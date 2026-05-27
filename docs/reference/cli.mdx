@@ -1,0 +1,50 @@
+---
+title: CLI
+description: acp-go-codex command reference.
+---
+
+Run as an ACP stdio agent:
+
+```sh
+acp-go-codex -codex /path/to/codex -codex-home /path/to/codex-home -model gpt-5.5 -debug
+```
+
+Flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `-codex` | Path to the Codex CLI executable. |
+| `-codex-home` | Codex home directory; passed as `CODEX_HOME` to launched Codex processes. |
+| `-model` | Default Codex model for new sessions. |
+| `-debug` | Write adapter debug logs to stderr. |
+| `-cli` | Run a local Codex auth passthrough command instead of serving ACP. |
+| `-device-auth` | Add `--device-auth` to `-cli login`. |
+
+Auth passthrough:
+
+```sh
+acp-go-codex -cli login -device-auth
+acp-go-codex -cli logout
+```
+
+When using `go run`, pass agent flags after Go's `--` delimiter:
+
+```sh
+go run ./cmd/acp-go-codex -- -codex /path/to/codex -codex-home /tmp/codex-home
+```
+
+MCP proxy mode is launched by generated Codex MCP config:
+
+```sh
+acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:NNNN -acp-id <id>
+```
+
+The MCP proxy reads `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE` from its environment.
+The token value itself is never placed in argv.
+
+OpenTelemetry uses standard `OTEL_*` environment variables. Traces and metrics
+are enabled when an explicit signal exporter or OTLP endpoint is set; logs are
+enabled only when `OTEL_LOGS_EXPORTER` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is
+set. ACP trace context is extracted from request metadata and injected into the
+launched Codex app-server environment as `TRACEPARENT`, `TRACESTATE`, and
+`BAGGAGE`.

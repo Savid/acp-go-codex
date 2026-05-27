@@ -1,0 +1,384 @@
+package codex
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sync"
+	"sync/atomic"
+)
+
+const jsonRPCVersion = "2.0"
+
+type rpcTransport interface {
+	Send(context.Context, rpcMessage) error
+	Recv() (rpcMessage, string, error)
+	Close() error
+}
+
+type rpcMessage struct {
+	JSONRPC string          `json:"jsonrpc,omitempty"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+func (e *rpcError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if len(e.Data) == 0 {
+		return e.Message
+	}
+
+	return fmt.Sprintf("%s: %s", e.Message, string(e.Data))
+}
+
+type lineTransport struct {
+	r      *bufio.Reader
+	w      io.Writer
+	closer io.Closer
+	mu     sync.Mutex
+}
+
+func newLineTransport(r io.Reader, w io.Writer, closer io.Closer) *lineTransport {
+	return &lineTransport{r: bufio.NewReaderSize(r, 1024*1024), w: w, closer: closer}
+}
+
+func (t *lineTransport) Send(ctx context.Context, msg rpcMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	msg.JSONRPC = jsonRPCVersion
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	_, err = t.w.Write(payload)
+	return err
+}
+
+func (t *lineTransport) Recv() (rpcMessage, string, error) {
+	line, err := t.r.ReadBytes('\n')
+	if err != nil {
+		return rpcMessage{}, "", err
+	}
+
+	raw := string(bytes.TrimRight(line, "\r\n"))
+	if raw == "" {
+		return rpcMessage{}, raw, errors.New("empty JSON-RPC line")
+	}
+
+	var msg rpcMessage
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		return rpcMessage{}, raw, err
+	}
+
+	return msg, raw, nil
+}
+
+func (t *lineTransport) Close() error {
+	if t.closer == nil {
+		return nil
+	}
+
+	return t.closer.Close()
+}
+
+type pendingCall struct {
+	result chan rpcMessage
+}
+
+type pendingRequest struct {
+	cancel context.CancelFunc
+}
+
+type rpcConn struct {
+	transport rpcTransport
+	handler   RequestHandler
+	events    chan rpcEvent
+	done      chan struct{}
+	doneOnce  sync.Once
+
+	nextID atomic.Int64
+
+	mu       sync.Mutex
+	pending  map[string]pendingCall
+	requests map[string]*pendingRequest
+	closed   bool
+}
+
+type rpcEvent struct {
+	Method string
+	Params json.RawMessage
+	Raw    string
+}
+
+func newRPCConn(transport rpcTransport, handler RequestHandler) *rpcConn {
+	conn := &rpcConn{
+		transport: transport,
+		handler:   handler,
+		events:    make(chan rpcEvent, 128),
+		done:      make(chan struct{}),
+		pending:   make(map[string]pendingCall),
+		requests:  make(map[string]*pendingRequest),
+	}
+	go func() {
+		defer recoverCodexGoroutine(context.Background(), "Codex JSON-RPC read loop")
+		conn.readLoop()
+	}()
+
+	return conn
+}
+
+func (c *rpcConn) Events() <-chan rpcEvent { return c.events }
+
+func (c *rpcConn) Call(ctx context.Context, method string, params any, result any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	id := c.nextID.Add(1)
+	idRaw := json.RawMessage(fmt.Sprintf("%d", id))
+	key := string(idRaw)
+	call := pendingCall{result: make(chan rpcMessage, 1)}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("codex rpc connection is closed")
+	}
+	c.pending[key] = call
+	c.mu.Unlock()
+
+	cleanup := func() {
+		c.mu.Lock()
+		delete(c.pending, key)
+		c.mu.Unlock()
+	}
+
+	paramsRaw, err := marshalRaw(params)
+	if err != nil {
+		cleanup()
+		return err
+	}
+
+	if err := c.transport.Send(ctx, rpcMessage{ID: idRaw, Method: method, Params: paramsRaw}); err != nil {
+		cleanup()
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		cleanup()
+		return ctx.Err()
+	case <-c.done:
+		cleanup()
+		return errors.New("codex rpc connection is closed")
+	case msg, ok := <-call.result:
+		if !ok {
+			return errors.New("codex rpc connection is closed")
+		}
+		if msg.Error != nil {
+			return msg.Error
+		}
+		if result == nil || len(msg.Result) == 0 {
+			return nil
+		}
+		return json.Unmarshal(msg.Result, result)
+	}
+}
+
+func (c *rpcConn) Notify(ctx context.Context, method string, params any) error {
+	paramsRaw, err := marshalRaw(params)
+	if err != nil {
+		return err
+	}
+
+	return c.transport.Send(ctx, rpcMessage{Method: method, Params: paramsRaw})
+}
+
+func (c *rpcConn) Respond(ctx context.Context, id json.RawMessage, result any, reqErr *rpcError) error {
+	resultRaw, err := marshalRaw(result)
+	if err != nil {
+		return err
+	}
+
+	return c.transport.Send(ctx, rpcMessage{ID: id, Result: resultRaw, Error: reqErr})
+}
+
+func (c *rpcConn) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	for key, call := range c.pending {
+		delete(c.pending, key)
+		close(call.result)
+	}
+	for key, request := range c.requests {
+		delete(c.requests, key)
+		request.cancel()
+	}
+	c.mu.Unlock()
+
+	err := c.transport.Close()
+	c.closeDone()
+
+	return err
+}
+
+func (c *rpcConn) readLoop() {
+	defer func() {
+		c.mu.Lock()
+		if !c.closed {
+			c.closed = true
+			for key, call := range c.pending {
+				delete(c.pending, key)
+				close(call.result)
+			}
+			for key, request := range c.requests {
+				delete(c.requests, key)
+				request.cancel()
+			}
+		}
+		c.mu.Unlock()
+		c.closeDone()
+	}()
+
+	for {
+		msg, raw, err := c.transport.Recv()
+		if err != nil {
+			return
+		}
+
+		switch {
+		case len(msg.ID) > 0 && msg.Method == "":
+			c.deliverResponse(msg)
+		case len(msg.ID) > 0 && msg.Method != "":
+			go func() {
+				defer recoverCodexGoroutine(context.Background(), "Codex server request")
+				c.handleRequest(msg)
+			}()
+		case msg.Method != "":
+			c.deliverNotification(msg, raw)
+		}
+	}
+}
+
+func (c *rpcConn) closeDone() {
+	c.doneOnce.Do(func() {
+		close(c.done)
+		close(c.events)
+	})
+}
+
+func (c *rpcConn) deliverResponse(msg rpcMessage) {
+	c.mu.Lock()
+	call, ok := c.pending[string(msg.ID)]
+	if ok {
+		delete(c.pending, string(msg.ID))
+	}
+	c.mu.Unlock()
+
+	if ok {
+		call.result <- msg
+	}
+}
+
+func (c *rpcConn) deliverNotification(msg rpcMessage, raw string) {
+	event := rpcEvent{Method: msg.Method, Params: msg.Params, Raw: raw}
+	select {
+	case c.events <- event:
+	case <-c.done:
+	}
+}
+
+func (c *rpcConn) handleRequest(msg rpcMessage) {
+	if c.handler == nil {
+		_ = c.Respond(context.Background(), msg.ID, nil, &rpcError{Code: -32601, Message: "method not found"})
+		return
+	}
+
+	ctx, finish, ok := c.beginRequest(string(msg.ID))
+	if !ok {
+		return
+	}
+	defer finish()
+
+	result, err := c.handler(ctx, ServerRequest{
+		ID:     append(json.RawMessage(nil), msg.ID...),
+		Method: msg.Method,
+		Params: append(json.RawMessage(nil), msg.Params...),
+	})
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	if err != nil {
+		_ = c.Respond(ctx, msg.ID, nil, &rpcError{Code: -32000, Message: err.Error()})
+		return
+	}
+
+	_ = c.Respond(ctx, msg.ID, result, nil)
+}
+
+func (c *rpcConn) beginRequest(key string) (context.Context, func(), bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	request := &pendingRequest{cancel: cancel}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		cancel()
+		return nil, nil, false
+	}
+	c.requests[key] = request
+	c.mu.Unlock()
+
+	finish := func() {
+		c.mu.Lock()
+		if c.requests[key] == request {
+			delete(c.requests, key)
+		}
+		c.mu.Unlock()
+		cancel()
+	}
+
+	return ctx, finish, true
+}
+
+func marshalRaw(value any) (json.RawMessage, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if raw, ok := value.(json.RawMessage); ok {
+		return raw, nil
+	}
+
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+
+	return payload, nil
+}

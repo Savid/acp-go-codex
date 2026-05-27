@@ -1,0 +1,61 @@
+---
+title: Security
+description: Security boundaries and sensitive data handling.
+---
+
+Treat rollout rows, raw event rows, MCP payloads, diffs, terminal output, and
+app-server request/response bodies as sensitive.
+
+The adapter must not log or expose:
+
+- access tokens;
+- refresh tokens;
+- MCP proxy tokens;
+- authorization headers;
+- raw Codex credential files;
+- full rollout JSONL rows;
+- prompt or tool payload bodies.
+
+## Credential ownership
+
+Normal Codex login state belongs to the local Codex installation. The adapter
+does not parse, redact, edit, or delete Codex credential files. Use Codex
+`account/*` app-server APIs or the adapter's `-cli login/logout` passthrough.
+
+Only enable ACP logout with `WithAllowAccountLogout(true)` when `CODEX_HOME`
+points at an adapter-owned credential directory.
+
+## Temporary files
+
+Generated rollout and MCP proxy token files are created inside private
+temporary directories where the platform supports it:
+
+- parent temp directory mode: `0700`;
+- file mode from `os.CreateTemp`: `0600` on normal Unix platforms.
+
+Materialized rollout files and token files are removed during normal cleanup.
+Hosts should still treat stale temp files as sensitive if the process is killed
+before cleanup runs.
+
+## MCP proxy boundary
+
+ACP-transport MCP uses an adapter-owned loopback listener plus a random proxy
+token. The token is 32 random bytes, base64 RawURL encoded, written to a
+private token file, and passed to the proxy by token-file path in the
+environment. The token value itself is never placed in argv.
+
+The trust boundary is loopback plus same-user process isolation. A same-user
+process that can inspect the adapter or proxy environment may see token-file
+paths. This is acceptable for the local ACP adapter model but should not be
+treated as cross-user isolation.
+
+Plain streamable HTTP MCP headers injected through Codex `-c mcp_servers...`
+configuration are process argv/config values and may be visible to same-user
+process inspection on some platforms. Do not place long-lived secrets there
+unless that boundary is acceptable.
+
+## Telemetry
+
+Telemetry may include ACP method names, model IDs, stop reasons, token counts,
+and process start counts. It must not include prompts, rollout rows, MCP
+payload bodies, auth tokens, proxy tokens, or authorization headers.

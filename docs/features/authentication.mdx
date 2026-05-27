@@ -1,0 +1,52 @@
+---
+title: Authentication
+description: Codex account and external token handling.
+---
+
+Managed Codex login state belongs to the local Codex install. The adapter does
+not parse or mutate Codex credential files directly.
+
+## Terminal auth
+
+ACP terminal auth advertises `codex-login` when the client supports terminal
+auth. The command runs the adapter's `-cli login -device-auth` passthrough,
+which execs the configured Codex binary and preserves stdio.
+
+## External ChatGPT tokens
+
+The agent auth method `codex-chatgpt-auth-tokens` is for explicit
+host-supplied external ChatGPT tokens. Tokens are passed to Codex
+`account/login/start` and are not logged or exposed in ACP metadata.
+
+Token input shape:
+
+```json
+{
+  "_meta": {
+    "codex": {
+      "auth": {
+        "chatgptAuthTokens": {
+          "accessToken": "secret",
+          "refreshToken": "secret",
+          "expiresAt": 1790000000
+        }
+      }
+    }
+  }
+}
+```
+
+The adapter keeps the latest external tokens in memory and applies them to
+newly launched app-server clients. If Codex asks for
+`account/chatgptAuthTokens/refresh`, the configured
+`WithChatGPTAuthTokenRefresher` callback supplies replacement tokens.
+
+## Account status and logout
+
+Session responses include redacted account state under `_meta.codex.account`.
+Access tokens, refresh tokens, and raw credential file contents are never
+returned.
+
+Logout is guarded. `account/logout` is called only when
+`WithAllowAccountLogout(true)` is configured, which is intended for
+adapter-owned `CODEX_HOME` directories.

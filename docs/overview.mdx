@@ -1,0 +1,25 @@
+---
+title: Overview
+description: ACP adapter for Codex CLI app-server.
+---
+
+`acp-go-codex` exposes the local Codex CLI through the Agent Client Protocol.
+It follows the framework structure of `acp-go-claude`, but the provider
+boundary is Codex-native: one ACP session owns one
+`codex app-server --listen stdio://` process and one active Codex thread.
+
+The adapter maps ACP session lifecycle, prompts, permissions, elicitation, MCP,
+auth, raw rollout events, session import/load, model config, and telemetry onto
+Codex app-server APIs. Codex protocol details stay behind `internal/codex`;
+public Go helpers stay ACP-oriented.
+
+The minimum verified Codex CLI is `codex-cli 0.129.0`.
+
+Primary integration paths:
+
+- run `acp-go-codex` as a standalone ACP subprocess;
+- embed `codexacp.Serve(ctx, input, output, opts...)` in a Go host.
+
+The adapter intentionally does not implement provider management APIs, goals,
+document/NES APIs, plugin/marketplace mutation, realtime thread APIs, or
+external-agent mutation.

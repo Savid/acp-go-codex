@@ -1,0 +1,63 @@
+---
+title: Permissions
+description: Command, file, generic permission, and user-input flows.
+---
+
+Codex approval requests are mapped to ACP `session/request_permission`. The
+selected ACP option is mapped back to the exact Codex decision where Codex
+provides one.
+
+Supported request paths:
+
+- `item/commandExecution/requestApproval`;
+- `item/fileChange/requestApproval`;
+- `item/permissions/requestApproval` when Codex's generic permission tool is
+  explicitly enabled;
+- `item/tool/requestUserInput`;
+- `mcpServer/elicitation/request`.
+
+## Command and file approvals
+
+The adapter builds ACP permission options from Codex `availableDecisions` when
+present. If Codex does not provide explicit options, the fallback mapping is:
+
+| ACP option ID | Codex decision |
+| --- | --- |
+| `accept` | `accept` |
+| `acceptForSession` | `acceptForSession` |
+| `decline` | `decline` |
+| `cancel` | `cancel` |
+| `acceptWithExecpolicyAmendment` | `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":...}}` |
+
+Codex-provided object decisions, such as network-policy amendments, are encoded
+as option IDs and decoded back to the original object when selected.
+
+Command approvals use execute tool kind. File-change approvals use edit/write
+tool kind where possible and expose Codex raw approval params under
+`_meta.codex`.
+
+## Generic permissions
+
+`item/permissions/requestApproval` is a separate Codex feature. It requires the
+Codex CLI feature flag `--enable request_permissions_tool` and a compatible
+Codex permission profile. The adapter keeps this opt-in; it is not advertised
+as a baseline permission feature unless the host chooses to enable it.
+
+Generic permission responses return the requested permission profile and a
+scope:
+
+| ACP option ID | Codex response |
+| --- | --- |
+| `grant-turn` | requested permissions with `scope: "turn"` |
+| `grant-session` | requested permissions with `scope: "session"` |
+| `decline` or no selection | empty permissions with `scope: "turn"` |
+
+## Interaction lifetime
+
+The adapter does not maintain a global approval cache that bypasses Codex.
+Session-scoped choices are mirrored only for ACP UI state, cancellation,
+fork/import bookkeeping, and cleanup.
+
+Pending permission and elicitation interactions are tied to the active turn.
+When the turn is canceled or the session closes, late responses are ignored
+instead of being submitted to Codex.

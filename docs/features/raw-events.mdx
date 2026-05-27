@@ -1,0 +1,71 @@
+---
+title: Raw Events
+description: Codex rollout-backed raw SDK messages.
+---
+
+The raw extension mirrors the host-facing raw SDK message pattern used by the
+Claude adapter, but the payloads are Codex rollout rows.
+
+Capability metadata is advertised under `agentCapabilities.meta.codex.sdkMessages`.
+Enable per session with:
+
+```json
+{
+  "_meta": {
+    "codex": {
+      "emitRawSDKMessages": true
+    }
+  }
+}
+```
+
+Notifications are sent as `_codex/sdkMessage` with:
+
+```json
+{
+  "sessionId": "session-id",
+  "message": {},
+  "rawJSON": "{}"
+}
+```
+
+`message` is the decoded rollout row. `rawJSON` is the original row string.
+
+## Filters
+
+Instead of `true`, hosts may pass an array of filters:
+
+```json
+{
+  "_meta": {
+    "codex": {
+      "emitRawSDKMessages": [
+        {"type": "event_msg", "payloadType": "agent_message"},
+        {"type": "response_item", "payloadRole": "assistant"}
+      ]
+    }
+  }
+}
+```
+
+Filter fields:
+
+| Field | Meaning |
+| --- | --- |
+| `type` | Required top-level rollout row type. |
+| `payloadType` | Optional `payload.type` match. |
+| `payloadRole` | Optional `payload.role` match. |
+
+Filters are intentionally simple and exact. Invalid filter entries are ignored.
+
+## Restore rule
+
+Filtered raw events are diagnostic and intentionally lossy. Exact restore
+requires complete rollout JSONL from one of:
+
+- a host-provided `SessionStore`;
+- `_codex/session/import*`;
+- an explicitly unfiltered raw capture that retained every restorable row.
+
+Do not treat `_codex/sdkMessage` as a durable restore mechanism unless the host
+captured the full rollout stream.

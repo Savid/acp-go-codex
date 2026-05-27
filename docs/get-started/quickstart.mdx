@@ -1,0 +1,55 @@
+---
+title: Quickstart
+description: Run the ACP agent locally.
+---
+
+Install or run from the checkout:
+
+```sh
+go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
+```
+
+```sh
+go run ./cmd/acp-go-codex
+```
+
+The binary is normally launched by an ACP host, not by a human terminal.
+
+## Try an example client
+
+```sh
+go run ./examples/minimal-client "Reply with a short hello from ACP."
+```
+
+For a line-oriented session:
+
+```sh
+go run ./examples/interactive-chat
+```
+
+For durable rollout import and resume:
+
+```sh
+go run ./examples/resume-from-file -session-file ./examples/resume-from-file/session.jsonl
+```
+
+## Useful flags
+
+```sh
+go run ./cmd/acp-go-codex -- -codex /path/to/codex -codex-home /tmp/codex-home -model gpt-5.5
+```
+
+`-codex-home` maps to `CODEX_HOME` for launched Codex processes. Use an
+adapter-owned directory when testing login/logout behavior.
+
+Manual authentication passthrough:
+
+```sh
+go run ./cmd/acp-go-codex -- -cli login -device-auth
+```
+
+## Local checks
+
+```sh
+make audit
+```

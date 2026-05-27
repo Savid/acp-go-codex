@@ -1,0 +1,47 @@
+---
+title: Install
+description: Install the ACP agent and point it at Codex.
+---
+
+Install the standalone ACP agent:
+
+```sh
+go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
+```
+
+The installed binary is normally launched by an ACP host over stdin/stdout:
+
+```sh
+acp-go-codex
+```
+
+Useful flags:
+
+```sh
+acp-go-codex -codex /path/to/codex -codex-home /tmp/codex-home -model gpt-5.5
+```
+
+`-codex` selects the Codex CLI executable. If omitted, the adapter asks the
+provider layer to discover `codex` from `PATH`.
+
+`-codex-home` sets `CODEX_HOME` for launched Codex CLI and app-server
+processes. Use an adapter-owned directory when testing login/logout flows.
+
+`-model` sets the default model preference for newly created sessions. Per
+session metadata and ACP config methods can still change the active model.
+
+For local development, run from the checkout:
+
+```sh
+go run ./cmd/acp-go-codex
+```
+
+Authentication passthrough is available for hosts that expose terminal auth:
+
+```sh
+acp-go-codex -cli login -device-auth
+acp-go-codex -cli logout
+```
+
+The passthrough command execs the configured Codex CLI and preserves stdio.
+The adapter does not parse or edit Codex credential files.

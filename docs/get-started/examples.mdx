@@ -1,0 +1,31 @@
+---
+title: Examples
+description: Example ACP clients for Codex.
+---
+
+Examples live under `examples/`.
+
+- `examples/minimal-client`: starts the agent, creates a session, sends one
+  prompt, prints streamed ACP updates, and closes the session.
+- `examples/resume-from-file`: imports Codex rollout JSONL through
+  `_codex/session/import`, loads the session, then resumes it.
+- `examples/interactive-chat`: simple line-oriented chat loop with `/cancel`
+  and `/exit`.
+
+Run the minimal client:
+
+```sh
+go run ./examples/minimal-client "Reply with a short hello from ACP."
+```
+
+Run the interactive chat:
+
+```sh
+go run ./examples/interactive-chat
+```
+
+Import and resume a rollout JSONL file:
+
+```sh
+go run ./examples/resume-from-file -session-file ./examples/resume-from-file/session.jsonl
+```

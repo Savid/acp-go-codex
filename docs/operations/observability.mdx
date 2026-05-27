@@ -1,0 +1,69 @@
+---
+title: Observability
+description: OpenTelemetry spans, metrics, and trace propagation.
+---
+
+The root package accepts caller-owned OpenTelemetry providers:
+
+```go
+agent := codexacp.NewAgent(
+	codexacp.WithTracerProvider(tracerProvider),
+	codexacp.WithMeterProvider(meterProvider),
+	codexacp.WithTextMapPropagator(propagator),
+)
+```
+
+The package does not configure global OpenTelemetry providers and does not
+shut caller-supplied providers down. The standalone `acp-go-codex` binary
+configures exporters from standard `OTEL_*` environment variables.
+
+## Spans
+
+The adapter starts spans for:
+
+- ACP requests, named `acp.request`;
+- prompt turns, named `session.prompt`.
+
+Prompt spans include Codex/OpenAI semantic attributes such as provider, client,
+operation, model, stop reason, token usage, and outcome.
+
+## Metrics
+
+The adapter records:
+
+- `acp_go_codex.acp.request.count`;
+- `acp_go_codex.acp.request.duration`;
+- `acp_go_codex.session.prompt.count`;
+- `acp_go_codex.session.prompt.duration`;
+- `acp_go_codex.session.cancel.count`;
+- `acp_go_codex.session.active`;
+- `acp_go_codex.codex.process.start.count`;
+- `gen_ai.client.operation.duration`;
+- `gen_ai.client.operation.time_to_first_chunk`;
+- `gen_ai.client.token.usage`.
+
+Metric attributes include ACP method, operation outcome, Codex app-server
+client identity, requested model, response model, stop reason, and token type.
+
+## Trace context
+
+Inbound ACP `_meta` may contain W3C trace context:
+
+```json
+{
+  "traceparent": "00-...",
+  "tracestate": "...",
+  "baggage": "..."
+}
+```
+
+The adapter extracts that context for ACP request and prompt spans. It also
+injects trace context into launched Codex app-server process environments as
+`TRACEPARENT`, `TRACESTATE`, and `BAGGAGE`.
+
+## Redaction
+
+Telemetry may include method names, model IDs, stop reasons, token counts, and
+process-start counts. It must not include prompts, rollout rows, MCP payload
+bodies, diffs, terminal output, auth tokens, proxy tokens, or authorization
+headers.

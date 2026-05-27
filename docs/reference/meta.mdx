@@ -1,0 +1,178 @@
+---
+title: Metadata
+description: Supported _meta fields and Codex-specific metadata.
+---
+
+ACP reserves `_meta` for extension metadata on requests, responses, and
+notifications. Portable clients should ignore metadata they do not understand.
+
+Codex metadata is emitted under both namespaces:
+
+- `_meta.codex`;
+- `_meta["github.com/savid/acp-go-codex"]`.
+
+The values are the same. The short `codex` namespace is convenient for hosts;
+the package namespace is collision-resistant.
+
+## Trace context
+
+Inbound ACP `_meta` can contain W3C trace context:
+
+```json
+{
+  "traceparent": "00-...",
+  "tracestate": "...",
+  "baggage": "..."
+}
+```
+
+The adapter uses this to parent its own spans and injects launch-time trace
+context into Codex app-server environments.
+
+## Session options
+
+```json
+{
+  "codex": {
+    "options": {
+      "model": "gpt-5.5",
+      "effort": "high",
+      "serviceTier": "flex",
+      "personality": "pragmatic",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {"type": "boolean"}
+        },
+        "required": ["ok"],
+        "additionalProperties": false
+      }
+    },
+    "emitRawSDKMessages": true
+  }
+}
+```
+
+`outputSchema` configures Codex structured output. The schema is sent on each
+`turn/start`, so attach it to `session/new`, `session/load`, `session/resume`,
+or `session/fork`; it is not a portable ACP core field.
+
+## Raw event filters
+
+```json
+{
+  "codex": {
+    "emitRawSDKMessages": [
+      {"type": "event_msg", "payloadType": "agent_message"},
+      {"type": "response_item", "payloadRole": "assistant"}
+    ]
+  }
+}
+```
+
+Filters match top-level rollout row `type`, optional `payload.type`, and
+optional `payload.role`. See [Raw Events](/docs/features/raw-events).
+
+## External auth input
+
+Hosts that implement explicit external ChatGPT auth can pass tokens through
+`authenticate` metadata:
+
+```json
+{
+  "codex": {
+    "auth": {
+      "chatgptAuthTokens": {
+        "accessToken": "secret",
+        "refreshToken": "secret",
+        "expiresAt": 1790000000
+      }
+    }
+  }
+}
+```
+
+Tokens are passed to Codex `account/login/start`, kept in memory for new
+app-server clients, and redacted from response metadata.
+
+## Session response metadata
+
+Session responses include:
+
+```json
+{
+  "codex": {
+    "codexThreadId": "thread-id",
+    "modelProvider": "openai",
+    "model": "gpt-5.5",
+    "effort": "high",
+    "serviceTier": "flex",
+    "personality": "pragmatic",
+    "account": {
+      "id": "acct_...",
+      "email": "user@example.com",
+      "planType": "plus"
+    }
+  }
+}
+```
+
+`account` is redacted. Access tokens, refresh tokens, and raw credential file
+contents are never emitted.
+
+## Structured output result metadata
+
+When structured output is configured and the final agent text parses as JSON,
+the prompt response includes:
+
+```json
+{
+  "codex": {
+    "structuredOutput": {
+      "ok": true
+    }
+  }
+}
+```
+
+The raw text remains the normal ACP agent message stream.
+
+## Initialize capability metadata
+
+The initialize response advertises Codex capability metadata under
+`agentCapabilities.meta.codex`:
+
+```json
+{
+  "provider": "codex",
+  "preferredTransport": "app-server",
+  "sdkMessages": {
+    "scope": "session",
+    "method": "_codex/sdkMessage",
+    "enabledBy": "_meta.codex.emitRawSDKMessages"
+  },
+  "outputSchema": {
+    "scope": "session",
+    "types": ["json_schema"],
+    "config": "_meta.codex.options.outputSchema",
+    "result": "usage_update._meta.codex.structuredOutput",
+    "rawEvents": "_codex/sdkMessage"
+  },
+  "sessionImport": {
+    "scope": "session",
+    "format": "codex-rollout-jsonl",
+    "methods": {
+      "import": "_codex/session/import",
+      "importChunk": "_codex/session/importChunk",
+      "commitImport": "_codex/session/commitImport",
+      "abortImport": "_codex/session/abortImport"
+    }
+  }
+}
+```
+
+## Extension methods
+
+Codex extension methods are listed in [ACP Methods](/docs/reference/acp-methods).
+The most common host-facing extensions are `_codex/sdkMessage` for raw rollout
+diagnostics and `_codex/session/import*` for durable restore.

@@ -1,0 +1,52 @@
+---
+title: Run Modes
+description: Standalone stdio and embedded Go usage.
+---
+
+`acp-go-codex` supports two host integration modes.
+
+## Standalone ACP subprocess
+
+Run the binary and connect it to ACP JSON-RPC streams:
+
+```sh
+acp-go-codex -codex /path/to/codex -codex-home /tmp/codex-home
+```
+
+This is the normal editor or ACP-host integration. The process writes only ACP
+JSON-RPC on stdout. Debug logs, when enabled with `-debug`, go to stderr.
+
+The standalone binary also owns env-based OpenTelemetry setup and graceful
+signal handling.
+
+## Embedded Go
+
+Call `Serve` with your own streams:
+
+```go
+err := codexacp.Serve(ctx, input, output,
+	codexacp.WithCodexPath("/usr/local/bin/codex"),
+	codexacp.WithCodexHome("/tmp/codex-home"),
+	codexacp.WithDefaultModel("gpt-5.5"),
+)
+```
+
+`Serve` owns ACP request dispatch, client callback routing, session creation,
+permission and elicitation callbacks, MCP bridge callbacks, and shutdown when
+the context or connection closes.
+
+Use package options for process-wide defaults such as `CODEX_HOME`, telemetry
+providers, durable session storage, and external ChatGPT token refresh.
+
+## MCP proxy subcommand
+
+`acp-go-codex mcp-proxy` is an internal stdio shim launched from generated
+Codex MCP config. Hosts usually should not start it directly.
+
+```sh
+acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:NNNN -acp-id <id>
+```
+
+The proxy reads `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE` from its environment and
+authenticates to the adapter-owned loopback listener before forwarding MCP
+messages over ACP.

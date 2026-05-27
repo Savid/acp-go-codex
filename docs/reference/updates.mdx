@@ -1,0 +1,39 @@
+---
+title: Updates
+description: ACP update mapping from Codex app-server events.
+---
+
+Codex app-server notifications are drained for the full client lifetime. During
+an active turn, turn-scoped events are routed to the session prompt stream with
+backpressure so updates are not silently dropped.
+
+## Prompt updates
+
+| Codex event | ACP update |
+| --- | --- |
+| agent message delta | `agent_message_chunk` |
+| reasoning delta | `agent_thought_chunk` |
+| plan update | `plan` |
+| command execution item | tool call update with execute kind |
+| file change item | tool call update with edit/write kind |
+| MCP or dynamic tool item | tool call update |
+| diff update | tool call content/update when available |
+| warning | session update with warning metadata where possible |
+| completed turn | final prompt stop reason and usage |
+
+When Codex emits only completed items, the mapper emits final text once. When
+deltas were already emitted for an item, completed text is treated as final
+state without duplicating visible output.
+
+## Raw events
+
+Raw rollout rows are emitted only through `_codex/sdkMessage` when enabled.
+Filtered raw events are diagnostic; exact remote restore requires complete
+rollout JSONL captured through `SessionStore`, session import, or an
+unfiltered raw capture that kept every restorable row.
+
+## Account updates
+
+`account/updated` notifications refresh adapter account metadata even when no
+turn is active. Session responses expose only redacted account state under
+`_meta.codex.account`.

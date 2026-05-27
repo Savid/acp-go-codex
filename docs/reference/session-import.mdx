@@ -1,0 +1,129 @@
+---
+title: Session Import
+description: Codex rollout JSONL import extension methods.
+---
+
+Session import is a Codex-specific extension surface for restoring durable
+rollout JSONL captured outside the local Codex state directory.
+
+The import format is:
+
+```text
+codex-rollout-jsonl
+```
+
+Each entry must be one JSON object. The adapter preserves the raw bytes after
+validation.
+
+## One-shot import
+
+`_codex/session/import` accepts the same payload as `importChunk`, then commits
+the generated import immediately.
+
+```json
+{
+  "sessionId": "session-id",
+  "cwd": "/workspace/project",
+  "format": "codex-rollout-jsonl",
+  "entries": [
+    {"type": "event_msg", "payload": {"type": "agent_message", "message": "hi"}}
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "importId": "sess_...",
+  "sessionId": "session-id",
+  "cwd": "/workspace/project",
+  "format": "codex-rollout-jsonl",
+  "entries": 1,
+  "bytes": 78,
+  "sha256": "..."
+}
+```
+
+## Chunked import
+
+`_codex/session/importChunk` appends entries to a pending import.
+
+Request fields:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `importId` | no | Existing import ID. If omitted on the first chunk, the adapter generates one. |
+| `sessionId` | yes | Session ID to store. |
+| `cwd` | yes | Absolute project directory. |
+| `format` | no | Must be `codex-rollout-jsonl` when present. |
+| `subpath` | no | Relative store subpath for related rollout artifacts. |
+| `offset` | no | Expected entry offset for this subpath. Defaults to `0`. |
+| `entries` | no | Array of raw JSON objects. |
+| `lines` | no | Array of JSONL strings. |
+| `jsonl` | no | JSONL text. Blank lines are ignored. |
+
+At least one normalized entry is required. `entries`, `lines`, and `jsonl` can
+be combined.
+
+Chunk response:
+
+```json
+{
+  "importId": "sess_...",
+  "sessionId": "session-id",
+  "cwd": "/workspace/project",
+  "format": "codex-rollout-jsonl",
+  "offset": 100,
+  "entries": 100,
+  "bytes": 12345
+}
+```
+
+`offset` is the next expected entry offset for that subpath. The top-level
+`entries` count is the total import entry count across all subpaths.
+
+## Commit
+
+`_codex/session/commitImport` writes the pending import into the configured
+`SessionStore`.
+
+```json
+{
+  "importId": "sess_...",
+  "sha256": "optional-expected-hash"
+}
+```
+
+If `sha256` is present, it must match the import's computed hash. Existing
+sessions can be replaced only when the store implements `SessionStoreReplacer`;
+otherwise the commit is rejected.
+
+## Abort
+
+`_codex/session/abortImport` drops a pending import:
+
+```json
+{
+  "importId": "sess_..."
+}
+```
+
+Response:
+
+```json
+{
+  "aborted": true
+}
+```
+
+## Limits
+
+- Maximum entries per chunk: `10000`.
+- Maximum entries per import: `100000`.
+- Maximum single JSONL line: `10 MiB`.
+- Maximum import byte total: `100 MiB`.
+- Pending import TTL: `30 minutes`.
+
+Use `session/load` after import to replay stored rollout rows into ACP updates
+and resume the Codex thread from a materialized rollout file.

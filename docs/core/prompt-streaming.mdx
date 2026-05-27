@@ -1,0 +1,28 @@
+---
+title: Prompt Streaming
+description: Prompt and update mapping.
+---
+
+ACP prompt content is converted to Codex `UserInput` blocks. Text, URL/data
+images, and local file images are sent as Codex text, `image`, and `localImage`
+inputs; file resource links are sent as Codex mentions when a local path is
+available.
+
+Live app-server notifications drive the portable ACP UI stream:
+
+- agent message deltas become `agent_message_chunk`;
+- reasoning deltas become `agent_thought_chunk`;
+- plan updates become `plan`;
+- command, file-change, MCP, and dynamic tool items become tool call updates;
+- usage becomes the final ACP prompt usage;
+- raw rollout rows are emitted only on the `_codex/sdkMessage` extension path.
+
+The app-server notification pump runs for the full lifetime of the client.
+Turn-scoped events are routed to the active prompt stream with backpressure, so
+a slow ACP host cannot silently truncate the tail of a turn.
+
+When a model emits only completed items, the mapper emits the final text once.
+When deltas were already emitted, completed items are treated as authoritative
+final state without duplicating visible output.
+
+See [Updates](/docs/reference/updates) for the event-to-update mapping.

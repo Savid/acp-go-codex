@@ -1,0 +1,59 @@
+---
+title: Sessions
+description: How ACP sessions map to Codex threads.
+---
+
+One ACP session owns one Codex app-server process and one Codex thread. This
+keeps Codex process-scoped configuration, especially MCP servers, isolated per
+ACP session from the host's point of view.
+
+## Lifecycle mapping
+
+| ACP method | Codex behavior |
+| --- | --- |
+| `session/new` | Starts app-server and calls `thread/start`. |
+| `session/prompt` | Calls `turn/start`, streams app-server events, mirrors rollout rows after the turn. |
+| `session/cancel` | Cancels local interactions and calls `turn/interrupt` for the active turn. |
+| `session/close` | Cancels work, unsubscribes the thread, closes MCP bridge resources, and terminates the app-server process. |
+| `session/resume` | Calls `thread/resume` for an existing Codex thread or rollout path. |
+| `session/load` | Replays stored rollout JSONL to ACP updates, materializes it to a private temp file, then resumes Codex. |
+| `session/list` | Combines active sessions, Codex `thread/list`, and optional `SessionStoreLister` results. |
+| `session/fork` | Calls `thread/fork` for the parent session's Codex thread. |
+
+`session/load` and `session/resume` are intentionally different. `resume`
+reattaches to Codex state. `load` first reconstructs ACP-visible history from
+stored rollout rows so a remote host can redraw the conversation even when the
+local UI has never seen the original turn stream.
+
+## Listing
+
+`session/list` accepts optional `cwd`, `cursor`, and `additionalDirectories`
+filters. Active in-process sessions are included first, duplicate Codex thread
+IDs are skipped, and stored sessions are included when the configured
+`SessionStore` implements `SessionStoreLister`.
+
+The current implementation preserves the ACP cursor field for host
+compatibility. Codex app-server pagination is exposed directly through the
+Codex extension `_codex/thread/turns/list`.
+
+## Additional directories
+
+Additional directories must be absolute paths. They are mapped to Codex
+writable roots through:
+
+- the thread-start workspace permission profile;
+- the per-turn sandbox policy.
+
+## Forking
+
+Fork creates a new ACP session and asks Codex to fork the parent thread. The
+new session gets its own app-server process and MCP configuration. Session
+metadata such as model, effort, service tier, personality, structured output,
+and additional directories is rebuilt from the fork request and parent state.
+
+## Durable restore
+
+Exact durable restore requires complete Codex rollout JSONL. Filtered raw
+events are not enough unless the host intentionally captured every restorable
+row without filtering. Use `SessionStore` or the `_codex/session/import*`
+extension methods for restore-grade data.

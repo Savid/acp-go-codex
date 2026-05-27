@@ -1,0 +1,39 @@
+---
+title: Models And Config
+description: Model, effort, service tier, personality, and modes.
+---
+
+The adapter uses Codex `model/list` for model discovery and exposes ACP config
+options for model and turn behavior.
+
+| Config ID | Meaning |
+| --- | --- |
+| `model` | Codex model ID. |
+| `mode` | ACP session mode: `default` or `plan`. |
+| `effort` | Codex reasoning effort. |
+| `service_tier` | Codex service tier. |
+| `personality` | Codex personality setting. |
+
+Supported effort values:
+
+```text
+none, minimal, low, medium, high, xhigh
+```
+
+Supported service tier values:
+
+```text
+auto, default, flex, priority
+```
+
+Supported personality values:
+
+```text
+none, friendly, pragmatic
+```
+
+Plan mode maps to Codex collaboration mode with Codex's current
+`developer_instructions` and `reasoning_effort` field names.
+
+Structured output is configured with `_meta.codex.options.outputSchema` and
+sent on each `turn/start` as `outputSchema`.

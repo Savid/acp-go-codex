@@ -1,0 +1,226 @@
+---
+title: Go API
+description: Public package surface for embedding or configuring the ACP agent.
+---
+
+Import the root package:
+
+```go
+import codexacp "github.com/savid/acp-go-codex"
+```
+
+Most applications either run the [standalone CLI](/docs/reference/cli) or call
+`Serve` with their own ACP JSON-RPC streams. The rest of the surface configures
+Codex process launch, session storage, telemetry, external auth refresh, and
+the internal MCP proxy subcommand.
+
+## Serve
+
+```go
+func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error
+```
+
+`Serve` runs the ACP agent over the provided streams. It owns:
+
+- ACP request dispatch;
+- client callback routing;
+- Codex app-server session creation;
+- permission, elicitation, and MCP callbacks;
+- agent shutdown when the context or connection closes.
+
+Use this for normal embedding:
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+err := codexacp.Serve(ctx, os.Stdin, os.Stdout,
+	codexacp.WithCodexPath("/usr/local/bin/codex"),
+	codexacp.WithCodexHome("/tmp/codex-home"),
+	codexacp.WithDefaultModel("gpt-5.5"),
+	codexacp.WithLogger(slog.Default()),
+)
+if err != nil && !errors.Is(err, context.Canceled) {
+	return err
+}
+```
+
+The `input` and `output` streams are the ACP JSON-RPC transport. Do not write
+logs, debug output, or OpenTelemetry console exporter output to the same stdout
+stream.
+
+## Agent
+
+```go
+type Agent struct { /* unexported fields */ }
+
+func NewAgent(opts ...Option) *Agent
+func (a *Agent) Close() error
+```
+
+`Agent` implements the ACP agent interfaces from
+`github.com/coder/acp-go-sdk`. It is exported so the package can expose the
+protocol handler, but most hosts should use `Serve`.
+
+`Close` cancels active sessions, closes app-server clients, closes MCP bridge
+resources, drops pending session imports, and detaches pending permission or
+elicitation interactions.
+
+## Request builders
+
+The ACP SDK request structs are the protocol source of truth. This package
+provides constructors that return normal SDK request values while filling
+required empty slices such as `mcpServers`.
+
+```go
+func NewSessionRequest(cwd string, opts ...SessionRequestOption) acp.NewSessionRequest
+func LoadSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequestOption) acp.LoadSessionRequest
+func ResumeSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequestOption) acp.ResumeSessionRequest
+func ForkSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequestOption) acp.UnstableForkSessionRequest
+```
+
+Session lifecycle request options:
+
+| Option | Purpose |
+| --- | --- |
+| `WithSessionMCPServers(servers...)` | Set MCP servers for session lifecycle requests. |
+| `WithSessionAdditionalDirectories(paths...)` | Set additional workspace roots. |
+| `WithSessionMeta(meta)` | Merge custom ACP `_meta`. |
+| `WithSessionCodexOptions(options)` | Merge `_meta.codex.options`. |
+| `WithSessionRawSDKMessages(enabled)` | Set `_meta.codex.emitRawSDKMessages`. |
+| `WithSessionOutputSchema(schema)` | Set `_meta.codex.options.outputSchema`. |
+
+Prompt helpers:
+
+```go
+func PromptRequest(sessionID acp.SessionId, blocks ...acp.ContentBlock) acp.PromptRequest
+func TextPromptRequest(sessionID acp.SessionId, text string) acp.PromptRequest
+```
+
+Session-list helpers:
+
+```go
+func ListSessionsRequest(opts ...ListSessionsRequestOption) acp.ListSessionsRequest
+func WithListSessionsCwd(cwd string) ListSessionsRequestOption
+func WithListSessionsCursor(cursor string) ListSessionsRequestOption
+func WithListSessionsAdditionalDirectories(paths ...string) ListSessionsRequestOption
+func WithListSessionsMeta(meta map[string]any) ListSessionsRequestOption
+```
+
+## CodexOptions
+
+```go
+type CodexOptions struct {
+	Model        string
+	Effort       string
+	ServiceTier  string
+	Personality  string
+	OutputSchema map[string]any
+}
+
+func NewCodexOptions(opts ...CodexOption) CodexOptions
+```
+
+Builder options:
+
+| Option | Metadata path |
+| --- | --- |
+| `WithCodexModel(model)` | `_meta.codex.options.model` |
+| `WithCodexEffort(effort)` | `_meta.codex.options.effort` |
+| `WithCodexServiceTier(tier)` | `_meta.codex.options.serviceTier` |
+| `WithCodexPersonality(personality)` | `_meta.codex.options.personality` |
+| `WithCodexOutputSchema(schema)` | `_meta.codex.options.outputSchema` |
+
+Example:
+
+```go
+req := codexacp.NewSessionRequest("/workspace/project",
+	codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+		codexacp.WithCodexModel("gpt-5.5"),
+		codexacp.WithCodexEffort("high"),
+		codexacp.WithCodexOutputSchema(map[string]any{
+			"type": "object",
+		}),
+	)),
+)
+```
+
+## Options
+
+Options are process-wide defaults. Per-session overrides can be provided
+through ACP request fields or `_meta.codex.options`.
+
+| Option | Purpose |
+| --- | --- |
+| `WithAgentName(name)` | Protocol identifier advertised during initialize. |
+| `WithAgentTitle(title)` | Human-readable title advertised during initialize. |
+| `WithAgentVersion(version)` | Version advertised during initialize and OTel instrumentation. |
+| `WithCodexPath(path)` | Use a specific Codex CLI executable. |
+| `WithCodexHome(path)` | Set `CODEX_HOME` for launched Codex sessions. |
+| `WithDefaultModel(model)` | Default model preference for new sessions. |
+| `WithLogger(logger)` | Configure structured diagnostics. |
+| `WithEnv(env)` | Merge environment variables into launched Codex processes. |
+| `WithMCPProxyCommand(command, args...)` | Override the command used for ACP-transport MCP proxy subprocesses. |
+| `WithSessionStore(store)` | Configure durable storage for Codex rollout JSONL rows. |
+| `WithSessionStoreLoadTimeout(timeout)` | Bound store-backed load/list operations. |
+| `WithChatGPTAuthTokenRefresher(refresher)` | Handle external ChatGPT token refresh callbacks from Codex. |
+| `WithAllowAccountLogout(enabled)` | Permit ACP logout to call Codex `account/logout`. |
+| `WithTracerProvider(provider)` | Configure OpenTelemetry tracing. |
+| `WithMeterProvider(provider)` | Configure OpenTelemetry metrics. |
+| `WithTextMapPropagator(propagator)` | Configure trace-context extraction and process-env injection. |
+
+Leave `WithAllowAccountLogout` disabled when `CODEX_HOME` points at a user's
+normal local Codex credentials.
+
+## SessionStore
+
+```go
+type SessionStoreEntry = json.RawMessage
+
+type SessionKey struct {
+	ProjectKey string
+	SessionID  string
+	Subpath    string
+}
+
+type SessionStore interface {
+	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
+	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+}
+```
+
+Optional interfaces:
+
+```go
+type SessionStoreLister interface {
+	ListSessions(ctx context.Context, projectKey string) ([]SessionSummary, error)
+}
+
+type SessionStoreDeleter interface {
+	Delete(ctx context.Context, key SessionKey) error
+}
+
+type SessionStoreReplacer interface {
+	ReplaceSession(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error
+}
+```
+
+`NewInMemorySessionStore` is available for tests and local examples. Production
+hosts should provide a durable store that preserves raw JSON bytes.
+
+## MCP proxy
+
+```go
+type MCPProxyOptions struct {
+	Network string
+	Address string
+	Token   string
+	ACPID   string
+}
+
+func RunMCPProxy(ctx context.Context, stdin io.Reader, stdout io.Writer, options MCPProxyOptions) error
+```
+
+`RunMCPProxy` is used by the `acp-go-codex mcp-proxy` subcommand generated for
+ACP-transport MCP servers. Most hosts configure ACP MCP servers on session
+requests and let the adapter launch the proxy.

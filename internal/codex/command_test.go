@@ -1,0 +1,280 @@
+package codex
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+func TestCommandHelpers(t *testing.T) {
+	t.Setenv(envCodexPath, "/tmp/codex-from-env")
+	path, err := resolveCodexPath("")
+	if err != nil {
+		t.Fatalf("resolveCodexPath env returned error: %v", err)
+	}
+	if path != "/tmp/codex-from-env" {
+		t.Fatalf("path = %q", path)
+	}
+	path, err = resolveCodexPath("/custom/codex")
+	if err != nil || path != "/custom/codex" {
+		t.Fatalf("explicit path=%q err=%v", path, err)
+	}
+
+	env := mergedEnv(Options{CodexHome: "/home/codex", Env: map[string]string{"A": "B"}})
+	if !envContains(env, envCodexHome+"=/home/codex") || !envContains(env, "A=B") {
+		t.Fatalf("merged env missing values: %v", env)
+	}
+	updated := upsertEnv([]string{"A=1"}, "A", "2")
+	if len(updated) != 1 || updated[0] != "A=2" {
+		t.Fatalf("updated env = %v", updated)
+	}
+	added := upsertEnv([]string{"A=1"}, "B", "2")
+	if !envContains(added, "B=2") {
+		t.Fatalf("added env = %v", added)
+	}
+
+	if shellValue("x y") != `"x y"` || shellValue(true) != "true" || shellValue(false) != "false" || shellValue(7) != "7" {
+		t.Fatalf("shellValue returned unexpected values")
+	}
+	if parseCodexVersion("codex-cli 0.129.0") != "0.129.0" || parseCodexVersion("codex 1.2.3-beta") != "1.2.3" || parseCodexVersion("none") != "" {
+		t.Fatal("parseCodexVersion failed")
+	}
+	if compareSemver("0.129.1", minCodexVersion) <= 0 || compareSemver("0.128.9", minCodexVersion) >= 0 || compareSemver(minCodexVersion, minCodexVersion) != 0 {
+		t.Fatal("compareSemver failed")
+	}
+	t.Setenv(envCodexPath, "")
+	t.Setenv("PATH", "")
+	if _, err := resolveCodexPath(""); err == nil {
+		t.Fatal("resolveCodexPath without codex succeeded")
+	}
+}
+
+func TestValidateCodexVersion(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho codex-cli 0.129.0\n"), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	if err := validateCodexVersion(context.Background(), script); err != nil {
+		t.Fatalf("validateCodexVersion returned error: %v", err)
+	}
+
+	old := filepath.Join(t.TempDir(), "codex-old")
+	if err := os.WriteFile(old, []byte("#!/bin/sh\necho codex-cli 0.1.0\n"), 0o700); err != nil {
+		t.Fatalf("write old script: %v", err)
+	}
+	if err := validateCodexVersion(context.Background(), old); err == nil {
+		t.Fatal("old codex version succeeded")
+	}
+
+	bad := filepath.Join(t.TempDir(), "codex-bad")
+	if err := os.WriteFile(bad, []byte("#!/bin/sh\necho nope\n"), 0o700); err != nil {
+		t.Fatalf("write bad script: %v", err)
+	}
+	if err := validateCodexVersion(context.Background(), bad); err == nil {
+		t.Fatal("bad codex version output succeeded")
+	}
+
+	fail := filepath.Join(t.TempDir(), "codex-fail")
+	if err := os.WriteFile(fail, []byte("#!/bin/sh\nexit 9\n"), 0o700); err != nil {
+		t.Fatalf("write failing script: %v", err)
+	}
+	if err := validateCodexVersion(context.Background(), fail); err == nil {
+		t.Fatal("failing codex version command succeeded")
+	}
+}
+
+func TestProcessCloserNil(t *testing.T) {
+	if err := (processCloser{}).Close(); err != nil {
+		t.Fatalf("nil process closer returned error: %v", err)
+	}
+	if err := killProcess(nil); err != nil {
+		t.Fatalf("killProcess nil returned error: %v", err)
+	}
+}
+
+func envContains(env []string, want string) bool {
+	for _, entry := range env {
+		if strings.TrimSpace(entry) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCommandLaunchAndProcessErrors(t *testing.T) {
+	dir := t.TempDir()
+	codexPath := filepath.Join(dir, "codex")
+	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.129.0\n"), 0o700); err != nil {
+		t.Fatalf("write codex: %v", err)
+	}
+	t.Setenv(envCodexPath, "")
+	t.Setenv("PATH", dir)
+	if resolved, err := resolveCodexPath(""); err != nil || resolved != codexPath {
+		t.Fatalf("resolve PATH = %q err=%v", resolved, err)
+	}
+
+	logPath := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "codex-app")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo codex-cli 0.129.0
+  exit 0
+fi
+printf '%s\n' "$*" > "$TEST_ARGS"
+read line || exit 0
+echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+read line || true
+while read line; do :; done
+`), 0o700); err != nil {
+		t.Fatalf("write app script: %v", err)
+	}
+	t.Setenv("TEST_ARGS", logPath)
+	client, err := NewAppServerClient(context.Background(), Options{
+		CLIPath:       script,
+		Config:        map[string]any{"feature.enabled": true, "name": "x y"},
+		ExtraArgs:     []string{"--extra"},
+		LaunchTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewAppServerClient with config returned error: %v", err)
+	}
+	_ = client.Close(context.Background())
+	rawArgs, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	args := string(rawArgs)
+	if !strings.Contains(args, "-c feature.enabled=true") || !strings.Contains(args, "-c name=\"x y\"") || !strings.Contains(args, "--extra") {
+		t.Fatalf("args = %q", args)
+	}
+
+	if parseCodexVersion("codex 1.2.3+meta") != "1.2.3" {
+		t.Fatal("parseCodexVersion did not trim build metadata")
+	}
+	origExec := execCommandContext
+	t.Cleanup(func() { execCommandContext = origExec })
+	versionCmd := func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.129.0")
+	}
+	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
+		if len(args) == 1 && args[0] == "--version" {
+			return versionCmd(ctx, path, args...)
+		}
+		cmd := exec.Command("/bin/sh", "-c", "cat")
+		cmd.Stdin = strings.NewReader("")
+		return cmd
+	}
+	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+		t.Fatal("launchAppServer ignored StdinPipe error")
+	}
+	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
+		if len(args) == 1 && args[0] == "--version" {
+			return versionCmd(ctx, path, args...)
+		}
+		cmd := exec.Command("/bin/sh", "-c", "cat")
+		cmd.Stdout = io.Discard
+		return cmd
+	}
+	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+		t.Fatal("launchAppServer ignored StdoutPipe error")
+	}
+	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
+		if len(args) == 1 && args[0] == "--version" {
+			return versionCmd(ctx, path, args...)
+		}
+		return exec.Command(filepath.Join(t.TempDir(), "missing"))
+	}
+	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+		t.Fatal("launchAppServer ignored start error")
+	}
+	execCommandContext = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.1.0")
+	}
+	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+		t.Fatal("launchAppServer ignored version error")
+	}
+	execCommandContext = origExec
+	t.Setenv(envCodexPath, "")
+	t.Setenv("PATH", t.TempDir())
+	if _, _, err := launchAppServer(context.Background(), Options{}); err == nil {
+		t.Fatal("launchAppServer ignored missing codex path")
+	}
+
+	exited := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := exited.Run(); err != nil {
+		t.Fatalf("run exited cmd: %v", err)
+	}
+	if err := killProcess(exited); err != nil {
+		t.Fatalf("kill exited process: %v", err)
+	}
+	running := exec.Command("/bin/sh", "-c", "sleep 10")
+	if err := startProcess(running); err != nil {
+		t.Fatalf("start running process: %v", err)
+	}
+	if err := killProcess(running); err != nil {
+		t.Fatalf("kill running process: %v", err)
+	}
+	_ = running.Wait()
+	origGetPGID := getProcessGroupID
+	origKillPID := killProcessID
+	t.Cleanup(func() {
+		getProcessGroupID = origGetPGID
+		killProcessID = origKillPID
+	})
+	getProcessGroupID = func(int) (int, error) { return 0, errors.New("pgid failed") }
+	fallback := exec.Command("/bin/sh", "-c", "sleep 10")
+	if err := startProcess(fallback); err != nil {
+		t.Fatalf("start fallback process: %v", err)
+	}
+	if err := killProcess(fallback); err != nil {
+		t.Fatalf("fallback process kill: %v", err)
+	}
+	_ = fallback.Wait()
+	getProcessGroupID = origGetPGID
+	signaled := exec.Command("/bin/sh", "-c", "kill -KILL $$")
+	if err := startProcess(signaled); err != nil {
+		t.Fatalf("start signaled process: %v", err)
+	}
+	if err := (processCloser{cmd: signaled}).Close(); err != nil {
+		t.Fatalf("signaled process close returned error: %v", err)
+	}
+	getProcessGroupID = func(int) (int, error) { return 123, nil }
+	killProcessID = func(int, syscall.Signal) error { return errors.New("kill failed") }
+	if err := killProcess(&exec.Cmd{Process: &os.Process{Pid: 123}}); err == nil {
+		t.Fatal("killProcess ignored process-group kill error")
+	}
+	getProcessGroupID = origGetPGID
+	killProcessID = origKillPID
+	killFail := exec.Command("/usr/bin/sleep", "10")
+	if err := startProcess(killFail); err != nil {
+		t.Fatalf("start kill-fail process: %v", err)
+	}
+	getProcessGroupID = func(int) (int, error) { return 123, nil }
+	killProcessID = func(int, syscall.Signal) error { return errors.New("kill failed") }
+	origGrace := processCloseGrace
+	processCloseGrace = 0
+	if err := (processCloser{cmd: killFail}).Close(); err == nil {
+		t.Fatal("processCloser ignored kill error")
+	}
+	getProcessGroupID = origGetPGID
+	killProcessID = origKillPID
+	_ = killProcess(killFail)
+	processCloseGrace = origGrace
+	stubborn := exec.Command("/usr/bin/sleep", "10")
+	if err := startProcess(stubborn); err != nil {
+		t.Fatalf("start stubborn process: %v", err)
+	}
+	processCloseGrace = 0
+	t.Cleanup(func() { processCloseGrace = origGrace })
+	if err := (processCloser{cmd: stubborn}).Close(); err != nil {
+		t.Fatalf("processCloser timeout kill returned error: %v", err)
+	}
+	processCloseGrace = origGrace
+}

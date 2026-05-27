@@ -1,0 +1,41 @@
+---
+title: Session Store
+description: Rollout JSONL import, mirror, load, and resume.
+---
+
+Codex rollout JSONL is the adapter's durable remote-session artifact. It is
+the restore-grade record of a Codex thread.
+
+The public store shape is append/load first:
+
+```go
+type SessionStore interface {
+	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
+	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+}
+```
+
+Store entries are raw Codex rollout JSON objects. Implementations should
+preserve the raw JSON bytes. The adapter validates imported entries as single
+JSON objects before appending them.
+
+Optional interfaces:
+
+- `SessionStoreLister` backs `session/list` from stored sessions;
+- `SessionStoreDeleter` deletes a stored rollout key;
+- `SessionStoreReplacer` atomically replaces an existing imported session.
+
+Import extension methods:
+
+- `_codex/session/import`;
+- `_codex/session/importChunk`;
+- `_codex/session/commitImport`;
+- `_codex/session/abortImport`.
+
+`session/load` reconstructs ACP-visible history from rollout rows before
+returning, then resumes Codex from a materialized rollout file. `session/resume`
+reattaches to Codex thread state without replaying the full visible history.
+
+Filtered raw events are not restore-grade data. Use a `SessionStore`,
+session-import extension methods, or a complete unfiltered raw capture when
+exact restore matters.

@@ -1,0 +1,34 @@
+---
+title: MCP
+description: Stdio, streamable HTTP, and ACP-transport MCP.
+---
+
+Codex app-server MCP configuration is process-scoped, so the adapter launches
+one app-server process per ACP session and injects MCP config at process start.
+
+Supported transports:
+
+- stdio MCP servers via generated `mcp_servers.<name>.command` config;
+- streamable HTTP MCP servers via generated `mcp_servers.<name>.url` config;
+- ACP-transport MCP through the adapter-owned loopback `mcp-proxy`.
+
+SSE MCP is rejected because Codex does not expose a supported SSE MCP path.
+
+## Stdio and HTTP
+
+Session MCP servers are converted to Codex `-c mcp_servers...` configuration.
+HTTP headers are configuration values passed to the Codex process; see
+[Security](/docs/operations/security#mcp-proxy-boundary) for the same-user
+process-inspection caveat.
+
+## ACP-transport MCP
+
+For ACP-transport MCP, Codex sees an ordinary stdio MCP server running:
+
+```sh
+acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:NNNN -acp-id <id>
+```
+
+The ACP host still sees normal `mcp/connect`, `mcp/message`, and
+`mcp/disconnect` callbacks. The proxy authenticates to the adapter-owned
+loopback listener with a token read from `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE`.

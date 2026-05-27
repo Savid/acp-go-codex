@@ -1,0 +1,49 @@
+---
+title: Elicitation
+description: Tool user input and MCP elicitation bridging.
+---
+
+Codex can ask the host for structured user input during a turn. The adapter
+maps those requests to ACP elicitation callbacks rather than inventing a
+Codex-specific prompt UI.
+
+## Tool user input
+
+Codex `item/tool/requestUserInput` requests are converted to
+`elicitation/create` client requests. The adapter builds an object schema from
+Codex question fields:
+
+- `id` or `header` becomes the answer key;
+- `header` becomes the field title;
+- `question` becomes the field description.
+
+Accepted elicitation responses are returned to Codex as:
+
+```json
+{
+  "answers": {
+    "name": "Ada"
+  }
+}
+```
+
+Declined or canceled responses return an empty `answers` object.
+
+## MCP elicitation
+
+Codex `mcpServer/elicitation/request` requests are mapped to ACP
+`elicitation/create` with the Codex-requested form fields and schema. Accepted,
+declined, and canceled responses are mapped back to Codex actions:
+
+| ACP outcome | Codex response |
+| --- | --- |
+| accept | `{"action":"accept","content":...,"_meta":...}` |
+| decline | `{"action":"decline","_meta":...}` |
+| cancel | `{"action":"cancel"}` |
+
+## Cancellation
+
+Pending elicitation interactions are tied to the active session turn. When a
+turn is canceled or the session closes, the adapter detaches pending
+interactions and ignores late responses instead of submitting stale answers
+back to Codex.
