@@ -24,7 +24,7 @@ type SessionStoreEntry = json.RawMessage
 type SessionKey struct {
 	// ProjectKey is the sanitized project directory key for the session cwd.
 	ProjectKey string
-	// SessionID is the Codex thread ID or opaque ACP session ID being stored.
+	// SessionID is the ACP-visible session ID or import ID being stored.
 	SessionID string
 	// Subpath is reserved for future Codex multi-file session artifacts.
 	Subpath string
@@ -46,6 +46,7 @@ type SessionSummary struct {
 type SessionStore interface {
 	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
 	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+	Replace(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
 }
 
 // SessionStoreLister lists main rollout JSONL keys for one Codex project key.
@@ -133,6 +134,35 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 	defer s.mu.Unlock()
 
 	return cloneStoreEntries(s.entries[key]), nil
+}
+
+// Replace atomically replaces one exact rollout key.
+func (s *InMemorySessionStore) Replace(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil {
+		return fmt.Errorf("nil InMemorySessionStore")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.entries == nil {
+		s.entries = make(map[SessionKey][]SessionStoreEntry)
+	}
+	if s.mtime == nil {
+		s.mtime = make(map[SessionKey]int64)
+	}
+	if len(entries) == 0 {
+		delete(s.entries, key)
+		delete(s.mtime, key)
+		return nil
+	}
+	s.entries[key] = cloneStoreEntries(entries)
+	s.mtime[key] = time.Now().UnixMilli()
+
+	return nil
 }
 
 // ListSessions lists main sessions for one project key.

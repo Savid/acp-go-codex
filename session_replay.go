@@ -17,6 +17,20 @@ type rolloutRow struct {
 	Payload map[string]any `json:"payload"`
 }
 
+func rolloutNativeThreadID(entries []SessionStoreEntry) string {
+	for _, entry := range entries {
+		row, err := decodeRolloutRow(entry)
+		if err != nil || row.Type != "session_meta" {
+			continue
+		}
+		if id := stringFromAny(row.Payload["id"]); id != "" {
+			return id
+		}
+	}
+
+	return ""
+}
+
 func (s *Session) replayRollout(ctx context.Context, entries []SessionStoreEntry) error {
 	updates, err := rolloutReplayUpdates(entries)
 	if err != nil {
@@ -37,7 +51,7 @@ func (s *Session) replayThreadHistory(ctx context.Context) error {
 	}
 	history, err := s.client.ReadThread(ctx, codex.ThreadReadRequest{ThreadID: s.codexThreadID})
 	if err != nil {
-		return err
+		return codexThreadACPError(err, s.accountMetaSnapshot(), codexThreadErrorData(s.id, s.codexThreadID))
 	}
 	for _, update := range threadHistoryReplayUpdates(history.Items) {
 		if err := s.emitUpdates(ctx, update); err != nil {
@@ -167,10 +181,6 @@ func replayEventMsg(payload map[string]any) []acp.SessionUpdate {
 	case "context_compacted":
 		if text := firstNonEmpty(stringFromAny(payload["message"]), "Context compacted"); text != "" {
 			return []acp.SessionUpdate{acp.UpdateAgentThoughtText(text)}
-		}
-	case "thread_goal_updated":
-		if text := threadGoalText(payload); text != "" {
-			return []acp.SessionUpdate{acp.UpdateAgentMessageText(text)}
 		}
 	}
 
@@ -327,16 +337,6 @@ func responseItemText(payload map[string]any) string {
 	}
 
 	return text.String()
-}
-
-func threadGoalText(payload map[string]any) string {
-	if message := stringFromAny(payload["message"]); message != "" {
-		return message
-	}
-	if goal := stringFromAny(payload["goal"]); goal != "" {
-		return "Goal updated: " + goal
-	}
-	return ""
 }
 
 func commandText(value any) string {

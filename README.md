@@ -69,7 +69,7 @@ func main() {
 ```
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as Codex path,
-`CODEX_HOME`, default model, session storage, external ChatGPT token refresh,
+`CODEX_HOME`, default model/mode, session storage, external ChatGPT token refresh,
 MCP proxy override, guarded logout, and OpenTelemetry providers.
 
 ## What It Provides
@@ -86,11 +86,13 @@ MCP proxy override, guarded logout, and OpenTelemetry providers.
   because Codex does not expose a supported SSE path.
 - Codex account status, terminal login passthrough, external ChatGPT token
   login/refresh, and guarded logout for adapter-owned `CODEX_HOME` directories.
+- Optional Codex-native session goals through experimental `thread/goal/*`
+  app-server APIs.
 - Session import and optional durable mirroring through a host-provided
   `SessionStore`; stored rows are Codex rollout JSONL.
 - Optional raw Codex rollout extension notifications through `_codex/sdkMessage`.
-- OpenTelemetry spans, metrics, trace propagation, and structured logs without
-  recording prompt/tool secrets by default.
+- OpenTelemetry adapter telemetry plus native Codex app-server OTLP mapping
+  without recording prompt/tool secrets by default.
 
 ## Docs
 
@@ -98,6 +100,7 @@ MCP proxy override, guarded logout, and OpenTelemetry providers.
 - [Run modes](docs/get-started/run-modes.mdx)
 - [Go API](docs/reference/go-api.mdx)
 - [ACP methods](docs/reference/acp-methods.mdx)
+- [Goals](docs/features/goals.mdx)
 - [Session import](docs/reference/session-import.mdx)
 - [Observability](docs/operations/observability.mdx)
 

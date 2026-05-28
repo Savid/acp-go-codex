@@ -8,15 +8,42 @@ import (
 
 func TestRequestBuilderClones(t *testing.T) {
 	meta := map[string]any{"x": []any{map[string]any{"y": "z"}}}
+	env := map[string]string{"SECRET": "value"}
+	approvalPolicy := map[string]any{"mode": "never"}
+	sandboxPolicy := map[string]any{"type": "workspaceWrite"}
 	req := NewSessionRequest("/repo",
 		WithSessionAdditionalDirectories("/extra"),
 		WithSessionRawSDKMessages(true),
 		WithSessionMeta(meta),
-		WithSessionCodexOptions(NewCodexOptions(WithCodexModel("gpt"), WithCodexEffort("low"), WithCodexOutputSchema(map[string]any{"type": "object"}))),
+		WithSessionCodexOptions(NewCodexOptions(
+			WithCodexModel("gpt"),
+			WithCodexMode(modePlan),
+			WithCodexEffort("low"),
+			WithCodexEnv(env),
+			WithCodexApprovalPolicy(approvalPolicy),
+			WithCodexSandboxPolicy(sandboxPolicy),
+			WithCodexOutputSchema(map[string]any{"type": "object"}),
+		)),
 	)
 	meta["x"].([]any)[0].(map[string]any)["y"] = "changed"
+	env["SECRET"] = "changed"
+	approvalPolicy["mode"] = "changed"
+	sandboxPolicy["type"] = "changed"
 	if req.Meta["x"].([]any)[0].(map[string]any)["y"] != "z" {
 		t.Fatal("WithSessionMeta did not clone input")
+	}
+	options := req.Meta[codexMetaKey].(map[string]any)[metaOptionsKey].(map[string]any)
+	if options[metaEnvKey].(map[string]string)["SECRET"] != "value" {
+		t.Fatalf("Codex env was not cloned: %#v", options)
+	}
+	if options[metaModeKey] != string(modePlan) {
+		t.Fatalf("Codex mode was not set: %#v", options)
+	}
+	if options[metaApprovalPolicyKey].(map[string]any)["mode"] != "never" {
+		t.Fatalf("Codex approval policy was not cloned: %#v", options)
+	}
+	if options[metaSandboxPolicyKey].(map[string]any)["type"] != "workspaceWrite" {
+		t.Fatalf("Codex sandbox policy was not cloned: %#v", options)
 	}
 	if len(LoadSessionRequest("s", "/repo").McpServers) != 0 || ResumeSessionRequest("s", "/repo").SessionId != "s" || ForkSessionRequest("s", "/repo").SessionId != "s" {
 		t.Fatal("request builders returned unexpected values")

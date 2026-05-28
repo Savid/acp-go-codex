@@ -10,19 +10,27 @@ import (
 )
 
 const (
-	mcpTransportStreamableHTTP = "streamable_http"
+	mcpHeaderEnvPrefix        = "CODEX_MCP_HEADER"
+	mcpApprovalModeAuto       = "auto"
+	mcpApprovalModePrompt     = "prompt"
+	mcpApprovalModeApprove    = "approve"
+	mcpDefaultApprovalModeKey = "defaultToolsApprovalMode"
+	mcpToolsKey               = "tools"
+	mcpToolApprovalModeKey    = "approvalMode"
 )
 
 var mcpNamePartRE = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+var mcpEnvPartRE = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
 type tomlLiteral string
 
-func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer) ([]string, error) {
+func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer) ([]string, map[string]string, error) {
 	if len(servers) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	args := make([]string, 0, len(servers)*8)
+	env := map[string]string{}
 	seen := map[string]int{}
 
 	for index, server := range servers {
@@ -37,26 +45,28 @@ func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer) ([]string, error) {
 				args = append(args, codexConfigArg("mcp_servers."+name+".env", tomlLiteral(tomlEnvTable(server.Stdio.Env)))...)
 			}
 		case server.Http != nil:
-			args = append(args,
-				codexConfigArg("mcp_servers."+name+".type", mcpTransportStreamableHTTP)...,
-			)
 			args = append(args, codexConfigArg("mcp_servers."+name+".url", server.Http.Url)...)
 			if len(server.Http.Headers) > 0 {
-				// Codex only accepts process-scoped MCP config today. Header values
-				// therefore ride in -c argv and may be visible to same-user process
-				// inspection; prefer ACP-transport MCP for sensitive credentials.
-				args = append(args, codexConfigArg("mcp_servers."+name+".headers", tomlLiteral(tomlHeaderTable(server.Http.Headers)))...)
+				headerEnv := mcpHeaderEnvTable(name, server.Http.Headers, env)
+				if headerEnv != "" {
+					args = append(args, codexConfigArg("mcp_servers."+name+".env_http_headers", tomlLiteral(headerEnv))...)
+				}
 			}
 		case server.Acp != nil:
-			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "ACP MCP servers must be rewritten by the session MCP bridge before Codex config generation"})
+			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": "ACP MCP servers must be rewritten by the session MCP bridge before Codex config generation"})
 		case server.Sse != nil:
-			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "SSE MCP is not supported by Codex"})
+			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": "SSE MCP is not supported by Codex"})
 		default:
-			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": fmt.Sprintf("server %d has no transport", index)})
+			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": fmt.Sprintf("server %d has no transport", index)})
 		}
+		approvalArgs, err := mcpApprovalConfigArgs(name, server)
+		if err != nil {
+			return nil, nil, err
+		}
+		args = append(args, approvalArgs...)
 	}
 
-	return args, nil
+	return args, env, nil
 }
 
 func mcpServerConfigName(server acp.McpServer, index int, seen map[string]int) string {
@@ -87,6 +97,86 @@ func mcpServerConfigName(server acp.McpServer, index int, seen map[string]int) s
 	}
 
 	return name
+}
+
+func mcpApprovalConfigArgs(serverConfigName string, server acp.McpServer) ([]string, error) {
+	meta := mcpServerMeta(server)
+	codexMeta, _ := meta[codexMetaKey].(map[string]any)
+	if len(codexMeta) == 0 {
+		return nil, nil
+	}
+
+	args := []string{}
+	if rawDefault, ok := codexMeta[mcpDefaultApprovalModeKey]; ok {
+		defaultMode, err := mcpApprovalModeFromMeta(rawDefault, "_meta.codex."+mcpDefaultApprovalModeKey)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, codexConfigArg("mcp_servers."+serverConfigName+".default_tools_approval_mode", defaultMode)...)
+	}
+
+	if rawTools, ok := codexMeta[mcpToolsKey]; ok {
+		tools, ok := rawTools.(map[string]any)
+		if !ok {
+			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.tools must be an object"})
+		}
+		for toolName, rawConfig := range tools {
+			if strings.TrimSpace(toolName) == "" {
+				return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.tools keys must be non-empty tool names"})
+			}
+			config, ok := rawConfig.(map[string]any)
+			if !ok {
+				return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.tools entries must be objects"})
+			}
+			rawMode, ok := config[mcpToolApprovalModeKey]
+			if !ok {
+				continue
+			}
+			mode, err := mcpApprovalModeFromMeta(rawMode, "_meta.codex.tools."+toolName+"."+mcpToolApprovalModeKey)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, codexConfigArg("mcp_servers."+serverConfigName+".tools."+toolName+".approval_mode", mode)...)
+		}
+	}
+
+	return args, nil
+}
+
+func mcpServerMeta(server acp.McpServer) map[string]any {
+	switch {
+	case server.Stdio != nil:
+		return server.Stdio.Meta
+	case server.Http != nil:
+		return server.Http.Meta
+	case server.Acp != nil:
+		return server.Acp.Meta
+	case server.Sse != nil:
+		return server.Sse.Meta
+	default:
+		return nil
+	}
+}
+
+func mcpApprovalModeFromMeta(raw any, path string) (string, error) {
+	mode, ok := raw.(string)
+	if !ok {
+		return "", acp.NewInvalidParams(map[string]any{"mcpServers": path + " must be a string"})
+	}
+	if !validMCPApprovalMode(mode) {
+		return "", acp.NewInvalidParams(map[string]any{"mcpServers": path + " must be one of auto, prompt, approve"})
+	}
+
+	return mode, nil
+}
+
+func validMCPApprovalMode(mode string) bool {
+	switch mode {
+	case mcpApprovalModeAuto, mcpApprovalModePrompt, mcpApprovalModeApprove:
+		return true
+	default:
+		return false
+	}
 }
 
 func codexConfigArg(key string, value any) []string {
@@ -125,16 +215,38 @@ func tomlEnvTable(env []acp.EnvVariable) string {
 	return "{ " + strings.Join(items, ", ") + " }"
 }
 
-func tomlHeaderTable(headers []acp.HttpHeader) string {
+func mcpHeaderEnvTable(serverName string, headers []acp.HttpHeader, env map[string]string) string {
 	items := make([]string, 0, len(headers))
-	for _, header := range headers {
+	seen := map[string]int{}
+	for index, header := range headers {
 		if header.Name == "" {
 			continue
 		}
-		items = append(items, tomlString(header.Name)+" = "+tomlString(header.Value))
+		envName := mcpHeaderEnvName(serverName, header.Name, index, seen)
+		env[envName] = header.Value
+		items = append(items, tomlString(header.Name)+" = "+tomlString(envName))
+	}
+
+	if len(items) == 0 {
+		return ""
 	}
 
 	return "{ " + strings.Join(items, ", ") + " }"
+}
+
+func mcpHeaderEnvName(serverName string, headerName string, index int, seen map[string]int) string {
+	base := strings.Trim(mcpEnvPartRE.ReplaceAllString(strings.ToUpper(serverName+"_"+headerName), "_"), "_")
+	if base == "" {
+		base = fmt.Sprintf("SERVER_%d_HEADER", index+1)
+	}
+	name := mcpHeaderEnvPrefix + "_" + base
+	count := seen[name]
+	seen[name] = count + 1
+	if count > 0 {
+		name = fmt.Sprintf("%s_%d", name, count+1)
+	}
+
+	return name
 }
 
 func stableMCPServersFromUnstable(servers []acp.UnstableMcpServer) []acp.McpServer {

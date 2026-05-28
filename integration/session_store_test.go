@@ -42,8 +42,8 @@ func TestCodexCLISessionStoreMirrorLoadAndResume(t *testing.T) {
 	if resp.StopReason != acp.StopReasonEndTurn {
 		t.Fatalf("stop reason = %s", resp.StopReason)
 	}
-	if !store.hasMainSession(threadID) {
-		t.Fatalf("store did not mirror Codex thread %q", threadID)
+	if !store.hasMainSession(string(session.SessionId)) {
+		t.Fatalf("store did not mirror ACP session %q", session.SessionId)
 	}
 
 	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
@@ -53,7 +53,7 @@ func TestCodexCLISessionStoreMirrorLoadAndResume(t *testing.T) {
 	client = &recordingClient{}
 	conn = connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, codexacp.WithSessionStore(store))
 	_, err = conn.LoadSession(ctx, acp.LoadSessionRequest{
-		SessionId:  acp.SessionId(threadID),
+		SessionId:  session.SessionId,
 		Cwd:        cwd,
 		McpServers: []acp.McpServer{},
 	})
@@ -68,7 +68,7 @@ func TestCodexCLISessionStoreMirrorLoadAndResume(t *testing.T) {
 		client.resetRecordedOutput()
 
 		return conn.Prompt(ctx, acp.PromptRequest{
-			SessionId: acp.SessionId(threadID),
+			SessionId: session.SessionId,
 			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_STORE_RESUME_OK and no punctuation.")},
 		})
 	})
@@ -81,7 +81,7 @@ func TestCodexCLISessionStoreMirrorLoadAndResume(t *testing.T) {
 		t.Fatal("resume did not emit agent message updates")
 	}
 
-	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(threadID)}); err != nil {
+	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
 		t.Fatalf("close loaded session: %v", err)
 	}
 }
@@ -137,6 +137,24 @@ func (s *recordingSessionStore) Load(
 	defer s.mu.Unlock()
 
 	return cloneSessionStoreEntries(s.entries[key]), nil
+}
+
+func (s *recordingSessionStore) Replace(
+	ctx context.Context,
+	key codexacp.SessionKey,
+	entries []codexacp.SessionStoreEntry,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.entries[key] = cloneSessionStoreEntries(entries)
+	s.mtime[key] = time.Now().UnixMilli()
+
+	return nil
 }
 
 func (s *recordingSessionStore) ListSessions(

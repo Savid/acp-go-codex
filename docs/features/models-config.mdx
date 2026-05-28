@@ -1,39 +1,102 @@
 ---
-title: Models And Config
-description: Model, effort, service tier, personality, and modes.
+title: "Models And Config"
+description: "Model catalog, reasoning effort, modes, and Codex session options"
+icon: "sliders-horizontal"
 ---
 
-The adapter uses Codex `model/list` for model discovery and exposes ACP config
-options for model and turn behavior.
+The adapter discovers Codex model data from the local app-server and advertises
+it through ACP session model state and config options.
 
-| Config ID | Meaning |
+## Model selection
+
+Set a process-wide default model:
+
+```bash
+acp-go-codex -model gpt-5.5
+```
+
+or in embedded Go:
+
+```go
+codexacp.WithDefaultModel("gpt-5.5")
+```
+
+Per-session model selection uses `_meta.codex.options.model` or the Go request
+builder:
+
+```go
+codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+    codexacp.WithCodexModel("gpt-5.5"),
+))
+```
+
+Clients can change the current model with ACP `session/set_config_option` using
+the `model` config option. `session/set_model` is also implemented for hosts
+that still use the unstable ACP model method.
+
+## Reasoning effort
+
+Reasoning effort is exposed as a select config option named `effort`.
+
+```go
+codexacp.WithCodexEffort("high")
+```
+
+The supported effort values are derived from the adapter's Codex config surface
+and are sent on each `turn/start`.
+
+## Modes
+
+ACP modes are mapped to Codex collaboration modes where Codex exposes matching
+mode data. Set a process-wide default mode:
+
+```bash
+acp-go-codex -mode plan
+```
+
+or in embedded Go:
+
+```go
+codexacp.WithDefaultMode("plan")
+```
+
+Per-session initial mode uses `_meta.codex.options.mode` or the Go request
+builder:
+
+```go
+codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+    codexacp.WithCodexMode("plan"),
+))
+```
+
+Hosts can also set the active mode with `session/set_mode` or the `mode`
+config option; the next turn uses the selected Codex collaboration mode.
+Codex-native `request_user_input` is available to the model only in `plan`
+mode.
+
+## Other Codex options
+
+Codex-specific session options live under `_meta.codex.options`:
+
+| Field | Purpose |
 | --- | --- |
-| `model` | Codex model ID. |
-| `mode` | ACP session mode: `default` or `plan`. |
-| `effort` | Codex reasoning effort. |
-| `service_tier` | Codex service tier. |
+| `model` | Initial model preference. |
+| `mode` | Initial ACP session mode: `default` or `plan`. |
+| `effort` | Reasoning effort. |
+| `serviceTier` | Codex service tier. |
 | `personality` | Codex personality setting. |
+| `env` | Session-scoped Codex process environment overlay. |
+| `approvalPolicy` | Native Codex approval policy object. |
+| `sandboxPolicy` | Native Codex sandbox policy object. |
+| `outputSchema` | JSON Schema structured output for turns. |
 
-Supported effort values:
+`approvalPolicy` and `sandboxPolicy` are forwarded as Codex-owned objects. Use
+[Permissions](/docs/features/permissions) for the ACP approval boundary and
+[Metadata](/docs/reference/meta#session-options) for exact paths.
 
-```text
-none, minimal, low, medium, high, xhigh
-```
+## Codex model metadata
 
-Supported service tier values:
-
-```text
-auto, default, flex, priority
-```
-
-Supported personality values:
-
-```text
-none, friendly, pragmatic
-```
-
-Plan mode maps to Codex collaboration mode with Codex's current
-`developer_instructions` and `reasoning_effort` field names.
-
-Structured output is configured with `_meta.codex.options.outputSchema` and
-sent on each `turn/start` as `outputSchema`.
+Session responses include current model metadata under `_meta.codex`, including
+`model`, `modelProvider`, `effort`, `serviceTier`, and `personality` when known.
+The same response also carries ACP model state for clients that render a model
+picker from the protocol-native fields.

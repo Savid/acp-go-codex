@@ -22,6 +22,10 @@ const (
 	permissionAcceptForSession = "acceptForSession"
 	permissionDecline          = "decline"
 	permissionCancel           = "cancel"
+
+	codexMCPApprovalKindKey      = "codex_approval_kind"
+	codexMCPToolApprovalKind     = "mcp_tool_call"
+	codexMCPApprovalToolTitleKey = "tool_title"
 )
 
 func (a *Agent) handleCodexServerRequest(ctx context.Context, req codex.ServerRequest) (any, error) {
@@ -176,29 +180,37 @@ func (a *Agent) handleCodexPermissionsApproval(ctx context.Context, req codex.Se
 }
 
 func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRequest) (any, error) {
+	params := mapFromRaw(req.Params)
+	session := a.sessionByCodexThread(stringFromAny(params["threadId"]))
+	if session == nil {
+		return map[string]any{"answers": map[string]any{}}, nil
+	}
+
 	conn := a.connection()
 	if conn == nil {
 		return map[string]any{"answers": map[string]any{}}, nil
 	}
-
-	params := mapFromRaw(req.Params)
-	schema, required := schemaFromToolQuestions(sliceOfMaps(params["questions"]))
-	message := "Codex needs input"
-	if len(required) == 1 {
-		message = required[0]
+	if caps := a.clientElicitationCapabilities(); caps == nil || caps.Form == nil {
+		return map[string]any{"answers": map[string]any{}}, nil
 	}
 
-	resp, err := conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	questions := sliceOfMaps(params["questions"])
+	schema, required := schemaFromToolQuestions(questions)
+	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
-			Message: message,
+			Message: toolUserInputMessage(questions),
 			Mode:    "form",
 			RequestedSchema: acp.UnstableElicitationSchema{
+				Title:      acp.Ptr("Codex input"),
 				Type:       acp.UnstableElicitationSchemaTypeObject,
 				Properties: schema,
 				Required:   required,
 			},
 			Meta: map[string]any{codexMetaKey: params},
 		},
+	}, elicitationScope{
+		SessionID:  session.id,
+		ToolCallID: acp.ToolCallId(firstNonEmpty(stringFromAny(params["itemId"]), serverRequestID(req.ID), codexReqToolUserInput)),
 	})
 	if err != nil {
 		return nil, err
@@ -209,24 +221,78 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 
 	answers := make(map[string]any, len(resp.Accept.Content))
 	for key, value := range resp.Accept.Content {
-		answers[key] = map[string]any{"answers": []string{fmt.Sprint(value)}}
+		answers[key] = map[string]any{"answers": stringAnswersFromAny(value)}
 	}
 
 	return map[string]any{"answers": answers}, nil
 }
 
 func (a *Agent) handleCodexMCPElicitation(ctx context.Context, req codex.ServerRequest) (any, error) {
+	params := mapFromRaw(req.Params)
+	if isCodexMCPToolApproval(params) {
+		return a.handleCodexMCPToolApproval(ctx, req, params)
+	}
+
+	return a.handleCodexMCPUserElicitation(ctx, req, params)
+}
+
+func (a *Agent) handleCodexMCPToolApproval(ctx context.Context, req codex.ServerRequest, params map[string]any) (any, error) {
+	session := a.sessionByCodexThread(stringFromAny(params["threadId"]))
+	if session == nil {
+		return map[string]any{"action": "cancel"}, nil
+	}
+
 	conn := a.connection()
 	if conn == nil {
 		return map[string]any{"action": "cancel"}, nil
 	}
 
-	params := mapFromRaw(req.Params)
+	meta := codexMCPMeta(params)
+	title := mcpToolApprovalTitle(params, meta)
+	kind := acp.ToolKindOther
+	status := acp.ToolCallStatusPending
+	toolID := firstNonEmpty(stringFromAny(params["elicitationId"]), stringFromAny(params["toolCallId"]), serverRequestID(req.ID), codexReqMCPElicitation)
+
+	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+		SessionId: session.id,
+		ToolCall: acp.ToolCallUpdate{
+			ToolCallId: acp.ToolCallId(toolID),
+			Title:      &title,
+			Kind:       &kind,
+			Status:     &status,
+			Content:    mcpToolApprovalContent(params, meta),
+			RawInput:   params,
+			Meta:       map[string]any{codexMetaKey: params},
+		},
+		Options: []acp.PermissionOption{
+			{OptionId: permissionAccept, Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
+			{OptionId: permissionDecline, Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Outcome.Selected == nil {
+		return map[string]any{"action": "cancel"}, nil
+	}
+
+	return map[string]any{"action": mcpToolApprovalAction(resp.Outcome.Selected.OptionId)}, nil
+}
+
+func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.ServerRequest, params map[string]any) (any, error) {
+	conn := a.connection()
+	if conn == nil {
+		return map[string]any{"action": "cancel"}, nil
+	}
+
 	mode := stringFromAny(params["mode"])
 	message := firstNonEmpty(stringFromAny(params["message"]), "MCP server needs input")
 
 	var request acp.UnstableCreateElicitationRequest
 	if mode == "url" {
+		if caps := a.clientElicitationCapabilities(); caps == nil || caps.Url == nil {
+			return map[string]any{"action": "decline"}, nil
+		}
 		request.Url = &acp.UnstableCreateElicitationUrl{
 			ElicitationId: acp.UnstableElicitationId(stringFromAny(params["elicitationId"])),
 			Message:       message,
@@ -235,6 +301,9 @@ func (a *Agent) handleCodexMCPElicitation(ctx context.Context, req codex.ServerR
 			Meta:          map[string]any{codexMetaKey: params},
 		}
 	} else {
+		if caps := a.clientElicitationCapabilities(); caps == nil || caps.Form == nil {
+			return map[string]any{"action": "decline"}, nil
+		}
 		request.Form = &acp.UnstableCreateElicitationForm{
 			Message:         message,
 			Mode:            "form",
@@ -243,7 +312,15 @@ func (a *Agent) handleCodexMCPElicitation(ctx context.Context, req codex.ServerR
 		}
 	}
 
-	resp, err := conn.UnstableCreateElicitation(ctx, request)
+	scope := elicitationScope{
+		ToolCallID: acp.ToolCallId(firstNonEmpty(stringFromAny(params["toolCallId"]), stringFromAny(params["itemId"]), stringFromAny(params["elicitationId"]), serverRequestID(req.ID))),
+		RequestID:  requestIDFromRaw(req.ID),
+	}
+	if session := a.sessionByCodexThread(stringFromAny(params["threadId"])); session != nil {
+		scope.SessionID = session.id
+	}
+
+	resp, err := conn.CreateElicitation(ctx, request, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -255,6 +332,103 @@ func (a *Agent) handleCodexMCPElicitation(ctx context.Context, req codex.ServerR
 	default:
 		return map[string]any{"action": "cancel"}, nil
 	}
+}
+
+func isCodexMCPToolApproval(params map[string]any) bool {
+	meta := codexMCPMeta(params)
+
+	return codexMCPMetaString(meta, codexMCPApprovalKindKey) == codexMCPToolApprovalKind
+}
+
+func codexMCPMeta(params map[string]any) map[string]any {
+	meta := mapFromAny(params["_meta"])
+	if codexMeta := mapFromAny(meta[codexMetaKey]); codexMeta != nil {
+		return codexMeta
+	}
+	if codexMeta := mapFromAny(params[codexMetaKey]); codexMeta != nil {
+		return codexMeta
+	}
+
+	return nil
+}
+
+func mcpToolApprovalTitle(params map[string]any, meta map[string]any) string {
+	if title := codexMCPMetaString(meta, codexMCPApprovalToolTitleKey); title != "" {
+		return title
+	}
+	if title := stringFromAny(params["toolTitle"]); title != "" {
+		return title
+	}
+	if title := stringFromAny(params["toolName"]); title != "" {
+		return title
+	}
+
+	return firstNonEmpty(stringFromAny(params["message"]), "MCP tool call")
+}
+
+func codexMCPMetaString(meta map[string]any, key string) string {
+	if detail := mapFromAny(meta["_meta"]); detail != nil {
+		if value := stringFromAny(detail[key]); value != "" {
+			return value
+		}
+	}
+
+	return stringFromAny(meta[key])
+}
+
+func mcpToolApprovalContent(params map[string]any, meta map[string]any) []acp.ToolCallContent {
+	parts := make([]string, 0, 3)
+	if message := stringFromAny(params["message"]); message != "" {
+		parts = append(parts, message)
+	}
+	if serverName := stringFromAny(meta["serverName"]); serverName != "" {
+		parts = append(parts, "Server: "+serverName)
+	}
+	for _, key := range []string{"tool_params", "toolParams"} {
+		if toolParams := params[key]; toolParams != nil {
+			if raw, err := json.MarshalIndent(toolParams, "", "  "); err == nil {
+				parts = append(parts, "Input:\n"+string(raw))
+			}
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+
+	return []acp.ToolCallContent{textToolContent(strings.Join(parts, "\n\n"))}
+}
+
+func mcpToolApprovalAction(optionID acp.PermissionOptionId) string {
+	switch optionID {
+	case permissionAccept, permissionAcceptForSession:
+		return "accept"
+	case permissionDecline:
+		return "decline"
+	default:
+		return "cancel"
+	}
+}
+
+func serverRequestID(raw json.RawMessage) string {
+	var id string
+	if len(raw) > 0 && json.Unmarshal(raw, &id) == nil {
+		return id
+	}
+
+	return string(raw)
+}
+
+func requestIDFromRaw(raw json.RawMessage) *acp.RequestId {
+	if len(raw) == 0 {
+		return nil
+	}
+	var id acp.RequestId
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return nil
+	}
+
+	return &id
 }
 
 func approvalTitle(method string, params map[string]any) string {
@@ -397,6 +571,16 @@ func permissionProfileText(value any) string {
 	return string(raw)
 }
 
+func toolUserInputMessage(questions []map[string]any) string {
+	if len(questions) == 1 {
+		if question := stringFromAny(questions[0]["question"]); question != "" {
+			return question
+		}
+	}
+
+	return "Codex needs input"
+}
+
 func schemaFromToolQuestions(questions []map[string]any) (map[string]any, []string) {
 	properties := make(map[string]any, len(questions))
 	required := make([]string, 0, len(questions))
@@ -406,11 +590,19 @@ func schemaFromToolQuestions(questions []map[string]any) (map[string]any, []stri
 			continue
 		}
 		required = append(required, id)
-		properties[id] = map[string]any{
+		property := map[string]any{
 			"type":        "string",
 			"title":       firstNonEmpty(stringFromAny(question["header"]), id),
 			"description": stringFromAny(question["question"]),
 		}
+		if options := toolQuestionOptions(question["options"]); len(options) > 0 {
+			property["oneOf"] = options
+		}
+		if secret, ok := question["isSecret"].(bool); ok && secret {
+			property["format"] = "password"
+			property["writeOnly"] = true
+		}
+		properties[id] = property
 	}
 	if len(properties) == 0 {
 		properties["answer"] = map[string]any{"type": "string"}
@@ -418,6 +610,31 @@ func schemaFromToolQuestions(questions []map[string]any) (map[string]any, []stri
 	}
 
 	return properties, required
+}
+
+func toolQuestionOptions(raw any) []map[string]any {
+	values, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		option := mapFromAny(value)
+		label := firstNonEmpty(stringFromAny(option["label"]), stringFromAny(option["value"]))
+		if label == "" {
+			continue
+		}
+		item := map[string]any{
+			"const": label,
+			"title": label,
+		}
+		if desc := stringFromAny(option["description"]); desc != "" {
+			item["description"] = desc
+		}
+		out = append(out, item)
+	}
+
+	return out
 }
 
 func elicitationSchemaFromMap(raw map[string]any) acp.UnstableElicitationSchema {
@@ -446,6 +663,23 @@ func elicitationSchemaFromMap(raw map[string]any) acp.UnstableElicitationSchema 
 	}
 
 	return schema
+}
+
+func stringAnswersFromAny(value any) []string {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, fmt.Sprint(item))
+		}
+		return out
+	default:
+		return []string{fmt.Sprint(value)}
+	}
 }
 
 func stringFromAny(value any) string {

@@ -1,34 +1,65 @@
 ---
-title: MCP
-description: Stdio, streamable HTTP, and ACP-transport MCP.
+title: "MCP"
+description: "MCP server configuration and ACP-transport bridging"
+icon: "network"
 ---
 
-Codex app-server MCP configuration is process-scoped, so the adapter launches
-one app-server process per ACP session and injects MCP config at process start.
+ACP session requests can include MCP server definitions. The adapter rewrites
+supported transports into Codex app-server MCP configuration for the launched
+session process.
 
-Supported transports:
+## Configuration
 
-- stdio MCP servers via generated `mcp_servers.<name>.command` config;
-- streamable HTTP MCP servers via generated `mcp_servers.<name>.url` config;
-- ACP-transport MCP through the adapter-owned loopback `mcp-proxy`.
+Attach MCP servers to `session/new`, `session/load`, `session/resume`, or
+`session/fork`. Embedded Go callers can use:
 
-SSE MCP is rejected because Codex does not expose a supported SSE MCP path.
-
-## Stdio and HTTP
-
-Session MCP servers are converted to Codex `-c mcp_servers...` configuration.
-HTTP headers are configuration values passed to the Codex process; see
-[Security](/docs/operations/security#mcp-proxy-boundary) for the same-user
-process-inspection caveat.
-
-## ACP-transport MCP
-
-For ACP-transport MCP, Codex sees an ordinary stdio MCP server running:
-
-```sh
-acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:NNNN -acp-id <id>
+```go
+req := codexacp.NewSessionRequest("/workspace/project",
+    codexacp.WithSessionMCPServers(server),
+)
 ```
 
-The ACP host still sees normal `mcp/connect`, `mcp/message`, and
-`mcp/disconnect` callbacks. The proxy authenticates to the adapter-owned
-loopback listener with a token read from `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE`.
+Codex-specific MCP server metadata can configure tool approval modes; see
+[Permissions](/docs/features/permissions#mcp-tool-approvals).
+
+## Supported transports
+
+| ACP transport | Codex mapping |
+| --- | --- |
+| Stdio | Codex `mcp_servers.<name>.command`, args, and env. |
+| Streamable HTTP | Codex `mcp_servers.<name>.url` plus `env_http_headers`. |
+| ACP transport | Local token-authenticated stdio proxy launched by the adapter. |
+| SSE | Rejected; Codex app-server does not support this transport here. |
+
+HTTP header values are passed through `env_http_headers` so bearer tokens and
+trace headers stay out of process argv.
+
+## ACP-transport bridge
+
+ACP-transport MCP servers are not directly understood by Codex. The adapter
+starts a loopback listener and rewrites the server into a Codex stdio MCP
+server that launches:
+
+```bash
+acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:... -acp-id <id>
+```
+
+The proxy reads a 32-byte token from a private token file path supplied in the
+environment. The token is never placed in argv.
+
+## Security boundary
+
+The bridge is loopback-only, token-gated, and same-user scoped. It is designed
+to expose one ACP MCP server to one Codex app-server process, not as a general
+network service.
+
+Temporary token files and materialized rollout files are created under private
+0700 parent directories with 0600 file permissions and cleaned up on session
+close.
+
+## Limits
+
+The MCP bridge enforces request size, pending-forward, and idle timeout limits
+to keep a stuck MCP server from blocking the Codex session indefinitely. Errors
+are surfaced through the Codex tool result path when possible and through ACP
+session errors when the bridge itself cannot start.

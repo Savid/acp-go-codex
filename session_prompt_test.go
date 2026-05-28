@@ -38,6 +38,17 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored update error")
 	}
+	session.client = &runEventsClient{events: []codex.Event{{
+		Kind:     codex.EventUsageUpdated,
+		ThreadID: "thread",
+		TurnID:   "turn",
+		TokenUsage: codex.TokenUsage{
+			Last: codex.Usage{InputTokens: 1, OutputTokens: 2},
+		},
+	}}}
+	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+		t.Fatal("Prompt ignored usage update error")
+	}
 
 	agent.setAgentClient(newRecordingAgentClient())
 	session.rawMessages = rawMessageConfig{All: true}
@@ -52,6 +63,11 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	session.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("boom")}}}
 	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored event error")
+	}
+
+	session.client = &runEventsClient{}
+	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); !errors.Is(err, codex.ErrConnectionClosed) {
+		t.Fatalf("Prompt with closed event stream err=%v, want connection closed", err)
 	}
 
 	session.rawMessages = rawMessageConfig{All: true}
@@ -171,6 +187,21 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 		t.Fatalf("canceled event prompt resp=%#v err=%v", resp, err)
 	}
 
+	interactionSession := &Session{agent: agent, id: "interaction"}
+	interactionSession.beginTurn(context.Background())
+	interactionCtx, finishInteraction := interactionSession.beginInteraction(context.Background(), "input")
+	interactionSession.mu.Lock()
+	cancelInteractionTurn := interactionSession.cancel
+	interactionSession.mu.Unlock()
+	cancelInteractionTurn()
+	select {
+	case <-interactionCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("interaction was not canceled when turn context ended")
+	}
+	finishInteraction()
+	interactionSession.finishTurn()
+
 	accountSession := &Session{
 		agent:         agent,
 		id:            "acct",
@@ -226,6 +257,82 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 		t.Fatalf("aggregate duplicate was not suppressed: %#v", event)
 	}
 
+	usageAgent := NewAgent()
+	usageConn := newRecordingAgentClient()
+	usageAgent.setAgentClient(usageConn)
+	usageSession := &Session{
+		agent:         usageAgent,
+		id:            "usage",
+		cwd:           "/tmp/project",
+		codexThreadID: "thread",
+		client: &runEventsClient{events: []codex.Event{
+			{
+				Kind:     codex.EventUsageUpdated,
+				ThreadID: "thread",
+				TurnID:   "turn",
+				Usage:    codex.Usage{InputTokens: 22143, CachedReadTokens: 6528, OutputTokens: 322, ReasoningOutputTokens: 157, TotalTokens: 22465},
+				TokenUsage: codex.TokenUsage{
+					Last:               codex.Usage{InputTokens: 22143, CachedReadTokens: 6528, OutputTokens: 322, ReasoningOutputTokens: 157, TotalTokens: 22465},
+					Total:              codex.Usage{InputTokens: 23000, CachedReadTokens: 6528, OutputTokens: 400, ReasoningOutputTokens: 200, TotalTokens: 23400},
+					ModelContextWindow: 258400,
+				},
+			},
+			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+		}},
+	}
+	usageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "hi"))
+	if err != nil {
+		t.Fatalf("usage prompt returned error: %v", err)
+	}
+	if usageResp.Usage == nil ||
+		usageResp.Usage.InputTokens != 22143 ||
+		usageResp.Usage.OutputTokens != 322 ||
+		usageResp.Usage.TotalTokens != 22465 ||
+		usageResp.Usage.CachedReadTokens == nil ||
+		*usageResp.Usage.CachedReadTokens != 6528 ||
+		usageResp.Usage.ThoughtTokens == nil ||
+		*usageResp.Usage.ThoughtTokens != 157 {
+		t.Fatalf("prompt usage = %#v", usageResp.Usage)
+	}
+	if len(usageConn.updates) != 1 || usageConn.updates[0].Update.UsageUpdate == nil {
+		t.Fatalf("usage updates = %#v", usageConn.updates)
+	}
+	usageUpdate := usageConn.updates[0].Update.UsageUpdate
+	codexMeta, _ := usageUpdate.Meta[codexMetaKey].(map[string]any)
+	usageMeta, _ := codexMeta[codexUsageMetaKey].(map[string]any)
+	if usageUpdate.Used != 23400 ||
+		usageUpdate.Size != 258400 ||
+		usageMeta[usageInputTokensKey] != 22143 ||
+		usageMeta[usageCachedReadTokensKey] != 6528 ||
+		usageMeta[usageOutputTokensKey] != 322 ||
+		usageMeta[usageReasoningOutputKey] != 157 ||
+		usageMeta[usageTotalTokensKey] != 22465 {
+		t.Fatalf("usage update=%#v meta=%#v", usageUpdate, usageMeta)
+	}
+	threadUsageMeta, _ := codexMeta[codexThreadUsageMetaKey].(map[string]any)
+	if usageUpdate.Used != 23400 || threadUsageMeta[usageTotalTokensKey] != 23400 {
+		t.Fatalf("thread usage update=%#v meta=%#v", usageUpdate, threadUsageMeta)
+	}
+
+	completedUsageConn := newRecordingAgentClient()
+	usageAgent.setAgentClient(completedUsageConn)
+	usageSession.client = &runEventsClient{events: []codex.Event{{
+		Kind:     codex.EventCompleted,
+		ThreadID: "thread",
+		TurnID:   "turn",
+		Usage:    codex.Usage{InputTokens: 1, OutputTokens: 2},
+	}}}
+	completedUsageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "hi"))
+	if err != nil {
+		t.Fatalf("completed usage prompt returned error: %v", err)
+	}
+	if completedUsageResp.Usage == nil || completedUsageResp.Usage.TotalTokens != 3 {
+		t.Fatalf("completed usage response = %#v", completedUsageResp.Usage)
+	}
+	if len(completedUsageConn.updates) != 1 || completedUsageConn.updates[0].Update.UsageUpdate == nil {
+		t.Fatalf("completed usage updates = %#v", completedUsageConn.updates)
+	}
+
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	if err := os.WriteFile(rollout, []byte("\n"+`{"type":"event_msg"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
@@ -237,10 +344,191 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	if err := rawSession.emitRawRolloutRow(context.Background(), SessionStoreEntry(`{"type":"event_msg"}`)); err != nil {
 		t.Fatalf("raw rollout row without conn returned error: %v", err)
 	}
-	stop, done := rawSession.startRolloutTail(context.Background())
+	stop, done := rawSession.startRolloutTail(context.Background(), nil, nil)
 	time.Sleep(150 * time.Millisecond)
 	stop()
 	<-done
+}
+
+func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
+	withRolloutCompletionFallback(t, time.Millisecond)
+
+	agent := NewAgent()
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
+		t.Fatalf("write empty rollout: %v", err)
+	}
+	writeErr := make(chan error, 1)
+	time.AfterFunc(20*time.Millisecond, func() {
+		writeErr <- os.WriteFile(rollout, []byte(
+			`{"type":"event_msg","payload":{"type":"agent_message","message":"1 + 1 = 2"}}`+"\n"+
+				`{"type":"event_msg","payload":{"type":"task_complete"}}`+"\n",
+		), 0o600)
+	})
+	defer func() {
+		if err := <-writeErr; err != nil {
+			t.Fatalf("write rollout rows: %v", err)
+		}
+	}()
+	session := &Session{
+		agent:         agent,
+		id:            "fallback",
+		cwd:           "/tmp/project",
+		codexThreadID: "thread",
+		rolloutPath:   rollout,
+		client:        &openRunEventsClient{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "prove it"))
+	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("fallback prompt resp=%#v err=%v", resp, err)
+	}
+	if len(conn.updates) != 1 || conn.updates[0].Update.AgentMessageChunk == nil {
+		t.Fatalf("fallback updates = %#v", conn.updates)
+	}
+	if session.completionRows != 2 || session.visibleRows != 2 {
+		t.Fatalf("rollout cursors completion=%d visible=%d", session.completionRows, session.visibleRows)
+	}
+}
+
+func TestPromptUsesImmediateRolloutTaskCompleteFallback(t *testing.T) {
+	withRolloutCompletionFallback(t, 0)
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
+		t.Fatalf("write empty rollout: %v", err)
+	}
+	writeErr := make(chan error, 1)
+	time.AfterFunc(20*time.Millisecond, func() {
+		writeErr <- os.WriteFile(rollout, []byte(`{"type":"event_msg","payload":{"type":"task_complete"}}`+"\n"), 0o600)
+	})
+	defer func() {
+		if err := <-writeErr; err != nil {
+			t.Fatalf("write rollout rows: %v", err)
+		}
+	}()
+	session := &Session{
+		agent:         NewAgent(),
+		id:            "fallback",
+		cwd:           "/tmp/project",
+		codexThreadID: "thread",
+		rolloutPath:   rollout,
+		client:        &openRunEventsClient{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "prove it"))
+	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("immediate fallback prompt resp=%#v err=%v", resp, err)
+	}
+	if session.completionRows != 1 {
+		t.Fatalf("completion cursor = %d", session.completionRows)
+	}
+}
+
+func TestPromptReturnsRolloutEventUpdateError(t *testing.T) {
+	agent := NewAgent()
+	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
+		t.Fatalf("write empty rollout: %v", err)
+	}
+	writeErr := make(chan error, 1)
+	time.AfterFunc(20*time.Millisecond, func() {
+		writeErr <- os.WriteFile(rollout, []byte(
+			`{"type":"event_msg","payload":{"type":"agent_message","message":"visible"}}`+"\n",
+		), 0o600)
+	})
+	defer func() {
+		if err := <-writeErr; err != nil {
+			t.Fatalf("write rollout rows: %v", err)
+		}
+	}()
+
+	session := &Session{
+		agent:         agent,
+		id:            "fallback",
+		cwd:           "/tmp/project",
+		codexThreadID: "thread",
+		rolloutPath:   rollout,
+		client:        &openRunEventsClient{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := session.Prompt(ctx, TextPromptRequest("fallback", "show it")); err == nil {
+		t.Fatal("rollout event update error was ignored")
+	}
+}
+
+func TestSandboxPolicyHelpers(t *testing.T) {
+	if sandboxMode("workspace-write") != "workspace-write" {
+		t.Fatal("string sandbox mode changed")
+	}
+	for _, tc := range []struct {
+		policy map[string]any
+		want   string
+	}{
+		{map[string]any{"type": "dangerFullAccess"}, "danger-full-access"},
+		{map[string]any{"type": "readOnly"}, "read-only"},
+		{map[string]any{"type": "workspaceWrite"}, "workspace-write"},
+	} {
+		if got := sandboxMode(tc.policy); got != tc.want {
+			t.Fatalf("sandboxMode(%#v) = %#v", tc.policy, got)
+		}
+	}
+	if sandboxMode(map[string]any{"type": "unknown"}) != nil || sandboxMode(123) != nil {
+		t.Fatal("sandboxMode accepted unknown policy")
+	}
+
+	danger, _ := sandboxPolicy("danger-full-access").(map[string]any)
+	if danger["type"] != "dangerFullAccess" {
+		t.Fatalf("danger policy = %#v", danger)
+	}
+	readOnly, _ := sandboxPolicy("read-only").(map[string]any)
+	if readOnly["type"] != "readOnly" || readOnly["networkAccess"] != false {
+		t.Fatalf("read-only policy = %#v", readOnly)
+	}
+	workspace, _ := sandboxPolicy("workspace-write").(map[string]any)
+	if workspace["type"] != "workspaceWrite" || workspace["writableRoots"] == nil {
+		t.Fatalf("workspace policy = %#v", workspace)
+	}
+	if sandboxPolicy("custom") != "custom" || sandboxPolicy(123) != 123 {
+		t.Fatal("sandboxPolicy did not preserve custom policies")
+	}
+	nilMap, _ := sandboxPolicy(map[string]any(nil)).(map[string]any)
+	if nilMap != nil {
+		t.Fatal("nil map policy was not preserved")
+	}
+	defaulted, _ := sandboxPolicy(map[string]any{"type": "workspaceWrite"}).(map[string]any)
+	if defaulted["writableRoots"] == nil ||
+		defaulted["networkAccess"] != false ||
+		defaulted["excludeTmpdirEnvVar"] != false ||
+		defaulted["excludeSlashTmp"] != false {
+		t.Fatalf("workspace defaults = %#v", defaulted)
+	}
+	alreadyComplete := map[string]any{
+		"type":                "workspace-write",
+		"writableRoots":       []string{"/repo"},
+		"networkAccess":       true,
+		"excludeTmpdirEnvVar": true,
+		"excludeSlashTmp":     true,
+	}
+	normalized, _ := sandboxPolicy(alreadyComplete).(map[string]any)
+	if normalized["type"] != "workspaceWrite" || normalized["networkAccess"] != true {
+		t.Fatalf("normalized policy = %#v", normalized)
+	}
+	otherMap := map[string]any{"type": "custom"}
+	if got, _ := sandboxPolicy(otherMap).(map[string]any); got["type"] != "custom" {
+		t.Fatalf("custom map policy = %#v", got)
+	}
 }
 
 func TestEventUpdateHelpers(t *testing.T) {
@@ -309,8 +597,52 @@ func TestEventUpdateEmptyAndFallbackBranches(t *testing.T) {
 	if usageFromCodex(codex.Usage{}) != nil {
 		t.Fatal("zero usage emitted usage")
 	}
-	if usageFromCodex(codex.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}).TotalTokens != 3 {
+	usage := usageFromCodex(codex.Usage{InputTokens: 1, CachedReadTokens: 2, CachedWriteTokens: 3, OutputTokens: 4, ReasoningOutputTokens: 5})
+	if usage.TotalTokens != 5 ||
+		usage.CachedReadTokens == nil ||
+		*usage.CachedReadTokens != 2 ||
+		usage.CachedWriteTokens == nil ||
+		*usage.CachedWriteTokens != 3 ||
+		usage.ThoughtTokens == nil ||
+		*usage.ThoughtTokens != 5 {
 		t.Fatal("usage mapping failed")
+	}
+	if updates := usageUpdateFromCodex(codex.Usage{}); updates != nil {
+		t.Fatalf("zero usage update = %#v", updates)
+	}
+	updates := usageUpdateFromCodex(codex.Usage{InputTokens: 1, CachedWriteTokens: 2, OutputTokens: 3})
+	if len(updates) != 1 {
+		t.Fatalf("usage update = %#v", updates)
+	}
+	updateMeta, _ := updates[0].UsageUpdate.Meta[codexMetaKey].(map[string]any)
+	updateUsage, _ := updateMeta[codexUsageMetaKey].(map[string]any)
+	if updateUsage[usageCachedWriteTokensKey] != 2 {
+		t.Fatalf("cached write usage meta = %#v", updateUsage)
+	}
+	tokenUpdates := tokenUsageUpdateFromCodex(codex.TokenUsage{
+		Last:               codex.Usage{InputTokens: 1, OutputTokens: 2},
+		Total:              codex.Usage{InputTokens: 3, OutputTokens: 4},
+		ModelContextWindow: 100,
+	})
+	if len(tokenUpdates) != 1 || tokenUpdates[0].UsageUpdate.Used != 7 || tokenUpdates[0].UsageUpdate.Size != 100 {
+		t.Fatalf("token usage update = %#v", tokenUpdates)
+	}
+	var streamedUsage codex.Usage
+	var streamedThreadUsage codex.Usage
+	var streamedWindow int64
+	firstUsageUpdates := usageUpdatesForEvent(codex.Event{Kind: codex.EventUsageUpdated, TokenUsage: codex.TokenUsage{Last: codex.Usage{InputTokens: 1, OutputTokens: 2}}}, &streamedUsage, &streamedThreadUsage, &streamedWindow)
+	duplicateUsageUpdates := usageUpdatesForEvent(codex.Event{Kind: codex.EventUsageUpdated, TokenUsage: codex.TokenUsage{Last: codex.Usage{InputTokens: 1, OutputTokens: 2}}}, &streamedUsage, &streamedThreadUsage, &streamedWindow)
+	if len(firstUsageUpdates) != 1 || duplicateUsageUpdates != nil {
+		t.Fatalf("usage update dedupe first=%#v duplicate=%#v", firstUsageUpdates, duplicateUsageUpdates)
+	}
+	observerResult := promptResultForObserver(acp.PromptResponse{Usage: usage}, nil, "gpt")
+	if observerResult.CachedReadTokens != 2 ||
+		observerResult.CachedWriteTokens != 3 ||
+		observerResult.ThoughtTokens != 5 ||
+		observerResult.InputTokens != 1 ||
+		observerResult.OutputTokens != 4 ||
+		observerResult.TotalTokens != 5 {
+		t.Fatalf("observer result = %#v", observerResult)
 	}
 	if structuredOutputMeta("", map[string]any{"type": "object"}) != nil || structuredOutputMeta(`{"ok":true}`, nil) != nil {
 		t.Fatal("structured output emitted without schema/text")

@@ -362,12 +362,16 @@ func TestRPCDoneAndPlaceholderCancelEdges(t *testing.T) {
 
 	readTransport := &manualTransport{recv: make(chan rpcMessage, 1)}
 	readConn := newRPCConn(readTransport, nil)
+	readConn.recordCloseError(nil)
 	errCh = make(chan error, 1)
 	go func() { errCh <- readConn.Call(context.Background(), "wait", nil, nil) }()
 	waitUntil(t, func() bool { return len(readTransport.sentMessages()) == 1 })
 	close(readTransport.recv)
-	if err := <-errCh; err == nil {
-		t.Fatal("Call ignored readLoop pending close")
+	if err := <-errCh; !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("Call err=%v, want connection closed", err)
+	}
+	if !errors.Is(readConn.closeError(), ErrConnectionClosed) {
+		t.Fatalf("closeError = %v, want connection closed", readConn.closeError())
 	}
 	_ = readConn.Close()
 

@@ -511,6 +511,9 @@ func TestCodexCLIMCPStdioTool(t *testing.T) {
 					Command: os.Args[0],
 					Args:    []string{"-test.run=TestIntegrationMCPStdioHelper"},
 					Env:     []acp.EnvVariable{{Name: helperMCPStdioEnv, Value: "1"}},
+					Meta: map[string]any{
+						"codex": map[string]any{"defaultToolsApprovalMode": "approve"},
+					},
 				},
 			},
 		},
@@ -523,7 +526,7 @@ func TestCodexCLIMCPStdioTool(t *testing.T) {
 		return conn.Prompt(ctx, acp.PromptRequest{
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{acp.TextBlock(
-				"You must call the mcp__acp_stdio__echo MCP tool with message ACP_MCP_STDIO_OK. " +
+				"Use the acp_stdio MCP server's echo tool with message ACP_MCP_STDIO_OK. " +
 					"After the tool returns, reply exactly ACP_MCP_STDIO_DONE.",
 			)},
 		})
@@ -578,7 +581,14 @@ func TestCodexCLIACPMCPBridgeTool(t *testing.T) {
 	session, err := acp.SendRequest[acp.NewSessionResponse](clientConn, ctx, acp.AgentMethodSessionNew, acp.NewSessionRequest{
 		Cwd: t.TempDir(),
 		McpServers: []acp.McpServer{
-			{Acp: &acp.McpServerAcpInline{Name: "acp_bridge", Id: "bridge-1", Type: "acp"}},
+			{Acp: &acp.McpServerAcpInline{
+				Name: "acp_bridge",
+				Id:   "bridge-1",
+				Type: "acp",
+				Meta: map[string]any{
+					"codex": map[string]any{"defaultToolsApprovalMode": "approve"},
+				},
+			}},
 		},
 	})
 	if err != nil {
@@ -589,7 +599,7 @@ func TestCodexCLIACPMCPBridgeTool(t *testing.T) {
 		return acp.SendRequest[acp.PromptResponse](clientConn, ctx, acp.AgentMethodSessionPrompt, acp.PromptRequest{
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{acp.TextBlock(
-				"You must call the mcp__acp_bridge__echo MCP tool with message ACP_MCP_ACP_OK. " +
+				"Use the acp_bridge MCP server's echo tool with message ACP_MCP_ACP_OK. " +
 					"After the tool returns, reply exactly ACP_MCP_ACP_DONE.",
 			)},
 		})

@@ -1,49 +1,65 @@
 ---
-title: Elicitation
-description: Tool user input and MCP elicitation bridging.
+title: "Elicitation"
+description: "How Codex user-input requests map to ACP elicitation"
+icon: "circle-question-mark"
 ---
 
-Codex can ask the host for structured user input during a turn. The adapter
-maps those requests to ACP elicitation callbacks rather than inventing a
-Codex-specific prompt UI.
+Codex can ask the host or user for additional input during a turn. The adapter
+maps those requests to ACP elicitation when the request is genuinely asking for
+form, URL, or free-form user input.
+
+## Capabilities
+
+ACP clients advertise elicitation capabilities during `initialize`. When the
+client supports the matching mode, the adapter handles:
+
+- Codex tool user-input requests;
+- MCP elicitation requests that are not approval prompts;
+- URL/open-browser style requests when Codex expresses them through the
+  app-server request channel.
+
+MCP tool approvals are routed through [Permissions](/docs/features/permissions)
+instead of ACP elicitation.
 
 ## Tool user input
 
-Codex `item/tool/requestUserInput` requests are converted to
-`elicitation/create` client requests. The adapter builds an object schema from
-Codex question fields:
+Codex user-input requests become ACP elicitation requests with:
 
-- `id` or `header` becomes the answer key;
-- `header` becomes the field title;
-- `question` becomes the field description.
+- the Codex message as the ACP prompt;
+- a requested schema when Codex supplies one;
+- Codex request metadata under `_meta.codex`;
+- `sessionId` and `toolCallId` scope when Codex supplies enough thread/item
+  context;
+- turn-scoped cancellation.
 
-Accepted elicitation responses are returned to Codex as:
+The adapter only sends form or URL elicitations when the ACP client advertised
+the matching elicitation capability during `initialize`. Without that
+capability, Codex receives an empty/cancelled response instead of the adapter
+trying a provider-local user-input tool path.
 
-```json
-{
-  "answers": {
-    "name": "Ada"
-  }
-}
-```
+Codex exposes the native `request_user_input` tool only in `plan` collaboration
+mode. Start the session with `_meta.codex.options.mode = "plan"`,
+`WithDefaultMode("plan")`, or `-mode plan`, or switch later with
+`session/set_mode`. In `default` mode Codex refuses the tool before the adapter
+receives a server request, so there is no ACP elicitation to translate.
 
-Declined or canceled responses return an empty `answers` object.
+The ACP client chooses how to render the elicitation. The adapter sends the
+client response back to Codex in the app-server response shape Codex expects.
 
-## MCP elicitation
+## Response handling
 
-Codex `mcpServer/elicitation/request` requests are mapped to ACP
-`elicitation/create` with the Codex-requested form fields and schema. Accepted,
-declined, and canceled responses are mapped back to Codex actions:
-
-| ACP outcome | Codex response |
+| ACP result | Codex behavior |
 | --- | --- |
-| accept | `{"action":"accept","content":...,"_meta":...}` |
-| decline | `{"action":"decline","_meta":...}` |
-| cancel | `{"action":"cancel"}` |
+| Submitted value | forwarded to Codex as the request response |
+| Cancelled | forwarded as cancellation |
+| Turn interrupted | request context is cancelled and detached |
+| Connection closed | pending interaction is detached during shutdown |
 
-## Cancellation
+Malformed elicitation requests are rejected as Codex request errors instead of
+being translated into ambiguous ACP prompts.
 
-Pending elicitation interactions are tied to the active session turn. When a
-turn is canceled or the session closes, the adapter detaches pending
-interactions and ignores late responses instead of submitting stale answers
-back to Codex.
+## Raw context
+
+When raw events are enabled, the original Codex rollout rows remain available
+through [`_codex/sdkMessage`](/docs/features/raw-events). Use raw rows for
+diagnostics only; the typed ACP elicitation is the host-facing API.

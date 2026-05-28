@@ -1,50 +1,92 @@
 ---
-title: CLI
-description: acp-go-codex command reference.
+title: "CLI reference"
+description: "Binary flags, subcommands, and environment behavior"
+icon: "terminal"
 ---
 
-Run as an ACP stdio agent:
+## Agent mode
 
-```sh
-acp-go-codex -codex /path/to/codex -codex-home /path/to/codex-home -model gpt-5.5 -debug
+```bash
+acp-go-codex [flags]
 ```
 
-Flags:
+The default mode serves ACP over
+[stdin/stdout](https://agentclientprotocol.com/protocol/transports). It is the
+[standalone CLI](/docs/get-started/run-modes#standalone-cli)
+counterpart to the embedded [`Serve`](/docs/reference/go-api#serve) API.
 
-| Flag | Meaning |
-| --- | --- |
-| `-codex` | Path to the Codex CLI executable. |
-| `-codex-home` | Codex home directory; passed as `CODEX_HOME` to launched Codex processes. |
-| `-model` | Default Codex model for new sessions. |
-| `-debug` | Write adapter debug logs to stderr. |
-| `-cli` | Run a local Codex auth passthrough command instead of serving ACP. |
-| `-device-auth` | Add `--device-auth` to `-cli login`. |
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-codex` | `codex` on `PATH` | Codex CLI executable path. |
+| `-codex-home` | unset | Codex home directory passed as `CODEX_HOME`. |
+| `-model` | unset | Default Codex model. |
+| `-mode` | `default` | Default ACP session mode: `default` or `plan`. |
+| `-enable-goals` | `false` | Enable Codex experimental native thread goal APIs. |
+| `-debug` | `false` | Write debug logs to stderr. |
+| `-cli` | unset | Run a local Codex auth passthrough command instead of serving ACP. |
+| `-device-auth` | `false` | Add `--device-auth` to `-cli login`. |
 
-Auth passthrough:
+When `OTEL_LOGS_EXPORTER` is configured, standalone mode also sends adapter
+logs through the configured OpenTelemetry log exporter. `-debug` remains
+stderr-only and additive.
 
-```sh
+## Terminal auth passthrough
+
+```bash
+acp-go-codex -cli login
 acp-go-codex -cli login -device-auth
 acp-go-codex -cli logout
 ```
 
-When using `go run`, pass agent flags after Go's `--` delimiter:
+This mode is advertised to ACP clients as terminal auth when supported. It
+forwards stdio and signals to the real Codex CLI. Codex is discovered through
+`-codex`, then `PATH`.
 
-```sh
-go run ./cmd/acp-go-codex -- -codex /path/to/codex -codex-home /tmp/codex-home
+See [Authentication](/docs/features/authentication#terminal-auth).
+
+## MCP proxy subcommand
+
+```bash
+acp-go-codex mcp-proxy \
+  -network tcp \
+  -address 127.0.0.1:12345 \
+  -acp-id server-id
 ```
 
-MCP proxy mode is launched by generated Codex MCP config:
+The bridge token is read from `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE`. This
+subcommand is internal to
+[ACP-transport MCP](/docs/features/mcp#acp-transport-bridge) and is normally
+launched by Codex through generated MCP config.
 
-```sh
-acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:NNNN -acp-id <id>
+## Codex launch arguments
+
+Interactive sessions use Codex app-server:
+
+```bash
+codex app-server
 ```
 
-The MCP proxy reads `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE` from its environment.
-The token value itself is never placed in argv.
+The adapter adds `-c` config overrides as needed for model defaults, native
+Codex OTEL, MCP servers, MCP approval modes, and experimental goal support.
+Per-turn settings such as reasoning effort, approval policy, sandbox policy,
+service tier, personality, and structured output are sent through app-server
+requests.
 
-OpenTelemetry uses standard `OTEL_*` environment variables. Traces and metrics
-are enabled when an explicit signal exporter or OTLP endpoint is set; logs are
-enabled only when `OTEL_LOGS_EXPORTER` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is
-set. ACP trace context is extracted from request metadata and injected into the
-launched Codex app-server environment as `TRACEPARENT`, `TRACESTATE`, and
-`BAGGAGE`.
+When native Codex OTEL is enabled, the adapter also passes
+`--analytics-default-enabled`.
+
+## Environment
+
+| Variable | Meaning |
+| --- | --- |
+| `CODEX_HOME` | Codex home, set by `-codex-home` or `WithCodexHome`. |
+| `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE` | Private token file path for the internal MCP proxy subcommand. |
+| `TRACEPARENT` | Injected into launched Codex app-server processes from ACP metadata when available. |
+| `TRACESTATE` | Injected into launched Codex app-server processes from ACP metadata when available. |
+| `BAGGAGE` | Injected into launched Codex app-server processes from ACP metadata when available. |
+| `OTEL_*` | Used by standalone mode to configure adapter telemetry and safe native Codex OTEL mapping. |
+| `CODEX_OTEL_ENVIRONMENT` | Native Codex `otel.environment` tag. |
+
+For embedded equivalents to these flags and env vars, see
+[Go API](/docs/reference/go-api). Native OTEL behavior is covered in
+[Observability](/docs/operations/observability).

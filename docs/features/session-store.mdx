@@ -1,41 +1,81 @@
 ---
-title: Session Store
-description: Rollout JSONL import, mirror, load, and resume.
+title: "Session Store"
+description: "Durable rollout JSONL mirroring, import, and remote restore"
+icon: "database"
 ---
 
-Codex rollout JSONL is the adapter's durable remote-session artifact. It is
-the restore-grade record of a Codex thread.
+Codex persists native thread state as rollout JSONL. `acp-go-codex` can mirror
+those rows to a host-owned `SessionStore` so a later process can restore a
+session even when the local Codex state directory is missing.
 
-The public store shape is append/load first:
+## Why use a store
+
+Use a store when:
+
+- the ACP host is remote from the agent process;
+- the agent process may be short-lived;
+- session restore must survive local Codex cache cleanup;
+- a host wants to export/import Codex rollout bundles explicitly.
+
+Without a store, Codex can still resume threads that exist in the local Codex
+home.
+
+## Mode support
+
+| Operation | Store behavior |
+| --- | --- |
+| `session/new` | Mirrors newly produced rollout rows after each turn. |
+| `session/load` | Loads stored rows, replays ACP updates, and materializes a rollout file for Codex resume. |
+| `session/resume` | Uses stored rows when present, materializes a rollout file for Codex resume, and does not replay history. |
+| `session/list` | Includes store-backed sessions when the store implements `SessionStoreLister`. |
+| `_codex/session/import*` | Writes host-provided rollout JSONL into the store. |
+
+## Interface
 
 ```go
 type SessionStore interface {
-	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
-	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+    Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
+    Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+    Replace(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
 }
 ```
 
-Store entries are raw Codex rollout JSON objects. Implementations should
-preserve the raw JSON bytes. The adapter validates imported entries as single
-JSON objects before appending them.
+Optional interfaces add list, delete, and atomic session replacement support.
+See [Go API](/docs/reference/go-api#sessionstore) for the full shape.
 
-Optional interfaces:
+## Key shape
 
-- `SessionStoreLister` backs `session/list` from stored sessions;
-- `SessionStoreDeleter` deletes a stored rollout key;
-- `SessionStoreReplacer` atomically replaces an existing imported session.
+```go
+type SessionKey struct {
+    ProjectKey string
+    SessionID  string
+    Subpath    string
+}
+```
 
-Import extension methods:
+`SessionID` is the ACP-visible session ID, not the native Codex thread ID.
+Native thread IDs remain in rollout JSONL and response metadata.
 
-- `_codex/session/import`;
-- `_codex/session/importChunk`;
-- `_codex/session/commitImport`;
-- `_codex/session/abortImport`.
+`Subpath` is empty for the main rollout. Reserved sidecars such as `goal.json`
+store adapter-owned snapshots related to the same session.
 
-`session/load` reconstructs ACP-visible history from rollout rows before
-returning, then resumes Codex from a materialized rollout file. `session/resume`
-reattaches to Codex thread state without replaying the full visible history.
+## Mirroring
 
-Filtered raw events are not restore-grade data. Use a `SessionStore`,
-session-import extension methods, or a complete unfiltered raw capture when
-exact restore matters.
+The adapter mirrors complete rollout JSONL rows. It advances durable-store and
+raw-event cursors independently so a failed raw notification cannot duplicate
+rows in the durable store.
+
+Final turn mirroring is bounded and retried. If durable mirroring still fails
+after retry, the prompt fails so the host does not believe a session was safely
+persisted when it was not.
+
+## Materialized resume
+
+For store-backed load or resume, the adapter writes stored rollout rows into a
+private temporary rollout file and asks Codex to resume from the native thread
+ID embedded in the rows. The ACP session ID remains the host-visible key.
+
+Filtered raw events are not a restore mechanism. Exact restore requires the
+full rollout JSONL rows captured through `SessionStore`,
+[`_codex/session/import*`](/docs/reference/session-import), or an unfiltered raw
+capture that kept every restorable row.

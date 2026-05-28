@@ -1,55 +1,95 @@
 ---
-title: Quickstart
-description: Run the ACP agent locally.
+title: "Quickstart"
+description: "Run the ACP agent and send a first prompt"
+icon: "rocket"
 ---
 
-Install or run from the checkout:
+## Prerequisites
 
-```sh
-go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
+- Go 1.25 or newer. This repo is developed with toolchain Go 1.26.3.
+- A local `codex` CLI installed and authenticated.
+- An [ACP client](https://agentclientprotocol.com/overview/clients) or one of
+  the [examples](/docs/get-started/examples) in this repo.
+
+## Option A: standalone CLI
+
+<Steps>
+  <Step title="Build or run the agent">
+
+    ```bash
+    go run ./cmd/acp-go-codex
+    ```
+
+    The process speaks ACP over stdin/stdout using the ACP
+    [stdio transport](https://agentclientprotocol.com/protocol/transports). In
+    normal use, an editor or host launches it as a subprocess.
+  </Step>
+
+  <Step title="Try the minimal client">
+
+    ```bash
+    go run ./examples/minimal-client "Reply with hello from ACP"
+    ```
+
+    The example starts the agent, initializes ACP, creates a session in the
+    current directory, sends a prompt, prints streamed text/tool updates, and
+    closes the session.
+  </Step>
+
+  <Step title="Try interactive chat">
+
+    ```bash
+    go run ./examples/interactive-chat
+    ```
+
+    This example demonstrates [prompt streaming](/docs/core/prompt-streaming),
+    queued input, cancellation, usage updates, tool calls, permissions, and
+    elicitation callbacks.
+  </Step>
+</Steps>
+
+## Option B: embedded Go
+
+Use [`Serve`](/docs/reference/go-api#serve) when your Go app owns the ACP
+streams:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    codexacp "github.com/savid/acp-go-codex"
+)
+
+func main() {
+    err := codexacp.Serve(context.Background(), os.Stdin, os.Stdout,
+        codexacp.WithDefaultModel("gpt-5.5"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+}
 ```
 
-```sh
-go run ./cmd/acp-go-codex
-```
+This has the same wire behavior as the standalone CLI: ACP JSON-RPC on the
+provided streams, with [Codex sessions](/docs/core/sessions) launched on
+demand. Use [CLI reference](/docs/reference/cli) for flags and
+[Go API](/docs/reference/go-api) for embedding options.
 
-The binary is normally launched by an ACP host, not by a human terminal.
+## Expected host flow
 
-## Try an example client
+1. Start `acp-go-codex` as a subprocess.
+2. Call ACP [`initialize`](https://agentclientprotocol.com/protocol/initialization).
+3. Create or resume a session with an absolute `cwd`.
+4. Send [`session/prompt`](https://agentclientprotocol.com/protocol/prompt-turn).
+5. Handle streamed [`session/update`](/docs/reference/updates) notifications.
+6. Close sessions and the process when done.
 
-```sh
-go run ./examples/minimal-client "Reply with a short hello from ACP."
-```
-
-For a line-oriented session:
-
-```sh
-go run ./examples/interactive-chat
-```
-
-For durable rollout import and resume:
-
-```sh
-go run ./examples/resume-from-file -session-file ./examples/resume-from-file/session.jsonl
-```
-
-## Useful flags
-
-```sh
-go run ./cmd/acp-go-codex -- -codex /path/to/codex -codex-home /tmp/codex-home -model gpt-5.5
-```
-
-`-codex-home` maps to `CODEX_HOME` for launched Codex processes. Use an
-adapter-owned directory when testing login/logout behavior.
-
-Manual authentication passthrough:
-
-```sh
-go run ./cmd/acp-go-codex -- -cli login -device-auth
-```
-
-## Local checks
-
-```sh
-make audit
-```
+<Tip>
+  ACP client callbacks such as permissions, elicitations, and MCP messages are
+  part of the [ACP method surface](/docs/reference/acp-methods). Codex-native
+  request details stay inside the adapter's app-server boundary.
+</Tip>

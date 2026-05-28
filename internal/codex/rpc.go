@@ -124,6 +124,7 @@ type rpcConn struct {
 	pending  map[string]pendingCall
 	requests map[string]*pendingRequest
 	closed   bool
+	closeErr error
 }
 
 type rpcEvent struct {
@@ -163,8 +164,12 @@ func (c *rpcConn) Call(ctx context.Context, method string, params any, result an
 
 	c.mu.Lock()
 	if c.closed {
+		err := c.closeErr
+		if err == nil {
+			err = ErrConnectionClosed
+		}
 		c.mu.Unlock()
-		return errors.New("codex rpc connection is closed")
+		return err
 	}
 	c.pending[key] = call
 	c.mu.Unlock()
@@ -192,10 +197,10 @@ func (c *rpcConn) Call(ctx context.Context, method string, params any, result an
 		return ctx.Err()
 	case <-c.done:
 		cleanup()
-		return errors.New("codex rpc connection is closed")
+		return c.err()
 	case msg, ok := <-call.result:
 		if !ok {
-			return errors.New("codex rpc connection is closed")
+			return c.err()
 		}
 		if msg.Error != nil {
 			return msg.Error
@@ -269,6 +274,7 @@ func (c *rpcConn) readLoop() {
 	for {
 		msg, raw, err := c.transport.Recv()
 		if err != nil {
+			c.recordCloseError(err)
 			return
 		}
 
@@ -284,6 +290,36 @@ func (c *rpcConn) readLoop() {
 			c.deliverNotification(msg, raw)
 		}
 	}
+}
+
+func (c *rpcConn) recordCloseError(err error) {
+	if err == nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.closeErr != nil {
+		return
+	}
+	c.closeErr = fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+}
+
+func (c *rpcConn) err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closeErr != nil {
+		return c.closeErr
+	}
+
+	return ErrConnectionClosed
+}
+
+func (c *rpcConn) closeError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.closeErr
 }
 
 func (c *rpcConn) closeDone() {

@@ -1,28 +1,74 @@
 ---
-title: Prompt Streaming
-description: Prompt and update mapping.
+title: "Prompt Streaming"
+description: "How Codex app-server events become ACP updates"
+icon: "waves"
 ---
 
-ACP prompt content is converted to Codex `UserInput` blocks. Text, URL/data
-images, and local file images are sent as Codex text, `image`, and `localImage`
-inputs; file resource links are sent as Codex mentions when a local path is
-available.
+ACP prompt turns are streaming. The final `session/prompt` response carries the
+turn stop reason and usage, while intermediate Codex app-server notifications
+are mapped to `session/update` notifications.
 
-Live app-server notifications drive the portable ACP UI stream:
+## Update types
 
-- agent message deltas become `agent_message_chunk`;
-- reasoning deltas become `agent_thought_chunk`;
-- plan updates become `plan`;
-- command, file-change, MCP, and dynamic tool items become tool call updates;
-- usage becomes the final ACP prompt usage;
-- raw rollout rows are emitted only on the `_codex/sdkMessage` extension path.
+The adapter maps Codex events into portable ACP updates where possible:
 
-The app-server notification pump runs for the full lifetime of the client.
-Turn-scoped events are routed to the active prompt stream with backpressure, so
-a slow ACP host cannot silently truncate the tail of a turn.
+| Codex event | ACP update |
+| --- | --- |
+| Agent text delta | `agent_message_chunk` |
+| Reasoning delta | `agent_thought_chunk` |
+| Plan update | `plan` |
+| Shell command item | `tool_call` / `tool_call_update` |
+| File change item | `tool_call` / `tool_call_update` |
+| MCP or dynamic tool item | `tool_call` / `tool_call_update` |
+| Diff update | tool-call content/update when Codex provides it |
+| Account or warning update | `session_info_update` metadata where possible |
+| Goal update | `session_info_update._meta.codex.goal` |
+| Completed turn | final stop reason, `PromptResponse.usage`, and usage update metadata |
 
-When a model emits only completed items, the mapper emits the final text once.
-When deltas were already emitted, completed items are treated as authoritative
-final state without duplicating visible output.
+When Codex emits only completed items, the mapper emits final text once. When
+deltas were already emitted for an item, completed text is treated as final
+state without duplicating visible output.
 
-See [Updates](/docs/reference/updates) for the event-to-update mapping.
+## Content input
+
+ACP prompt content blocks are converted into Codex turn input:
+
+- text blocks become user text;
+- URL and data images become Codex image inputs;
+- `file://` images become Codex local-image inputs;
+- file resource links become Codex mentions;
+- non-file resource links and embedded resources become text context.
+
+Unsupported content block types are rejected as invalid params instead of being
+dropped.
+
+The adapter serializes turns per session. A second `session/prompt` waits until
+the active turn completes or is cancelled.
+
+## Codex command surfaces
+
+Codex-native app-server APIs are exposed as explicit extension methods rather
+than as plain text slash commands:
+
+| Extension | Native Codex operation |
+| --- | --- |
+| `_codex/turn/steer` | `turn/steer` |
+| `_codex/thread/compact` | `thread/compact/start` |
+| `_codex/review/start` | `review/start` |
+| `_codex/thread/read` | `thread/read` |
+| `_codex/thread/turns/list` | `thread/turns/list` |
+
+Hosts can still send ordinary text that Codex interprets however the CLI would
+interpret it. The extension methods are for app-server operations with typed
+inputs and responses.
+
+## Usage
+
+When Codex emits `thread/tokenUsage/updated`, the adapter returns
+`tokenUsage.last` as standard ACP `PromptResponse.usage` and also emits a
+`usage_update` before the turn is finalized. Codex-native per-turn token
+details are preserved under `_meta.codex.usage`; cumulative thread usage, when
+reported, is exposed as `usage_update.used`, `usage_update.size`, and
+`_meta.codex.threadUsage`.
+
+See [Updates](/docs/reference/updates#usage-updates) for the exact mapping.

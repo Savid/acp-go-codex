@@ -28,7 +28,7 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartThread returned error: %v", err)
 	}
-	if thread.ID != "thread-1" || thread.Path != "/tmp/rollout.jsonl" || thread.UpdatedAt == "" {
+	if thread.ID != "thread-1" || thread.Path != "/tmp/rollout.jsonl" || thread.UpdatedAt == "" || thread.ReasoningEffort != "high" {
 		t.Fatalf("thread = %#v", thread)
 	}
 	start := transport.sentParams(methodThreadStart)
@@ -72,6 +72,19 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if _, err := client.StartReview(ctx, ReviewStartRequest{ThreadID: "thread-1", Target: map[string]any{"type": "uncommittedChanges"}, Delivery: "inline"}); err != nil {
 		t.Fatalf("StartReview returned error: %v", err)
 	}
+	budget := int64(5000)
+	goal, err := client.SetGoal(ctx, GoalSetRequest{ThreadID: "thread-1", Objective: "ship", Status: "active", TokenBudget: &budget})
+	if err != nil || goal.Objective != "ship" || goal.TokenBudget == nil || *goal.TokenBudget != budget {
+		t.Fatalf("SetGoal = %#v err=%v", goal, err)
+	}
+	gotGoal, err := client.GetGoal(ctx, "thread-1")
+	if err != nil || gotGoal == nil || gotGoal.Objective != "ship" {
+		t.Fatalf("GetGoal = %#v err=%v", gotGoal, err)
+	}
+	cleared, err := client.ClearGoal(ctx, "thread-1")
+	if err != nil || !cleared {
+		t.Fatalf("ClearGoal cleared=%v err=%v", cleared, err)
+	}
 	modes, err := client.CollaborationModeList(ctx)
 	if err != nil || len(modes.Modes) != 2 || modes.Modes[0].ID != "default" {
 		t.Fatalf("CollaborationModeList = %#v err=%v", modes, err)
@@ -84,7 +97,7 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 		t.Fatalf("UnsubscribeThread returned error: %v", err)
 	}
 	models, err := client.ModelList(ctx)
-	if err != nil || len(models) != 2 || models[0].ID != "gpt-a" {
+	if err != nil || len(models) != 2 || models[0].ID != "gpt-a" || models[0].Name != "GPT A" || models[0].Description != "A model" || models[0].DefaultReasoningEffort != "medium" || len(models[0].ReasoningEfforts) != 2 {
 		t.Fatalf("ModelList = %#v err=%v", models, err)
 	}
 	account, err := client.AccountRead(ctx)
@@ -103,7 +116,7 @@ func TestNewAppServerClientLaunchesCLI(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.129.0
+  echo codex-cli 0.134.0
   exit 0
 fi
 read line || exit 0
@@ -149,14 +162,40 @@ func TestAppServerRunTurnMapsEvents(t *testing.T) {
 	for event := range events {
 		got = append(got, event)
 	}
-	if len(got) != 5 {
+	if len(got) != 6 {
 		t.Fatalf("events = %#v", got)
 	}
-	if got[0].Kind != EventPlanUpdated || got[1].Kind != EventReasoningDelta || got[2].Kind != EventAgentMessageDelta || got[3].Kind != EventDiffUpdated || got[4].Kind != EventCompleted {
+	if got[0].Kind != EventPlanUpdated || got[1].Kind != EventReasoningDelta || got[2].Kind != EventAgentMessageDelta || got[3].Kind != EventDiffUpdated || got[4].Kind != EventUsageUpdated || got[5].Kind != EventCompleted {
 		t.Fatalf("unexpected event order: %#v", got)
 	}
-	if got[4].Usage.TotalTokens != 3 {
-		t.Fatalf("usage = %#v", got[4].Usage)
+	if got[4].Usage.TotalTokens != 3 ||
+		got[4].TokenUsage.Last.CachedReadTokens != 1 ||
+		got[4].TokenUsage.Last.ReasoningOutputTokens != 1 ||
+		got[4].TokenUsage.Total.TotalTokens != 9 ||
+		got[4].TokenUsage.ModelContextWindow != 100 {
+		t.Fatalf("usage = %#v tokenUsage=%#v", got[4].Usage, got[4].TokenUsage)
+	}
+}
+
+func TestAppServerRunTurnEmitsConnectionError(t *testing.T) {
+	transport := newAbruptCloseTransport()
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	defer client.Close(context.Background())
+
+	events, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
+	if err != nil {
+		t.Fatalf("RunTurn returned error: %v", err)
+	}
+	transport.CloseWithError(errors.New("boom"))
+	event, ok := <-events
+	if !ok {
+		t.Fatal("turn stream closed without an error event")
+	}
+	if event.Kind != EventError || !errors.Is(event.Err, ErrConnectionClosed) {
+		t.Fatalf("event = %#v, want connection error", event)
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("turn stream stayed open after connection error")
 	}
 }
 
@@ -177,9 +216,30 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	if stopReasonFromTurn(map[string]any{"status": "cancelled"}) != StopReasonCancelled || stopReasonFromTurn(map[string]any{"status": "failed"}) != StopReasonError {
 		t.Fatal("stop reason mapping failed")
 	}
-	usage := usageFromParams(map[string]any{"usage": map[string]any{"inputTokens": float64(1), "completionTokens": float64(2)}})
-	if usage.TotalTokens != 3 {
+	usage := usageFromParams(map[string]any{"usage": map[string]any{
+		"inputTokens":              float64(1),
+		"completionTokens":         float64(2),
+		"cachedReadTokens":         float64(3),
+		"cacheCreationInputTokens": float64(4),
+		"reasoning_output_tokens":  float64(5),
+	}})
+	if usage.TotalTokens != 3 || usage.CachedReadTokens != 3 || usage.CachedWriteTokens != 4 || usage.ReasoningOutputTokens != 5 {
 		t.Fatalf("usage = %#v", usage)
+	}
+	tokenUsage := tokenUsageFromParams(map[string]any{"tokenUsage": map[string]any{
+		"last":               map[string]any{"input_tokens": float64(1), "output_tokens": float64(2)},
+		"total":              map[string]any{"inputTokens": float64(4), "outputTokens": float64(5)},
+		"modelContextWindow": float64(200),
+	}})
+	if tokenUsage.Last.TotalTokens != 3 || tokenUsage.Total.TotalTokens != 9 || tokenUsage.ModelContextWindow != 200 {
+		t.Fatalf("token usage = %#v", tokenUsage)
+	}
+	flatTokenUsage := tokenUsageFromParams(map[string]any{"usage": map[string]any{"inputTokens": float64(4), "outputTokens": float64(5)}})
+	if flatTokenUsage.Last.TotalTokens != 9 || flatTokenUsage.Total.TotalTokens != 9 {
+		t.Fatalf("flat token usage = %#v", flatTokenUsage)
+	}
+	if firstInt64(map[string]any{"fallback": float64(4)}, "missing", "fallback") != 4 || firstInt64(map[string]any{}, "missing") != 0 {
+		t.Fatal("firstInt64 fallback failed")
 	}
 	if completedItemEvent(Event{}, map[string]any{"item": map[string]any{"type": "agentMessage", "text": "done"}}).Kind != EventAgentMessageDelta {
 		t.Fatal("agent completed item did not map to agent delta")
@@ -206,6 +266,12 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	if tool := toolEventFromItem(map[string]any{"item": map[string]any{"result": map[string]any{"content": []any{map[string]any{"text": "mcp ok"}}}}}, "completed"); tool.Content != "mcp ok" {
 		t.Fatalf("nested tool content = %#v", tool)
 	}
+	if tool := toolEventFromItem(map[string]any{"item": map[string]any{"type": "mcpToolCall", "server": "remote", "tool": "echo"}}, "completed"); tool.Title != "remote echo" {
+		t.Fatalf("MCP tool title = %#v", tool)
+	}
+	if title := toolTitleFromItem(map[string]any{"tool": "echo"}); title != "echo" {
+		t.Fatalf("tool-only title = %q", title)
+	}
 	if toolEventFromItem(map[string]any{"itemId": "outer"}, "running").ID != "outer" {
 		t.Fatal("tool event did not fall back to outer item id")
 	}
@@ -227,6 +293,22 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	if int64Value(map[string]any{"x": int64(4)}, "x") != 4 || int64Value(map[string]any{"x": 5}, "x") != 5 || int64Value(nil, "x") != 0 {
 		t.Fatal("int64Value branches failed")
 	}
+	if int64PtrValue(nil, "x") != nil || int64PtrValue(map[string]any{}, "x") != nil {
+		t.Fatal("int64PtrValue nil branches failed")
+	}
+	rootGoal := goalFromResponse(map[string]any{
+		"threadId":        "thread-root",
+		"objective":       "ship",
+		"status":          "active",
+		"tokenBudget":     float64(100),
+		"tokensUsed":      float64(1),
+		"timeUsedSeconds": float64(2),
+		"createdAt":       float64(3),
+		"updatedAt":       float64(4),
+	})
+	if rootGoal.ThreadID != "thread-root" || rootGoal.TokenBudget == nil || *rootGoal.TokenBudget != 100 || rootGoal.TokensUsed != 1 {
+		t.Fatalf("root goal response = %#v", rootGoal)
+	}
 	if firstNonEmptyMapSlice(map[string]any{"templates": []any{map[string]any{"name": "t"}}}, "resourceTemplates", "templates")[0]["name"] != "t" {
 		t.Fatal("firstNonEmptyMapSlice fallback failed")
 	}
@@ -245,6 +327,21 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	}
 	if threads := threadsFromResponse(map[string]any{"threads": []any{"bad"}}); len(threads) != 0 {
 		t.Fatalf("threadsFromResponse = %#v", threads)
+	}
+}
+
+func TestAppServerGoalNilResponse(t *testing.T) {
+	client := &AppServerClient{rpc: newRPCConn(&responseTransport{responses: map[string]any{
+		methodThreadGoalGet: map[string]any{"goal": nil},
+	}}, nil)}
+	defer client.Close(context.Background())
+
+	goal, err := client.GetGoal(context.Background(), "thread-1")
+	if err != nil {
+		t.Fatalf("GetGoal returned error: %v", err)
+	}
+	if goal != nil {
+		t.Fatalf("nil goal response = %#v", goal)
 	}
 }
 
@@ -269,6 +366,8 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 		{"turn/diff/updated", map[string]any{"patch": "diff"}, EventDiffUpdated},
 		{"turn/completed", map[string]any{"turn": map[string]any{"status": "interrupted"}}, EventCompleted},
 		{"account/updated", map[string]any{"account": map[string]any{"chatgptAccountId": "acct", "email": "u@example.com", "chatgptPlanType": "plus"}}, EventAccountUpdated},
+		{"thread/goal/updated", map[string]any{"threadId": "thread-1", "goal": map[string]any{"threadId": "thread-1", "objective": "ship", "status": "active"}}, EventGoalUpdated},
+		{"thread/goal/cleared", map[string]any{"threadId": "thread-1"}, EventGoalCleared},
 		{"warning", map[string]any{"message": "warn"}, EventWarning},
 		{"error", map[string]any{"error": "boom"}, EventError},
 		{"rawResponseItem/completed", map[string]any{}, EventRaw},
@@ -355,6 +454,15 @@ func TestAppServerClientRPCErrorBranches(t *testing.T) {
 	if _, err := client.StartReview(ctx, ReviewStartRequest{}); err == nil {
 		t.Fatal("StartReview with RPC error succeeded")
 	}
+	if _, err := client.SetGoal(ctx, GoalSetRequest{}); err == nil {
+		t.Fatal("SetGoal with RPC error succeeded")
+	}
+	if _, err := client.GetGoal(ctx, "thread"); err == nil {
+		t.Fatal("GetGoal with RPC error succeeded")
+	}
+	if _, err := client.ClearGoal(ctx, "thread"); err == nil {
+		t.Fatal("ClearGoal with RPC error succeeded")
+	}
 	if _, err := client.CollaborationModeList(ctx); err == nil {
 		t.Fatal("CollaborationModeList with RPC error succeeded")
 	}
@@ -372,6 +480,18 @@ func TestAppServerClientRPCErrorBranches(t *testing.T) {
 	}
 	if _, err := client.AccountRead(ctx); err == nil {
 		t.Fatal("AccountRead with RPC error succeeded")
+	}
+}
+
+func TestAppServerClientNormalizesMissingThreadRPCError(t *testing.T) {
+	transport := newScriptTransport()
+	transport.fail(methodThreadResume, "no rollout found for thread id thread-1")
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	defer client.Close(context.Background())
+
+	_, err := client.ResumeThread(context.Background(), ThreadResumeRequest{ThreadID: "thread-1"})
+	if !errors.Is(err, ErrThreadNotFound) {
+		t.Fatalf("ResumeThread error = %v, want ErrThreadNotFound", err)
 	}
 }
 
@@ -484,6 +604,39 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	if <-sendResult {
 		t.Fatal("send succeeded after stream closed while blocked")
 	}
+	unbufferedDone := make(chan struct{})
+	unbuffered := &turnStream{cancel: func() {}, done: unbufferedDone, closed: make(chan struct{}), in: make(chan Event), out: make(chan Event)}
+	go unbuffered.forward()
+	sent := make(chan struct{})
+	go func() {
+		unbuffered.in <- Event{Kind: EventError, Err: ErrConnectionClosed}
+		close(sent)
+	}()
+	<-sent
+	if event := <-unbuffered.out; event.Kind != EventError {
+		t.Fatalf("unbuffered forward event = %#v", event)
+	}
+	if _, ok := <-unbuffered.out; ok {
+		t.Fatal("unbuffered error stream stayed open")
+	}
+	blockingCompleted := &turnStream{cancel: func() {}, done: make(chan struct{}), closed: make(chan struct{}), in: make(chan Event), out: make(chan Event, 1)}
+	blockingCompleted.out <- Event{Kind: EventRaw}
+	go blockingCompleted.forward()
+	sent = make(chan struct{})
+	go func() {
+		blockingCompleted.in <- Event{Kind: EventCompleted}
+		close(sent)
+	}()
+	<-sent
+	if event := <-blockingCompleted.out; event.Kind != EventRaw {
+		t.Fatalf("blocking completed filler event = %#v", event)
+	}
+	if event := <-blockingCompleted.out; event.Kind != EventCompleted {
+		t.Fatalf("blocking completed event = %#v", event)
+	}
+	if _, ok := <-blockingCompleted.out; ok {
+		t.Fatal("blocking completed stream stayed open")
+	}
 	openStream, err := client.registerTurn(context.Background(), "thread-1")
 	if err != nil {
 		t.Fatalf("register open stream returned error: %v", err)
@@ -503,6 +656,10 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	if event := <-updated; event.Account.ID != "acct" {
 		t.Fatalf("account update event = %#v", event)
 	}
+	accountClient.dispatchEvent(Event{Kind: EventGoalCleared, ThreadID: "thread-1"})
+	if event := <-updated; event.Kind != EventGoalCleared {
+		t.Fatalf("goal event = %#v", event)
+	}
 	accountClient.setAccount(Account{})
 	_ = accountClient.Close(context.Background())
 
@@ -520,6 +677,16 @@ type scriptTransport struct {
 	mu     sync.Mutex
 	sent   []rpcMessage
 	recv   chan rpcMessage
+	closed bool
+	errs   map[string]*rpcError
+}
+
+type abruptCloseTransport struct {
+	mu     sync.Mutex
+	sent   []rpcMessage
+	recv   chan rpcMessage
+	done   chan struct{}
+	err    error
 	closed bool
 }
 
@@ -548,6 +715,60 @@ func newScriptTransport() *scriptTransport {
 	return &scriptTransport{recv: make(chan rpcMessage, 64)}
 }
 
+func newAbruptCloseTransport() *abruptCloseTransport {
+	return &abruptCloseTransport{
+		recv: make(chan rpcMessage, 1),
+		done: make(chan struct{}),
+	}
+}
+
+func (t *abruptCloseTransport) Send(_ context.Context, msg rpcMessage) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return errors.New("closed")
+	}
+	t.sent = append(t.sent, msg)
+	if msg.Method == methodTurnStart {
+		t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Result: mustRaw(map[string]any{"turn": map[string]any{"id": "turn-1"}})}
+	}
+
+	return nil
+}
+
+func (t *abruptCloseTransport) Recv() (rpcMessage, string, error) {
+	select {
+	case msg := <-t.recv:
+		return msg, string(mustRaw(msg)), nil
+	case <-t.done:
+		t.mu.Lock()
+		err := t.err
+		t.mu.Unlock()
+		if err == nil {
+			err = errors.New("closed")
+		}
+		return rpcMessage{}, "", err
+	}
+}
+
+func (t *abruptCloseTransport) Close() error {
+	t.CloseWithError(errors.New("closed"))
+
+	return nil
+}
+
+func (t *abruptCloseTransport) CloseWithError(err error) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	t.closed = true
+	t.err = err
+	close(t.done)
+	t.mu.Unlock()
+}
+
 func (t *scriptTransport) Send(_ context.Context, msg rpcMessage) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -557,13 +778,22 @@ func (t *scriptTransport) Send(_ context.Context, msg rpcMessage) error {
 	t.sent = append(t.sent, msg)
 
 	if len(msg.ID) > 0 {
+		if errResp := t.errs[msg.Method]; errResp != nil {
+			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Error: errResp}
+			return nil
+		}
 		t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Result: mustRaw(t.response(msg.Method))}
 		if msg.Method == methodTurnStart {
 			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/plan/updated", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "items": []any{map[string]any{"text": "plan", "status": "running"}}})}
 			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/reasoning/textDelta", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "delta": "why"})}
 			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/completed", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "item": map[string]any{"type": "agentMessage", "text": "hi"}})}
 			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/fileChange/patchUpdated", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "diff": "diff"})}
-			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/completed", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "turn": map[string]any{"status": "completed", "usage": map[string]any{"inputTokens": 1, "outputTokens": 2}}})}
+			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "thread/tokenUsage/updated", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "tokenUsage": map[string]any{
+				"last":               map[string]any{"inputTokens": 1, "cachedInputTokens": 1, "outputTokens": 2, "reasoningOutputTokens": 1},
+				"total":              map[string]any{"inputTokens": 6, "outputTokens": 3, "totalTokens": 9},
+				"modelContextWindow": 100,
+			}})}
+			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/completed", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "turn": map[string]any{"status": "completed"}})}
 		}
 	}
 
@@ -604,10 +834,19 @@ func (t *scriptTransport) sentParams(method string) map[string]any {
 	return nil
 }
 
+func (t *scriptTransport) fail(method string, message string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.errs == nil {
+		t.errs = make(map[string]*rpcError)
+	}
+	t.errs[method] = &rpcError{Code: -32000, Message: message}
+}
+
 func (t *scriptTransport) response(method string) any {
 	switch method {
 	case methodThreadStart, methodThreadResume, methodThreadFork:
-		return map[string]any{"thread": map[string]any{"id": "thread-1", "sessionId": "session-1", "path": "/tmp/rollout.jsonl", "cwd": "/repo", "model": "gpt-a", "modelProvider": "openai", "updatedAt": float64(10)}}
+		return map[string]any{"thread": map[string]any{"id": "thread-1", "sessionId": "session-1", "path": "/tmp/rollout.jsonl", "cwd": "/repo", "model": "gpt-a", "modelProvider": "openai", "updatedAt": float64(10)}, "reasoningEffort": "high"}
 	case methodThreadList:
 		return map[string]any{"data": []any{map[string]any{"id": "thread-1"}}}
 	case methodThreadRead:
@@ -622,12 +861,31 @@ func (t *scriptTransport) response(method string) any {
 		return map[string]any{"status": "compacted"}
 	case methodReviewStart:
 		return map[string]any{"status": "reviewing"}
+	case methodThreadGoalSet:
+		return map[string]any{"goal": map[string]any{"threadId": "thread-1", "objective": "ship", "status": "active", "tokenBudget": float64(5000)}}
+	case methodThreadGoalGet:
+		return map[string]any{"goal": map[string]any{"threadId": "thread-1", "objective": "ship", "status": "active"}}
+	case methodThreadGoalClear:
+		return map[string]any{"cleared": true}
 	case methodCollaborationList:
 		return map[string]any{"data": []any{map[string]any{"id": "default", "name": "Default"}, map[string]any{"mode": "plan"}}}
 	case methodMCPStatusList:
 		return map[string]any{"servers": []any{map[string]any{"name": "mcp", "status": "ready", "tools": []any{map[string]any{"name": "echo"}}}}}
 	case methodModelList:
-		return map[string]any{"data": []any{map[string]any{"id": "gpt-a", "name": "GPT A"}, map[string]any{"model": "gpt-b"}}}
+		return map[string]any{"data": []any{
+			map[string]any{
+				"id":                     "gpt-a",
+				"displayName":            "GPT A",
+				"description":            "A model",
+				"defaultReasoningEffort": "medium",
+				"supportedReasoningEfforts": []any{
+					map[string]any{"description": "ignored"},
+					map[string]any{"reasoningEffort": "low", "description": "fast"},
+					map[string]any{"reasoningEffort": "medium", "description": "balanced"},
+				},
+			},
+			map[string]any{"model": "gpt-b"},
+		}}
 	case methodAccountRead:
 		return map[string]any{"account": map[string]any{"chatgptAccountId": "acct", "email": "u@example.com", "chatgptPlanType": "plus"}}
 	default:
@@ -651,7 +909,7 @@ func TestAppServerLifecycleMappingEdges(t *testing.T) {
 	initErrorScript := filepath.Join(t.TempDir(), "codex-init-error")
 	if err := os.WriteFile(initErrorScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.129.0
+  echo codex-cli 0.134.0
   exit 0
 fi
 read line || exit 0

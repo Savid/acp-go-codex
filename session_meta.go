@@ -9,11 +9,16 @@ import (
 
 type sessionMeta struct {
 	Model           string
+	Mode            acp.SessionModeId
 	ReasoningEffort string
 	ServiceTier     string
 	Personality     string
+	Env             map[string]string
+	ApprovalPolicy  any
+	SandboxPolicy   any
 	OutputSchema    any
 	RawMessages     rawMessageConfig
+	Goal            goalMetaInput
 }
 
 func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
@@ -21,22 +26,35 @@ func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
 	if err != nil {
 		return sessionMeta{}, err
 	}
+	goal, err := parseGoalFromMeta(meta)
+	if err != nil {
+		return sessionMeta{}, err
+	}
 
 	return sessionMeta{
 		Model:           codexOptions.Model,
+		Mode:            codexOptions.Mode,
 		ReasoningEffort: codexOptions.ReasoningEffort,
 		ServiceTier:     codexOptions.ServiceTier,
 		Personality:     codexOptions.Personality,
+		Env:             codexOptions.Env,
+		ApprovalPolicy:  codexOptions.ApprovalPolicy,
+		SandboxPolicy:   codexOptions.SandboxPolicy,
 		OutputSchema:    codexOptions.OutputSchema,
 		RawMessages:     rawMessageConfigFromMeta(meta),
+		Goal:            goal,
 	}, nil
 }
 
 type codexOptions struct {
 	Model           string
+	Mode            acp.SessionModeId
 	ReasoningEffort string
 	ServiceTier     string
 	Personality     string
+	Env             map[string]string
+	ApprovalPolicy  any
+	SandboxPolicy   any
 	OutputSchema    any
 }
 
@@ -50,6 +68,16 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 	options := codexOptions{}
 	if model, _ := optionsMap["model"].(string); model != "" {
 		options.Model = model
+	}
+	if rawMode, ok := optionsMap[metaModeKey]; ok {
+		mode, ok := rawMode.(string)
+		if !ok {
+			return codexOptions{}, fmt.Errorf("_meta.codex.options.mode must be a string")
+		}
+		if !validCodexMode(acp.SessionModeId(mode)) {
+			return codexOptions{}, fmt.Errorf("_meta.codex.options.mode is unsupported")
+		}
+		options.Mode = acp.SessionModeId(mode)
 	}
 	if effort, _ := optionsMap["effort"].(string); effort != "" {
 		if !validReasoningEffort(effort) {
@@ -65,6 +93,19 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 			return codexOptions{}, fmt.Errorf("_meta.codex.options.personality is unsupported")
 		}
 		options.Personality = personality
+	}
+	if rawEnv, ok := optionsMap[metaEnvKey]; ok {
+		env, err := stringMapFromMeta(rawEnv)
+		if err != nil {
+			return codexOptions{}, err
+		}
+		options.Env = env
+	}
+	if policy, ok := optionsMap[metaApprovalPolicyKey]; ok {
+		options.ApprovalPolicy = cloneAny(policy)
+	}
+	if policy, ok := optionsMap[metaSandboxPolicyKey]; ok {
+		options.SandboxPolicy = cloneAny(policy)
 	}
 	if schema, ok := optionsMap["outputSchema"]; ok {
 		if err := validateSchemaObject(schema); err != nil {
@@ -106,6 +147,34 @@ func validPersonality(value string) bool {
 	}
 }
 
+func validCodexMode(mode acp.SessionModeId) bool {
+	switch mode {
+	case "", modeDefault, modePlan:
+		return true
+	default:
+		return false
+	}
+}
+
+func stringMapFromMeta(value any) (map[string]string, error) {
+	switch typed := value.(type) {
+	case map[string]string:
+		return cloneStringMap(typed), nil
+	case map[string]any:
+		out := make(map[string]string, len(typed))
+		for key, raw := range typed {
+			str, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("_meta.codex.options.env.%s must be a string", key)
+			}
+			out[key] = str
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("_meta.codex.options.env must be an object")
+	}
+}
+
 func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 	codexMeta := map[string]any{
 		codexThreadIDMetaKey: snapshot.codexThreadID,
@@ -128,6 +197,7 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 	if len(snapshot.accountMeta) > 0 {
 		codexMeta[codexAccountMetaKey] = cloneAnyMap(snapshot.accountMeta)
 	}
+	codexMeta[codexGoalMetaKey] = goalMetaFromSnapshot(snapshot.goal)
 
 	return map[string]any{
 		// The reference docs intentionally advertise both the short provider
@@ -135,6 +205,32 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 		codexMetaKey:   codexMeta,
 		packageMetaKey: cloneAnyMap(codexMeta),
 	}
+}
+
+func sessionInfoMeta(snapshot sessionSnapshot) map[string]any {
+	codexMeta := cloneAnyMap(sessionResponseMeta(snapshot)[codexMetaKey].(map[string]any))
+	codexMeta[codexGoalMetaKey] = goalSummaryFromSnapshot(snapshot.goal)
+
+	return map[string]any{
+		codexMetaKey:   codexMeta,
+		packageMetaKey: cloneAnyMap(codexMeta),
+	}
+}
+
+func goalMetaFromSnapshot(goal *CodexGoal) any {
+	if goal == nil {
+		return nil
+	}
+
+	return canonicalGoalMeta(*goal)
+}
+
+func goalSummaryFromSnapshot(goal *CodexGoal) any {
+	if goal == nil {
+		return nil
+	}
+
+	return goalSummaryMeta(*goal)
 }
 
 func modeState(mode acp.SessionModeId) *acp.SessionModeState {
@@ -179,9 +275,23 @@ func cloneAny(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		return cloneAnyMap(typed)
+	case map[string]string:
+		return cloneStringMap(typed)
 	case []any:
 		return cloneAnySlice(typed)
 	default:
 		return value
 	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+
+	return cloned
 }

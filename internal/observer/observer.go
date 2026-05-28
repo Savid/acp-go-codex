@@ -19,21 +19,24 @@ import (
 const (
 	InstrumentationName = "github.com/savid/acp-go-codex"
 
-	attrACPMethod              = "acp.method"
-	attrCodexClient            = "codex.client"
-	attrCodexProcessKind       = "codex.process.kind"
-	attrGenAIOperation         = "gen_ai.operation.name"
-	attrGenAIProvider          = "gen_ai.provider.name"
-	attrGenAIRequestModel      = "gen_ai.request.model"
-	attrGenAIResponseModel     = "gen_ai.response.model"
-	attrGenAIStopReason        = "gen_ai.response.finish_reasons"
-	attrGenAITokenType         = "gen_ai.token.type"          // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageInputTokens  = "gen_ai.usage.input_tokens"  // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageOutputTokens = "gen_ai.usage.output_tokens" // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageTotalTokens  = "gen_ai.usage.total_tokens"  // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrOperation              = "operation"
-	attrOutcome                = "outcome"
-	attrStopReason             = "stop_reason"
+	attrACPMethod                       = "acp.method"
+	attrCodexClient                     = "codex.client"
+	attrCodexProcessKind                = "codex.process.kind"
+	attrGenAIOperation                  = "gen_ai.operation.name"
+	attrGenAIProvider                   = "gen_ai.provider.name"
+	attrGenAIRequestModel               = "gen_ai.request.model"
+	attrGenAIResponseModel              = "gen_ai.response.model"
+	attrGenAIStopReason                 = "gen_ai.response.finish_reasons"
+	attrGenAITokenType                  = "gen_ai.token.type"                        // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageCacheCreationTokens   = "gen_ai.usage.cache_creation.input_tokens" // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageCacheReadTokens       = "gen_ai.usage.cache_read.input_tokens"     // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageInputTokens           = "gen_ai.usage.input_tokens"                // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageOutputTokens          = "gen_ai.usage.output_tokens"               // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageReasoningOutputTokens = "gen_ai.usage.reasoning.output_tokens"     // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageTotalTokens           = "gen_ai.usage.total_tokens"                // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrOperation                       = "operation"
+	attrOutcome                         = "outcome"
+	attrStopReason                      = "stop_reason"
 
 	codexClientValue   = "codex-app-server"
 	genAIOperationChat = "chat"
@@ -76,12 +79,15 @@ type Observer struct {
 }
 
 type PromptResult struct {
-	Err          error
-	InputTokens  int
-	Model        string
-	OutputTokens int
-	StopReason   string
-	TotalTokens  int
+	CachedReadTokens  int
+	CachedWriteTokens int
+	Err               error
+	InputTokens       int
+	Model             string
+	OutputTokens      int
+	StopReason        string
+	ThoughtTokens     int
+	TotalTokens       int
 }
 
 type promptStateKey struct{}
@@ -355,6 +361,15 @@ func promptUsageAttrs(result PromptResult) []attribute.KeyValue {
 	}
 	if result.OutputTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageOutputTokens, result.OutputTokens))
+	}
+	if result.CachedReadTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheReadTokens, result.CachedReadTokens))
+	}
+	if result.CachedWriteTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheCreationTokens, result.CachedWriteTokens))
+	}
+	if result.ThoughtTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrGenAIUsageReasoningOutputTokens, result.ThoughtTokens))
 	}
 	if result.TotalTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageTotalTokens, result.TotalTokens))

@@ -17,6 +17,7 @@ type PlaceholderClient struct {
 	mu      sync.Mutex
 	closed  bool
 	threads map[string]Thread
+	goals   map[string]Goal
 }
 
 func NewPlaceholderClient(options Options) *PlaceholderClient {
@@ -25,6 +26,7 @@ func NewPlaceholderClient(options Options) *PlaceholderClient {
 	return &PlaceholderClient{
 		options: options,
 		threads: make(map[string]Thread),
+		goals:   make(map[string]Goal),
 	}
 }
 
@@ -50,6 +52,9 @@ func (c *PlaceholderClient) StartThread(ctx context.Context, req ThreadStartRequ
 		Title:     "Codex placeholder session",
 	}
 	c.threads[id] = thread
+	if c.goals == nil {
+		c.goals = make(map[string]Goal)
+	}
 
 	return thread, nil
 }
@@ -69,6 +74,9 @@ func (c *PlaceholderClient) ResumeThread(ctx context.Context, req ThreadResumeRe
 	id := firstNonEmpty(req.ThreadID, fmt.Sprintf("codex-thread-%d", c.nextID.Add(1)))
 	thread := Thread{ID: id, SessionID: id, Cwd: req.Cwd, Model: firstNonEmpty(c.options.DefaultModel, "default"), Provider: "placeholder", Title: "Codex placeholder session"}
 	c.threads[id] = thread
+	if c.goals == nil {
+		c.goals = make(map[string]Goal)
+	}
 
 	return thread, nil
 }
@@ -237,6 +245,66 @@ func (c *PlaceholderClient) StartReview(ctx context.Context, req ReviewStartRequ
 	return map[string]any{"threadId": req.ThreadID, "target": req.Target}, nil
 }
 
+func (c *PlaceholderClient) SetGoal(ctx context.Context, req GoalSetRequest) (Goal, error) {
+	if err := ctx.Err(); err != nil {
+		return Goal{}, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.threads[req.ThreadID]; !ok {
+		return Goal{}, ErrThreadNotFound
+	}
+	goal := Goal{
+		ThreadID:    req.ThreadID,
+		Objective:   req.Objective,
+		Status:      firstNonEmpty(req.Status, "active"),
+		TokenBudget: cloneInt64Ptr(req.TokenBudget),
+	}
+	if c.goals == nil {
+		c.goals = make(map[string]Goal)
+	}
+	c.goals[req.ThreadID] = goal
+
+	return goal, nil
+}
+
+func (c *PlaceholderClient) GetGoal(ctx context.Context, threadID string) (*Goal, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.threads[threadID]; !ok {
+		return nil, ErrThreadNotFound
+	}
+	goal, ok := c.goals[threadID]
+	if !ok {
+		//nolint:nilnil // nil goal with nil error is the GetGoal "not set" result.
+		return nil, nil
+	}
+	goal.TokenBudget = cloneInt64Ptr(goal.TokenBudget)
+
+	return &goal, nil
+}
+
+func (c *PlaceholderClient) ClearGoal(ctx context.Context, threadID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.threads[threadID]; !ok {
+		return false, ErrThreadNotFound
+	}
+	_, existed := c.goals[threadID]
+	delete(c.goals, threadID)
+
+	return existed, nil
+}
+
 func (c *PlaceholderClient) CollaborationModeList(context.Context) (CollaborationModeListResponse, error) {
 	return CollaborationModeListResponse{
 		Modes: []CollaborationMode{
@@ -275,6 +343,7 @@ func (c *PlaceholderClient) Close(context.Context) error {
 
 	c.closed = true
 	c.threads = make(map[string]Thread)
+	c.goals = make(map[string]Goal)
 
 	return nil
 }
@@ -300,4 +369,13 @@ func cloneStringMap(values map[string]string) map[string]string {
 	}
 
 	return cloned
+}
+
+func cloneInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+
+	return &cloned
 }

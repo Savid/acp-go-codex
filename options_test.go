@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
@@ -21,6 +22,7 @@ func TestOptionsSetters(t *testing.T) {
 	options := applyOptions([]Option{
 		WithCodexPath("/bin/codex"),
 		WithCodexHome("/tmp/codex"),
+		WithDefaultMode(acp.SessionModeId("plan")),
 		WithLogger(logger),
 		WithEnv(map[string]string{"A": "B"}),
 		WithSessionStore(store),
@@ -31,6 +33,7 @@ func TestOptionsSetters(t *testing.T) {
 	})
 	if options.CodexPath != "/bin/codex" ||
 		options.CodexHome != "/tmp/codex" ||
+		options.DefaultMode != acp.SessionModeId("plan") ||
 		options.Logger != logger ||
 		options.Env["A"] != "B" ||
 		options.SessionStore != store ||

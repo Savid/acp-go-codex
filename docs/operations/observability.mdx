@@ -1,51 +1,129 @@
 ---
-title: Observability
-description: OpenTelemetry spans, metrics, and trace propagation.
+title: "Observability"
+description: "OpenTelemetry spans, metrics, logs, and trace propagation"
+icon: "chart-line"
 ---
+
+`acp-go-codex` has two telemetry layers:
+
+- adapter telemetry from ACP requests, sessions, MCP bridge work, session-store
+  work, and Codex process lifecycle;
+- native Codex app-server telemetry from the launched `codex app-server`
+  process.
+
+## How telemetry flows
 
 The root package accepts caller-owned OpenTelemetry providers:
 
 ```go
 agent := codexacp.NewAgent(
-	codexacp.WithTracerProvider(tracerProvider),
-	codexacp.WithMeterProvider(meterProvider),
-	codexacp.WithTextMapPropagator(propagator),
+    codexacp.WithTracerProvider(tracerProvider),
+    codexacp.WithMeterProvider(meterProvider),
+    codexacp.WithTextMapPropagator(propagator),
 )
 ```
 
-The package does not configure global OpenTelemetry providers and does not
-shut caller-supplied providers down. The standalone `acp-go-codex` binary
-configures exporters from standard `OTEL_*` environment variables.
+The package does not configure global providers and does not shut down
+caller-supplied providers. The standalone binary configures adapter exporters
+from standard `OTEL_*` environment variables.
 
-## Spans
+## Debug logs
 
-The adapter starts spans for:
+`-debug` writes adapter debug logs to stderr. It is useful for local diagnosis
+but should not be mixed into stdout because stdout is the ACP JSON-RPC
+transport.
+
+When `OTEL_LOGS_EXPORTER` is configured, standalone mode also sends adapter
+logs through the configured OpenTelemetry log exporter. `-debug` remains
+stderr-only and additive.
+
+## Enable telemetry export
+
+Example standalone configuration:
+
+```bash
+OTEL_TRACES_EXPORTER=otlp \
+OTEL_METRICS_EXPORTER=otlp \
+OTEL_LOGS_EXPORTER=otlp \
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+CODEX_OTEL_ENVIRONMENT=development \
+acp-go-codex
+```
+
+Logs require an explicit log signal:
+
+- `OTEL_LOGS_EXPORTER=otlp`
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
+
+Generic `OTEL_EXPORTER_OTLP_ENDPOINT` enables adapter and native Codex traces
+and metrics, but not logs. This matches the adapter log opt-in policy.
+
+## Native Codex OTEL
+
+Codex app-server uses native `-c otel.*` config. The adapter maps safe standard
+`OTEL_*` process environment into those Codex config keys when it starts an
+app-server.
+
+When native Codex OTEL is enabled, the adapter starts app-server with
+`--analytics-default-enabled` and Codex emits telemetry with
+`service.name=codex-app-server`.
+
+`OTEL_SERVICE_NAME` applies to the adapter process only. It is not mapped to
+Codex app-server; Codex owns its provider process service name.
+
+## Protocols
+
+Supported native Codex exporter mapping:
+
+| Env protocol | Codex exporter | Codex HTTP protocol |
+| --- | --- | --- |
+| `http/protobuf` | `otlp-http` | `binary` |
+| `http/json` | `otlp-http` | `json` |
+| `grpc` | `otlp-grpc` | n/a |
+
+Signal-specific protocol variables override the generic protocol:
+
+- `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`
+- `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`
+- `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`
+
+For HTTP generic endpoints, the adapter appends the signal path:
+
+- traces: `/v1/traces`
+- metrics: `/v1/metrics`
+- logs: `/v1/logs`
+
+## Flush short-lived runs
+
+Standalone mode shuts down configured OpenTelemetry providers before exit with
+a bounded timeout. Embedded hosts own provider shutdown and should flush their
+providers after `Serve` returns.
+
+## Read traces
+
+Adapter spans include:
 
 - ACP requests, named `acp.request`;
-- prompt turns, named `session.prompt`.
+- prompt turns, named `session.prompt`;
+- Codex app-server client operations;
+- session-store work;
+- MCP bridge work.
 
-Prompt spans include Codex/OpenAI semantic attributes such as provider, client,
-operation, model, stop reason, token usage, and outcome.
+Adapter metrics include:
 
-## Metrics
+- `acp_go_codex.acp.request.count`
+- `acp_go_codex.acp.request.duration`
+- `acp_go_codex.session.prompt.count`
+- `acp_go_codex.session.prompt.duration`
+- `acp_go_codex.session.cancel.count`
+- `acp_go_codex.session.active`
+- `acp_go_codex.codex.process.start.count`
+- `gen_ai.client.operation.duration`
+- `gen_ai.client.operation.time_to_first_chunk`
+- `gen_ai.client.token.usage`
 
-The adapter records:
-
-- `acp_go_codex.acp.request.count`;
-- `acp_go_codex.acp.request.duration`;
-- `acp_go_codex.session.prompt.count`;
-- `acp_go_codex.session.prompt.duration`;
-- `acp_go_codex.session.cancel.count`;
-- `acp_go_codex.session.active`;
-- `acp_go_codex.codex.process.start.count`;
-- `gen_ai.client.operation.duration`;
-- `gen_ai.client.operation.time_to_first_chunk`;
-- `gen_ai.client.token.usage`.
-
-Metric attributes include ACP method, operation outcome, Codex app-server
-client identity, requested model, response model, stop reason, and token type.
-
-## Trace context
+## Link traces to your application
 
 Inbound ACP `_meta` may contain W3C trace context:
 
@@ -57,13 +135,57 @@ Inbound ACP `_meta` may contain W3C trace context:
 }
 ```
 
-The adapter extracts that context for ACP request and prompt spans. It also
-injects trace context into launched Codex app-server process environments as
-`TRACEPARENT`, `TRACESTATE`, and `BAGGAGE`.
+The adapter extracts that context for adapter spans and injects it into launched
+Codex app-server process environments as `TRACEPARENT`, `TRACESTATE`, and
+`BAGGAGE`.
 
-## Redaction
+## Tag telemetry
 
-Telemetry may include method names, model IDs, stop reasons, token counts, and
-process-start counts. It must not include prompts, rollout rows, MCP payload
-bodies, diffs, terminal output, auth tokens, proxy tokens, or authorization
-headers.
+Use `CODEX_OTEL_ENVIRONMENT` for Codex's native `otel.environment` tag.
+
+If `CODEX_OTEL_ENVIRONMENT` is unset, the adapter reads these
+`OTEL_RESOURCE_ATTRIBUTES` keys:
+
+- `deployment.environment.name`
+- `deployment.environment`
+
+`OTEL_RESOURCE_ATTRIBUTES` is still passed through to the Codex process for
+additive low-cardinality resource tags such as `service.namespace` or
+`tenant.id`. It must not be used to override `service.name`.
+
+## Adapter metrics
+
+Adapter metrics intentionally stay low-cardinality. They cover request counts,
+request durations, active sessions, prompt duration, cancellation, Codex
+process starts, and token usage. Prompt text, rollout rows, tool payloads, and
+diff bodies are not metric attributes.
+
+## Embedded ownership
+
+Embedded hosts own:
+
+- provider construction;
+- resource attributes;
+- sampling;
+- exporter configuration;
+- provider shutdown.
+
+The adapter only uses providers passed through `WithTracerProvider`,
+`WithMeterProvider`, and `WithTextMapPropagator`.
+
+## Privacy defaults
+
+Telemetry must not include rollout JSONL rows, MCP payload bodies, diffs,
+terminal output, auth tokens, proxy tokens, authorization headers, or raw
+prompt text by default.
+
+Native prompt logging is disabled by default. The only supported opt-in is:
+
+```bash
+CODEX_OTEL_LOG_USER_PROMPT=1
+```
+
+Only set it when your telemetry backend is allowed to store raw prompt text.
+
+Do not use console exporters in ACP stdio mode. Console exporters write to
+stdout, which is also the ACP JSON-RPC transport.

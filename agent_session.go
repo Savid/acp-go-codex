@@ -2,6 +2,12 @@ package codexacp
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +27,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	if err != nil {
 		return acp.NewSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
+	start := codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            params.McpServers,
+		Meta:                  meta,
+	}
 
 	idValue, err := newSessionID()
 	if err != nil {
@@ -31,7 +43,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
-	client, err := a.newClient(ctx, mcpServers)
+	client, err := a.newClient(ctx, mcpServers, meta.Env)
 	if err != nil {
 		if mcpBridge != nil {
 			_ = mcpBridge.Close()
@@ -45,6 +57,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		Model:                 firstNonEmpty(meta.Model, a.options.DefaultModel),
 		ServiceTier:           meta.ServiceTier,
 		Personality:           meta.Personality,
+		ApprovalPolicy:        meta.ApprovalPolicy,
+		Sandbox:               sandboxMode(meta.SandboxPolicy),
 	})
 	if err != nil {
 		_ = client.Close(context.Background())
@@ -55,8 +69,13 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	}
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
 	session.mcpBridge = mcpBridge
+	if err := session.applyClientGoalInput(ctx, meta.Goal, false); err != nil {
+		_ = session.Close(context.Background())
+		return acp.NewSessionResponse{}, goalACPError(err)
+	}
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 		return acp.NewSessionResponse{}, err
@@ -82,36 +101,61 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	defer func() { finish(promptResultForObserver(resp, err, session.currentModel())) }()
 
 	resp, err = session.Prompt(ctx, params)
+	if err != nil && fatalCodexProcessError(err) {
+		if a.removeSessionIf(params.SessionId, session) {
+			a.observe.AddActiveSession(ctx, -1)
+		}
+		_ = session.Close(context.Background())
+
+		return acp.PromptResponse{}, acp.NewInternalError(map[string]any{
+			jsonFieldError:   err.Error(),
+			jsonFieldMessage: "The Codex app-server process exited unexpectedly. Please start a new session.",
+		})
+	}
 
 	return resp, err
 }
 
 func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error {
-	a.mu.Lock()
-	session := a.sessions[params.SessionId]
-	a.mu.Unlock()
-	if session == nil {
-		return nil
+	session, err := a.session(params.SessionId)
+	if err != nil {
+		return err
 	}
 	session.cancelTurn()
 
-	return session.client.CancelTurn(ctx, session.codexThreadID, session.activeTurnID())
+	return codexThreadACPError(
+		session.client.CancelTurn(ctx, session.codexThreadID, session.activeTurnID()),
+		session.accountMetaSnapshot(),
+		codexThreadErrorData(session.id, session.codexThreadID),
+	)
 }
 
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
-	session := a.removeSession(params.SessionId)
-	if session == nil {
-		return acp.CloseSessionResponse{}, nil
+	session, err := a.session(params.SessionId)
+	if err != nil {
+		return acp.CloseSessionResponse{}, err
 	}
-	a.observe.AddActiveSession(ctx, -1)
+	closeErr := session.Close(ctx)
+	if a.removeSessionIf(params.SessionId, session) {
+		a.observe.AddActiveSession(ctx, -1)
+	}
 
-	return acp.CloseSessionResponse{}, session.Close(ctx)
+	return acp.CloseSessionResponse{}, closeErr
 }
 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if err := a.ensureOpen(); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	if err := validateOptionalAbsolutePath(jsonFieldCwd, params.Cwd); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	if err := validateAbsolutePaths("additionalDirectories", params.AdditionalDirectories); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+
 	a.mu.Lock()
 	active := make([]*Session, 0, len(a.sessions))
-	activeIDs := map[acp.SessionId]struct{}{}
 	activeThreadIDs := map[string]struct{}{}
 	for _, session := range a.sessions {
 		if params.Cwd != nil && session.cwd != *params.Cwd {
@@ -121,29 +165,40 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 			continue
 		}
 		active = append(active, session)
-		activeIDs[session.id] = struct{}{}
 		activeThreadIDs[session.codexThreadID] = struct{}{}
 	}
 	a.mu.Unlock()
 
 	sessions := make([]acp.SessionInfo, 0, len(active))
+	seen := map[acp.SessionId]struct{}{}
 	for _, session := range active {
-		sessions = append(sessions, session.info())
+		addSessionInfo(&sessions, seen, session.info())
 	}
-	if params.Cwd != nil {
-		storeSessions, err := a.listStoredSessions(ctx, *params.Cwd, activeIDs)
+	if params.Cwd != nil && len(params.AdditionalDirectories) == 0 {
+		storeSessions, err := a.listStoredSessions(ctx, *params.Cwd, seen)
 		if err != nil {
 			return acp.ListSessionsResponse{}, err
 		}
-		sessions = append(sessions, storeSessions...)
+		for _, session := range storeSessions {
+			addSessionInfo(&sessions, seen, session)
+		}
 	}
-	codexSessions, err := a.listCodexThreads(ctx, params, activeIDs, activeThreadIDs)
+	if len(params.AdditionalDirectories) == 0 {
+		codexSessions, err := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
+		if err != nil {
+			return acp.ListSessionsResponse{}, err
+		}
+		for _, session := range codexSessions {
+			addSessionInfo(&sessions, seen, session)
+		}
+	}
+
+	paged, nextCursor, err := paginateSessionInfos(sessions, params.Cursor)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
-	sessions = append(sessions, codexSessions...)
 
-	return acp.ListSessionsResponse{Sessions: sessions}, nil
+	return acp.ListSessionsResponse{Sessions: paged, NextCursor: nextCursor}, nil
 }
 
 func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsRequest, activeIDs map[acp.SessionId]struct{}, activeThreadIDs map[string]struct{}) ([]acp.SessionInfo, error) {
@@ -155,7 +210,7 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 		cwd = *params.Cwd
 	}
 
-	client, err := a.newClient(ctx, nil)
+	client, err := a.newClient(ctx, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +245,7 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 					codexThreadIDMetaKey: thread.ID,
 					"stored":             true,
 					"source":             "codex",
+					codexGoalMetaKey:     nil,
 				},
 			},
 		}
@@ -197,10 +253,159 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 			codexMeta := info.Meta[codexMetaKey].(map[string]any)
 			codexMeta["model"] = thread.Model
 		}
+		info.Meta[packageMetaKey] = cloneAnyMap(info.Meta[codexMetaKey].(map[string]any))
 		out = append(out, info)
 	}
 
 	return out, nil
+}
+
+type codexSessionStart struct {
+	Cwd                   string
+	AdditionalDirectories []string
+	McpServers            []acp.McpServer
+	Meta                  sessionMeta
+	ResumeID              string
+	ForkParentID          string
+	MaterializedPath      string
+}
+
+func (a *Agent) activeSessionForStart(id acp.SessionId, start codexSessionStart) *Session {
+	fingerprint := codexSessionStartFingerprint(start)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	session := a.sessions[id]
+	if session == nil || session.fingerprint != fingerprint {
+		return nil
+	}
+
+	return session
+}
+
+func codexSessionStartFingerprint(start codexSessionStart) string {
+	servers := slices.Clone(start.McpServers)
+	slices.SortFunc(servers, func(left, right acp.McpServer) int {
+		return strings.Compare(mcpServerName(left), mcpServerName(right))
+	})
+
+	data := struct {
+		Cwd                   string           `json:"cwd"`
+		AdditionalDirectories []string         `json:"additionalDirectories,omitempty"`
+		McpServers            []acp.McpServer  `json:"mcpServers,omitempty"`
+		Meta                  codexMetaForHash `json:"meta,omitzero"`
+	}{
+		Cwd:                   start.Cwd,
+		AdditionalDirectories: slices.Clone(start.AdditionalDirectories),
+		McpServers:            servers,
+		Meta:                  codexMetaFingerprint(start.Meta),
+	}
+
+	return jsonFingerprint(data)
+}
+
+type codexMetaForHash struct {
+	Model           string            `json:"model,omitempty"`
+	Mode            acp.SessionModeId `json:"mode,omitempty"`
+	ReasoningEffort string            `json:"reasoningEffort,omitempty"`
+	ServiceTier     string            `json:"serviceTier,omitempty"`
+	Personality     string            `json:"personality,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	ApprovalPolicy  any               `json:"approvalPolicy,omitempty"`
+	SandboxPolicy   any               `json:"sandboxPolicy,omitempty"`
+	OutputSchema    any               `json:"outputSchema,omitempty"`
+	RawMessages     rawMessageConfig  `json:"rawMessages,omitzero"`
+}
+
+func codexMetaFingerprint(meta sessionMeta) codexMetaForHash {
+	return codexMetaForHash{
+		Model:           meta.Model,
+		Mode:            meta.Mode,
+		ReasoningEffort: meta.ReasoningEffort,
+		ServiceTier:     meta.ServiceTier,
+		Personality:     meta.Personality,
+		Env:             cloneStringMap(meta.Env),
+		ApprovalPolicy:  cloneAny(meta.ApprovalPolicy),
+		SandboxPolicy:   cloneAny(meta.SandboxPolicy),
+		OutputSchema:    cloneAny(meta.OutputSchema),
+		RawMessages:     meta.RawMessages,
+	}
+}
+
+func jsonFingerprint(data any) string {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Sprintf("marshal-error:%T:%v", data, err)
+	}
+
+	return string(encoded)
+}
+
+func mcpServerName(server acp.McpServer) string {
+	switch {
+	case server.Http != nil:
+		return server.Http.Name
+	case server.Sse != nil:
+		return server.Sse.Name
+	case server.Acp != nil:
+		return server.Acp.Name
+	case server.Stdio != nil:
+		return server.Stdio.Name
+	default:
+		return ""
+	}
+}
+
+func addSessionInfo(sessions *[]acp.SessionInfo, seen map[acp.SessionId]struct{}, session acp.SessionInfo) {
+	if session.SessionId == "" {
+		return
+	}
+	if _, ok := seen[session.SessionId]; ok {
+		return
+	}
+
+	*sessions = append(*sessions, session)
+	seen[session.SessionId] = struct{}{}
+}
+
+func paginateSessionInfos(sessions []acp.SessionInfo, cursor *string) ([]acp.SessionInfo, *string, error) {
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "invalid cursor"})
+	}
+	if offset > len(sessions) {
+		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "cursor is past end"})
+	}
+
+	end := offset + listSessionsPageSize
+	if end >= len(sessions) {
+		return sessions[offset:], nil, nil
+	}
+	next := encodeListCursor(end)
+
+	return sessions[offset:end], &next, nil
+}
+
+func decodeListCursor(cursor *string) (int, error) {
+	if cursor == nil || *cursor == "" {
+		return 0, nil
+	}
+
+	data, err := base64.RawURLEncoding.DecodeString(*cursor)
+	if err != nil {
+		return 0, err
+	}
+	offset, err := strconv.Atoi(string(data))
+	if err != nil || offset < 0 {
+		return 0, strconv.ErrSyntax
+	}
+
+	return offset, nil
+}
+
+func encodeListCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }
 
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
@@ -215,12 +420,41 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err != nil {
 		return acp.ResumeSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
+	start := codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            params.McpServers,
+		Meta:                  meta,
+		ResumeID:              string(params.SessionId),
+	}
+	if session := a.activeSessionForStart(params.SessionId, start); session != nil {
+		if err := session.applyLifecycleOrNativeGoal(ctx, meta.Goal, false); err != nil {
+			return acp.ResumeSessionResponse{}, goalACPError(err)
+		}
+		models := modelList(ctx, session.client)
+		snapshot := session.snapshot()
+
+		return acp.ResumeSessionResponse{
+			Meta:          sessionResponseMeta(snapshot),
+			Modes:         modeState(snapshot.mode),
+			Models:        modelState(snapshot.model, models),
+			ConfigOptions: sessionConfigOptions(session, models),
+		}, nil
+	}
+
+	storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId, params.Cwd)
+	if loadErr != nil {
+		return acp.ResumeSessionResponse{}, loadErr
+	}
+	if len(storeEntries) > 0 {
+		return a.resumeMaterializedSession(ctx, params, storeEntries)
+	}
 
 	mcpServers, mcpBridge, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
-	client, err := a.newClient(ctx, mcpServers)
+	client, err := a.newClient(ctx, mcpServers, meta.Env)
 	if err != nil {
 		if mcpBridge != nil {
 			_ = mcpBridge.Close()
@@ -236,13 +470,18 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		if mcpBridge != nil {
 			_ = mcpBridge.Close()
 		}
-		return acp.ResumeSessionResponse{}, codexAuthRequiredError(err, nil)
+		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, string(params.SessionId)))
 	}
 
 	id := params.SessionId
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
 	session.mcpBridge = mcpBridge
+	if err := session.applyLifecycleOrNativeGoal(ctx, meta.Goal, false); err != nil {
+		_ = session.Close(context.Background())
+		return acp.ResumeSessionResponse{}, goalACPError(err)
+	}
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 		return acp.ResumeSessionResponse{}, err
@@ -258,18 +497,123 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}, nil
 }
 
+func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.ResumeSessionRequest, entries []SessionStoreEntry) (acp.ResumeSessionResponse, error) {
+	if err := a.ensureOpen(); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	meta, err := sessionMetaFromLifecycle(params.Meta)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+	path, err := materializeRollout(entries)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	mcpServers, mcpBridge, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
+	if err != nil {
+		_ = removeMaterializedRollout(path)
+		return acp.ResumeSessionResponse{}, err
+	}
+	client, err := a.newClient(ctx, mcpServers, meta.Env)
+	if err != nil {
+		_ = removeMaterializedRollout(path)
+		if mcpBridge != nil {
+			_ = mcpBridge.Close()
+		}
+		return acp.ResumeSessionResponse{}, err
+	}
+	threadID := firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: threadID,
+		Path:     path,
+		Cwd:      params.Cwd,
+	})
+	if err != nil {
+		_ = client.Close(context.Background())
+		_ = removeMaterializedRollout(path)
+		if mcpBridge != nil {
+			_ = mcpBridge.Close()
+		}
+		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, threadID))
+	}
+
+	id := params.SessionId
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            params.McpServers,
+		Meta:                  meta,
+		ResumeID:              string(params.SessionId),
+		MaterializedPath:      path,
+	})
+	session.setAccount(clientAccountMeta(ctx, client))
+	session.materializedPath = path
+	session.mcpBridge = mcpBridge
+	if err := a.storeStartedSession(session); err != nil {
+		_ = session.Close(context.Background())
+		return acp.ResumeSessionResponse{}, err
+	}
+	if err := session.restoreGoalForLoad(ctx, entries, meta.Goal); err != nil {
+		a.removeSession(id)
+		_ = session.Close(context.Background())
+		return acp.ResumeSessionResponse{}, goalACPError(err)
+	}
+	models := modelList(ctx, client)
+	snapshot := session.snapshot()
+
+	return acp.ResumeSessionResponse{
+		Meta:          sessionResponseMeta(snapshot),
+		Modes:         modeState(snapshot.mode),
+		Models:        modelState(snapshot.model, models),
+		ConfigOptions: sessionConfigOptions(session, models),
+	}, nil
+}
+
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
 	ctx = a.observe.Extract(ctx, params.Meta)
+	if err := a.ensureOpen(); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
-	if existing, err := a.session(params.SessionId); err == nil {
+	meta, err := sessionMetaFromLifecycle(params.Meta)
+	if err != nil {
+		return acp.LoadSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+	start := codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            params.McpServers,
+		Meta:                  meta,
+		ResumeID:              string(params.SessionId),
+	}
+	if existing := a.activeSessionForStart(params.SessionId, start); existing != nil {
+		if err := existing.applyLifecycleOrNativeGoal(ctx, meta.Goal, true); err != nil {
+			return acp.LoadSessionResponse{}, goalACPError(err)
+		}
+		storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId, params.Cwd)
+		switch {
+		case loadErr != nil:
+			return acp.LoadSessionResponse{}, loadErr
+		case len(storeEntries) > 0:
+			if err := existing.replayRollout(ctx, storeEntries); err != nil {
+				return acp.LoadSessionResponse{}, err
+			}
+		default:
+			if err := existing.replayThreadHistory(ctx); err != nil {
+				return acp.LoadSessionResponse{}, err
+			}
+		}
+		models := modelList(ctx, existing.client)
 		snapshot := existing.snapshot()
 		return acp.LoadSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
 			Modes:         modeState(snapshot.mode),
-			Models:        modelState(snapshot.model, nil),
-			ConfigOptions: sessionConfigOptions(existing, nil),
+			Models:        modelState(snapshot.model, models),
+			ConfigOptions: sessionConfigOptions(existing, models),
 		}, nil
 	}
 
@@ -320,21 +664,38 @@ func (a *Agent) listStoredSessions(ctx context.Context, cwd string, activeIDs ma
 		}
 		updatedAt := time.UnixMilli(summary.MTime).UTC().Format(time.RFC3339)
 		title := "Codex session " + summary.SessionID
+		goalSummary := a.storedGoalSummary(listCtx, projectKey, summary.SessionID)
+		codexMeta := map[string]any{
+			"stored":         true,
+			"source":         "sessionStore",
+			codexGoalMetaKey: goalSummary,
+		}
 		out = append(out, acp.SessionInfo{
 			SessionId: id,
 			Cwd:       cwd,
 			Title:     &title,
 			UpdatedAt: &updatedAt,
 			Meta: map[string]any{
-				codexMetaKey: map[string]any{
-					codexThreadIDMetaKey: summary.SessionID,
-					"stored":             true,
-				},
+				codexMetaKey:   codexMeta,
+				packageMetaKey: cloneAnyMap(codexMeta),
 			},
 		})
 	}
 
 	return out, nil
+}
+
+func (a *Agent) storedGoalSummary(ctx context.Context, projectKey string, sessionID string) any {
+	entries, err := a.sessionStore().Load(ctx, SessionKey{ProjectKey: projectKey, SessionID: sessionID, Subpath: sessionStoreGoalSubpath})
+	if err != nil || len(entries) == 0 {
+		return nil
+	}
+	input, err := parseGoalSidecarEntry(entries[len(entries)-1])
+	if err != nil || !input.present || input.clear {
+		return nil
+	}
+
+	return goalSummaryMeta(input.goal)
 }
 
 func (a *Agent) loadStoredSession(ctx context.Context, sessionID acp.SessionId, cwd string) ([]SessionStoreEntry, error) {
@@ -372,7 +733,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		_ = removeMaterializedRollout(path)
 		return acp.LoadSessionResponse{}, err
 	}
-	client, err := a.newClient(ctx, mcpServers)
+	client, err := a.newClient(ctx, mcpServers, meta.Env)
 	if err != nil {
 		_ = removeMaterializedRollout(path)
 		if mcpBridge != nil {
@@ -381,7 +742,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, err
 	}
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: string(params.SessionId),
+		ThreadID: firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
 		Path:     path,
 		Cwd:      params.Cwd,
 	})
@@ -391,11 +752,19 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		if mcpBridge != nil {
 			_ = mcpBridge.Close()
 		}
-		return acp.LoadSessionResponse{}, codexAuthRequiredError(err, nil)
+		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))))
 	}
 
 	id := params.SessionId
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            params.McpServers,
+		Meta:                  meta,
+		ResumeID:              string(params.SessionId),
+		MaterializedPath:      path,
+	})
 	session.setAccount(clientAccountMeta(ctx, client))
 	session.materializedPath = path
 	session.mcpBridge = mcpBridge
@@ -407,6 +776,11 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		a.removeSession(id)
 		_ = session.Close(context.Background())
 		return acp.LoadSessionResponse{}, err
+	}
+	if err := session.restoreGoalForLoad(ctx, entries, meta.Goal); err != nil {
+		a.removeSession(id)
+		_ = session.Close(context.Background())
+		return acp.LoadSessionResponse{}, goalACPError(err)
 	}
 	models := modelList(ctx, client)
 	snapshot := session.snapshot()
@@ -450,7 +824,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
-	client, err := a.newClient(ctx, mcpServers)
+	client, err := a.newClient(ctx, mcpServers, meta.Env)
 	if err != nil {
 		if mcpBridge != nil {
 			_ = mcpBridge.Close()
@@ -467,12 +841,23 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 		if mcpBridge != nil {
 			_ = mcpBridge.Close()
 		}
-		return acp.UnstableForkSessionResponse{}, codexAuthRequiredError(err, parentSnapshot.accountMeta)
+		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta, codexThreadErrorData(parent.id, parentSnapshot.codexThreadID))
 	}
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            stableMCPServersFromUnstable(params.McpServers),
+		Meta:                  meta,
+		ForkParentID:          parentSnapshot.codexThreadID,
+	})
 	session.setAccount(clientAccountMeta(ctx, client))
 	session.mcpBridge = mcpBridge
+	if err := session.applyLifecycleOrNativeGoal(ctx, meta.Goal, false); err != nil {
+		_ = session.Close(context.Background())
+		return acp.UnstableForkSessionResponse{}, goalACPError(err)
+	}
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 		return acp.UnstableForkSessionResponse{}, err
@@ -572,7 +957,15 @@ func modelState(current string, models []codex.Model) *acp.SessionModelState {
 			continue
 		}
 		seen[id] = struct{}{}
-		available = append(available, acp.ModelInfo{ModelId: acp.ModelId(id), Name: firstNonEmpty(model.Name, id)})
+		available = append(available, acp.ModelInfo{
+			ModelId:     acp.ModelId(id),
+			Name:        firstNonEmpty(model.Name, id),
+			Description: stringPtrIfNotEmpty(model.Description),
+			Meta:        model.Raw,
+		})
+	}
+	if _, ok := seen[current]; !ok {
+		available = append(available, acp.ModelInfo{ModelId: acp.ModelId(current), Name: current})
 	}
 
 	return &acp.SessionModelState{CurrentModelId: acp.ModelId(current), AvailableModels: available}
@@ -595,14 +988,28 @@ func unstableModelState(current string, models []codex.Model) *acp.UnstableSessi
 		current = "default"
 	}
 	available := make([]acp.UnstableModelInfo, 0, len(models)+1)
+	seen := map[string]struct{}{}
 	if len(models) == 0 {
 		models = []codex.Model{{ID: current, Name: current}}
 	}
 	for _, model := range models {
 		id := firstNonEmpty(model.ID, model.Name)
-		if id != "" {
-			available = append(available, acp.UnstableModelInfo{ModelId: acp.UnstableModelId(id), Name: firstNonEmpty(model.Name, id)})
+		if id == "" {
+			continue
 		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		available = append(available, acp.UnstableModelInfo{
+			ModelId:     acp.UnstableModelId(id),
+			Name:        firstNonEmpty(model.Name, id),
+			Description: stringPtrIfNotEmpty(model.Description),
+			Meta:        model.Raw,
+		})
+	}
+	if _, ok := seen[current]; !ok {
+		available = append(available, acp.UnstableModelInfo{ModelId: acp.UnstableModelId(current), Name: current})
 	}
 
 	return &acp.UnstableSessionModelState{CurrentModelId: acp.UnstableModelId(current), AvailableModels: available}
@@ -656,4 +1063,35 @@ func clientAccountMeta(ctx context.Context, client codex.Client) map[string]any 
 	}
 
 	return redactedAccountMeta(account)
+}
+
+func codexThreadACPError(err error, account map[string]any, data map[string]any) error {
+	if err == nil {
+		return nil
+	}
+	if isCodexAuthError(err) {
+		return codexAuthRequiredError(err, account)
+	}
+	if errors.Is(err, codex.ErrThreadNotFound) {
+		return newResourceNotFound(data)
+	}
+
+	return err
+}
+
+func fatalCodexProcessError(err error) bool {
+	return errors.Is(err, codex.ErrConnectionClosed)
+}
+
+func newResourceNotFound(data any) *acp.RequestError {
+	return &acp.RequestError{Code: -32002, Message: "Resource not found", Data: data}
+}
+
+func codexThreadErrorData(sessionID acp.SessionId, threadID string) map[string]any {
+	data := map[string]any{jsonFieldSessionID: sessionID}
+	if threadID != "" {
+		data["threadId"] = threadID
+	}
+
+	return data
 }

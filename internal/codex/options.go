@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -13,6 +14,7 @@ type Options struct {
 	Env            map[string]string
 	Config         map[string]any
 	ExtraArgs      []string
+	Logger         *slog.Logger
 	RequestHandler RequestHandler
 	EventHandler   func(context.Context, Event)
 	LaunchTimeout  time.Duration

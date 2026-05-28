@@ -1,10 +1,14 @@
 ---
-title: Session Import
-description: Codex rollout JSONL import extension methods.
+title: "Session Import"
+description: "Codex rollout JSONL import extension methods"
+icon: "file-input"
 ---
 
 Session import is a Codex-specific extension surface for restoring durable
 rollout JSONL captured outside the local Codex state directory.
+
+`sessionId` is the ACP-visible store key chosen by the host. It can differ from
+the native Codex thread ID embedded in the rollout JSONL.
 
 The import format is:
 
@@ -54,7 +58,7 @@ Request fields:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `importId` | no | Existing import ID. If omitted on the first chunk, the adapter generates one. |
-| `sessionId` | yes | Session ID to store. |
+| `sessionId` | yes | ACP-visible session/import ID to store. |
 | `cwd` | yes | Absolute project directory. |
 | `format` | no | Must be `codex-rollout-jsonl` when present. |
 | `subpath` | no | Relative store subpath for related rollout artifacts. |
@@ -83,10 +87,8 @@ Chunk response:
 `offset` is the next expected entry offset for that subpath. The top-level
 `entries` count is the total import entry count across all subpaths.
 
-## Commit
-
 `_codex/session/commitImport` writes the pending import into the configured
-`SessionStore`.
+`SessionStore`:
 
 ```json
 {
@@ -98,8 +100,6 @@ Chunk response:
 If `sha256` is present, it must match the import's computed hash. Existing
 sessions can be replaced only when the store implements `SessionStoreReplacer`;
 otherwise the commit is rejected.
-
-## Abort
 
 `_codex/session/abortImport` drops a pending import:
 
@@ -117,13 +117,27 @@ Response:
 }
 ```
 
-## Limits
+## Validation
 
 - Maximum entries per chunk: `10000`.
 - Maximum entries per import: `100000`.
 - Maximum single JSONL line: `10 MiB`.
 - Maximum import byte total: `100 MiB`.
 - Pending import TTL: `30 minutes`.
+- `cwd` must be absolute.
+- `subpath` must be relative and cannot escape the session bundle.
 
-Use `session/load` after import to replay stored rollout rows into ACP updates
-and resume the Codex thread from a materialized rollout file.
+Malformed JSONL, offset mismatches, format mismatches, and stale import IDs are
+rejected as invalid params.
+
+## Storage
+
+`subpath: "goal.json"` is reserved for the adapter's latest Codex goal
+snapshot. Hosts that export/import full Codex bundles should include this
+sidecar when goal restore fidelity matters.
+
+Use `session/load` after import to replay stored rollout rows into ACP updates,
+or `session/resume` to restore native Codex context without replay. Both paths
+resume the Codex thread from a materialized rollout file. When the rollout
+contains `session_meta.payload.id`, the adapter passes that native Codex thread
+ID to Codex while keeping the ACP session ID unchanged.

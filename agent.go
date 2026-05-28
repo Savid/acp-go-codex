@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	jsonFieldError = "error"
+	listSessionsPageSize = 50
+
+	jsonFieldError   = "error"
+	jsonFieldMessage = "message"
 
 	modeDefault acp.SessionModeId = "default"
 	modePlan    acp.SessionModeId = "plan"
@@ -86,12 +89,6 @@ func NewAgent(opts ...Option) *Agent {
 		importStore:    NewInMemorySessionStore(),
 		mcpConnections: make(map[acp.UnstableMcpConnectionId]*mcpBridgeConn),
 	}
-}
-
-// SetAgentConnection installs the ACP connection used to send client
-// notifications. The SDK does not call this automatically, so Serve wires it.
-func (a *Agent) SetAgentConnection(conn *acp.AgentSideConnection) {
-	a.setAgentClient(conn)
 }
 
 func (a *Agent) setAgentClient(conn agentClient) {
@@ -177,6 +174,42 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	a.positionEncoding = positionEncoding
 	a.mu.Unlock()
 
+	codexMeta := map[string]any{
+		"provider":           "codex",
+		"preferredTransport": "app-server",
+		rawSDKMessagesCapabilityKey: map[string]any{
+			capabilityScopeKey:         capabilityScopeSession,
+			rawSDKMessagesMethodKey:    rawCodexSDKMessageMethod,
+			rawSDKMessagesEnabledByKey: rawSDKMessagesEnabledByPath,
+		},
+		outputSchemaCapabilityKey: map[string]any{
+			capabilityScopeKey: "session",
+			"types":            []string{"json_schema"},
+			"config":           outputSchemaConfigPath,
+			"result":           outputSchemaResultPath,
+			"rawEvents":        rawCodexSDKMessageMethod,
+		},
+		"mcpToolApproval": map[string]any{
+			capabilityScopeKey: "mcpServer",
+			"modes":            []string{mcpApprovalModeAuto, mcpApprovalModePrompt, mcpApprovalModeApprove},
+			"defaultMode":      "_meta.codex.defaultToolsApprovalMode",
+			"perTool":          "_meta.codex.tools.<toolName>.approvalMode",
+		},
+		"sessionImport": map[string]any{
+			capabilityScopeKey: "session",
+			"format":           codexSessionImportFormatJSON,
+			"methods": map[string]string{
+				"import":       codexSessionImportMethod,
+				"importChunk":  codexSessionImportChunkMethod,
+				"commitImport": codexSessionCommitImportMethod,
+				"abortImport":  codexSessionAbortImportMethod,
+			},
+		},
+	}
+	if a.options.EnableGoals {
+		codexMeta[codexGoalsCapabilityKey] = codexGoalsCapability()
+	}
+
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
@@ -187,32 +220,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		AuthMethods: a.authMethods(params),
 		AgentCapabilities: acp.AgentCapabilities{
 			Meta: map[string]any{
-				codexMetaKey: map[string]any{
-					"provider":           "codex",
-					"preferredTransport": "app-server",
-					rawSDKMessagesCapabilityKey: map[string]any{
-						capabilityScopeKey:         capabilityScopeSession,
-						rawSDKMessagesMethodKey:    rawCodexSDKMessageMethod,
-						rawSDKMessagesEnabledByKey: rawSDKMessagesEnabledByPath,
-					},
-					outputSchemaCapabilityKey: map[string]any{
-						capabilityScopeKey: "session",
-						"types":            []string{"json_schema"},
-						"config":           outputSchemaConfigPath,
-						"result":           outputSchemaResultPath,
-						"rawEvents":        rawCodexSDKMessageMethod,
-					},
-					"sessionImport": map[string]any{
-						capabilityScopeKey: "session",
-						"format":           codexSessionImportFormatJSON,
-						"methods": map[string]string{
-							"import":       codexSessionImportMethod,
-							"importChunk":  codexSessionImportChunkMethod,
-							"commitImport": codexSessionCommitImportMethod,
-							"abortImport":  codexSessionAbortImportMethod,
-						},
-					},
-				},
+				codexMetaKey: codexMeta,
 			},
 			LoadSession: true,
 			Auth:        a.authCapabilities(),
@@ -236,7 +244,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	}, nil
 }
 
-func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer) (codex.Client, error) {
+func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOverlay map[string]string) (codex.Client, error) {
 	factory := a.options.clientFactory
 	if factory == nil {
 		factory = func(ctx context.Context, options codex.Options) (codex.Client, error) {
@@ -244,19 +252,36 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer) (code
 		}
 	}
 
-	extraArgs, err := a.mcpServerConfigArgs(mcpServers)
+	extraArgs, mcpEnv, err := a.mcpServerConfigArgs(mcpServers)
 	if err != nil {
 		return nil, err
 	}
+	otelConfig, err := a.codexOTELConfig(envOverlay)
+	if err != nil {
+		return nil, err
+	}
+	extraArgs = append(append([]string(nil), otelConfig.ExtraArgs...), extraArgs...)
 
 	a.observe.RecordCodexProcessStart(ctx)
 	eventSink := &codexClientEventSink{agent: a}
+	env := cloneStringMap(a.options.Env)
+	if env == nil && (len(envOverlay) > 0 || len(mcpEnv) > 0) {
+		env = map[string]string{}
+	}
+	for key, value := range envOverlay {
+		env[key] = value
+	}
+	for key, value := range mcpEnv {
+		env[key] = value
+	}
 	client, err := factory(ctx, codex.Options{
 		CLIPath:      a.options.CodexPath,
 		CodexHome:    a.options.CodexHome,
 		DefaultModel: a.options.DefaultModel,
-		Env:          a.observe.InjectTraceEnv(ctx, a.options.Env),
+		Env:          a.observe.InjectTraceEnv(ctx, env),
+		Config:       a.codexConfig(),
 		ExtraArgs:    extraArgs,
+		Logger:       a.log,
 		EventHandler: eventSink.Handle,
 		RequestHandler: func(ctx context.Context, req codex.ServerRequest) (any, error) {
 			return a.handleCodexServerRequest(ctx, req)
@@ -276,8 +301,18 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer) (code
 	return client, nil
 }
 
+func (a *Agent) codexConfig() map[string]any {
+	if !a.options.EnableGoals {
+		return nil
+	}
+
+	return map[string]any{"features.goals": true}
+}
+
 func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
-	if event.Kind != codex.EventAccountUpdated {
+	switch event.Kind {
+	case codex.EventAccountUpdated, codex.EventGoalUpdated, codex.EventGoalCleared:
+	default:
 		return
 	}
 	s.mu.Lock()
@@ -289,7 +324,7 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	}
 	s.mu.Unlock()
 
-	s.agent.updateAccountForClient(client, event.ThreadID, event.Account)
+	s.agent.applyCodexClientEvent(context.Background(), client, event)
 }
 
 func (s *codexClientEventSink) SetClient(client codex.Client) {
@@ -300,7 +335,16 @@ func (s *codexClientEventSink) SetClient(client codex.Client) {
 	s.mu.Unlock()
 
 	for _, event := range pending {
-		s.agent.updateAccountForClient(client, event.ThreadID, event.Account)
+		s.agent.applyCodexClientEvent(context.Background(), client, event)
+	}
+}
+
+func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, event codex.Event) {
+	switch event.Kind {
+	case codex.EventAccountUpdated:
+		a.updateAccountForClient(client, event.ThreadID, event.Account)
+	case codex.EventGoalUpdated, codex.EventGoalCleared:
+		a.updateGoalForClient(ctx, client, event)
 	}
 }
 
@@ -332,7 +376,7 @@ func (a *Agent) ensureOpen() error {
 	defer a.mu.Unlock()
 
 	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent is closed"})
+		return newAgentClosedError()
 	}
 
 	return nil
@@ -342,9 +386,13 @@ func (a *Agent) session(id acp.SessionId) (*Session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.closed {
+		return nil, newAgentClosedError()
+	}
+
 	session, ok := a.sessions[id]
 	if !ok {
-		return nil, acp.NewInvalidParams(map[string]any{"sessionId": id, jsonFieldError: "session not found"})
+		return nil, newResourceNotFound(map[string]any{jsonFieldSessionID: id})
 	}
 
 	return session, nil
@@ -354,17 +402,29 @@ func (a *Agent) storeStartedSession(session *Session) error {
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent is closed"})
+		if err := session.Close(context.Background()); err != nil {
+			a.log.DebugContext(context.Background(), "close rejected Codex session failed", slog.String(jsonFieldError, err.Error()))
+		}
+		return newAgentClosedError()
 	}
-	_, existed := a.sessions[session.id]
+	previous := a.sessions[session.id]
 	a.sessions[session.id] = session
 	a.mu.Unlock()
 
-	if !existed {
-		a.observe.AddActiveSession(context.Background(), 1)
+	if previous != nil {
+		if err := previous.Close(context.Background()); err != nil {
+			a.log.WarnContext(context.Background(), "close replaced Codex session failed", slog.String(jsonFieldError, err.Error()))
+		}
+		return nil
 	}
 
+	a.observe.AddActiveSession(context.Background(), 1)
+
 	return nil
+}
+
+func newAgentClosedError() *acp.RequestError {
+	return acp.NewInternalError(map[string]any{jsonFieldError: "agent is closed"})
 }
 
 func (a *Agent) removeSession(id acp.SessionId) *Session {
@@ -377,11 +437,30 @@ func (a *Agent) removeSession(id acp.SessionId) *Session {
 	return session
 }
 
+func (a *Agent) removeSessionIf(id acp.SessionId, session *Session) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.sessions[id] != session {
+		return false
+	}
+	delete(a.sessions, id)
+
+	return true
+}
+
 func (a *Agent) connection() agentClient {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	return a.conn
+}
+
+func (a *Agent) clientElicitationCapabilities() *acp.ElicitationCapabilities {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.clientCapabilities.Elicitation
 }
 
 func (a *Agent) emitUpdate(ctx context.Context, sessionID acp.SessionId, update acp.SessionUpdate) error {

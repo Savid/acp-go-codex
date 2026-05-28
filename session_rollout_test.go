@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestRolloutMirrorDoesNotDuplicateDurableRowsWhenRawFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project key: %v", err)
 	}
-	entries, err := store.Load(context.Background(), SessionKey{ProjectKey: projectKey, SessionID: "thread"})
+	entries, err := store.Load(context.Background(), SessionKey{ProjectKey: projectKey, SessionID: "session"})
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("durable entries after raw failure len=%d err=%v", len(entries), err)
 	}
@@ -77,7 +78,7 @@ func TestRolloutMirrorDoesNotDuplicateDurableRowsWhenRawFails(t *testing.T) {
 	if err := session.mirrorAndEmitRollout(context.Background()); err != nil {
 		t.Fatalf("mirror after raw recovery returned error: %v", err)
 	}
-	entries, err = store.Load(context.Background(), SessionKey{ProjectKey: projectKey, SessionID: "thread"})
+	entries, err = store.Load(context.Background(), SessionKey{ProjectKey: projectKey, SessionID: "session"})
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("durable entries were duplicated len=%d err=%v", len(entries), err)
 	}
@@ -103,6 +104,98 @@ func TestEmitRawRolloutRowsSkipsAlreadyEmittedRows(t *testing.T) {
 	})
 	if len(conn.extensions) != 1 || session.emittedRawRows != 2 {
 		t.Fatalf("raw rollout skip extensions=%#v cursor=%d", conn.extensions, session.emittedRawRows)
+	}
+}
+
+func TestRolloutCompletionCursor(t *testing.T) {
+	session := &Session{completionRows: 1, visibleRows: 1}
+	completed := make(chan struct{}, 1)
+	session.emitRolloutCompletions([]rolloutMirrorRow{
+		{index: 0, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
+		{index: 1, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"token_count"}}`)},
+		{index: 2, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
+		{index: 3, entry: SessionStoreEntry(`not-json`)},
+	}, completed)
+
+	select {
+	case <-completed:
+	default:
+		t.Fatal("task_complete row did not signal completion")
+	}
+	select {
+	case <-completed:
+		t.Fatal("completion signal was not coalesced")
+	default:
+	}
+	if session.completionRows != 4 {
+		t.Fatalf("completion cursor before unbuffered signal = %d", session.completionRows)
+	}
+	session.emitRolloutCompletions([]rolloutMirrorRow{
+		{index: 4, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
+	}, make(chan struct{}))
+	if session.completionRows != 5 {
+		t.Fatalf("completion cursor = %d", session.completionRows)
+	}
+	if !rolloutTaskComplete(SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)) ||
+		rolloutTaskComplete(SessionStoreEntry(`{"type":"response_item","payload":{"type":"message"}}`)) {
+		t.Fatal("rollout task completion detection changed")
+	}
+
+	events := make(chan codex.Event, 1)
+	session.emitRolloutEvents([]rolloutMirrorRow{
+		{index: 0, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"old"}}`)},
+		{index: 4, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"visible"}}`)},
+	}, events)
+	select {
+	case event := <-events:
+		if event.Kind != codex.EventAgentMessageDelta || event.Text != "visible" || !event.Completed {
+			t.Fatalf("rollout event = %#v", event)
+		}
+	default:
+		t.Fatal("agent_message row did not emit visible event")
+	}
+	if session.visibleRows != 5 {
+		t.Fatalf("visible cursor = %d", session.visibleRows)
+	}
+	session.emitRolloutEvents([]rolloutMirrorRow{
+		{index: 5, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"dropped"}}`)},
+	}, make(chan codex.Event))
+	if session.visibleRows != 6 {
+		t.Fatalf("visible cursor after unbuffered event = %d", session.visibleRows)
+	}
+	if event, ok := rolloutEvent(SessionStoreEntry(`{"type":"event_msg","payload":{"type":"token_count"}}`)); ok || event.Kind != "" {
+		t.Fatalf("non-message rollout event = %#v ok=%v", event, ok)
+	}
+	if event, ok := rolloutEvent(SessionStoreEntry(`not-json`)); ok || event.Kind != "" {
+		t.Fatalf("invalid rollout event = %#v ok=%v", event, ok)
+	}
+}
+
+func TestPrepareRolloutLiveCursors(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, []byte("\n{\"type\":\"one\"}\n{\"type\":\"two\"}\n"), 0o600); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+	session := &Session{rolloutPath: rollout, completionRows: 1}
+	session.prepareRolloutLiveCursors()
+	if session.completionRows != 2 || session.visibleRows != 2 {
+		t.Fatalf("prepared cursors completion=%d visible=%d", session.completionRows, session.visibleRows)
+	}
+	if rows, err := countRolloutRows(""); err != nil || rows != 0 {
+		t.Fatalf("empty rollout count rows=%d err=%v", rows, err)
+	}
+	huge := filepath.Join(t.TempDir(), "huge.jsonl")
+	if err := os.WriteFile(huge, []byte(strings.Repeat("x", maxSessionImportLineBytes+1)), 0o600); err != nil {
+		t.Fatalf("write huge rollout: %v", err)
+	}
+	if _, err := countRolloutRows(huge); err == nil {
+		t.Fatal("huge rollout count succeeded")
+	}
+
+	missing := &Session{rolloutPath: filepath.Join(t.TempDir(), "missing.jsonl"), completionRows: 3, visibleRows: 4}
+	missing.prepareRolloutLiveCursors()
+	if missing.completionRows != 3 || missing.visibleRows != 4 {
+		t.Fatalf("missing rollout changed cursors completion=%d visible=%d", missing.completionRows, missing.visibleRows)
 	}
 }
 
@@ -148,6 +241,13 @@ func TestAppendRolloutEntriesRetriesAndBoundsStoreCalls(t *testing.T) {
 	if err := appendRolloutEntries(context.Background(), store, SessionKey{}, nil); err != nil {
 		t.Fatalf("empty append returned error: %v", err)
 	}
+	withRolloutAppendSettings(t, time.Second, []time.Duration{time.Nanosecond})
+	store = &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
+		return nil
+	}}
+	if err := appendRolloutEntries(context.Background(), store, SessionKey{ProjectKey: "p", SessionID: "s"}, []SessionStoreEntry{SessionStoreEntry(`{"type":"one"}`)}); err != nil {
+		t.Fatalf("delayed append returned error: %v", err)
+	}
 }
 
 func withRolloutAppendSettings(t *testing.T, timeout time.Duration, delays []time.Duration) {
@@ -159,6 +259,15 @@ func withRolloutAppendSettings(t *testing.T, timeout time.Duration, delays []tim
 	t.Cleanup(func() {
 		sessionRolloutAppendTimeout = originalTimeout
 		sessionRolloutAppendDelays = originalDelays
+	})
+}
+
+func withRolloutCompletionFallback(t *testing.T, delay time.Duration) {
+	t.Helper()
+	original := sessionRolloutCompletionFallback
+	sessionRolloutCompletionFallback = delay
+	t.Cleanup(func() {
+		sessionRolloutCompletionFallback = original
 	})
 }
 
@@ -179,4 +288,8 @@ func (s *appendFuncStore) Append(ctx context.Context, key SessionKey, entries []
 
 func (s *appendFuncStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
 	return nil, nil
+}
+
+func (s *appendFuncStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
+	return nil
 }

@@ -51,8 +51,8 @@ func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tie
 		{Name: "Default", Value: acp.SessionConfigValueId(modeDefault)},
 		{Name: "Plan", Value: acp.SessionConfigValueId(modePlan)},
 	}))
-	if effort != "" {
-		options = append(options, selectConfigOption(configEffort, "Effort", acp.SessionConfigOptionCategoryThoughtLevel, acp.SessionConfigValueId(effort), stringConfigValues(codexEffortValues)))
+	if currentEffort, values := effortConfigValues(model, effort, models); len(values) > 0 {
+		options = append(options, selectConfigOption(configEffort, "Effort", acp.SessionConfigOptionCategoryThoughtLevel, currentEffort, values))
 	}
 	if tier != "" {
 		options = append(options, selectConfigOption(configServiceTier, "Service Tier", "", acp.SessionConfigValueId(tier), stringConfigValues(codexTierValues)))
@@ -77,9 +77,10 @@ func modelConfigValues(current string, models []codex.Model) []acp.SessionConfig
 		}
 		seen[id] = struct{}{}
 		values = append(values, acp.SessionConfigSelectOption{
-			Name:  firstNonEmpty(model.Name, id),
-			Value: acp.SessionConfigValueId(id),
-			Meta:  model.Raw,
+			Name:        firstNonEmpty(model.Name, id),
+			Value:       acp.SessionConfigValueId(id),
+			Description: stringPtrIfNotEmpty(model.Description),
+			Meta:        model.Raw,
 		})
 	}
 	if current != "" {
@@ -91,6 +92,52 @@ func modelConfigValues(current string, models []codex.Model) []acp.SessionConfig
 	return values
 }
 
+func effortConfigValues(currentModel string, currentEffort string, models []codex.Model) (acp.SessionConfigValueId, []acp.SessionConfigSelectOption) {
+	if model := modelByID(currentModel, models); model != nil && len(model.ReasoningEfforts) > 0 {
+		seen := map[string]struct{}{}
+		values := make([]acp.SessionConfigSelectOption, 0, len(model.ReasoningEfforts)+1)
+		for _, effort := range model.ReasoningEfforts {
+			if effort.ID == "" {
+				continue
+			}
+			if _, ok := seen[effort.ID]; ok {
+				continue
+			}
+			seen[effort.ID] = struct{}{}
+			values = append(values, acp.SessionConfigSelectOption{
+				Name:        effort.ID,
+				Value:       acp.SessionConfigValueId(effort.ID),
+				Description: stringPtrIfNotEmpty(effort.Description),
+				Meta:        effort.Raw,
+			})
+		}
+
+		selected := firstNonEmpty(currentEffort, model.DefaultReasoningEffort)
+		if selected != "" {
+			if _, ok := seen[selected]; !ok {
+				values = append(values, acp.SessionConfigSelectOption{Name: selected, Value: acp.SessionConfigValueId(selected)})
+			}
+		}
+
+		return acp.SessionConfigValueId(selected), values
+	}
+	if currentEffort == "" {
+		return "", nil
+	}
+
+	return acp.SessionConfigValueId(currentEffort), stringConfigValues(codexEffortValues)
+}
+
+func modelByID(id string, models []codex.Model) *codex.Model {
+	for i := range models {
+		if firstNonEmpty(models[i].ID, models[i].Name) == id {
+			return &models[i]
+		}
+	}
+
+	return nil
+}
+
 func stringConfigValues(values []string) []acp.SessionConfigSelectOption {
 	out := make([]acp.SessionConfigSelectOption, 0, len(values))
 	for _, value := range values {
@@ -98,6 +145,14 @@ func stringConfigValues(values []string) []acp.SessionConfigSelectOption {
 	}
 
 	return out
+}
+
+func stringPtrIfNotEmpty(value string) *string {
+	if value == "" {
+		return nil
+	}
+
+	return &value
 }
 
 func selectConfigOption(id acp.SessionConfigId, name string, category acp.SessionConfigOptionCategory, current acp.SessionConfigValueId, values []acp.SessionConfigSelectOption) acp.SessionConfigOption {

@@ -42,6 +42,7 @@ func TestRunPassesOptions(t *testing.T) {
 			"-codex", "/bin/codex",
 			"-codex-home", "/tmp/codex",
 			"-model", "gpt-5.5",
+			"-mode", "plan",
 			"-debug",
 		},
 		bytes.NewBuffer(nil),
@@ -64,6 +65,9 @@ func TestRunPassesOptions(t *testing.T) {
 	if got.DefaultModel != "gpt-5.5" {
 		t.Fatalf("default model = %q", got.DefaultModel)
 	}
+	if got.DefaultMode != "plan" {
+		t.Fatalf("default mode = %q", got.DefaultMode)
+	}
 	if got.Logger == nil {
 		t.Fatal("logger was not set")
 	}
@@ -85,6 +89,9 @@ func TestRunErrorPathsAndVersion(t *testing.T) {
 	}
 	if code := run(context.Background(), []string{"-bad"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 2 {
 		t.Fatalf("bad flags code = %d", code)
+	}
+	if code := run(context.Background(), []string{"-mode", "bad"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 2 {
+		t.Fatalf("bad mode code = %d", code)
 	}
 
 	serve = func(context.Context, io.Reader, io.Writer, ...codexacp.Option) error {
@@ -153,7 +160,12 @@ func TestRunSuccessBranches(t *testing.T) {
 			done <- err
 			return
 		}
-		_ = conn.Close()
+		defer conn.Close()
+		var hello map[string]any
+		if err := json.NewDecoder(conn).Decode(&hello); err != nil {
+			done <- err
+			return
+		}
 		done <- nil
 	}()
 	if code := run(context.Background(), []string{"mcp-proxy", "-address", ln.Addr().String(), "-acp-id", "acp"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {

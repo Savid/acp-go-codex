@@ -13,6 +13,51 @@ import (
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
+func TestScopedElicitationParams(t *testing.T) {
+	requestID := acp.RequestId{Str: acp.Ptr(acp.RequestIdStr("request-1"))}
+	raw, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{
+		Url: &acp.UnstableCreateElicitationUrl{
+			ElicitationId: "elicit-1",
+			Message:       "Open URL",
+			Mode:          "url",
+			Url:           "https://example.com",
+			Meta:          map[string]any{"source": "test"},
+		},
+	}, elicitationScope{RequestID: &requestID})
+	if err != nil {
+		t.Fatalf("scoped URL elicitation params returned error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal scoped URL payload: %v", err)
+	}
+	if payload["requestId"] != "request-1" || payload["mode"] != "url" || payload["url"] != "https://example.com" || payload["_meta"] == nil {
+		t.Fatalf("scoped URL payload = %#v", payload)
+	}
+
+	raw, err = scopedElicitationParams(acp.UnstableCreateElicitationRequest{
+		Form: &acp.UnstableCreateElicitationForm{Message: "Answer?", Mode: "form"},
+	}, elicitationScope{SessionID: "session-1", ToolCallID: "tool-1"})
+	if err != nil {
+		t.Fatalf("scoped form elicitation params returned error: %v", err)
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal scoped form payload: %v", err)
+	}
+	if payload["sessionId"] != "session-1" || payload["toolCallId"] != "tool-1" || payload["mode"] != "form" {
+		t.Fatalf("scoped form payload = %#v", payload)
+	}
+
+	if _, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{}, elicitationScope{}); err == nil {
+		t.Fatal("empty elicitation request was accepted")
+	}
+	if _, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{
+		Form: &acp.UnstableCreateElicitationForm{Message: "Bad", Mode: "form", Meta: map[string]any{"bad": func() {}}},
+	}, elicitationScope{}); err == nil {
+		t.Fatal("unmarshalable elicitation request was accepted")
+	}
+}
+
 func TestLocalAgentConnectionClientMethods(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -59,6 +104,9 @@ func TestLocalAgentConnectionClientMethods(t *testing.T) {
 
 	if _, err := conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Message: "m", Mode: "form"}}); err != nil {
 		t.Fatalf("UnstableCreateElicitation returned error: %v", err)
+	}
+	if _, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Message: "bad", Mode: "form", Meta: map[string]any{"bad": func() {}}}}, elicitationScope{}); err == nil {
+		t.Fatal("CreateElicitation accepted unmarshalable params")
 	}
 	if _, err := conn.UnstableConnectMcp(ctx, acp.UnstableConnectMcpRequest{AcpId: "server"}); err != nil {
 		t.Fatalf("UnstableConnectMcp returned error: %v", err)
@@ -126,8 +174,19 @@ func TestLocalAgentConnectionHandleBranches(t *testing.T) {
 	if _, reqErr := conn.handle(context.Background(), "missing/method", json.RawMessage(`{}`)); reqErr == nil {
 		t.Fatal("missing method succeeded")
 	}
-	if _, reqErr := conn.handle(context.Background(), acp.AgentMethodSessionCancel, json.RawMessage(`{"sessionId":"missing"}`)); reqErr != nil {
-		t.Fatalf("cancel missing session returned error: %v", reqErr)
+	if _, reqErr := conn.handle(context.Background(), acp.AgentMethodSessionCancel, json.RawMessage(`{"sessionId":"missing"}`)); reqErr == nil {
+		t.Fatal("cancel missing session succeeded")
+	}
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	if err != nil {
+		t.Fatalf("NewSession for cancel returned error: %v", err)
+	}
+	cancelParams, err := json.Marshal(acp.CancelNotification{SessionId: resp.SessionId})
+	if err != nil {
+		t.Fatalf("marshal cancel: %v", err)
+	}
+	if _, reqErr := conn.handle(context.Background(), acp.AgentMethodSessionCancel, cancelParams); reqErr != nil {
+		t.Fatalf("cancel existing session returned error: %v", reqErr)
 	}
 }
 

@@ -50,9 +50,9 @@ func TestCodexCLISessionImportChunkCommitReplaceAndLoad(t *testing.T) {
 		t.Fatalf("seed stop reason = %s", resp.StopReason)
 	}
 	eventually(t, 30*time.Second, 250*time.Millisecond, func() bool {
-		return sourceStore.hasMainSession(sourceThreadID)
+		return sourceStore.hasMainSession(string(source.SessionId))
 	})
-	entries := sourceStore.mainSessionEntries(sourceThreadID)
+	entries := sourceStore.mainSessionEntries(string(source.SessionId))
 	if len(entries) == 0 {
 		t.Fatal("source store did not capture rollout entries")
 	}
@@ -64,14 +64,14 @@ func TestCodexCLISessionImportChunkCommitReplaceAndLoad(t *testing.T) {
 	client := &recordingClient{}
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, codexacp.WithSessionStore(targetStore))
 
-	importSessionEntries(t, ctx, conn, "integration-import-1", sourceThreadID, cwd, entries)
-	importSessionEntries(t, ctx, conn, "integration-import-2", sourceThreadID, cwd, entries)
+	importSessionEntries(t, ctx, conn, "integration-import-1", string(source.SessionId), cwd, entries)
+	importSessionEntries(t, ctx, conn, "integration-import-2", string(source.SessionId), cwd, entries)
 	if targetStore.replaceCount() != 1 {
 		t.Fatalf("replace count = %d, want 1", targetStore.replaceCount())
 	}
 
 	_, err = conn.LoadSession(ctx, acp.LoadSessionRequest{
-		SessionId:  acp.SessionId(sourceThreadID),
+		SessionId:  source.SessionId,
 		Cwd:        cwd,
 		McpServers: []acp.McpServer{},
 	})
@@ -86,7 +86,7 @@ func TestCodexCLISessionImportChunkCommitReplaceAndLoad(t *testing.T) {
 		client.resetRecordedOutput()
 
 		return conn.Prompt(ctx, acp.PromptRequest{
-			SessionId: acp.SessionId(sourceThreadID),
+			SessionId: source.SessionId,
 			Prompt: []acp.ContentBlock{
 				acp.TextBlock("Reply exactly " + resumeFromFileImportedResumeSentinel + " and do not use tools."),
 			},
@@ -99,7 +99,7 @@ func TestCodexCLISessionImportChunkCommitReplaceAndLoad(t *testing.T) {
 		t.Fatalf("fresh load text = %q", client.text())
 	}
 
-	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(sourceThreadID)}); err != nil {
+	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: source.SessionId}); err != nil {
 		t.Fatalf("close loaded session: %v", err)
 	}
 }

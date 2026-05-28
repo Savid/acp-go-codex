@@ -42,7 +42,7 @@ func TestRolloutReplayResponseItemVariants(t *testing.T) {
 			outputs++
 		}
 	}
-	if users != 1 || agents != 2 || thoughts != 1 || starts != 3 || outputs != 1 {
+	if users != 1 || agents != 1 || thoughts != 1 || starts != 3 || outputs != 1 {
 		t.Fatalf("counts users=%d agents=%d thoughts=%d starts=%d outputs=%d updates=%#v", users, agents, thoughts, starts, outputs, updates)
 	}
 
@@ -51,6 +51,21 @@ func TestRolloutReplayResponseItemVariants(t *testing.T) {
 	}
 	if _, err := rolloutReplayUpdates([]SessionStoreEntry{SessionStoreEntry(`bad`)}); err == nil {
 		t.Fatal("bad rollout JSON succeeded")
+	}
+}
+
+func TestRolloutNativeThreadID(t *testing.T) {
+	entries := []SessionStoreEntry{
+		SessionStoreEntry(`bad`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"id":"ignored"}}`),
+		SessionStoreEntry(`{"type":"session_meta","payload":{}}`),
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
+	}
+	if id := rolloutNativeThreadID(entries); id != "native-thread" {
+		t.Fatalf("native thread id = %q", id)
+	}
+	if id := rolloutNativeThreadID([]SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{}}`)}); id != "" {
+		t.Fatalf("empty native thread id = %q", id)
 	}
 }
 
@@ -124,9 +139,6 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	}
 	if responseItemText(map[string]any{"content": []any{"a", map[string]any{"summary_text": "b"}}}) != "ab" {
 		t.Fatal("responseItemText content failed")
-	}
-	if threadGoalText(map[string]any{"message": "msg"}) != "msg" || threadGoalText(map[string]any{}) != "" {
-		t.Fatal("threadGoalText message/empty failed")
 	}
 	if commandText([]string{"go", "test"}) != "go test" || commandText([]any{"go", "test"}) != "go test" || commandText(7) != "" {
 		t.Fatal("commandText failed")

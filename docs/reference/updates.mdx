@@ -1,39 +1,89 @@
 ---
-title: Updates
-description: ACP update mapping from Codex app-server events.
+title: "Updates"
+description: "ACP update mapping from Codex app-server events"
+icon: "refresh-cw"
 ---
 
 Codex app-server notifications are drained for the full client lifetime. During
 an active turn, turn-scoped events are routed to the session prompt stream with
 backpressure so updates are not silently dropped.
 
-## Prompt updates
+## Messages
 
 | Codex event | ACP update |
 | --- | --- |
-| agent message delta | `agent_message_chunk` |
-| reasoning delta | `agent_thought_chunk` |
-| plan update | `plan` |
-| command execution item | tool call update with execute kind |
-| file change item | tool call update with edit/write kind |
-| MCP or dynamic tool item | tool call update |
-| diff update | tool call content/update when available |
-| warning | session update with warning metadata where possible |
-| completed turn | final prompt stop reason and usage |
+| Agent text delta | `agent_message_chunk` |
+| Completed agent message | final `agent_message_chunk` when no delta was emitted |
+| Reasoning delta | `agent_thought_chunk` |
+| Plan update | `plan` |
 
 When Codex emits only completed items, the mapper emits final text once. When
 deltas were already emitted for an item, completed text is treated as final
 state without duplicating visible output.
 
-## Raw events
+## Tools
+
+| Codex event | ACP update |
+| --- | --- |
+| Command execution item | tool call update with execute kind |
+| File change item | tool call update with edit/write kind |
+| MCP or dynamic tool item | tool call update |
+| Diff update | tool call content/update when available |
+| Completed tool item | final tool state |
+
+File-change `patchUpdated` events are supported opportunistically when Codex
+emits them.
+
+## Session state
+
+| Codex event | ACP update |
+| --- | --- |
+| Warning | session update with warning metadata where possible |
+| `account/updated` | refreshes redacted account metadata |
+| `thread/goal/updated` | `session_info_update._meta.codex.goal` |
+| `thread/goal/cleared` | `session_info_update._meta.codex.goal: null` |
+| Completed turn | final prompt stop reason, `PromptResponse.usage`, and `usage_update` metadata |
+
+`account/updated` and goal notifications are consumed even when no turn is
+active, so the next session response reflects current Codex state.
+
+## Usage updates
+
+When Codex emits `thread/tokenUsage/updated`, the adapter returns
+`tokenUsage.last` as the standard ACP `PromptResponse.usage` and also emits a
+`usage_update` for hosts that consume only streamed session updates.
+Codex-native per-turn token details are preserved under `_meta.codex.usage`:
+
+```json
+{
+  "codex": {
+    "usage": {
+      "inputTokens": 22143,
+      "cachedReadTokens": 6528,
+      "cachedWriteTokens": 0,
+      "outputTokens": 322,
+      "reasoningOutputTokens": 157,
+      "totalTokens": 22465
+    }
+  }
+}
+```
+
+If Codex reports cumulative thread usage, `usage_update.used` comes from
+`tokenUsage.total.totalTokens`, `usage_update.size` comes from
+`modelContextWindow`, and `_meta.codex.threadUsage` carries the cumulative token
+breakdown.
+
+Codex app-server does not currently report USD cost through this path, so the
+adapter does not synthesize `cost`.
+
+## Replay
+
+`session/load` replays stored rollout rows into ACP updates before returning.
+`session/resume` restores native Codex context, including from materialized
+store-backed rollout rows when present, without replaying history.
 
 Raw rollout rows are emitted only through `_codex/sdkMessage` when enabled.
 Filtered raw events are diagnostic; exact remote restore requires complete
 rollout JSONL captured through `SessionStore`, session import, or an
 unfiltered raw capture that kept every restorable row.
-
-## Account updates
-
-`account/updated` notifications refresh adapter account metadata even when no
-turn is active. Session responses expose only redacted account state under
-`_meta.codex.account`.

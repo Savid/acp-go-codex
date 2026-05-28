@@ -25,13 +25,19 @@ type Session struct {
 	updatedAt             string
 	model                 string
 	modelProvider         string
+	fingerprint           string
 	mode                  acp.SessionModeId
 	reasoningEffort       string
 	serviceTier           string
 	personality           string
+	env                   map[string]string
+	approvalPolicy        any
+	sandboxPolicy         any
 	rawMessages           rawMessageConfig
 	outputSchema          any
 	accountMeta           map[string]any
+	goal                  *CodexGoal
+	goalRevision          int64
 
 	client    codex.Client
 	mcpBridge *mcpSessionBridge
@@ -46,6 +52,8 @@ type Session struct {
 	mirrorMu       sync.Mutex
 	mirroredRows   int
 	emittedRawRows int
+	completionRows int
+	visibleRows    int
 }
 
 type sessionInteraction struct {
@@ -65,8 +73,12 @@ type sessionSnapshot struct {
 	reasoningEffort       string
 	serviceTier           string
 	personality           string
+	env                   map[string]string
+	approvalPolicy        any
+	sandboxPolicy         any
 	outputSchema          any
 	accountMeta           map[string]any
+	goal                  *CodexGoal
 }
 
 func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, thread codex.Thread, client codex.Client, meta sessionMeta) *Session {
@@ -90,13 +102,27 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		updatedAt:             updatedAt,
 		model:                 firstNonEmpty(thread.Model, meta.Model),
 		modelProvider:         thread.Provider,
-		mode:                  modeDefault,
-		reasoningEffort:       meta.ReasoningEffort,
+		mode:                  initialSessionMode(meta.Mode, agent.options.DefaultMode),
+		reasoningEffort:       firstNonEmpty(meta.ReasoningEffort, thread.ReasoningEffort),
 		serviceTier:           meta.ServiceTier,
 		personality:           meta.Personality,
+		env:                   cloneStringMap(meta.Env),
+		approvalPolicy:        cloneAny(meta.ApprovalPolicy),
+		sandboxPolicy:         cloneAny(meta.SandboxPolicy),
 		rawMessages:           meta.RawMessages,
 		outputSchema:          meta.OutputSchema,
 		client:                client,
+	}
+}
+
+func initialSessionMode(metaMode acp.SessionModeId, defaultMode acp.SessionModeId) acp.SessionModeId {
+	switch {
+	case validCodexMode(metaMode) && metaMode != "":
+		return metaMode
+	case validCodexMode(defaultMode) && defaultMode != "":
+		return defaultMode
+	default:
+		return modeDefault
 	}
 }
 
@@ -193,8 +219,12 @@ func (s *Session) snapshot() sessionSnapshot {
 		reasoningEffort:       s.reasoningEffort,
 		serviceTier:           s.serviceTier,
 		personality:           s.personality,
+		env:                   cloneStringMap(s.env),
+		approvalPolicy:        cloneAny(s.approvalPolicy),
+		sandboxPolicy:         cloneAny(s.sandboxPolicy),
 		outputSchema:          cloneAny(s.outputSchema),
 		accountMeta:           cloneAnyMap(s.accountMeta),
+		goal:                  cloneCodexGoalPtr(s.goal),
 	}
 }
 
@@ -330,6 +360,6 @@ func (s *Session) info() acp.SessionInfo {
 		AdditionalDirectories: snapshot.additionalDirectories,
 		Title:                 &title,
 		UpdatedAt:             &updatedAt,
-		Meta:                  sessionResponseMeta(snapshot),
+		Meta:                  sessionInfoMeta(snapshot),
 	}
 }

@@ -418,6 +418,9 @@ func (a *Agent) sessionStore() SessionStore {
 	if a.options.SessionStore != nil {
 		return a.options.SessionStore
 	}
+	if a.importStore == nil {
+		return nil
+	}
 	return a.importStore
 }
 

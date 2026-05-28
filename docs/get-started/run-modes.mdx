@@ -1,52 +1,66 @@
 ---
-title: Run Modes
-description: Standalone stdio and embedded Go usage.
+title: "Run Modes"
+description: "Run as a subprocess or embed the ACP server in Go"
+icon: "route"
 ---
 
-`acp-go-codex` supports two host integration modes.
+The adapter has two supported integration modes. Both expose the same ACP
+method surface and start local Codex app-server sessions on demand.
 
-## Standalone ACP subprocess
+## Standalone CLI
 
-Run the binary and connect it to ACP JSON-RPC streams:
+Run `acp-go-codex` as an ACP stdio subprocess:
 
-```sh
-acp-go-codex -codex /path/to/codex -codex-home /tmp/codex-home
+```bash
+acp-go-codex -codex /usr/local/bin/codex -model gpt-5.5
 ```
 
-This is the normal editor or ACP-host integration. The process writes only ACP
-JSON-RPC on stdout. Debug logs, when enabled with `-debug`, go to stderr.
+Useful flags:
 
-The standalone binary also owns env-based OpenTelemetry setup and graceful
-signal handling.
+| Flag | Purpose |
+| --- | --- |
+| `-codex` | Path to the Codex CLI. Defaults to `codex` on `PATH`. |
+| `-codex-home` | `CODEX_HOME` for launched Codex processes. |
+| `-model` | Default Codex model for new sessions. |
+| `-enable-goals` | Enable Codex experimental native thread goal APIs. |
+| `-debug` | Write adapter debug logs to stderr. |
+| `-cli login` | Run a local Codex login command. |
+| `-cli logout` | Run a local Codex logout command. |
+
+ACP stdio uses stdout for JSON-RPC. Logs and diagnostics must go to stderr or a
+separate telemetry backend.
 
 ## Embedded Go
 
-Call `Serve` with your own streams:
+Embed the same agent in a Go process:
 
 ```go
 err := codexacp.Serve(ctx, input, output,
-	codexacp.WithCodexPath("/usr/local/bin/codex"),
-	codexacp.WithCodexHome("/tmp/codex-home"),
-	codexacp.WithDefaultModel("gpt-5.5"),
+    codexacp.WithCodexPath("/usr/local/bin/codex"),
+    codexacp.WithCodexHome("/tmp/codex-home"),
+    codexacp.WithDefaultModel("gpt-5.5"),
 )
 ```
 
-`Serve` owns ACP request dispatch, client callback routing, session creation,
-permission and elicitation callbacks, MCP bridge callbacks, and shutdown when
-the context or connection closes.
+Use this mode when your host already owns process lifetime, logging,
+OpenTelemetry providers, auth refresh, or durable [SessionStore](/docs/features/session-store)
+integration.
 
-Use package options for process-wide defaults such as `CODEX_HOME`, telemetry
-providers, durable session storage, and external ChatGPT token refresh.
+## Same ACP contract
+
+Standalone and embedded modes share:
+
+- the same [`initialize`](/docs/reference/acp-methods) capabilities;
+- the same session lifecycle methods;
+- the same permission, elicitation, MCP, raw-event, goal, and import
+  extension behavior;
+- the same update mapping from Codex app-server events.
+
+The only difference is ownership. Standalone mode owns process flags and
+environment. Embedded mode accepts Go options and caller-owned streams.
 
 ## MCP proxy subcommand
 
-`acp-go-codex mcp-proxy` is an internal stdio shim launched from generated
-Codex MCP config. Hosts usually should not start it directly.
-
-```sh
-acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:NNNN -acp-id <id>
-```
-
-The proxy reads `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE` from its environment and
-authenticates to the adapter-owned loopback listener before forwarding MCP
-messages over ACP.
+`acp-go-codex mcp-proxy` is an internal subcommand launched by the adapter when
+it rewrites ACP-transport MCP servers into Codex stdio MCP config. Hosts should
+not call it directly; configure MCP servers on session requests instead.

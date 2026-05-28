@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/coder/acp-go-sdk"
 	codexacp "github.com/savid/acp-go-codex"
 )
 
@@ -43,11 +44,18 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	codexPath := flags.String("codex", "", "path to codex CLI")
 	codexHome := flags.String("codex-home", "", "Codex home directory")
 	model := flags.String("model", "", "default Codex model")
+	mode := flags.String("mode", "", "default ACP session mode: default or plan")
+	enableGoals := flags.Bool("enable-goals", false, "enable Codex experimental thread goal APIs")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	cli := flags.String("cli", "", "run a local Codex CLI auth command")
 	deviceAuth := flags.Bool("device-auth", false, "use Codex device auth for --cli login")
 
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *mode != "" && *mode != "default" && *mode != "plan" {
+		_, _ = fmt.Fprintf(stderr, "acp-go-codex: unsupported -mode %q\n", *mode)
+
 		return 2
 	}
 	if *cli != "" {
@@ -87,8 +95,12 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		codexacp.WithCodexPath(*codexPath),
 		codexacp.WithCodexHome(*codexHome),
 		codexacp.WithDefaultModel(*model),
+		codexacp.WithCodexGoals(*enableGoals),
 		codexacp.WithLogger(logger),
 	)
+	if *mode != "" {
+		serveOptions = append(serveOptions, codexacp.WithDefaultMode(acp.SessionModeId(*mode)))
+	}
 	serveOptions = append(serveOptions, telemetry.options...)
 
 	err = serve(ctx, stdin, stdout, serveOptions...)

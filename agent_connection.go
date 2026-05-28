@@ -17,6 +17,7 @@ const jsonFieldMethod = "method"
 
 type agentClient interface {
 	Done() <-chan struct{}
+	CreateElicitation(context.Context, acp.UnstableCreateElicitationRequest, elicitationScope) (acp.UnstableCreateElicitationResponse, error)
 	UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
 	UnstableConnectMcp(context.Context, acp.UnstableConnectMcpRequest) (acp.UnstableConnectMcpResponse, error)
 	UnstableDisconnectMcp(context.Context, acp.UnstableDisconnectMcpRequest) (acp.UnstableDisconnectMcpResponse, error)
@@ -30,6 +31,12 @@ type mcpAgentClient interface {
 	UnstableDisconnectMcp(context.Context, acp.UnstableDisconnectMcpRequest) (acp.UnstableDisconnectMcpResponse, error)
 	UnstableMessageMcp(context.Context, acp.UnstableMessageMcpRequest) (acp.UnstableMessageMcpResponse, error)
 	UnstableNotifyMcp(context.Context, acp.UnstableMessageMcpNotification) error
+}
+
+type elicitationScope struct {
+	SessionID  acp.SessionId
+	ToolCallID acp.ToolCallId
+	RequestID  *acp.RequestId
 }
 
 type localAgentConnection struct {
@@ -192,7 +199,20 @@ func (c *localAgentConnection) UnstableCreateElicitation(
 	ctx context.Context,
 	params acp.UnstableCreateElicitationRequest,
 ) (acp.UnstableCreateElicitationResponse, error) {
-	return acp.SendRequest[acp.UnstableCreateElicitationResponse](c.conn, ctx, acp.ClientMethodElicitationCreate, params)
+	return c.CreateElicitation(ctx, params, elicitationScope{})
+}
+
+func (c *localAgentConnection) CreateElicitation(
+	ctx context.Context,
+	params acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+) (acp.UnstableCreateElicitationResponse, error) {
+	raw, err := scopedElicitationParams(params, scope)
+	if err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	return acp.SendRequest[acp.UnstableCreateElicitationResponse](c.conn, ctx, acp.ClientMethodElicitationCreate, raw)
 }
 
 func (c *localAgentConnection) UnstableConnectMcp(
@@ -255,4 +275,47 @@ func requestError(err error) *acp.RequestError {
 	}
 
 	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+}
+
+func scopedElicitationParams(
+	params acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+) (json.RawMessage, error) {
+	var payload map[string]any
+
+	switch {
+	case params.Form != nil:
+		payload = map[string]any{
+			jsonFieldMessage:  params.Form.Message,
+			"mode":            "form",
+			"requestedSchema": params.Form.RequestedSchema,
+		}
+		if len(params.Form.Meta) > 0 {
+			payload["_meta"] = params.Form.Meta
+		}
+	case params.Url != nil:
+		payload = map[string]any{
+			"elicitationId":  params.Url.ElicitationId,
+			jsonFieldMessage: params.Url.Message,
+			"mode":           "url",
+			"url":            params.Url.Url,
+		}
+		if len(params.Url.Meta) > 0 {
+			payload["_meta"] = params.Url.Meta
+		}
+	default:
+		return nil, errors.New("elicitation request must include form or url")
+	}
+
+	if scope.SessionID != "" {
+		payload[jsonFieldSessionID] = scope.SessionID
+	}
+	if scope.ToolCallID != "" {
+		payload["toolCallId"] = scope.ToolCallID
+	}
+	if scope.RequestID != nil {
+		payload["requestId"] = scope.RequestID
+	}
+
+	return json.Marshal(payload)
 }

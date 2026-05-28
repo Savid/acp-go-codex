@@ -49,6 +49,14 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 	if !containsModelID(sessionModelIDs(session.Models.AvailableModels), session.Models.CurrentModelId) {
 		t.Fatalf("current model %q missing from available models", session.Models.CurrentModelId)
 	}
+	modelConfig := findSessionSelectConfig(session.ConfigOptions, "model")
+	if modelConfig == nil || modelConfig.Category == nil || *modelConfig.Category != acp.SessionConfigOptionCategoryModel || len(*modelConfig.Options.Ungrouped) == 0 {
+		t.Fatalf("model config not populated: %#v", session.ConfigOptions)
+	}
+	effortConfig := findSessionSelectConfig(session.ConfigOptions, "effort")
+	if effortConfig == nil || effortConfig.Category == nil || *effortConfig.Category != acp.SessionConfigOptionCategoryThoughtLevel || len(*effortConfig.Options.Ungrouped) == 0 {
+		t.Fatalf("effort config not populated: %#v", session.ConfigOptions)
+	}
 	threadID := codexThreadID(session.Meta)
 	if threadID == "" {
 		t.Fatalf("codex thread id missing from meta: %#v", session.Meta)
@@ -147,8 +155,12 @@ func TestCodexCLIACPConversation(t *testing.T) {
 	if resp.UserMessageId == nil || *resp.UserMessageId != messageID {
 		t.Fatalf("user message id = %#v", resp.UserMessageId)
 	}
-	if resp.Usage != nil && resp.Usage.TotalTokens <= 0 {
-		t.Fatalf("usage populated with invalid totals: %#v", resp.Usage)
+	if resp.Usage == nil || resp.Usage.TotalTokens <= 0 {
+		t.Fatalf("usage not populated with valid totals: %#v", resp.Usage)
+	}
+	streamedUsage := client.latestUsage()
+	if streamedUsage == nil || streamedUsage.Used <= 0 {
+		t.Fatalf("streamed usage not populated: %#v", streamedUsage)
 	}
 	if !strings.Contains(client.text(), "ACP_OK") {
 		t.Fatalf("agent text %q does not contain sentinel", client.text())

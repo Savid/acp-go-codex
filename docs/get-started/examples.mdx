@@ -1,31 +1,42 @@
 ---
-title: Examples
-description: Example ACP clients for Codex.
+title: "Examples"
+description: "Runnable examples for ACP clients and session restore"
+icon: "flask-conical"
 ---
 
-Examples live under `examples/`.
+Examples live under `examples/` and exercise the same public ACP surface that a
+host uses.
 
-- `examples/minimal-client`: starts the agent, creates a session, sends one
-  prompt, prints streamed ACP updates, and closes the session.
-- `examples/resume-from-file`: imports Codex rollout JSONL through
-  `_codex/session/import`, loads the session, then resumes it.
-- `examples/interactive-chat`: simple line-oriented chat loop with `/cancel`
-  and `/exit`.
+## Minimal client
 
-Run the minimal client:
-
-```sh
-go run ./examples/minimal-client "Reply with a short hello from ACP."
+```bash
+go run ./examples/minimal-client "Reply with hello from ACP"
 ```
 
-Run the interactive chat:
+The minimal client launches `acp-go-codex`, initializes ACP, creates a session,
+sends one prompt, prints streamed updates, and closes the session.
 
-```sh
+## Interactive chat
+
+```bash
 go run ./examples/interactive-chat
 ```
 
-Import and resume a rollout JSONL file:
+The interactive client keeps a session open for repeated turns. It is useful
+for checking prompt streaming, tool updates, cancellation, permission prompts,
+elicitation callbacks, and usage reporting.
 
-```sh
-go run ./examples/resume-from-file -session-file ./examples/resume-from-file/session.jsonl
+## Resume from file
+
+```bash
+go run ./examples/resume-from-file ./rollout.jsonl
 ```
+
+The resume example imports Codex rollout JSONL through the
+[`_codex/session/import*`](/docs/reference/session-import) extension surface and
+then calls `session/load` to replay the restored timeline.
+
+<Tip>
+  Integration tests under `integration/` use the same examples and public
+  methods as smoke coverage for a local Codex CLI.
+</Tip>

@@ -155,6 +155,7 @@ func (a *Agent) prepareMCPServers(ctx context.Context, sessionID acp.SessionId, 
 		}
 		out = append(out, acp.McpServer{Stdio: &acp.McpServerStdio{
 			Name:    server.Acp.Name,
+			Meta:    cloneAnyMap(server.Acp.Meta),
 			Command: bridge.command,
 			Args:    bridge.proxyArgs(string(server.Acp.Id)),
 			Env: []acp.EnvVariable{

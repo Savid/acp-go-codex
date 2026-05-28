@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -29,6 +30,11 @@ type Options struct {
 	CodexHome string
 	// DefaultModel is the model preference for newly created Codex threads.
 	DefaultModel string
+	// DefaultMode is the ACP mode used for newly created Codex sessions when
+	// session metadata does not set _meta.codex.options.mode.
+	DefaultMode acp.SessionModeId
+	// EnableGoals enables Codex's experimental native thread goal APIs.
+	EnableGoals bool
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
 	Logger *slog.Logger
@@ -67,6 +73,7 @@ func applyOptions(opts []Option) Options {
 		AgentName:               "acp-go-codex",
 		AgentTitle:              "acp-go-codex",
 		AgentVersion:            "0.1.0",
+		DefaultMode:             modeDefault,
 		SessionStoreLoadTimeout: 10 * time.Second,
 		clientFactory: func(ctx context.Context, options codex.Options) (codex.Client, error) {
 			return codex.NewAppServerClient(ctx, options)
@@ -125,6 +132,22 @@ func WithCodexHome(path string) Option {
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
 		options.DefaultModel = model
+	}
+}
+
+// WithDefaultMode selects the ACP mode for newly created sessions. Use "plan"
+// when Codex-native request_user_input should be available from the first turn.
+func WithDefaultMode(mode acp.SessionModeId) Option {
+	return func(options *Options) {
+		options.DefaultMode = mode
+	}
+}
+
+// WithCodexGoals enables Codex's experimental native thread goal APIs for
+// launched app-server processes.
+func WithCodexGoals(enabled bool) Option {
+	return func(options *Options) {
+		options.EnableGoals = enabled
 	}
 }
 

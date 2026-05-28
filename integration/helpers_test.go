@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -358,6 +359,53 @@ func integrationCodexHome(t *testing.T) string {
 	return os.Getenv(envCodexHome)
 }
 
+func isolatedCodexHome(t *testing.T) string {
+	t.Helper()
+
+	source := integrationCodexHome(t)
+	if source == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("user home: %v", err)
+		}
+		source = filepath.Join(home, ".codex")
+	}
+
+	base, err := filepath.Abs(filepath.Join("..", ".tmp", "integration-codex-home"))
+	if err != nil {
+		t.Fatalf("resolve Codex home temp base: %v", err)
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatalf("create Codex home temp base: %v", err)
+	}
+	target, err := os.MkdirTemp(base, "home-*")
+	if err != nil {
+		t.Fatalf("create isolated Codex home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(target) })
+
+	for _, name := range []string{"auth.json", "config.json", "config.toml", "models_cache.json", "installation_id"} {
+		if err := copyCodexHomeFile(source, target, name); err != nil {
+			t.Fatalf("copy Codex %s: %v", name, err)
+		}
+	}
+
+	return target
+}
+
+func copyCodexHomeFile(sourceDir string, targetDir string, name string) error {
+	source := filepath.Join(sourceDir, name)
+	data, err := os.ReadFile(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(targetDir, name), data, 0o600)
+}
+
 func requireLiveTurn(t *testing.T) {
 	t.Helper()
 
@@ -415,7 +463,7 @@ func serveLiveAgentRawForTest(
 
 	base := []codexacp.Option{
 		codexacp.WithCodexPath(integrationCodexPath(t)),
-		codexacp.WithCodexHome(integrationCodexHome(t)),
+		codexacp.WithCodexHome(isolatedCodexHome(t)),
 		codexacp.WithDefaultModel(os.Getenv(envModel)),
 		codexacp.WithLogger(integrationLogger),
 	}
@@ -497,7 +545,7 @@ func connectLiveAgentBinary(
 		t.Skipf("set %s to run compiled binary integration coverage", envAgentBinary)
 	}
 
-	args := []string{"-codex", integrationCodexPath(t), "-codex-home", integrationCodexHome(t)}
+	args := []string{"-codex", integrationCodexPath(t), "-codex-home", isolatedCodexHome(t)}
 	if model := os.Getenv(envModel); model != "" {
 		args = append(args, "-model", model)
 	}
@@ -607,6 +655,16 @@ func sessionModelIDs(models []acp.ModelInfo) []acp.ModelId {
 	}
 
 	return ids
+}
+
+func findSessionSelectConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
+	for _, option := range options {
+		if option.Select != nil && option.Select.Id == id {
+			return option.Select
+		}
+	}
+
+	return nil
 }
 
 func authAgentMethodIDs(methods []acp.AuthMethod) []string {

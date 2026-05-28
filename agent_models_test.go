@@ -80,6 +80,29 @@ func TestModeStateDefaults(t *testing.T) {
 	}
 }
 
+func TestNewSessionInitialMode(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent(
+		WithDefaultMode(modePlan),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
+	)
+	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	if err != nil {
+		t.Fatalf("NewSession with default mode returned error: %v", err)
+	}
+	if resp.Modes == nil || resp.Modes.CurrentModeId != modePlan {
+		t.Fatalf("default mode response = %#v", resp.Modes)
+	}
+
+	resp, err = agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionCodexOptions(NewCodexOptions(WithCodexMode(modeDefault)))))
+	if err != nil {
+		t.Fatalf("NewSession with meta mode returned error: %v", err)
+	}
+	if resp.Modes == nil || resp.Modes.CurrentModeId != modeDefault {
+		t.Fatalf("meta mode response = %#v", resp.Modes)
+	}
+}
+
 func TestSetSessionConfigOptionRejectsBadModeValue(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
@@ -90,6 +113,75 @@ func TestSetSessionConfigOptionRejectsBadModeValue(t *testing.T) {
 	}
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{SessionId: resp.SessionId, ConfigId: configMode, Value: "bad"}}); err == nil {
 		t.Fatal("mode config accepted bad value")
+	}
+}
+
+func TestCodexConfigOptionsExposeModelCatalogAndEffort(t *testing.T) {
+	models := []codex.Model{{
+		ID:                     "gpt-5.5",
+		Name:                   "GPT-5.5",
+		Description:            "Frontier model",
+		DefaultReasoningEffort: "medium",
+		ReasoningEfforts: []codex.ModelReasoningEffort{
+			{ID: "low", Description: "Fast"},
+			{ID: "medium", Description: "Balanced"},
+		},
+		Raw: map[string]any{"displayName": "GPT-5.5"},
+	}}
+
+	options := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models)
+	if len(options) != 3 {
+		t.Fatalf("config options = %#v", options)
+	}
+	modelOption := options[0].Select
+	if modelOption == nil || modelOption.Id != configModel || modelOption.Category == nil || *modelOption.Category != acp.SessionConfigOptionCategoryModel {
+		t.Fatalf("model option = %#v", modelOption)
+	}
+	modelValues := *modelOption.Options.Ungrouped
+	if modelValues[0].Name != "GPT-5.5" || modelValues[0].Description == nil || *modelValues[0].Description != "Frontier model" || modelValues[0].Meta["displayName"] != "GPT-5.5" {
+		t.Fatalf("model values = %#v", modelValues)
+	}
+	effortOption := options[2].Select
+	if effortOption == nil || effortOption.Id != configEffort || effortOption.CurrentValue != "medium" {
+		t.Fatalf("effort option = %#v", effortOption)
+	}
+	effortValues := *effortOption.Options.Ungrouped
+	if len(effortValues) != 2 || effortValues[0].Description == nil || *effortValues[0].Description != "Fast" {
+		t.Fatalf("effort values = %#v", effortValues)
+	}
+}
+
+func TestEffortConfigValuesCoverCatalogEdges(t *testing.T) {
+	models := []codex.Model{{
+		ID:                     "gpt-5.5",
+		DefaultReasoningEffort: "medium",
+		ReasoningEfforts: []codex.ModelReasoningEffort{
+			{},
+			{ID: "low", Description: "Fast"},
+			{ID: "low", Description: "Duplicate"},
+			{ID: "high"},
+		},
+	}}
+
+	current, values := effortConfigValues("gpt-5.5", "custom", models)
+	if current != "custom" {
+		t.Fatalf("current effort = %q", current)
+	}
+	if len(values) != 3 || values[0].Value != "low" || values[1].Value != "high" || values[2].Value != "custom" {
+		t.Fatalf("catalog effort values = %#v", values)
+	}
+	if values[0].Description == nil || *values[0].Description != "Fast" {
+		t.Fatalf("catalog effort description = %#v", values[0].Description)
+	}
+
+	current, values = effortConfigValues("missing", "high", models)
+	if current != "high" || len(values) != len(codexEffortValues) {
+		t.Fatalf("fallback effort values = current %q values %#v", current, values)
+	}
+
+	current, values = effortConfigValues("missing", "", models)
+	if current != "" || values != nil {
+		t.Fatalf("empty fallback effort values = current %q values %#v", current, values)
 	}
 }
 

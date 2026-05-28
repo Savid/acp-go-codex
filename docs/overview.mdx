@@ -1,25 +1,41 @@
 ---
-title: Overview
-description: ACP adapter for Codex CLI app-server.
+title: "Overview"
+description: "ACP agent for Codex CLI, written in Go and backed by the local Codex app-server"
+icon: "sparkles"
 ---
 
-`acp-go-codex` exposes the local Codex CLI through the Agent Client Protocol.
-It follows the framework structure of `acp-go-claude`, but the provider
-boundary is Codex-native: one ACP session owns one
-`codex app-server --listen stdio://` process and one active Codex thread.
+`acp-go-codex` exposes the local `codex` CLI as an
+[Agent Client Protocol](https://agentclientprotocol.com/) agent. It speaks ACP
+over [JSON-RPC streams](https://agentclientprotocol.com/protocol/transports),
+starts `codex app-server` processes on demand, maps
+[ACP prompts](https://agentclientprotocol.com/protocol/prompt-turn) and client
+callbacks into Codex app-server requests, and streams
+[ACP session updates](/docs/reference/updates) back to the host.
 
-The adapter maps ACP session lifecycle, prompts, permissions, elicitation, MCP,
-auth, raw rollout events, session import/load, model config, and telemetry onto
-Codex app-server APIs. Codex protocol details stay behind `internal/codex`;
-public Go helpers stay ACP-oriented.
+Use it when you want a Codex agent that speaks ACP while keeping Codex protocol
+details behind a small Go adapter boundary.
 
-The minimum verified Codex CLI is `codex-cli 0.129.0`.
+<CardGroup cols={2}>
+  <Card title="Two integration modes" icon="route" href="/docs/get-started/run-modes">
+    Run it as a standalone ACP subprocess or embed it in another Go application with `Serve`.
+  </Card>
+  <Card title="ACP method surface" icon="plug" href="/docs/reference/acp-methods">
+    Initialize, create sessions, prompt, cancel, load, resume, fork, stream updates, and bridge MCP through ACP.
+  </Card>
+  <Card title="Session runtime" icon="terminal" href="/docs/core/sessions">
+    Codex threads, app-server ownership, prompt turns, cancellation, replay, resume, fork, and rollout storage.
+  </Card>
+  <Card title="Production controls" icon="shield" href="/docs/operations/security">
+    Session-scoped policies, account auth boundaries, token-file MCP proxies, path validation, and predictable cleanup.
+  </Card>
+  <Card title="Observable by default" icon="chart-line" href="/docs/operations/observability">
+    Optional OpenTelemetry spans, metrics, trace propagation, structured logs, and native Codex OTEL forwarding.
+  </Card>
+</CardGroup>
 
-Primary integration paths:
-
-- run `acp-go-codex` as a standalone ACP subprocess;
-- embed `codexacp.Serve(ctx, input, output, opts...)` in a Go host.
-
-The adapter intentionally does not implement provider management APIs, goals,
-document/NES APIs, plugin/marketplace mutation, realtime thread APIs, or
-external-agent mutation.
+<Note>
+  This project wraps the local `codex` CLI. Authentication, model availability,
+  MCP behavior, native telemetry, and rollout persistence are ultimately
+  governed by the installed Codex CLI version and the user's Codex
+  configuration.
+</Note>

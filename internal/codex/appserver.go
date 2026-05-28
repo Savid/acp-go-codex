@@ -22,6 +22,9 @@ const (
 	methodThreadTurnsList   = "thread/turns/list"
 	methodThreadUnsubscribe = "thread/unsubscribe"
 	methodThreadCompact     = "thread/compact/start"
+	methodThreadGoalSet     = "thread/goal/set"
+	methodThreadGoalGet     = "thread/goal/get"
+	methodThreadGoalClear   = "thread/goal/clear"
 	methodTurnStart         = "turn/start"
 	methodTurnSteer         = "turn/steer"
 	methodTurnInterrupt     = "turn/interrupt"
@@ -142,7 +145,7 @@ func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequ
 	setNonEmpty(params, "cwd", req.Cwd)
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadResume, params, &resp); err != nil {
-		return Thread{}, err
+		return Thread{}, normalizeThreadError(err)
 	}
 
 	thread := threadFromResponse(resp)
@@ -157,7 +160,7 @@ func (c *AppServerClient) ForkThread(ctx context.Context, req ThreadForkRequest)
 	setNonEmpty(params, "cwd", req.Cwd)
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadFork, params, &resp); err != nil {
-		return Thread{}, err
+		return Thread{}, normalizeThreadError(err)
 	}
 
 	return threadFromResponse(resp), nil
@@ -178,7 +181,7 @@ func (c *AppServerClient) ListThreads(ctx context.Context, req ThreadListRequest
 func (c *AppServerClient) ReadThread(ctx context.Context, req ThreadReadRequest) (ThreadHistory, error) {
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadRead, map[string]any{"threadId": req.ThreadID}, &resp); err != nil {
-		return ThreadHistory{}, err
+		return ThreadHistory{}, normalizeThreadError(err)
 	}
 
 	return ThreadHistory{
@@ -198,7 +201,7 @@ func (c *AppServerClient) ListTurns(ctx context.Context, req ThreadTurnsListRequ
 
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadTurnsList, params, &resp); err != nil {
-		return ThreadTurnsListResponse{}, err
+		return ThreadTurnsListResponse{}, normalizeThreadError(err)
 	}
 
 	return ThreadTurnsListResponse{
@@ -231,7 +234,7 @@ func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodTurnStart, params, &resp); err != nil {
 		c.closeTurn(stream)
-		return nil, err
+		return nil, normalizeThreadError(err)
 	}
 
 	turnID := stringValue(mapValue(resp, "turn"), "id")
@@ -250,19 +253,19 @@ func (c *AppServerClient) SteerTurn(ctx context.Context, req TurnSteerRequest) e
 		"input":          req.Input,
 	}
 
-	return c.rpc.Call(ctx, methodTurnSteer, params, nil)
+	return normalizeThreadError(c.rpc.Call(ctx, methodTurnSteer, params, nil))
 }
 
 func (c *AppServerClient) CancelTurn(ctx context.Context, threadID string, turnID string) error {
 	params := map[string]any{"threadId": threadID}
 	setNonEmpty(params, "turnId", turnID)
-	return c.rpc.Call(ctx, methodTurnInterrupt, params, nil)
+	return normalizeThreadError(c.rpc.Call(ctx, methodTurnInterrupt, params, nil))
 }
 
 func (c *AppServerClient) CompactThread(ctx context.Context, req ThreadCompactRequest) (map[string]any, error) {
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadCompact, map[string]any{"threadId": req.ThreadID}, &resp); err != nil {
-		return nil, err
+		return nil, normalizeThreadError(err)
 	}
 
 	return resp, nil
@@ -277,10 +280,51 @@ func (c *AppServerClient) StartReview(ctx context.Context, req ReviewStartReques
 
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodReviewStart, params, &resp); err != nil {
-		return nil, err
+		return nil, normalizeThreadError(err)
 	}
 
 	return resp, nil
+}
+
+func (c *AppServerClient) SetGoal(ctx context.Context, req GoalSetRequest) (Goal, error) {
+	params := map[string]any{"threadId": req.ThreadID}
+	setNonEmpty(params, "objective", req.Objective)
+	setNonEmpty(params, "status", req.Status)
+	if req.TokenBudget != nil {
+		params["tokenBudget"] = *req.TokenBudget
+	}
+
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodThreadGoalSet, params, &resp); err != nil {
+		return Goal{}, normalizeThreadError(err)
+	}
+
+	return goalFromResponse(resp), nil
+}
+
+func (c *AppServerClient) GetGoal(ctx context.Context, threadID string) (*Goal, error) {
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodThreadGoalGet, map[string]any{"threadId": threadID}, &resp); err != nil {
+		return nil, normalizeThreadError(err)
+	}
+	rawGoal := mapValue(resp, "goal")
+	if rawGoal == nil {
+		//nolint:nilnil // nil goal with nil error is the GetGoal "not set" result.
+		return nil, nil
+	}
+	goal := goalFromResponse(resp)
+
+	return &goal, nil
+}
+
+func (c *AppServerClient) ClearGoal(ctx context.Context, threadID string) (bool, error) {
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodThreadGoalClear, map[string]any{"threadId": threadID}, &resp); err != nil {
+		return false, normalizeThreadError(err)
+	}
+	cleared, _ := resp["cleared"].(bool)
+
+	return cleared, nil
 }
 
 func (c *AppServerClient) CollaborationModeList(ctx context.Context) (CollaborationModeListResponse, error) {
@@ -334,7 +378,7 @@ func (c *AppServerClient) UnsubscribeThread(ctx context.Context, threadID string
 		return nil
 	}
 
-	return c.rpc.Call(ctx, methodThreadUnsubscribe, map[string]any{"threadId": threadID}, nil)
+	return normalizeThreadError(c.rpc.Call(ctx, methodThreadUnsubscribe, map[string]any{"threadId": threadID}, nil))
 }
 
 func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {
@@ -350,10 +394,36 @@ func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {
 		if id == "" {
 			continue
 		}
-		models = append(models, Model{ID: id, Name: firstNonEmpty(stringValue(item, "name"), id), Context: int64Value(item, "contextWindow"), Raw: item})
+		models = append(models, Model{
+			ID:                     id,
+			Name:                   firstNonEmpty(stringValue(item, "displayName"), stringValue(item, "name"), id),
+			Description:            stringValue(item, "description"),
+			Context:                int64Value(item, "contextWindow"),
+			DefaultReasoningEffort: stringValue(item, "defaultReasoningEffort"),
+			ReasoningEfforts:       modelReasoningEfforts(item),
+			Raw:                    item,
+		})
 	}
 
 	return models, nil
+}
+
+func modelReasoningEfforts(model map[string]any) []ModelReasoningEffort {
+	raw := mapSlice(model, "supportedReasoningEfforts")
+	efforts := make([]ModelReasoningEffort, 0, len(raw))
+	for _, item := range raw {
+		id := stringValue(item, "reasoningEffort")
+		if id == "" {
+			continue
+		}
+		efforts = append(efforts, ModelReasoningEffort{
+			ID:          id,
+			Description: stringValue(item, "description"),
+			Raw:         item,
+		})
+	}
+
+	return efforts
 }
 
 func (c *AppServerClient) AccountRead(ctx context.Context) (Account, error) {
@@ -437,11 +507,16 @@ func (c *AppServerClient) runEventPump(done chan<- struct{}) {
 	for notification := range c.rpc.Events() {
 		c.dispatchEvent(eventFromRPC(notification))
 	}
+	if err := c.rpc.closeError(); err != nil {
+		c.dispatchEvent(Event{Kind: EventError, Err: err})
+	}
 }
 
 func (c *AppServerClient) dispatchEvent(event Event) {
-	if event.Kind == EventAccountUpdated {
-		c.setAccount(event.Account)
+	if event.Kind == EventAccountUpdated || event.Kind == EventGoalUpdated || event.Kind == EventGoalCleared {
+		if event.Kind == EventAccountUpdated {
+			c.setAccount(event.Account)
+		}
 		if c.options.EventHandler != nil {
 			c.options.EventHandler(context.Background(), event)
 		}
@@ -591,10 +666,18 @@ func (s *turnStream) forward() {
 		case event := <-s.in:
 			select {
 			case s.out <- event:
+				if event.Kind == EventCompleted || event.Kind == EventError {
+					return
+				}
+				continue
+			default:
+			}
+			select {
+			case s.out <- event:
 			case <-s.done:
 				return
 			}
-			if event.Kind == EventCompleted {
+			if event.Kind == EventCompleted || event.Kind == EventError {
 				return
 			}
 		}
@@ -635,15 +718,16 @@ func threadFromResponse(resp map[string]any) Thread {
 	}
 
 	return Thread{
-		ID:        firstNonEmpty(stringValue(rawThread, "id"), stringValue(resp, "threadId")),
-		SessionID: firstNonEmpty(stringValue(rawThread, "sessionId"), stringValue(rawThread, "id"), stringValue(resp, "threadId")),
-		Path:      stringValue(rawThread, "path"),
-		Cwd:       firstNonEmpty(stringValue(resp, "cwd"), stringValue(rawThread, "cwd")),
-		Model:     firstNonEmpty(stringValue(resp, "model"), stringValue(rawThread, "model")),
-		Provider:  firstNonEmpty(stringValue(resp, "modelProvider"), stringValue(rawThread, "modelProvider")),
-		Title:     firstNonEmpty(stringValue(rawThread, "name"), stringValue(rawThread, "title"), stringValue(rawThread, "preview")),
-		UpdatedAt: firstNonEmpty(timestampValue(rawThread, "updatedAt"), timestampValue(rawThread, "mtime")),
-		Raw:       rawThread,
+		ID:              firstNonEmpty(stringValue(rawThread, "id"), stringValue(resp, "threadId")),
+		SessionID:       firstNonEmpty(stringValue(rawThread, "sessionId"), stringValue(rawThread, "id"), stringValue(resp, "threadId")),
+		Path:            stringValue(rawThread, "path"),
+		Cwd:             firstNonEmpty(stringValue(resp, "cwd"), stringValue(rawThread, "cwd")),
+		Model:           firstNonEmpty(stringValue(resp, "model"), stringValue(rawThread, "model")),
+		Provider:        firstNonEmpty(stringValue(resp, "modelProvider"), stringValue(rawThread, "modelProvider")),
+		ReasoningEffort: firstNonEmpty(stringValue(resp, "reasoningEffort"), stringValue(rawThread, "reasoningEffort")),
+		Title:           firstNonEmpty(stringValue(rawThread, "name"), stringValue(rawThread, "title"), stringValue(rawThread, "preview")),
+		UpdatedAt:       firstNonEmpty(timestampValue(rawThread, "updatedAt"), timestampValue(rawThread, "mtime")),
+		Raw:             rawThread,
 	}
 }
 
@@ -702,6 +786,10 @@ func eventFromRPC(raw rpcEvent) Event {
 	case "item/fileChange/patchUpdated", "turn/diff/updated":
 		event.Kind = EventDiffUpdated
 		event.Diff = firstNonEmpty(stringValue(params, "diff"), stringValue(params, "patch"))
+	case "thread/tokenUsage/updated":
+		event.Kind = EventUsageUpdated
+		event.TokenUsage = tokenUsageFromParams(params)
+		event.Usage = event.TokenUsage.Last
 	case "turn/completed":
 		event.Kind = EventCompleted
 		event.StopReason = stopReasonFromTurn(mapValue(params, "turn"))
@@ -709,6 +797,12 @@ func eventFromRPC(raw rpcEvent) Event {
 	case "account/updated":
 		event.Kind = EventAccountUpdated
 		event.Account = accountFromResponse(params)
+	case "thread/goal/updated":
+		event.Kind = EventGoalUpdated
+		goal := goalFromResponse(params)
+		event.Goal = &goal
+	case "thread/goal/cleared":
+		event.Kind = EventGoalCleared
 	case "warning", "guardianWarning", "deprecationNotice", "configWarning":
 		event.Kind = EventWarning
 		event.Text = firstNonEmpty(stringValue(params, "message"), stringValue(params, "text"))
@@ -753,6 +847,25 @@ func accountFromResponse(resp map[string]any) Account {
 		Email:    stringValue(rawAccount, "email"),
 		PlanType: firstNonEmpty(stringValue(rawAccount, "chatgptPlanType"), stringValue(rawAccount, "planType")),
 		Raw:      rawAccount,
+	}
+}
+
+func goalFromResponse(resp map[string]any) Goal {
+	rawGoal := mapValue(resp, "goal")
+	if rawGoal == nil {
+		rawGoal = resp
+	}
+
+	return Goal{
+		ThreadID:        firstNonEmpty(stringValue(rawGoal, "threadId"), stringValue(resp, "threadId")),
+		Objective:       stringValue(rawGoal, "objective"),
+		Status:          stringValue(rawGoal, "status"),
+		TokenBudget:     int64PtrValue(rawGoal, "tokenBudget"),
+		TokensUsed:      int64Value(rawGoal, "tokensUsed"),
+		TimeUsedSeconds: int64Value(rawGoal, "timeUsedSeconds"),
+		CreatedAt:       int64Value(rawGoal, "createdAt"),
+		UpdatedAt:       int64Value(rawGoal, "updatedAt"),
+		Raw:             rawGoal,
 	}
 }
 
@@ -815,7 +928,7 @@ func toolEventFromItem(params map[string]any, status string) ToolEvent {
 	if item == nil {
 		item = params
 	}
-	title := firstNonEmpty(stringValue(item, "title"), stringValue(item, "name"), stringValue(item, "type"))
+	title := toolTitleFromItem(item)
 	id := firstNonEmpty(stringValue(item, "id"), stringValue(params, "itemId"))
 
 	return ToolEvent{
@@ -834,6 +947,20 @@ func toolEventFromItem(params map[string]any, status string) ToolEvent {
 		),
 		Raw: item,
 	}
+}
+
+func toolTitleFromItem(item map[string]any) string {
+	if title := firstNonEmpty(stringValue(item, "title"), stringValue(item, "name")); title != "" {
+		return title
+	}
+	if server, tool := stringValue(item, "server"), stringValue(item, "tool"); server != "" && tool != "" {
+		return server + " " + tool
+	}
+	if tool := stringValue(item, "tool"); tool != "" {
+		return tool
+	}
+
+	return stringValue(item, "type")
 }
 
 func itemLocations(item map[string]any) []string {
@@ -916,14 +1043,59 @@ func usageFromParams(params map[string]any) Usage {
 		usage = mapValue(mapValue(params, "turn"), "usage")
 	}
 
-	input := firstInt64(usage, "inputTokens", "promptTokens")
-	output := firstInt64(usage, "outputTokens", "completionTokens")
-	total := firstInt64(usage, "totalTokens")
+	return usageFromMap(usage)
+}
+
+func tokenUsageFromParams(params map[string]any) TokenUsage {
+	tokenUsage := mapValue(params, "tokenUsage")
+	if tokenUsage == nil {
+		tokenUsage = mapValue(params, "usage")
+	}
+
+	usage := TokenUsage{
+		Last:               usageFromMap(mapValue(tokenUsage, "last")),
+		Total:              usageFromMap(mapValue(tokenUsage, "total")),
+		ModelContextWindow: int64Value(tokenUsage, "modelContextWindow"),
+		Raw:                tokenUsage,
+	}
+	if isZeroUsage(usage.Last) {
+		usage.Last = usageFromMap(tokenUsage)
+	}
+	if isZeroUsage(usage.Total) {
+		usage.Total = usage.Last
+	}
+
+	return usage
+}
+
+func usageFromMap(usage map[string]any) Usage {
+	input := firstInt64(usage, "inputTokens", "promptTokens", "input_tokens", "prompt_tokens")
+	output := firstInt64(usage, "outputTokens", "completionTokens", "output_tokens", "completion_tokens")
+	cachedRead := firstInt64(usage, "cachedReadTokens", "cacheReadInputTokens", "cachedInputTokens", "cache_read_input_tokens", "cached_input_tokens")
+	cachedWrite := firstInt64(usage, "cachedWriteTokens", "cacheCreationInputTokens", "cacheWriteInputTokens", "cache_creation_input_tokens", "cache_write_input_tokens")
+	reasoning := firstInt64(usage, "reasoningOutputTokens", "thoughtTokens", "reasoningTokens", "reasoning_output_tokens", "thought_tokens")
+	total := firstInt64(usage, "totalTokens", "total_tokens")
 	if total == 0 {
 		total = input + output
 	}
 
-	return Usage{InputTokens: input, OutputTokens: output, TotalTokens: total}
+	return Usage{
+		CachedReadTokens:      cachedRead,
+		CachedWriteTokens:     cachedWrite,
+		InputTokens:           input,
+		OutputTokens:          output,
+		ReasoningOutputTokens: reasoning,
+		TotalTokens:           total,
+	}
+}
+
+func isZeroUsage(usage Usage) bool {
+	return usage.CachedReadTokens == 0 &&
+		usage.CachedWriteTokens == 0 &&
+		usage.InputTokens == 0 &&
+		usage.OutputTokens == 0 &&
+		usage.ReasoningOutputTokens == 0 &&
+		usage.TotalTokens == 0
 }
 
 func planStatusFromString(status string) PlanStepStatus {
@@ -1016,6 +1188,18 @@ func int64Value(values map[string]any, key string) int64 {
 	default:
 		return 0
 	}
+}
+
+func int64PtrValue(values map[string]any, key string) *int64 {
+	if values == nil {
+		return nil
+	}
+	if _, ok := values[key]; !ok || values[key] == nil {
+		return nil
+	}
+	value := int64Value(values, key)
+
+	return &value
 }
 
 func timestampValue(values map[string]any, key string) string {

@@ -60,6 +60,10 @@ func TestInitializeAdvertisesCodexCapabilities(t *testing.T) {
 	if meta[rawSDKMessagesCapabilityKey] == nil {
 		t.Fatalf("missing raw SDK message capability: %#v", meta)
 	}
+	approvalMeta, ok := meta["mcpToolApproval"].(map[string]any)
+	if !ok || approvalMeta["defaultMode"] != "_meta.codex.defaultToolsApprovalMode" {
+		t.Fatalf("missing MCP tool approval capability: %#v", meta)
+	}
 }
 
 func TestPlaceholderSessionLifecycle(t *testing.T) {
@@ -136,8 +140,8 @@ func TestACPConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	clientConn := acp.NewClientSideConnection(client, c2aW, a2cR)
 
 	agent := newPlaceholderAgent()
-	agentConn := acp.NewAgentSideConnection(agent, a2cW, c2aR)
-	agent.SetAgentConnection(agentConn)
+	agentConn := newLocalAgentConnection(agent, a2cW, c2aR)
+	agent.setAgentClient(agentConn)
 
 	if _, err := clientConn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
@@ -344,6 +348,26 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 		t.Fatalf("direct account update = %#v", sameClientOtherThread.accountMeta)
 	}
 	agent.updateAccountForClient(client, "", codex.Account{})
+	agent.applyCodexClientEvent(context.Background(), client, codex.Event{Kind: codex.EventRaw})
+	agent.applyCodexClientEvent(context.Background(), client, codex.Event{
+		Kind:     codex.EventGoalCleared,
+		ThreadID: "thread-1",
+	})
+	agent.updateGoalForClient(context.Background(), client, codex.Event{
+		Kind:     codex.EventGoalUpdated,
+		ThreadID: "missing-thread",
+		Goal:     &codex.Goal{Objective: "skip"},
+	})
+	badGoalAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()))
+	badGoalSession := newSession(badGoalAgent, "bad-goal", "relative", nil, codex.Thread{ID: "bad-thread"}, client, sessionMeta{})
+	if err := badGoalAgent.storeStartedSession(badGoalSession); err != nil {
+		t.Fatalf("store bad goal session: %v", err)
+	}
+	badGoalAgent.updateGoalForClient(context.Background(), client, codex.Event{
+		Kind:     codex.EventGoalUpdated,
+		ThreadID: "bad-thread",
+		Goal:     &codex.Goal{Objective: "bad"},
+	})
 }
 
 type spyCodexClient struct {
@@ -358,6 +382,9 @@ type spyCodexClient struct {
 	steer     codex.TurnSteerRequest
 	compact   codex.ThreadCompactRequest
 	review    codex.ReviewStartRequest
+	goalSet   codex.GoalSetRequest
+	goal      *codex.Goal
+	goalClear string
 	turns     codex.ThreadTurnsListRequest
 	loggedOut bool
 	login     codex.ChatGPTAuthTokens
@@ -464,6 +491,46 @@ func (c *spyCodexClient) StartReview(_ context.Context, req codex.ReviewStartReq
 	return map[string]any{"status": "reviewing"}, nil
 }
 
+func (c *spyCodexClient) SetGoal(_ context.Context, req codex.GoalSetRequest) (codex.Goal, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.goalSet = req
+	goal := codex.Goal{
+		ThreadID:    req.ThreadID,
+		Objective:   req.Objective,
+		Status:      firstNonEmpty(req.Status, CodexGoalStatusActive),
+		TokenBudget: cloneInt64Ptr(req.TokenBudget),
+	}
+	c.goal = &goal
+
+	return goal, nil
+}
+
+func (c *spyCodexClient) GetGoal(context.Context, string) (*codex.Goal, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.goal == nil {
+		//nolint:nilnil // nil goal with nil error is the GetGoal "not set" result.
+		return nil, nil
+	}
+	goal := *c.goal
+	goal.TokenBudget = cloneInt64Ptr(goal.TokenBudget)
+
+	return &goal, nil
+}
+
+func (c *spyCodexClient) ClearGoal(_ context.Context, threadID string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.goalClear = threadID
+	existed := c.goal != nil
+	c.goal = nil
+
+	return existed, nil
+}
+
 func (c *spyCodexClient) CollaborationModeList(context.Context) (codex.CollaborationModeListResponse, error) {
 	return codex.CollaborationModeListResponse{Modes: []codex.CollaborationMode{{ID: "default"}, {ID: "plan"}}}, nil
 }
@@ -500,10 +567,13 @@ func (c *spyCodexClient) Close(context.Context) error {
 type recordingAgentClient struct {
 	done chan struct{}
 
-	updates     []acp.SessionNotification
-	extensions  []extensionNotification
-	permission  acp.PermissionOptionId
-	elicitation acp.UnstableCreateElicitationResponse
+	updates      []acp.SessionNotification
+	extensions   []extensionNotification
+	permissions  []acp.RequestPermissionRequest
+	elicitations []acp.UnstableCreateElicitationRequest
+	scopes       []elicitationScope
+	permission   acp.PermissionOptionId
+	elicitation  acp.UnstableCreateElicitationResponse
 }
 
 type extensionNotification struct {
@@ -517,7 +587,13 @@ func newRecordingAgentClient() *recordingAgentClient {
 
 func (c *recordingAgentClient) Done() <-chan struct{} { return c.done }
 
-func (c *recordingAgentClient) UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+func (c *recordingAgentClient) UnstableCreateElicitation(ctx context.Context, request acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	return c.CreateElicitation(ctx, request, elicitationScope{})
+}
+
+func (c *recordingAgentClient) CreateElicitation(_ context.Context, request acp.UnstableCreateElicitationRequest, scope elicitationScope) (acp.UnstableCreateElicitationResponse, error) {
+	c.elicitations = append(c.elicitations, request)
+	c.scopes = append(c.scopes, scope)
 	if c.elicitation.Accept != nil || c.elicitation.Decline != nil || c.elicitation.Cancel != nil {
 		return c.elicitation, nil
 	}
@@ -532,7 +608,8 @@ func (c *recordingAgentClient) UnstableDisconnectMcp(context.Context, acp.Unstab
 	return acp.UnstableDisconnectMcpResponse{}, nil
 }
 
-func (c *recordingAgentClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+func (c *recordingAgentClient) RequestPermission(_ context.Context, request acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	c.permissions = append(c.permissions, request)
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(c.permission)}, nil
 }
 
@@ -583,7 +660,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	agent := NewAgent()
 	agent.options.clientFactory = nil
 	agent.options.CodexPath = filepath.Join(t.TempDir(), "missing-codex")
-	if _, err := agent.newClient(context.Background(), nil); err == nil {
+	if _, err := agent.newClient(context.Background(), nil, nil); err == nil {
 		t.Fatal("newClient with nil factory and no Codex CLI succeeded")
 	}
 	var gotOptions codex.Options
@@ -591,7 +668,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 		gotOptions = options
 		return newSpyCodexClient(), nil
 	}))
-	if _, err := requestAgent.newClient(context.Background(), nil); err != nil {
+	if _, err := requestAgent.newClient(context.Background(), nil, nil); err != nil {
 		t.Fatalf("newClient for request handler returned error: %v", err)
 	}
 	if _, err := gotOptions.RequestHandler(context.Background(), codex.ServerRequest{Method: "missing"}); err == nil {
@@ -628,6 +705,7 @@ type errorCodexClient struct {
 	steerErr         error
 	compactErr       error
 	reviewErr        error
+	goalErr          error
 	readErr          error
 	turnsErr         error
 	collaborationErr error
@@ -713,6 +791,27 @@ func (c *errorCodexClient) StartReview(ctx context.Context, req codex.ReviewStar
 	return c.spyCodexClient.StartReview(ctx, req)
 }
 
+func (c *errorCodexClient) SetGoal(ctx context.Context, req codex.GoalSetRequest) (codex.Goal, error) {
+	if c.goalErr != nil {
+		return codex.Goal{}, c.goalErr
+	}
+	return c.spyCodexClient.SetGoal(ctx, req)
+}
+
+func (c *errorCodexClient) GetGoal(ctx context.Context, threadID string) (*codex.Goal, error) {
+	if c.goalErr != nil {
+		return nil, c.goalErr
+	}
+	return c.spyCodexClient.GetGoal(ctx, threadID)
+}
+
+func (c *errorCodexClient) ClearGoal(ctx context.Context, threadID string) (bool, error) {
+	if c.goalErr != nil {
+		return false, c.goalErr
+	}
+	return c.spyCodexClient.ClearGoal(ctx, threadID)
+}
+
 func (c *errorCodexClient) CollaborationModeList(ctx context.Context) (codex.CollaborationModeListResponse, error) {
 	if c.collaborationErr != nil {
 		return codex.CollaborationModeListResponse{}, c.collaborationErr
@@ -788,6 +887,10 @@ func (c *serverRequestErrorClient) UnstableCreateElicitation(context.Context, ac
 	return acp.UnstableCreateElicitationResponse{}, c.elicitationErr
 }
 
+func (c *serverRequestErrorClient) CreateElicitation(context.Context, acp.UnstableCreateElicitationRequest, elicitationScope) (acp.UnstableCreateElicitationResponse, error) {
+	return acp.UnstableCreateElicitationResponse{}, c.elicitationErr
+}
+
 type blockingPermissionAgentClient struct {
 	*recordingAgentClient
 	started chan struct{}
@@ -831,6 +934,9 @@ func (s errorSessionStore) Load(context.Context, SessionKey) ([]SessionStoreEntr
 	}
 	return nil, nil
 }
+func (s errorSessionStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
+	return nil
+}
 
 func (s errorSessionStore) ListSessions(context.Context, string) ([]SessionSummary, error) {
 	if s.listErr != nil {
@@ -862,8 +968,9 @@ func TestMain(m *testing.M) {
 
 type noListStore struct{}
 
-func (noListStore) Append(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
-func (noListStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) { return nil, nil }
+func (noListStore) Append(context.Context, SessionKey, []SessionStoreEntry) error  { return nil }
+func (noListStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error)  { return nil, nil }
+func (noListStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
 
 type appendErrorStore struct{}
 
@@ -873,6 +980,9 @@ func (appendErrorStore) Append(context.Context, SessionKey, []SessionStoreEntry)
 func (appendErrorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
 	return nil, nil
 }
+func (appendErrorStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
+	return nil
+}
 
 type loadErrorStore struct{}
 
@@ -880,6 +990,7 @@ func (loadErrorStore) Append(context.Context, SessionKey, []SessionStoreEntry) e
 func (loadErrorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
 	return nil, errors.New("load failed")
 }
+func (loadErrorStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
 
 type existingNoReplaceStore struct{}
 
@@ -889,12 +1000,18 @@ func (existingNoReplaceStore) Append(context.Context, SessionKey, []SessionStore
 func (existingNoReplaceStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
 	return []SessionStoreEntry{SessionStoreEntry(`{"type":"old"}`)}, nil
 }
+func (existingNoReplaceStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
+	return nil
+}
 
 type replaceErrorStore struct{}
 
 func (replaceErrorStore) Append(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
 func (replaceErrorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
 	return []SessionStoreEntry{SessionStoreEntry(`{"type":"old"}`)}, nil
+}
+func (replaceErrorStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
+	return nil
 }
 func (replaceErrorStore) ReplaceSession(context.Context, SessionKey, []SessionStoreReplacement) error {
 	return errors.New("replace failed")
@@ -920,7 +1037,13 @@ type acceptElicitationClient struct {
 	*recordingAgentClient
 }
 
-func (c *acceptElicitationClient) UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+func (c *acceptElicitationClient) UnstableCreateElicitation(ctx context.Context, request acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	return c.CreateElicitation(ctx, request, elicitationScope{})
+}
+
+func (c *acceptElicitationClient) CreateElicitation(_ context.Context, request acp.UnstableCreateElicitationRequest, scope elicitationScope) (acp.UnstableCreateElicitationResponse, error) {
+	c.elicitations = append(c.elicitations, request)
+	c.scopes = append(c.scopes, scope)
 	resp := acp.NewUnstableCreateElicitationResponseAccept()
 	resp.Accept.Content = map[string]any{"name": "Ada"}
 	resp.Accept.Meta = map[string]any{"ok": true}
@@ -950,6 +1073,28 @@ func (c *runEventsClient) RunTurn(context.Context, codex.TurnStartRequest) (<-ch
 func (c *runEventsClient) CancelTurn(context.Context, string, string) error { return nil }
 func (c *runEventsClient) UnsubscribeThread(context.Context, string) error  { return nil }
 func (c *runEventsClient) Close(context.Context) error                      { return nil }
+
+type openRunEventsClient struct {
+	*spyCodexClient
+	events []codex.Event
+}
+
+func (c *openRunEventsClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (<-chan codex.Event, error) {
+	out := make(chan codex.Event, len(c.events))
+	go func() {
+		defer close(out)
+		for _, event := range c.events {
+			out <- event
+		}
+		<-ctx.Done()
+	}()
+
+	return out, nil
+}
+
+func (c *openRunEventsClient) CancelTurn(context.Context, string, string) error { return nil }
+func (c *openRunEventsClient) UnsubscribeThread(context.Context, string) error  { return nil }
+func (c *openRunEventsClient) Close(context.Context) error                      { return nil }
 
 type cancelErrorClient struct {
 	*spyCodexClient

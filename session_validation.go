@@ -10,6 +10,14 @@ func validateSessionStartPaths(cwd string, additionalDirectories []string) error
 	return validateAbsolutePaths("additionalDirectories", additionalDirectories)
 }
 
+func validateOptionalAbsolutePath(field string, value *string) error {
+	if value == nil {
+		return nil
+	}
+
+	return validateRequiredAbsolutePath(field, *value)
+}
+
 func validateAbsolutePaths(field string, paths []string) error {
 	for index, path := range paths {
 		if err := validateRequiredAbsolutePath(field, path); err != nil {

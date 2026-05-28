@@ -3,10 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
-	"errors"
 )
-
-var ErrThreadNotFound = errors.New("codex thread not found")
 
 // Client is the provider boundary used by the ACP layer.
 type Client interface {
@@ -21,6 +18,9 @@ type Client interface {
 	CancelTurn(context.Context, string, string) error
 	CompactThread(context.Context, ThreadCompactRequest) (map[string]any, error)
 	StartReview(context.Context, ReviewStartRequest) (map[string]any, error)
+	SetGoal(context.Context, GoalSetRequest) (Goal, error)
+	GetGoal(context.Context, string) (*Goal, error)
+	ClearGoal(context.Context, string) (bool, error)
 	CollaborationModeList(context.Context) (CollaborationModeListResponse, error)
 	MCPServerStatusList(context.Context) (MCPServerStatusListResponse, error)
 	UnsubscribeThread(context.Context, string) error
@@ -86,15 +86,16 @@ type ThreadTurnsListResponse struct {
 }
 
 type Thread struct {
-	ID        string
-	SessionID string
-	Path      string
-	Cwd       string
-	Model     string
-	Provider  string
-	Title     string
-	UpdatedAt string
-	Raw       map[string]any
+	ID              string
+	SessionID       string
+	Path            string
+	Cwd             string
+	Model           string
+	Provider        string
+	ReasoningEffort string
+	Title           string
+	UpdatedAt       string
+	Raw             map[string]any
 }
 
 type ThreadHistory struct {
@@ -132,6 +133,25 @@ type ReviewStartRequest struct {
 	Delivery string
 }
 
+type GoalSetRequest struct {
+	ThreadID    string
+	Objective   string
+	Status      string
+	TokenBudget *int64
+}
+
+type Goal struct {
+	ThreadID        string
+	Objective       string
+	Status          string
+	TokenBudget     *int64
+	TokensUsed      int64
+	TimeUsedSeconds int64
+	CreatedAt       int64
+	UpdatedAt       int64
+	Raw             map[string]any
+}
+
 type CollaborationModeListResponse struct {
 	Modes []CollaborationMode
 	Raw   map[string]any
@@ -159,6 +179,22 @@ type MCPServerStatus struct {
 
 type UserInput map[string]any
 
+type ModelReasoningEffort struct {
+	ID          string
+	Description string
+	Raw         map[string]any
+}
+
+type Model struct {
+	ID                     string
+	Name                   string
+	Description            string
+	Context                int64
+	DefaultReasoningEffort string
+	ReasoningEfforts       []ModelReasoningEffort
+	Raw                    map[string]any
+}
+
 type EventKind string
 
 const (
@@ -169,7 +205,10 @@ const (
 	EventToolDelta         EventKind = "tool_delta"
 	EventToolCompleted     EventKind = "tool_completed"
 	EventDiffUpdated       EventKind = "diff_updated"
+	EventUsageUpdated      EventKind = "usage_updated"
 	EventAccountUpdated    EventKind = "account_updated"
+	EventGoalUpdated       EventKind = "goal_updated"
+	EventGoalCleared       EventKind = "goal_cleared"
 	EventRaw               EventKind = "raw"
 	EventWarning           EventKind = "warning"
 	EventError             EventKind = "error"
@@ -208,7 +247,9 @@ type Event struct {
 	Tool       ToolEvent
 	StopReason StopReason
 	Usage      Usage
+	TokenUsage TokenUsage
 	Account    Account
+	Goal       *Goal
 	Completed  bool
 	RawMethod  string
 	RawParams  json.RawMessage
@@ -227,16 +268,19 @@ type ToolEvent struct {
 }
 
 type Usage struct {
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
+	CachedReadTokens      int64
+	CachedWriteTokens     int64
+	InputTokens           int64
+	OutputTokens          int64
+	ReasoningOutputTokens int64
+	TotalTokens           int64
 }
 
-type Model struct {
-	ID      string
-	Name    string
-	Context int64
-	Raw     map[string]any
+type TokenUsage struct {
+	Last               Usage
+	Total              Usage
+	ModelContextWindow int64
+	Raw                map[string]any
 }
 
 type Account struct {

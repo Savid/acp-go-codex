@@ -20,6 +20,9 @@ const (
 
 // HandleExtensionMethod handles Codex-specific ACP extension methods.
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
 	switch method {
 	case codexSessionImportMethod:
 		return a.importCodexSession(ctx, params)
@@ -29,6 +32,8 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 		return a.commitCodexSessionImport(ctx, params)
 	case codexSessionAbortImportMethod:
 		return a.abortCodexSessionImport(ctx, params)
+	case codexSessionSetGoalMethod:
+		return a.setCodexGoal(ctx, params)
 	case codexTurnSteerMethod:
 		return a.steerCodexTurn(ctx, params)
 	case codexThreadCompactMethod:
@@ -120,7 +125,7 @@ func (a *Agent) steerCodexTurn(ctx context.Context, params json.RawMessage) (any
 		return nil, acp.NewInvalidParams(map[string]any{"input": validationRequired})
 	}
 	if err := session.client.SteerTurn(ctx, codex.TurnSteerRequest{ThreadID: threadID, ExpectedTurnID: req.ExpectedTurnID, Input: input}); err != nil {
-		return nil, err
+		return nil, codexThreadACPError(err, session.accountMetaSnapshot(), codexThreadErrorData(session.id, threadID))
 	}
 
 	return map[string]any{"threadId": threadID, "turnId": req.ExpectedTurnID}, nil
@@ -136,7 +141,8 @@ func (a *Agent) compactCodexThread(ctx context.Context, params json.RawMessage) 
 		return nil, err
 	}
 
-	return session.client.CompactThread(ctx, codex.ThreadCompactRequest{ThreadID: threadID})
+	result, err := session.client.CompactThread(ctx, codex.ThreadCompactRequest{ThreadID: threadID})
+	return result, codexThreadACPError(err, session.accountMetaSnapshot(), codexThreadErrorData(session.id, threadID))
 }
 
 func (a *Agent) startCodexReview(ctx context.Context, params json.RawMessage) (any, error) {
@@ -152,7 +158,8 @@ func (a *Agent) startCodexReview(ctx context.Context, params json.RawMessage) (a
 		req.Target = map[string]any{"type": "uncommittedChanges"}
 	}
 
-	return session.client.StartReview(ctx, codex.ReviewStartRequest{ThreadID: threadID, Target: req.Target, Delivery: req.Delivery})
+	result, err := session.client.StartReview(ctx, codex.ReviewStartRequest{ThreadID: threadID, Target: req.Target, Delivery: req.Delivery})
+	return result, codexThreadACPError(err, session.accountMetaSnapshot(), codexThreadErrorData(session.id, threadID))
 }
 
 func (a *Agent) readCodexThread(ctx context.Context, params json.RawMessage) (any, error) {
@@ -165,7 +172,8 @@ func (a *Agent) readCodexThread(ctx context.Context, params json.RawMessage) (an
 		return nil, err
 	}
 
-	return session.client.ReadThread(ctx, codex.ThreadReadRequest{ThreadID: threadID})
+	result, err := session.client.ReadThread(ctx, codex.ThreadReadRequest{ThreadID: threadID})
+	return result, codexThreadACPError(err, session.accountMetaSnapshot(), codexThreadErrorData(session.id, threadID))
 }
 
 func (a *Agent) listCodexThreadTurns(ctx context.Context, params json.RawMessage) (any, error) {
@@ -178,12 +186,13 @@ func (a *Agent) listCodexThreadTurns(ctx context.Context, params json.RawMessage
 		return nil, err
 	}
 
-	return session.client.ListTurns(ctx, codex.ThreadTurnsListRequest{
+	result, err := session.client.ListTurns(ctx, codex.ThreadTurnsListRequest{
 		ThreadID:      threadID,
 		Cursor:        req.Cursor,
 		Limit:         req.Limit,
 		SortDirection: req.SortDirection,
 	})
+	return result, codexThreadACPError(err, session.accountMetaSnapshot(), codexThreadErrorData(session.id, threadID))
 }
 
 func (a *Agent) listCodexCollaborationModes(ctx context.Context, params json.RawMessage) (any, error) {

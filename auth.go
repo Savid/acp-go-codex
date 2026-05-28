@@ -71,6 +71,9 @@ func (a *Agent) authCapabilities() acp.AgentAuthCapabilities {
 }
 
 func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if err := a.ensureOpen(); err != nil {
+		return acp.AuthenticateResponse{}, err
+	}
 	if params.MethodId != authMethodChatGPTAuthTokens {
 		return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 	}
@@ -81,7 +84,7 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	}
 
 	a.setExternalAuthTokens(tokens)
-	client, err := a.newClient(ctx, nil)
+	client, err := a.newClient(ctx, nil, nil)
 	if err != nil {
 		a.clearExternalAuthTokens()
 		return acp.AuthenticateResponse{}, err
@@ -93,6 +96,9 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 }
 
 func (a *Agent) UnstableLogout(ctx context.Context, _ acp.UnstableLogoutRequest) (acp.UnstableLogoutResponse, error) {
+	if err := a.ensureOpen(); err != nil {
+		return acp.UnstableLogoutResponse{}, err
+	}
 	if !a.options.AllowAccountLogout {
 		return acp.UnstableLogoutResponse{}, acp.NewInvalidRequest(map[string]any{
 			jsonFieldError: "Codex account logout is disabled; set WithAllowAccountLogout for adapter-owned CODEX_HOME",
@@ -113,7 +119,7 @@ func (a *Agent) UnstableLogout(ctx context.Context, _ acp.UnstableLogoutRequest)
 		err = errors.Join(err, session.Close(ctx))
 	}
 
-	client, clientErr := a.newClient(ctx, nil)
+	client, clientErr := a.newClient(ctx, nil, nil)
 	if clientErr != nil {
 		return acp.UnstableLogoutResponse{}, errors.Join(err, clientErr)
 	}

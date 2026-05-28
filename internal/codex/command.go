@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
@@ -15,7 +16,7 @@ import (
 const (
 	envCodexHome    = "CODEX_HOME"
 	envCodexPath    = "CODEX_EXECUTABLE"
-	minCodexVersion = "0.129.0"
+	minCodexVersion = "0.134.0"
 )
 
 var execCommandContext = exec.CommandContext
@@ -48,7 +49,7 @@ func launchAppServer(ctx context.Context, options Options) (*lineTransport, *exe
 		_ = stdin.Close()
 		return nil, nil, err
 	}
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = codexStderrWriter(options.Logger)
 
 	if err := startProcess(cmd); err != nil {
 		_ = stdin.Close()
@@ -57,6 +58,31 @@ func launchAppServer(ctx context.Context, options Options) (*lineTransport, *exe
 	}
 
 	return newLineTransport(stdout, stdin, processCloser{cmd: cmd, stdin: stdin, stdout: stdout}), cmd, nil
+}
+
+type processStderrWriter struct {
+	logger *slog.Logger
+}
+
+func codexStderrWriter(logger *slog.Logger) io.Writer {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return processStderrWriter{logger: logger}
+}
+
+func (w processStderrWriter) Write(p []byte) (int, error) {
+	text := strings.TrimSpace(string(p))
+	if text != "" {
+		w.logger.DebugContext(
+			context.Background(),
+			"Codex app-server stderr",
+			slog.String("stderr", strings.TrimRight(string(p), "\r\n")),
+		)
+	}
+
+	return len(p), nil
 }
 
 func resolveCodexPath(path string) (string, error) {

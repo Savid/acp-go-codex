@@ -206,13 +206,20 @@ func TestMCPBridgePreparationAndProxy(t *testing.T) {
 
 	conn := &recordingMCPAgentClient{recordingAgentClient: newRecordingAgentClient()}
 	agent.setAgentClient(conn)
-	prepared, bridge, err = agent.prepareMCPServers(context.Background(), "s", []acp.McpServer{{Acp: &acp.McpServerAcpInline{Id: "acp", Name: "ACP"}}})
+	prepared, bridge, err = agent.prepareMCPServers(context.Background(), "s", []acp.McpServer{{Acp: &acp.McpServerAcpInline{
+		Id:   "acp",
+		Name: "ACP",
+		Meta: map[string]any{codexMetaKey: map[string]any{mcpDefaultApprovalModeKey: mcpApprovalModeApprove}},
+	}}})
 	if err != nil {
 		t.Fatalf("prepare ACP server returned error: %v", err)
 	}
 	defer bridge.Close()
 	if len(prepared) != 1 || prepared[0].Stdio == nil || prepared[0].Stdio.Command != "/bin/acp-go-codex" {
 		t.Fatalf("prepared servers = %#v", prepared)
+	}
+	if prepared[0].Stdio.Meta[codexMetaKey] == nil {
+		t.Fatalf("prepared ACP server lost metadata: %#v", prepared[0].Stdio.Meta)
 	}
 	args := bridge.proxyArgs("acp")
 	if !containsAll(jsonString(args), "--flag", mcpProxySubcommand, "-acp-id", "acp") {
@@ -678,9 +685,6 @@ func TestMCPStableFromUnstableAndConfigBranches(t *testing.T) {
 	}
 	if !strings.Contains(tomlEnvTable([]acp.EnvVariable{{}, {Name: "A", Value: "B"}}), "A") {
 		t.Fatal("tomlEnvTable skipped valid env")
-	}
-	if !strings.Contains(tomlHeaderTable([]acp.HttpHeader{{}, {Name: "H", Value: "V"}}), "H") {
-		t.Fatal("tomlHeaderTable skipped valid header")
 	}
 }
 

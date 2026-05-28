@@ -1,63 +1,85 @@
 ---
-title: Permissions
-description: Command, file, generic permission, and user-input flows.
+title: "Permissions"
+description: "How Codex approvals map to ACP permission prompts"
+icon: "shield-check"
 ---
 
-Codex approval requests are mapped to ACP `session/request_permission`. The
-selected ACP option is mapped back to the exact Codex decision where Codex
-provides one.
+Permission flow is a trust boundary. The adapter does not silently approve
+Codex requests. Codex owns its native approval and sandbox policy stack; the
+adapter preserves the ACP approval boundary and forwards host decisions back to
+Codex.
 
-Supported request paths:
+## Configure defaults
 
-- `item/commandExecution/requestApproval`;
-- `item/fileChange/requestApproval`;
-- `item/permissions/requestApproval` when Codex's generic permission tool is
-  explicitly enabled;
-- `item/tool/requestUserInput`;
-- `mcpServer/elicitation/request`.
+| Need | Standalone | Embedded | Per session |
+| --- | --- | --- | --- |
+| Default approval policy | no dedicated flag | use request metadata defaults in your host | `_meta.codex.options.approvalPolicy` |
+| Sandbox policy | no dedicated flag | use request metadata defaults in your host | `_meta.codex.options.sandboxPolicy` |
+| MCP tool approval | MCP server metadata | MCP server metadata | per MCP server `Meta` |
 
-## Command and file approvals
+Codex policy objects are native Codex shapes. The adapter validates only the
+ACP envelope and forwards the policy to `turn/start`.
 
-The adapter builds ACP permission options from Codex `availableDecisions` when
-present. If Codex does not provide explicit options, the fallback mapping is:
+## Flow
 
-| ACP option ID | Codex decision |
+1. Codex emits a server-to-client approval request.
+2. The adapter maps the request to ACP `session/request_permission`.
+3. The client selects allow, allow for session, reject, or cancel.
+4. The adapter submits the corresponding Codex approval decision.
+5. Cancellation or connection close detaches pending interactions.
+
+The ACP-facing methods and callbacks are listed in
+[ACP methods](/docs/reference/acp-methods).
+
+## Options sent to clients
+
+| ACP choice | Codex decision |
 | --- | --- |
-| `accept` | `accept` |
-| `acceptForSession` | `acceptForSession` |
-| `decline` | `decline` |
-| `cancel` | `cancel` |
-| `acceptWithExecpolicyAmendment` | `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":...}}` |
+| Allow once | `accept` |
+| Allow for session | `acceptForSession` |
+| Reject once | `decline` |
+| Cancel | `cancel` |
 
-Codex-provided object decisions, such as network-policy amendments, are encoded
-as option IDs and decoded back to the original object when selected.
+The adapter does not keep a separate durable permission store. Any persistence
+comes from Codex's own approval cache or from the host's explicit session
+metadata on future requests.
 
-Command approvals use execute tool kind. File-change approvals use edit/write
-tool kind where possible and expose Codex raw approval params under
-`_meta.codex`.
+## MCP tool approvals
 
-## Generic permissions
+Codex MCP tool approval requests are permission prompts, not generic form
+elicitations. When Codex sends an MCP approval request with
+`_meta.codex.codex_approval_kind == "mcp_tool_call"`, the adapter routes it
+through ACP `session/request_permission`.
 
-`item/permissions/requestApproval` is a separate Codex feature. It requires the
-Codex CLI feature flag `--enable request_permissions_tool` and a compatible
-Codex permission profile. The adapter keeps this opt-in; it is not advertised
-as a baseline permission feature unless the host chooses to enable it.
+Trusted service MCP servers can opt into Codex-native tool approval metadata on
+the MCP server definition:
 
-Generic permission responses return the requested permission profile and a
-scope:
+```json
+{
+  "codex": {
+    "defaultToolsApprovalMode": "approve",
+    "tools": {
+      "execute": {
+        "approvalMode": "approve"
+      }
+    }
+  }
+}
+```
 
-| ACP option ID | Codex response |
-| --- | --- |
-| `grant-turn` | requested permissions with `scope: "turn"` |
-| `grant-session` | requested permissions with `scope: "session"` |
-| `decline` or no selection | empty permissions with `scope: "turn"` |
+Supported modes are `auto`, `prompt`, and `approve`. This is explicit
+per-server trust metadata; `_meta.codex.options.approvalPolicy: "never"` does
+not silently approve all MCP tools.
 
-## Interaction lifetime
+## Cancellation
 
-The adapter does not maintain a global approval cache that bypasses Codex.
-Session-scoped choices are mirrored only for ACP UI state, cancellation,
-fork/import bookkeeping, and cleanup.
+When `session/cancel` interrupts a turn, outstanding permission requests tied
+to that turn are cancelled. Codex receives an interrupt-aware cancel/deny
+decision, and the prompt returns `cancelled`.
 
-Pending permission and elicitation interactions are tied to the active turn.
-When the turn is canceled or the session closes, late responses are ignored
-instead of being submitted to Codex.
+## File changes
+
+File-change approval and diff events are mapped opportunistically when Codex
+emits them. The adapter keeps successful shell output, file updates, and diffs
+in the normal prompt stream where possible; raw rollout rows remain available
+through [`_codex/sdkMessage`](/docs/features/raw-events) for diagnostics.

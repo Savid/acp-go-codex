@@ -360,18 +360,18 @@ func TestSessionStoreImportMaterializeAndList(t *testing.T) {
 		t.Fatalf("project key returned error: %v", err)
 	}
 
-	importParams := json.RawMessage(`{"sessionId":"stored-session","cwd":` + quoteJSON(cwd) + `,"entries":[{"type":"turn_context","payload":{"cwd":"/repo"}},{"type":"response_item","payload":{"type":"message","role":"assistant"}}]}`)
+	importParams := json.RawMessage(`{"sessionId":"stored-session","cwd":` + quoteJSON(cwd) + `,"entries":[{"type":"session_meta","payload":{"id":"native-thread"}},{"type":"turn_context","payload":{"cwd":"/repo"}},{"type":"response_item","payload":{"type":"message","role":"assistant"}}]}`)
 	result, err := agent.HandleExtensionMethod(ctx, codexSessionImportMethod, importParams)
 	if err != nil {
 		t.Fatalf("import returned error: %v", err)
 	}
 	resultMap, ok := result.(map[string]any)
-	if !ok || resultMap[jsonFieldEntries] != 2 {
+	if !ok || resultMap[jsonFieldEntries] != 3 {
 		t.Fatalf("import result = %#v", result)
 	}
 
 	entries, err := store.Load(ctx, SessionKey{ProjectKey: projectKey, SessionID: "stored-session"})
-	if err != nil || len(entries) != 2 {
+	if err != nil || len(entries) != 3 {
 		t.Fatalf("store Load entries=%d err=%v", len(entries), err)
 	}
 	path, err := materializeRollout(entries)
@@ -381,6 +381,21 @@ func TestSessionStoreImportMaterializeAndList(t *testing.T) {
 	defer func() { _ = removeMaterializedRollout(path) }()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("materialized file missing: %v", err)
+	}
+
+	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+	if len(listResp.Sessions) == 0 {
+		t.Fatal("stored session was not listed")
+	}
+	if listResp.Sessions[0].SessionId != "stored-session" {
+		t.Fatalf("stored session id = %q", listResp.Sessions[0].SessionId)
+	}
+	listMeta, _ := listResp.Sessions[0].Meta[codexMetaKey].(map[string]any)
+	if _, ok := listMeta[codexThreadIDMetaKey]; ok {
+		t.Fatalf("stored session list exposed ACP id as codex thread id: %#v", listMeta)
 	}
 
 	loadResp, err := agent.LoadSession(ctx, LoadSessionRequest("stored-session", cwd))
@@ -394,12 +409,26 @@ func TestSessionStoreImportMaterializeAndList(t *testing.T) {
 	if client.resume.Path == "" {
 		t.Fatal("LoadSession did not resume from a materialized rollout path")
 	}
-
-	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
-	if err != nil {
-		t.Fatalf("ListSessions returned error: %v", err)
+	if client.resume.ThreadID != "native-thread" {
+		t.Fatalf("LoadSession resume thread id = %q, want native rollout id", client.resume.ThreadID)
 	}
-	if len(listResp.Sessions) == 0 {
-		t.Fatal("stored session was not listed")
+
+	resumeClient := newSpyCodexClient()
+	resumeAgent := NewAgent(
+		WithSessionStore(store),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return resumeClient, nil }),
+	)
+	resumeResp, err := resumeAgent.ResumeSession(ctx, ResumeSessionRequest("stored-session", cwd))
+	if err != nil {
+		t.Fatalf("ResumeSession returned error: %v", err)
+	}
+	if resumeResp.Meta[codexMetaKey] == nil {
+		t.Fatalf("resume meta = %#v", resumeResp.Meta)
+	}
+	if resumeClient.resume.Path == "" {
+		t.Fatal("ResumeSession did not resume from a materialized rollout path")
+	}
+	if resumeClient.resume.ThreadID != "native-thread" {
+		t.Fatalf("ResumeSession thread id = %q, want native rollout id", resumeClient.resume.ThreadID)
 	}
 }

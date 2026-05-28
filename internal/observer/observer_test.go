@@ -105,11 +105,14 @@ func TestObserverRecordsACPRequestsAndProcessStarts(t *testing.T) {
 	observer.ObserveFirstPromptUpdate(ctx)
 	observer.ObserveFirstPromptUpdate(context.Background())
 	finishPrompt(PromptResult{
-		InputTokens:  1,
-		OutputTokens: 2,
-		TotalTokens:  3,
-		Model:        "gpt-test",
-		StopReason:   "end_turn",
+		CachedReadTokens:  4,
+		CachedWriteTokens: 5,
+		InputTokens:       1,
+		OutputTokens:      2,
+		ThoughtTokens:     6,
+		TotalTokens:       3,
+		Model:             "gpt-test",
+		StopReason:        "end_turn",
 	})
 	_, finishPrompt = observer.StartPrompt(ctx, nil, "")
 	finishPrompt(PromptResult{Err: context.Canceled, StopReason: "cancelled"})

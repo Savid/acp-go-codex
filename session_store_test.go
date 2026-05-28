@@ -39,6 +39,9 @@ func TestSessionStoreAdditionalBranches(t *testing.T) {
 	if err := uninitialized.Append(ctx, key, []SessionStoreEntry{SessionStoreEntry(`{"a":1}`)}); err != nil {
 		t.Fatalf("uninitialized Append returned error: %v", err)
 	}
+	if err := (&InMemorySessionStore{}).Replace(ctx, key, []SessionStoreEntry{SessionStoreEntry(`{"replace":1}`)}); err != nil {
+		t.Fatalf("uninitialized Replace returned error: %v", err)
+	}
 	if err := uninitialized.ReplaceSession(ctx, key, []SessionStoreReplacement{{Key: key}}); err != nil {
 		t.Fatalf("empty replacement returned error: %v", err)
 	}
@@ -73,6 +76,24 @@ func TestSessionStoreBranches(t *testing.T) {
 	}
 	if err := store.ReplaceSession(ctx, key, []SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{json.RawMessage(`{"type":"c"}`)}}}); err != nil {
 		t.Fatalf("ReplaceSession returned error: %v", err)
+	}
+	if err := store.Replace(ctx, sub, []SessionStoreEntry{json.RawMessage(`{"type":"d"}`)}); err != nil {
+		t.Fatalf("Replace returned error: %v", err)
+	}
+	replacedSub, err := store.Load(ctx, sub)
+	if err != nil || len(replacedSub) != 1 || string(replacedSub[0]) != `{"type":"d"}` {
+		t.Fatalf("Replace load entries=%q err=%v", replacedSub, err)
+	}
+	replacedSub[0][0] = '['
+	reloadedSub, _ := store.Load(ctx, sub)
+	if string(reloadedSub[0]) != `{"type":"d"}` {
+		t.Fatalf("Replace did not clone entries: %s", reloadedSub[0])
+	}
+	if err := store.Replace(ctx, sub, nil); err != nil {
+		t.Fatalf("empty Replace returned error: %v", err)
+	}
+	if entries, _ := store.Load(ctx, sub); len(entries) != 0 {
+		t.Fatalf("empty Replace did not delete entries: %#v", entries)
 	}
 	summaries, err := store.ListSessions(ctx, "project")
 	if err != nil || len(summaries) != 1 {
@@ -171,6 +192,9 @@ func TestSessionStoreErrorBranches(t *testing.T) {
 	if err := nilStore.ReplaceSession(ctx, key, nil); err == nil {
 		t.Fatal("nil ReplaceSession succeeded")
 	}
+	if err := nilStore.Replace(ctx, key, nil); err == nil {
+		t.Fatal("nil Replace succeeded")
+	}
 
 	canceled := canceledContext()
 	store := NewInMemorySessionStore()
@@ -188,6 +212,9 @@ func TestSessionStoreErrorBranches(t *testing.T) {
 	}
 	if err := store.ReplaceSession(canceled, key, nil); err == nil {
 		t.Fatal("canceled ReplaceSession succeeded")
+	}
+	if err := store.Replace(canceled, key, nil); err == nil {
+		t.Fatal("canceled Replace succeeded")
 	}
 	if err := store.Append(ctx, key, nil); err != nil {
 		t.Fatalf("empty Append returned error: %v", err)

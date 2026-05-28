@@ -45,7 +45,8 @@
               "docs/features/elicitation",
               "docs/features/mcp",
               "docs/features/session-store",
-              "docs/features/raw-events"
+              "docs/features/raw-events",
+              "docs/features/goals"
             ]
           }
         ]

@@ -7,11 +7,14 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 var (
-	sessionRolloutAppendTimeout = 60 * time.Second
-	sessionRolloutAppendDelays  = []time.Duration{0, 200 * time.Millisecond, 800 * time.Millisecond}
+	sessionRolloutAppendTimeout      = 60 * time.Second
+	sessionRolloutAppendDelays       = []time.Duration{0, 200 * time.Millisecond, 800 * time.Millisecond}
+	sessionRolloutCompletionFallback = 2 * time.Second
 )
 
 type rolloutMirrorRow struct {
@@ -20,20 +23,66 @@ type rolloutMirrorRow struct {
 }
 
 func (s *Session) mirrorAndEmitRollout(ctx context.Context) error {
+	return s.mirrorAndEmitRolloutWithCompletion(ctx, nil, nil)
+}
+
+func (s *Session) prepareRolloutLiveCursors() {
+	rows, err := countRolloutRows(s.rolloutPath)
+	if err != nil {
+		return
+	}
+
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	if rows > s.completionRows {
+		s.completionRows = rows
+	}
+	if rows > s.visibleRows {
+		s.visibleRows = rows
+	}
+}
+
+func countRolloutRows(path string) (int, error) {
+	if path == "" {
+		return 0, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(nil, maxSessionImportLineBytes)
+
+	rows := 0
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) != "" {
+			rows++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+
+	return rows, nil
+}
+
+func (s *Session) mirrorAndEmitRolloutWithCompletion(
+	ctx context.Context,
+	completed chan<- struct{},
+	events chan<- codex.Event,
+) error {
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
 
 	store := s.agent.options.SessionStore
 	rawEnabled := s.rawMessages.Enabled()
-	if s.rolloutPath == "" || (store == nil && !rawEnabled) {
+	if s.rolloutPath == "" || (store == nil && !rawEnabled && completed == nil && events == nil) {
 		return nil
 	}
-	startRow := s.mirroredRows
-	if store == nil {
-		startRow = s.emittedRawRows
-	} else if rawEnabled {
-		startRow = min(s.mirroredRows, s.emittedRawRows)
-	}
+	startRow := s.rolloutStartRow(store != nil, rawEnabled, completed != nil, events != nil)
 
 	file, err := os.Open(s.rolloutPath)
 	if err != nil {
@@ -79,7 +128,7 @@ func (s *Session) mirrorAndEmitRollout(ctx context.Context) error {
 		durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
 		if err := appendRolloutEntries(ctx, store, SessionKey{
 			ProjectKey: projectKey,
-			SessionID:  firstNonEmpty(s.codexThreadID, string(s.id)),
+			SessionID:  string(s.id),
 		}, durableEntries); err != nil {
 			return err
 		}
@@ -90,8 +139,43 @@ func (s *Session) mirrorAndEmitRollout(ctx context.Context) error {
 	if rawEnabled {
 		s.emitRawRolloutRows(ctx, rows)
 	}
+	if events != nil {
+		s.emitRolloutEvents(rows, events)
+	}
+	if completed != nil {
+		s.emitRolloutCompletions(rows, completed)
+	}
 
 	return nil
+}
+
+func (s *Session) rolloutStartRow(
+	storeEnabled bool,
+	rawEnabled bool,
+	completionEnabled bool,
+	eventsEnabled bool,
+) int {
+	startRow := 0
+	set := false
+	for _, cursor := range []struct {
+		enabled bool
+		row     int
+	}{
+		{storeEnabled, s.mirroredRows},
+		{rawEnabled, s.emittedRawRows},
+		{completionEnabled, s.completionRows},
+		{eventsEnabled, s.visibleRows},
+	} {
+		if !cursor.enabled {
+			continue
+		}
+		if !set || cursor.row < startRow {
+			startRow = cursor.row
+			set = true
+		}
+	}
+
+	return startRow
 }
 
 func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKey, entries []SessionStoreEntry) error {
@@ -149,7 +233,88 @@ func (s *Session) emitRawRolloutRows(ctx context.Context, rows []rolloutMirrorRo
 	}
 }
 
-func (s *Session) startRolloutTail(ctx context.Context) (context.CancelFunc, <-chan struct{}) {
+func (s *Session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan<- struct{}) {
+	nextRow := s.completionRows
+	for _, row := range rows {
+		if row.index < s.completionRows {
+			continue
+		}
+		nextRow = row.index + 1
+		if rolloutTaskComplete(row.entry) {
+			select {
+			case completed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	if nextRow > s.completionRows {
+		s.completionRows = nextRow
+	}
+}
+
+func (s *Session) emitRolloutEvents(rows []rolloutMirrorRow, events chan<- codex.Event) {
+	nextRow := s.visibleRows
+	for _, row := range rows {
+		if row.index < s.visibleRows {
+			continue
+		}
+		nextRow = row.index + 1
+		event, ok := rolloutEvent(row.entry)
+		if !ok {
+			continue
+		}
+		select {
+		case events <- event:
+		default:
+		}
+	}
+	if nextRow > s.visibleRows {
+		s.visibleRows = nextRow
+	}
+}
+
+func rolloutEvent(entry SessionStoreEntry) (codex.Event, bool) {
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(entry, &row); err != nil {
+		return codex.Event{}, false
+	}
+	if row.Type != "event_msg" || row.Payload.Type != "agent_message" || row.Payload.Message == "" {
+		return codex.Event{}, false
+	}
+
+	return codex.Event{
+		Kind:      codex.EventAgentMessageDelta,
+		Text:      row.Payload.Message,
+		Completed: true,
+		RawJSON:   string(entry),
+	}, true
+}
+
+func rolloutTaskComplete(entry SessionStoreEntry) bool {
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(entry, &row); err != nil {
+		return false
+	}
+
+	return row.Type == "event_msg" && row.Payload.Type == "task_complete"
+}
+
+func (s *Session) startRolloutTail(
+	ctx context.Context,
+	completed chan<- struct{},
+	events chan<- codex.Event,
+) (context.CancelFunc, <-chan struct{}) {
 	tailCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -161,10 +326,10 @@ func (s *Session) startRolloutTail(ctx context.Context) (context.CancelFunc, <-c
 		for {
 			select {
 			case <-tailCtx.Done():
-				_ = s.mirrorAndEmitRollout(context.WithoutCancel(ctx))
+				_ = s.mirrorAndEmitRolloutWithCompletion(context.WithoutCancel(ctx), completed, events)
 				return
 			case <-ticker.C:
-				_ = s.mirrorAndEmitRollout(tailCtx)
+				_ = s.mirrorAndEmitRolloutWithCompletion(tailCtx, completed, events)
 			}
 		}
 	}()

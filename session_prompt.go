@@ -4,10 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-codex/internal/observer"
+)
+
+const (
+	codexUsageMetaKey         = "usage"
+	codexThreadUsageMetaKey   = "threadUsage"
+	usageCachedReadTokensKey  = "cachedReadTokens"
+	usageCachedWriteTokensKey = "cachedWriteTokens"
+	usageInputTokensKey       = "inputTokens"
+	usageOutputTokensKey      = "outputTokens"
+	usageReasoningOutputKey   = "reasoningOutputTokens"
+	usageTotalTokensKey       = "totalTokens"
 )
 
 func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -27,6 +39,7 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 
 	snapshot := s.snapshot()
 	model, effort, tier, personality, collaborationMode := s.turnSettings()
+	s.prepareRolloutLiveCursors()
 	events, err := s.client.RunTurn(turnCtx, codex.TurnStartRequest{
 		ThreadID:          snapshot.codexThreadID,
 		Prompt:            input,
@@ -35,14 +48,20 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		ReasoningEffort:   effort,
 		Personality:       personality,
 		CollaborationMode: collaborationMode,
-		SandboxPolicy:     sandboxPolicyForAdditionalDirectories(snapshot.additionalDirectories),
-		OutputSchema:      snapshot.outputSchema,
+		ApprovalPolicy:    snapshot.approvalPolicy,
+		SandboxPolicy: firstNonNil(
+			sandboxPolicy(snapshot.sandboxPolicy),
+			sandboxPolicyForAdditionalDirectories(snapshot.additionalDirectories),
+		),
+		OutputSchema: snapshot.outputSchema,
 	})
 	if err != nil {
-		return acp.PromptResponse{}, codexAuthRequiredError(err, s.accountMetaSnapshot())
+		return acp.PromptResponse{}, codexThreadACPError(err, s.accountMetaSnapshot(), codexThreadErrorData(s.id, snapshot.codexThreadID))
 	}
 
-	stopTail, tailDone := s.startRolloutTail(turnCtx)
+	rolloutCompleted := make(chan struct{}, 1)
+	rolloutEvents := make(chan codex.Event, 128)
+	stopTail, tailDone := s.startRolloutTail(turnCtx, rolloutCompleted, rolloutEvents)
 	tailStopped := false
 	defer func() {
 		if !tailStopped {
@@ -52,11 +71,21 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}()
 	stopReason := acp.StopReasonEndTurn
 	var usage *acp.Usage
+	var streamedUsage codex.Usage
+	var streamedThreadUsage codex.Usage
+	var streamedUsageContextWindow int64
 	var agentText strings.Builder
 	agentDeltaItems := map[string]struct{}{}
 	reasoningDeltaItems := map[string]struct{}{}
-
-	for event := range events {
+	var completionTimer *time.Timer
+	var completionFallback <-chan time.Time
+	defer func() {
+		if completionTimer != nil {
+			completionTimer.Stop()
+		}
+	}()
+	completed := false
+	handleEvent := func(event codex.Event) error {
 		if event.TurnID != "" {
 			s.setTurnID(event.TurnID)
 		}
@@ -64,7 +93,7 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			s.setAccount(redactedAccountMeta(event.Account))
 		}
 		if err := s.emitRawCodexEvent(turnCtx, event); err != nil {
-			return acp.PromptResponse{}, err
+			return err
 		}
 		visibleEvent := dedupeCompletedTextEvent(event, agentDeltaItems, reasoningDeltaItems)
 		if visibleEvent.Kind == codex.EventAgentMessageDelta {
@@ -72,18 +101,67 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		}
 		for _, update := range eventUpdates(visibleEvent) {
 			if err := s.emitUpdates(turnCtx, update); err != nil {
-				return acp.PromptResponse{}, err
+				return err
+			}
+		}
+		for _, update := range usageUpdatesForEvent(event, &streamedUsage, &streamedThreadUsage, &streamedUsageContextWindow) {
+			if err := s.emitUpdates(turnCtx, update); err != nil {
+				return err
+			}
+		}
+		if event.Kind == codex.EventUsageUpdated {
+			if tokenUsage := usageFromCodex(event.TokenUsage.Last); tokenUsage != nil {
+				usage = tokenUsage
 			}
 		}
 		if event.Kind == codex.EventCompleted {
+			completed = true
 			stopReason = stopReasonFromCodex(event.StopReason)
-			usage = usageFromCodex(event.Usage)
+			if completedUsage := usageFromCodex(event.Usage); completedUsage != nil {
+				usage = completedUsage
+			}
 		}
 		if visibleEvent.Kind == codex.EventAgentMessageDelta && visibleEvent.Text != "" {
 			agentText.WriteString(visibleEvent.Text)
 		}
 		if event.Kind == codex.EventError && event.Err != nil && !s.wasTurnCancelled() {
-			return acp.PromptResponse{}, codexAuthRequiredError(event.Err, s.accountMetaSnapshot())
+			return codexThreadACPError(
+				event.Err,
+				s.accountMetaSnapshot(),
+				codexThreadErrorData(s.id, firstNonEmpty(event.ThreadID, snapshot.codexThreadID)),
+			)
+		}
+
+		return nil
+	}
+
+	eventsOpen := true
+	for eventsOpen {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				eventsOpen = false
+				continue
+			}
+			if err := handleEvent(event); err != nil {
+				return acp.PromptResponse{}, err
+			}
+		case event := <-rolloutEvents:
+			if err := handleEvent(event); err != nil {
+				return acp.PromptResponse{}, err
+			}
+		case <-rolloutCompleted:
+			completed = true
+			if completionTimer == nil {
+				if sessionRolloutCompletionFallback <= 0 {
+					eventsOpen = false
+					continue
+				}
+				completionTimer = time.NewTimer(sessionRolloutCompletionFallback)
+				completionFallback = completionTimer.C
+			}
+		case <-completionFallback:
+			eventsOpen = false
 		}
 	}
 	stopTail()
@@ -92,6 +170,13 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 
 	if turnCtx.Err() != nil || s.wasTurnCancelled() {
 		stopReason = acp.StopReasonCancelled
+	}
+	if !completed && stopReason != acp.StopReasonCancelled {
+		return acp.PromptResponse{}, codexThreadACPError(
+			codex.ErrConnectionClosed,
+			s.accountMetaSnapshot(),
+			codexThreadErrorData(s.id, snapshot.codexThreadID),
+		)
 	}
 	if err := s.mirrorAndEmitRollout(context.WithoutCancel(ctx)); err != nil {
 		return acp.PromptResponse{}, err
@@ -255,6 +340,44 @@ func eventUpdates(event codex.Event) []acp.SessionUpdate {
 	}
 }
 
+func usageUpdatesForEvent(
+	event codex.Event,
+	streamedUsage *codex.Usage,
+	streamedThreadUsage *codex.Usage,
+	streamedUsageContextWindow *int64,
+) []acp.SessionUpdate {
+	switch event.Kind {
+	case codex.EventUsageUpdated:
+		if event.TokenUsage.Last == *streamedUsage &&
+			event.TokenUsage.Total == *streamedThreadUsage &&
+			event.TokenUsage.ModelContextWindow == *streamedUsageContextWindow {
+			return nil
+		}
+		updates := tokenUsageUpdateFromCodex(event.TokenUsage)
+		if len(updates) > 0 {
+			*streamedUsage = event.TokenUsage.Last
+			*streamedThreadUsage = event.TokenUsage.Total
+			*streamedUsageContextWindow = event.TokenUsage.ModelContextWindow
+		}
+
+		return updates
+	case codex.EventCompleted:
+		if event.Usage == *streamedUsage {
+			return nil
+		}
+		updates := usageUpdateFromCodex(event.Usage)
+		if len(updates) > 0 {
+			*streamedUsage = event.Usage
+			*streamedThreadUsage = codex.Usage{}
+			*streamedUsageContextWindow = 0
+		}
+
+		return updates
+	default:
+		return nil
+	}
+}
+
 func planUpdate(steps []codex.PlanStep) []acp.SessionUpdate {
 	if len(steps) == 0 {
 		return nil
@@ -368,22 +491,165 @@ func sandboxPolicyForAdditionalDirectories(dirs []string) any {
 		return nil
 	}
 
+	return workspaceWriteSandboxPolicy(dirs)
+}
+
+func sandboxMode(policy any) any {
+	switch p := policy.(type) {
+	case string:
+		return p
+	case map[string]any:
+		switch p["type"] {
+		case "dangerFullAccess", "danger-full-access", "fullAccess":
+			return "danger-full-access"
+		case "readOnly", "read-only":
+			return "read-only"
+		case "workspaceWrite", "workspace-write":
+			return "workspace-write"
+		}
+	}
+
+	return nil
+}
+
+func sandboxPolicy(policy any) any {
+	switch p := policy.(type) {
+	case string:
+		switch p {
+		case "danger-full-access":
+			return map[string]any{"type": "dangerFullAccess"}
+		case "read-only":
+			return map[string]any{
+				"type":          "readOnly",
+				"networkAccess": false,
+			}
+		case "workspace-write":
+			return workspaceWriteSandboxPolicy(nil)
+		default:
+			return p
+		}
+	case map[string]any:
+		cloned, _ := cloneAny(p).(map[string]any)
+		if cloned == nil {
+			return p
+		}
+		if cloned["type"] == "workspaceWrite" || cloned["type"] == "workspace-write" {
+			cloned["type"] = "workspaceWrite"
+			if _, ok := cloned["writableRoots"]; !ok {
+				cloned["writableRoots"] = []string{}
+			}
+			if _, ok := cloned["networkAccess"]; !ok {
+				cloned["networkAccess"] = false
+			}
+			if _, ok := cloned["excludeTmpdirEnvVar"]; !ok {
+				cloned["excludeTmpdirEnvVar"] = false
+			}
+			if _, ok := cloned["excludeSlashTmp"]; !ok {
+				cloned["excludeSlashTmp"] = false
+			}
+		}
+
+		return cloned
+	default:
+		return p
+	}
+}
+
+func workspaceWriteSandboxPolicy(dirs []string) map[string]any {
 	return map[string]any{
-		"type":          "workspaceWrite",
-		"writableRoots": append([]string(nil), dirs...),
+		"type":                "workspaceWrite",
+		"writableRoots":       append([]string{}, dirs...),
+		"networkAccess":       false,
+		"excludeTmpdirEnvVar": false,
+		"excludeSlashTmp":     false,
 	}
 }
 
 func usageFromCodex(usage codex.Usage) *acp.Usage {
-	if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.TotalTokens == 0 {
+	if usage.CachedReadTokens == 0 &&
+		usage.CachedWriteTokens == 0 &&
+		usage.InputTokens == 0 &&
+		usage.OutputTokens == 0 &&
+		usage.ReasoningOutputTokens == 0 &&
+		usage.TotalTokens == 0 {
 		return nil
 	}
 
-	return &acp.Usage{
+	result := &acp.Usage{
 		InputTokens:  int(usage.InputTokens),
 		OutputTokens: int(usage.OutputTokens),
 		TotalTokens:  int(usage.TotalTokens),
 	}
+	if result.TotalTokens == 0 {
+		result.TotalTokens = result.InputTokens + result.OutputTokens
+	}
+	if usage.CachedReadTokens > 0 {
+		result.CachedReadTokens = acp.Ptr(int(usage.CachedReadTokens))
+	}
+	if usage.CachedWriteTokens > 0 {
+		result.CachedWriteTokens = acp.Ptr(int(usage.CachedWriteTokens))
+	}
+	if usage.ReasoningOutputTokens > 0 {
+		result.ThoughtTokens = acp.Ptr(int(usage.ReasoningOutputTokens))
+	}
+
+	return result
+}
+
+func usageUpdateFromCodex(usage codex.Usage) []acp.SessionUpdate {
+	return usageUpdateFromCodexContext(usage, codex.Usage{}, 0)
+}
+
+func tokenUsageUpdateFromCodex(usage codex.TokenUsage) []acp.SessionUpdate {
+	return usageUpdateFromCodexContext(usage.Last, usage.Total, usage.ModelContextWindow)
+}
+
+func usageUpdateFromCodexContext(usage codex.Usage, threadUsage codex.Usage, contextWindow int64) []acp.SessionUpdate {
+	acpUsage := usageFromCodex(usage)
+	if acpUsage == nil {
+		return nil
+	}
+
+	used := acpUsage.TotalTokens
+	meta := map[string]any{
+		codexUsageMetaKey: usageMetaFromCodex(acpUsage),
+	}
+	if threadACPUsage := usageFromCodex(threadUsage); threadACPUsage != nil {
+		used = threadACPUsage.TotalTokens
+		meta[codexThreadUsageMetaKey] = usageMetaFromCodex(threadACPUsage)
+	}
+
+	return []acp.SessionUpdate{{
+		UsageUpdate: &acp.SessionUsageUpdate{
+			Used: used,
+			Size: int(contextWindow),
+			Meta: map[string]any{
+				codexMetaKey: meta,
+			},
+		},
+	}}
+}
+
+func usageMetaFromCodex(usage *acp.Usage) map[string]any {
+	meta := map[string]any{
+		usageInputTokensKey:       usage.InputTokens,
+		usageCachedReadTokensKey:  0,
+		usageCachedWriteTokensKey: 0,
+		usageOutputTokensKey:      usage.OutputTokens,
+		usageReasoningOutputKey:   0,
+		usageTotalTokensKey:       usage.TotalTokens,
+	}
+	if usage.CachedReadTokens != nil {
+		meta[usageCachedReadTokensKey] = *usage.CachedReadTokens
+	}
+	if usage.CachedWriteTokens != nil {
+		meta[usageCachedWriteTokensKey] = *usage.CachedWriteTokens
+	}
+	if usage.ThoughtTokens != nil {
+		meta[usageReasoningOutputKey] = *usage.ThoughtTokens
+	}
+
+	return meta
 }
 
 func promptResultForObserver(resp acp.PromptResponse, err error, model string) observer.PromptResult {
@@ -399,6 +665,15 @@ func promptResultForObserver(resp acp.PromptResponse, err error, model string) o
 	result.InputTokens = resp.Usage.InputTokens
 	result.OutputTokens = resp.Usage.OutputTokens
 	result.TotalTokens = resp.Usage.TotalTokens
+	if resp.Usage.CachedReadTokens != nil {
+		result.CachedReadTokens = *resp.Usage.CachedReadTokens
+	}
+	if resp.Usage.CachedWriteTokens != nil {
+		result.CachedWriteTokens = *resp.Usage.CachedWriteTokens
+	}
+	if resp.Usage.ThoughtTokens != nil {
+		result.ThoughtTokens = *resp.Usage.ThoughtTokens
+	}
 
 	return result
 }

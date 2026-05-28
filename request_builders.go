@@ -1,11 +1,19 @@
 package codexacp
 
-import "github.com/coder/acp-go-sdk"
+import (
+	"strings"
+
+	"github.com/coder/acp-go-sdk"
+)
 
 const (
-	metaOptionsKey      = "options"
-	metaModelKey        = "model"
-	metaOutputSchemaKey = "outputSchema"
+	metaOptionsKey        = "options"
+	metaModelKey          = "model"
+	metaModeKey           = "mode"
+	metaEnvKey            = "env"
+	metaApprovalPolicyKey = "approvalPolicy"
+	metaSandboxPolicyKey  = "sandboxPolicy"
+	metaOutputSchemaKey   = "outputSchema"
 )
 
 // CodexOptions is the stable Codex-specific subset accepted at
@@ -13,12 +21,20 @@ const (
 type CodexOptions struct {
 	// Model selects the initial Codex model for this session.
 	Model string `json:"model,omitempty"`
+	// Mode selects the initial ACP mode for this session.
+	Mode acp.SessionModeId `json:"mode,omitempty"`
 	// Effort selects the Codex reasoning effort for turns in this session.
 	Effort string `json:"effort,omitempty"`
 	// ServiceTier selects the Codex service tier for turns in this session.
 	ServiceTier string `json:"serviceTier,omitempty"`
 	// Personality selects the Codex personality setting for turns in this session.
 	Personality string `json:"personality,omitempty"`
+	// Env adds session-scoped environment variables for the Codex app-server process.
+	Env map[string]string `json:"env,omitempty"`
+	// ApprovalPolicy configures Codex approval behavior for this session.
+	ApprovalPolicy any `json:"approvalPolicy,omitempty"`
+	// SandboxPolicy configures Codex sandbox behavior for turns in this session.
+	SandboxPolicy any `json:"sandboxPolicy,omitempty"`
 	// OutputSchema configures JSON Schema structured output for this session.
 	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 }
@@ -29,6 +45,9 @@ func (options CodexOptions) Meta() map[string]any {
 	if options.Model != "" {
 		values[metaModelKey] = options.Model
 	}
+	if options.Mode != "" {
+		values[metaModeKey] = string(options.Mode)
+	}
 	if options.Effort != "" {
 		values[string(configEffort)] = options.Effort
 	}
@@ -37,6 +56,15 @@ func (options CodexOptions) Meta() map[string]any {
 	}
 	if options.Personality != "" {
 		values[string(configPersonality)] = options.Personality
+	}
+	if len(options.Env) > 0 {
+		values[metaEnvKey] = cloneStringMap(options.Env)
+	}
+	if options.ApprovalPolicy != nil {
+		values[metaApprovalPolicyKey] = cloneAny(options.ApprovalPolicy)
+	}
+	if options.SandboxPolicy != nil {
+		values[metaSandboxPolicyKey] = cloneAny(options.SandboxPolicy)
 	}
 	if options.OutputSchema != nil {
 		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
@@ -171,6 +199,32 @@ func WithSessionOutputSchema(schema map[string]any) SessionRequestOption {
 	}
 }
 
+// WithSessionGoal sets initial _meta.codex.goal metadata for a session
+// lifecycle request. It serializes only client-settable goal fields.
+func WithSessionGoal(goal CodexGoal) SessionRequestOption {
+	value := clientGoalMap(goal)
+
+	return func(config *sessionRequestConfig) {
+		config.meta = mergeAnyMap(config.meta, map[string]any{
+			codexMetaKey: map[string]any{
+				codexGoalMetaKey: value,
+			},
+		})
+	}
+}
+
+// WithSessionGoalClear clears _meta.codex.goal metadata for a session lifecycle
+// request.
+func WithSessionGoalClear() SessionRequestOption {
+	return func(config *sessionRequestConfig) {
+		config.meta = mergeAnyMap(config.meta, map[string]any{
+			codexMetaKey: map[string]any{
+				codexGoalMetaKey: nil,
+			},
+		})
+	}
+}
+
 func newSessionRequestConfig(opts ...SessionRequestOption) sessionRequestConfig {
 	config := sessionRequestConfig{}
 	for _, opt := range opts {
@@ -205,6 +259,24 @@ func PromptRequest(sessionID acp.SessionId, blocks ...acp.ContentBlock) acp.Prom
 // content block.
 func TextPromptRequest(sessionID acp.SessionId, text string) acp.PromptRequest {
 	return PromptRequest(sessionID, acp.TextBlock(text))
+}
+
+// SetGoalRequest constructs params for the _codex/session/setGoal extension
+// method. It serializes only client-settable goal fields.
+func SetGoalRequest(sessionID acp.SessionId, goal CodexGoal) map[string]any {
+	return map[string]any{
+		jsonFieldSessionID: sessionID,
+		codexGoalMetaKey:   clientGoalMap(goal),
+	}
+}
+
+// ClearGoalRequest constructs params for the _codex/session/setGoal extension
+// method that clears goal state.
+func ClearGoalRequest(sessionID acp.SessionId) map[string]any {
+	return map[string]any{
+		jsonFieldSessionID: sessionID,
+		codexGoalMetaKey:   nil,
+	}
 }
 
 // ListSessionsRequestOption configures embedded-Go session/list requests.
@@ -275,6 +347,13 @@ func WithCodexModel(model string) CodexOption {
 	}
 }
 
+// WithCodexMode configures the initial ACP session mode.
+func WithCodexMode(mode acp.SessionModeId) CodexOption {
+	return func(options *CodexOptions) {
+		options.Mode = mode
+	}
+}
+
 // WithCodexEffort configures Codex reasoning effort.
 func WithCodexEffort(effort string) CodexOption {
 	return func(options *CodexOptions) {
@@ -296,6 +375,33 @@ func WithCodexPersonality(personality string) CodexOption {
 	}
 }
 
+// WithCodexEnv configures session-scoped Codex process environment variables.
+func WithCodexEnv(env map[string]string) CodexOption {
+	cloned := cloneStringMap(env)
+
+	return func(options *CodexOptions) {
+		options.Env = cloneStringMap(cloned)
+	}
+}
+
+// WithCodexApprovalPolicy configures Codex approval behavior.
+func WithCodexApprovalPolicy(policy any) CodexOption {
+	cloned := cloneAny(policy)
+
+	return func(options *CodexOptions) {
+		options.ApprovalPolicy = cloneAny(cloned)
+	}
+}
+
+// WithCodexSandboxPolicy configures Codex sandbox behavior.
+func WithCodexSandboxPolicy(policy any) CodexOption {
+	cloned := cloneAny(policy)
+
+	return func(options *CodexOptions) {
+		options.SandboxPolicy = cloneAny(cloned)
+	}
+}
+
 // WithCodexOutputSchema configures Codex JSON Schema structured output.
 func WithCodexOutputSchema(schema map[string]any) CodexOption {
 	cloned := cloneAnyMap(schema)
@@ -307,12 +413,32 @@ func WithCodexOutputSchema(schema map[string]any) CodexOption {
 
 func cloneCodexOptions(options CodexOptions) CodexOptions {
 	return CodexOptions{
-		Model:        options.Model,
-		Effort:       options.Effort,
-		ServiceTier:  options.ServiceTier,
-		Personality:  options.Personality,
-		OutputSchema: cloneAnyMap(options.OutputSchema),
+		Model:       options.Model,
+		Mode:        options.Mode,
+		Effort:      options.Effort,
+		ServiceTier: options.ServiceTier,
+		Personality: options.Personality,
+		Env:         cloneStringMap(options.Env),
+		ApprovalPolicy: cloneAny(
+			options.ApprovalPolicy,
+		),
+		SandboxPolicy: cloneAny(options.SandboxPolicy),
+		OutputSchema:  cloneAnyMap(options.OutputSchema),
 	}
+}
+
+func clientGoalMap(goal CodexGoal) map[string]any {
+	out := map[string]any{
+		goalFieldObjective: strings.TrimSpace(goal.Objective),
+	}
+	if goal.Status != "" {
+		out[goalFieldStatus] = goal.Status
+	}
+	if goal.TokenBudget != nil {
+		out[goalFieldTokenBudget] = *goal.TokenBudget
+	}
+
+	return out
 }
 
 func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {

@@ -1,71 +1,79 @@
 ---
-title: Raw Events
-description: Codex rollout-backed raw SDK messages.
+title: "Raw Events"
+description: "Optional raw Codex rollout rows for diagnostics and export"
+icon: "braces"
 ---
 
-The raw extension mirrors the host-facing raw SDK message pattern used by the
-Claude adapter, but the payloads are Codex rollout rows.
+Raw Codex events are an opt-in diagnostic/export surface. The typed ACP updates
+remain the main host API.
 
-Capability metadata is advertised under `agentCapabilities.meta.codex.sdkMessages`.
-Enable per session with:
+## Capability
+
+The initialize response advertises raw event support under
+`agentCapabilities.meta.codex.sdkMessages`:
 
 ```json
 {
-  "_meta": {
-    "codex": {
-      "emitRawSDKMessages": true
-    }
+  "scope": "session",
+  "method": "_codex/sdkMessage",
+  "enabledBy": "_meta.codex.emitRawSDKMessages"
+}
+```
+
+Raw events are emitted as extension notifications named `_codex/sdkMessage`.
+
+## Enable all raw messages
+
+Set `_meta.codex.emitRawSDKMessages` to `true` on `session/new`,
+`session/load`, `session/resume`, or `session/fork`:
+
+```json
+{
+  "codex": {
+    "emitRawSDKMessages": true
   }
 }
 ```
 
-Notifications are sent as `_codex/sdkMessage` with:
+Embedded Go callers can use:
 
-```json
-{
-  "sessionId": "session-id",
-  "message": {},
-  "rawJSON": "{}"
-}
+```go
+codexacp.WithSessionRawSDKMessages(true)
 ```
 
-`message` is the decoded rollout row. `rawJSON` is the original row string.
+## Enable selected raw messages
 
-## Filters
-
-Instead of `true`, hosts may pass an array of filters:
+Set `_meta.codex.emitRawSDKMessages` to a filter array:
 
 ```json
 {
-  "_meta": {
-    "codex": {
-      "emitRawSDKMessages": [
-        {"type": "event_msg", "payloadType": "agent_message"},
-        {"type": "response_item", "payloadRole": "assistant"}
-      ]
-    }
+  "codex": {
+    "emitRawSDKMessages": [
+      {"type": "event_msg", "payloadType": "agent_message"},
+      {"type": "response_item", "payloadRole": "assistant"}
+    ]
   }
 }
 ```
 
-Filter fields:
+Filters match:
 
-| Field | Meaning |
-| --- | --- |
-| `type` | Required top-level rollout row type. |
-| `payloadType` | Optional `payload.type` match. |
-| `payloadRole` | Optional `payload.role` match. |
+- top-level rollout row `type`;
+- optional `payload.type`;
+- optional `payload.role`.
 
-Filters are intentionally simple and exact. Invalid filter entries are ignored.
+## Notification payload
+
+Each `_codex/sdkMessage` notification includes the ACP session ID, Codex method
+metadata when known, and the raw JSON payload. The raw bytes are preserved
+where possible so hosts can export diagnostics without waiting for typed ACP
+fields to cover every Codex rollout detail.
 
 ## Restore rule
 
-Filtered raw events are diagnostic and intentionally lossy. Exact restore
-requires complete rollout JSONL from one of:
+Filtered raw events are lossy. Do not treat `_codex/sdkMessage` as the durable
+restore mechanism unless the host captured every rollout row needed for exact
+Codex resume.
 
-- a host-provided `SessionStore`;
-- `_codex/session/import*`;
-- an explicitly unfiltered raw capture that retained every restorable row.
-
-Do not treat `_codex/sdkMessage` as a durable restore mechanism unless the host
-captured the full rollout stream.
+For durable restore, prefer [SessionStore](/docs/features/session-store) or the
+[`_codex/session/import*`](/docs/reference/session-import) extension methods.

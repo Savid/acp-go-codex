@@ -1,61 +1,67 @@
 ---
-title: ACP Methods
-description: Agent methods implemented by the local dispatcher.
+title: "ACP methods"
+description: "Agent methods implemented by the local dispatcher"
+icon: "square-code"
 ---
+
+## Stable methods
 
 The method surface is identical in standalone CLI and embedded Go. The only
 difference is whether the ACP connection reaches the agent through process
 stdio or through streams passed to `codexacp.Serve`.
 
-## Stable methods
-
-| Method | Status |
-| --- | --- |
-| `initialize` | implemented |
-| `authenticate` | implemented for external ChatGPT tokens; terminal auth is advertised as a command auth method |
-| `session/new` | implemented |
-| `session/prompt` | implemented |
-| `session/cancel` | implemented |
-| `session/close` | implemented |
-| `session/list` | implemented |
-| `session/load` | implemented |
-| `session/resume` | implemented |
-| `session/set_mode` | implemented |
-| `session/set_config_option` | implemented |
+| Method | Status | ACP docs |
+| --- | --- | --- |
+| `initialize` | implemented | [Initialization](https://agentclientprotocol.com/protocol/initialization), [Schema](https://agentclientprotocol.com/protocol/schema) |
+| `authenticate` | implemented for external ChatGPT tokens | [Initialization](https://agentclientprotocol.com/protocol/initialization), [Schema](https://agentclientprotocol.com/protocol/schema) |
+| `session/new` | implemented | [Session Setup](https://agentclientprotocol.com/protocol/session-setup), [Schema](https://agentclientprotocol.com/protocol/schema) |
+| `session/prompt` | implemented | [Prompt Turn](https://agentclientprotocol.com/protocol/prompt-turn), [Content](https://agentclientprotocol.com/protocol/content), [Tool Calls](https://agentclientprotocol.com/protocol/tool-calls) |
+| `session/cancel` | implemented | [Prompt Turn cancellation](https://agentclientprotocol.com/protocol/prompt-turn), [Schema](https://agentclientprotocol.com/protocol/schema) |
+| `session/close` | implemented | [Schema](https://agentclientprotocol.com/protocol/schema), [Session close RFD](https://agentclientprotocol.com/rfds/session-stop) |
+| `session/list` | implemented | [Session List](https://agentclientprotocol.com/protocol/session-list) |
+| `session/load` | implemented | [Session Setup](https://agentclientprotocol.com/protocol/session-setup), [Schema](https://agentclientprotocol.com/protocol/schema) |
+| `session/resume` | implemented | [Schema](https://agentclientprotocol.com/protocol/schema), [Session resume RFD](https://agentclientprotocol.com/rfds/session-resume) |
+| `session/set_mode` | implemented | [Session Modes](https://agentclientprotocol.com/protocol/session-modes) |
+| `session/set_config_option` | implemented | [Session Config Options](https://agentclientprotocol.com/protocol/session-config-options) |
 
 ## Unstable methods
 
-| Method | Status |
-| --- | --- |
-| `session/fork` | implemented |
-| `session/set_model` | implemented for SDK compatibility; prefer `session/set_config_option` with `model` |
-| `logout` | implemented only when `WithAllowAccountLogout(true)` is configured |
-| `mcp/message` | implemented for ACP-transport MCP |
+The methods in this section are exposed through the SDK's unstable ACP surface.
+Clients should treat them as opt-in behavior and prefer stable config methods
+where available.
 
-The adapter intentionally does not implement provider management APIs, goals,
-document/NES APIs, plugin/marketplace mutation, realtime thread APIs, or
+| Method | Status | ACP docs |
+| --- | --- | --- |
+| `session/fork` | implemented | [Session fork RFD](https://agentclientprotocol.com/rfds/session-fork) |
+| `session/set_model` | implemented for hosts that use the unstable ACP model method; prefer `session/set_config_option` with `model` | [Session Config Options](https://agentclientprotocol.com/protocol/session-config-options), [model config RFD](https://agentclientprotocol.com/rfds/model-config-category) |
+| `logout` | calls Codex `account/logout` only when explicitly enabled | [Logout Method RFD](https://agentclientprotocol.com/rfds/logout-method) |
+| `mcp/message` | implemented for ACP-transport MCP | [MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp) |
+
+The adapter intentionally does not implement provider management APIs,
+document/NES APIs, realtime thread APIs, plugin/marketplace mutation, or
 external-agent mutation.
 
-## Codex extension methods
+## Codex-specific extension methods
 
-| Method | Purpose |
-| --- | --- |
-| `_codex/session/import` | One-shot import and commit of Codex rollout JSONL entries. |
-| `_codex/session/importChunk` | Append a chunk to a pending import. |
-| `_codex/session/commitImport` | Commit a pending import into the session store. |
-| `_codex/session/abortImport` | Drop a pending import. |
-| `_codex/turn/steer` | Steer the active Codex turn with Codex input or ACP prompt content. |
-| `_codex/thread/compact` | Call Codex `thread/compact/start` for a session thread. |
-| `_codex/review/start` | Call Codex `review/start` for a session thread. |
-| `_codex/thread/read` | Return Codex `thread/read` history for a session thread. |
-| `_codex/thread/turns/list` | Return Codex `thread/turns/list` for a session thread. |
-| `_codex/collaborationMode/list` | Return Codex collaboration modes. |
-| `_codex/mcpServerStatus/list` | Return Codex MCP server status. |
-
-Unsupported extension methods return method-not-found errors.
+| Method | Purpose | ACP docs |
+| --- | --- | --- |
+| `_codex/session/import` | One-shot import and commit of Codex rollout JSONL entries. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/session/importChunk` | Append a chunk to a pending import. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/session/commitImport` | Commit a pending import into the session store. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/session/abortImport` | Drop a pending import. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/session/setGoal` | Set or clear `_meta.codex.goal` session metadata when goals are enabled. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/turn/steer` | Steer the active Codex turn. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/thread/compact` | Call Codex `thread/compact/start`. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/review/start` | Call Codex `review/start`. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/thread/read` | Return Codex `thread/read` history. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/thread/turns/list` | Return Codex `thread/turns/list`. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/collaborationMode/list` | Return Codex collaboration modes. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
+| `_codex/mcpServerStatus/list` | Return Codex MCP server status. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
 
 ## Extension notifications
 
-| Method | Purpose |
-| --- | --- |
-| `_codex/sdkMessage` | Emits selected raw Codex rollout rows. |
+| Method | Purpose | ACP docs |
+| --- | --- | --- |
+| `_codex/sdkMessage` | Emits selected raw Codex rollout rows. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility), [Session Updates](https://agentclientprotocol.com/protocol/prompt-turn) |
+
+Unsupported extension methods return `method not found`.
