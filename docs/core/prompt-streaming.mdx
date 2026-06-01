@@ -23,6 +23,7 @@ The adapter maps Codex events into portable ACP updates where possible:
 | Diff update | tool-call content/update when Codex provides it |
 | Account or warning update | `session_info_update` metadata where possible |
 | Goal update | `session_info_update._meta.codex.goal` |
+| Mode/config change | `current_mode_update` / `config_option_update` |
 | Completed turn | final stop reason, `PromptResponse.usage`, and usage update metadata |
 
 When Codex emits only completed items, the mapper emits final text once. When
@@ -72,3 +73,6 @@ reported, is exposed as `usage_update.used`, `usage_update.size`, and
 `_meta.codex.threadUsage`.
 
 See [Updates](/docs/reference/updates#usage-updates) for the exact mapping.
+
+Structured output is returned on the final `session/prompt` response under
+`_meta.codex.structuredOutput`, not as a streamed update.

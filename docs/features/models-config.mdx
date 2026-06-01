@@ -74,6 +74,27 @@ config option; the next turn uses the selected Codex collaboration mode.
 Codex-native `request_user_input` is available to the model only in `plan`
 mode.
 
+## Config option IDs
+
+The adapter advertises current values through ACP session config options:
+
+| Config ID | Type | Behavior |
+| --- | --- | --- |
+| `model` | select | Changes the active Codex model. |
+| `mode` | select | Changes the ACP/Codex collaboration mode. |
+| `effort` | select | Changes reasoning effort when the selected model reports effort values. |
+| `service_tier` | select | Changes Codex service tier when the session has one selected. |
+| `personality` | select | Changes Codex personality when the session has one selected. |
+
+`model` uses the ACP model-config category. `mode` uses the ACP mode category.
+`effort` uses the thought-level category. Service tier and personality are
+Codex-specific select options.
+
+After a successful `session/set_config_option`, the adapter emits
+`config_option_update` with refreshed options. Mode changes also emit
+`current_mode_update`. `session/set_model` emits `config_option_update` for
+hosts that still call the unstable model method.
+
 ## Other Codex options
 
 Codex-specific session options live under `_meta.codex.options`:

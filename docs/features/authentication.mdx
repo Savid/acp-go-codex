@@ -20,23 +20,37 @@ acp-go-codex -cli login -device-auth
 The command delegates to `codex login` with the same `-codex` and
 `-codex-home` settings as the agent process.
 
+When the ACP client advertises terminal auth, `initialize` includes a terminal
+auth method:
+
+| Method ID | Meaning |
+| --- | --- |
+| `codex-login` | Run `acp-go-codex -cli login --device-auth` with the configured Codex path/home. |
+
 ## External ChatGPT tokens
 
 Hosts that own ChatGPT auth can call ACP `authenticate` with:
 
 ```json
 {
-  "codex": {
-    "auth": {
-      "chatgptAuthTokens": {
-        "accessToken": "secret",
-        "refreshToken": "secret",
-        "expiresAt": 1790000000
+  "methodId": "codex-chatgpt-auth-tokens",
+  "_meta": {
+    "codex": {
+      "auth": {
+        "chatgptAuthTokens": {
+          "accessToken": "secret",
+          "refreshToken": "secret",
+          "expiresAt": 1790000000
+        }
       }
     }
   }
 }
 ```
+
+The `codex-chatgpt-auth-tokens` method is always advertised as an agent auth
+method. It is for hosts that own ChatGPT OAuth state and want the adapter to
+pass those tokens to Codex app-server account APIs.
 
 Embedded hosts can also provide:
 

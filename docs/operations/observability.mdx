@@ -88,11 +88,39 @@ Signal-specific protocol variables override the generic protocol:
 - `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`
 - `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`
 
+Signal-specific endpoints also override the generic endpoint:
+
+| Signal | Endpoint env |
+| --- | --- |
+| traces | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` |
+| metrics | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` |
+| logs | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` |
+
 For HTTP generic endpoints, the adapter appends the signal path:
 
 - traces: `/v1/traces`
 - metrics: `/v1/metrics`
 - logs: `/v1/logs`
+
+TLS certificate env vars are mapped when Codex supports the target exporter:
+
+| Env | Meaning |
+| --- | --- |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` | Generic CA certificate path. |
+| `OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE` | Trace-specific CA certificate path. |
+| `OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE` | Metric-specific CA certificate path. |
+| `OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE` | Log-specific CA certificate path. |
+| `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` | Generic client certificate path for gRPC exporters. |
+| `OTEL_EXPORTER_OTLP_CLIENT_KEY` | Generic client private key path for gRPC exporters. |
+| `OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE` | Trace-specific client certificate path for gRPC exporters. |
+| `OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY` | Trace-specific client private key path for gRPC exporters. |
+| `OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE` | Metric-specific client certificate path for gRPC exporters. |
+| `OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY` | Metric-specific client private key path for gRPC exporters. |
+| `OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE` | Log-specific client certificate path for gRPC exporters. |
+| `OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY` | Log-specific client private key path for gRPC exporters. |
+
+Client certificate/key pairs are ignored for native Codex HTTP exporters
+because current Codex app-server config only accepts them on the gRPC path.
 
 ## Flush short-lived runs
 

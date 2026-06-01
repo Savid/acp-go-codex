@@ -34,6 +34,16 @@ Codex-specific MCP server metadata can configure tool approval modes; see
 HTTP header values are passed through `env_http_headers` so bearer tokens and
 trace headers stay out of process argv.
 
+## Tool naming and inspection
+
+Codex refers to MCP tools by server and tool name. Prompts and tests should use
+that native shape, for example: "Use the `acp_stdio` MCP server's `echo` tool."
+Do not depend on Claude-style synthetic names such as `mcp__server__tool`.
+
+Tool updates use Codex's `server` and `tool` fields when available, so hosts can
+render titles such as `acp_stdio echo`. Hosts that need to inspect the live
+server/tool catalog can call `_codex/mcpServerStatus/list`.
+
 ## ACP-transport bridge
 
 ACP-transport MCP servers are not directly understood by Codex. The adapter

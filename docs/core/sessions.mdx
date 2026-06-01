@@ -80,6 +80,17 @@ If a matching session is already active, both methods reuse it instead of
 launching another Codex process. The match includes `cwd`, additional
 directories, MCP configuration, Codex options, and raw-message settings.
 
+## Error semantics
+
+When a requested live session is missing, the adapter returns ACP resource not
+found with the requested `sessionId` in error data. Hosts can use that to enter
+their restore/import path.
+
+When the whole agent has been closed, lifecycle and prompt methods return ACP
+internal error with `data.error = "agent is closed"`. Treat that as a closed
+runtime/transport, not as a missing session that can be restored on the same
+agent instance.
+
 ## Goals
 
 Codex-specific [goal metadata](/docs/features/goals) is session state. Clients

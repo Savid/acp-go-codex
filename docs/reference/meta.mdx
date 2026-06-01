@@ -223,7 +223,8 @@ model picker.
 ## Structured output result metadata
 
 When structured output is configured and the final agent text parses as JSON,
-the prompt response includes:
+the `session/prompt` response includes the parsed object at
+`result._meta.codex.structuredOutput`:
 
 ```json
 {
@@ -287,7 +288,7 @@ The initialize response advertises Codex capability metadata under
     "scope": "session",
     "types": ["json_schema"],
     "config": "_meta.codex.options.outputSchema",
-    "result": "usage_update._meta.codex.structuredOutput",
+    "result": "session/prompt.result._meta.codex.structuredOutput",
     "rawEvents": "_codex/sdkMessage"
   },
   "mcpToolApproval": {

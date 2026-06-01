@@ -60,6 +60,10 @@ func TestInitializeAdvertisesCodexCapabilities(t *testing.T) {
 	if meta[rawSDKMessagesCapabilityKey] == nil {
 		t.Fatalf("missing raw SDK message capability: %#v", meta)
 	}
+	outputSchemaMeta, ok := meta[outputSchemaCapabilityKey].(map[string]any)
+	if !ok || outputSchemaMeta["result"] != outputSchemaResultPath {
+		t.Fatalf("missing output schema capability: %#v", meta)
+	}
 	approvalMeta, ok := meta["mcpToolApproval"].(map[string]any)
 	if !ok || approvalMeta["defaultMode"] != "_meta.codex.defaultToolsApprovalMode" {
 		t.Fatalf("missing MCP tool approval capability: %#v", meta)

@@ -16,7 +16,7 @@ const (
 	rawSDKMessagesEnabledByKey   = "enabledBy"
 	outputSchemaCapabilityKey    = "outputSchema"
 	outputSchemaConfigPath       = "_meta.codex.options.outputSchema"
-	outputSchemaResultPath       = "usage_update._meta.codex.structuredOutput"
+	outputSchemaResultPath       = "session/prompt.result._meta.codex.structuredOutput"
 	structuredOutputMetaKey      = "structuredOutput"
 	capabilityScopeKey           = "scope"
 	capabilityScopeSession       = "session"

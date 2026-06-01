@@ -267,8 +267,18 @@ type SessionStoreLister interface {
     ListSessions(ctx context.Context, projectKey string) ([]SessionSummary, error)
 }
 
+type SessionSummary struct {
+    SessionID string
+    MTime     int64
+}
+
 type SessionStoreDeleter interface {
     Delete(ctx context.Context, key SessionKey) error
+}
+
+type SessionStoreReplacement struct {
+    Key     SessionKey
+    Entries []SessionStoreEntry
 }
 
 type SessionStoreReplacer interface {
@@ -276,17 +286,32 @@ type SessionStoreReplacer interface {
 }
 ```
 
-`Replace` writes exact reserved bundle artifacts such as `goal.json`, the
-latest visible Codex goal snapshot.
+| Interface | Enables |
+| --- | --- |
+| `SessionStoreLister` | Include remote rollout bundles in `session/list`. |
+| `SessionStoreDeleter` | Explicit deletion for stores that need it. |
+| `SessionStoreReplacer` | Atomic replacement during `_codex/session/commitImport`. |
+
+`SessionSummary.MTime` is a Unix millisecond timestamp used for list ordering.
+`SessionStoreReplacement` writes exact reserved bundle artifacts such as
+`goal.json`, the latest visible Codex goal snapshot.
 
 ### In-memory store
 
-`NewInMemorySessionStore` is available for tests and local examples. Production
-hosts should provide a durable store that preserves raw JSON bytes.
+```go
+store := codexacp.NewInMemorySessionStore()
+```
+
+`InMemorySessionStore` implements `SessionStore`, `SessionStoreLister`,
+`SessionStoreDeleter`, and `SessionStoreReplacer`. It is available for tests
+and local examples. Production hosts should provide a durable store that
+preserves raw JSON bytes.
 
 ## MCP proxy API
 
 ```go
+const MCPProxyTokenFileEnv = "ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE"
+
 type MCPProxyOptions struct {
     Network string
     Address string
@@ -300,6 +325,10 @@ func RunMCPProxy(ctx context.Context, stdin io.Reader, stdout io.Writer, options
 `RunMCPProxy` is used by the `acp-go-codex mcp-proxy` subcommand generated for
 ACP-transport MCP servers. Most hosts configure ACP MCP servers on session
 requests and let the adapter launch the proxy.
+
+The parent agent writes the bridge token to a `0600` temp file under a private
+directory and passes the path in `MCPProxyTokenFileEnv`. The token value should
+not be placed in argv or normal environment variables.
 
 ## Minimal embedding checklist
 
