@@ -197,8 +197,8 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume session: %v", err)
 	}
-	if resumed.Models == nil {
-		t.Fatalf("resume models missing: %#v", resumed)
+	if resumed.ConfigOptions == nil {
+		t.Fatalf("resume config options missing: %#v", resumed)
 	}
 
 	client.resetRecordedOutput()
@@ -288,10 +288,10 @@ func TestCodexCLIFailurePaths(t *testing.T) {
 	if _, err := conn.UnstableListProviders(ctx, acp.UnstableListProvidersRequest{}); err == nil {
 		t.Fatal("provider list succeeded even though Codex provider management is unavailable")
 	}
-	if _, err := conn.UnstableSetProviders(ctx, acp.UnstableSetProvidersRequest{}); err == nil {
+	if _, err := conn.UnstableSetProvider(ctx, acp.UnstableSetProviderRequest{Id: "test", BaseUrl: "https://example.com"}); err == nil {
 		t.Fatal("provider set succeeded even though Codex provider management is unavailable")
 	}
-	if _, err := conn.UnstableDisableProviders(ctx, acp.UnstableDisableProvidersRequest{}); err == nil {
+	if _, err := conn.UnstableDisableProvider(ctx, acp.UnstableDisableProviderRequest{Id: "test"}); err == nil {
 		t.Fatal("provider disable succeeded even though Codex provider management is unavailable")
 	}
 

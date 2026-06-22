@@ -15,7 +15,7 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
 	ctx := context.Background()
 
-	_, err := agent.UnstableLogout(ctx, acp.UnstableLogoutRequest{})
+	_, err := agent.Logout(ctx, acp.LogoutRequest{})
 	if err == nil {
 		t.Fatal("logout without explicit opt-in succeeded")
 	}
@@ -65,7 +65,7 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 		WithAllowAccountLogout(true),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
-	if _, err := logoutAgent.UnstableLogout(ctx, acp.UnstableLogoutRequest{}); err != nil {
+	if _, err := logoutAgent.Logout(ctx, acp.LogoutRequest{}); err != nil {
 		t.Fatalf("logout with opt-in returned error: %v", err)
 	}
 	if !client.loggedOut {

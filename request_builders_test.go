@@ -48,7 +48,7 @@ func TestRequestBuilderClones(t *testing.T) {
 	if len(LoadSessionRequest("s", "/repo").McpServers) != 0 || ResumeSessionRequest("s", "/repo").SessionId != "s" || ForkSessionRequest("s", "/repo").SessionId != "s" {
 		t.Fatal("request builders returned unexpected values")
 	}
-	list := ListSessionsRequest(WithListSessionsCwd("/repo"), WithListSessionsCursor("c"), WithListSessionsAdditionalDirectories("/extra"), WithListSessionsMeta(map[string]any{"a": "b"}))
+	list := ListSessionsRequest(WithListSessionsCwd("/repo"), WithListSessionsCursor("c"), WithListSessionsMeta(map[string]any{"a": "b"}))
 	if *list.Cwd != "/repo" || *list.Cursor != "c" || list.Meta["a"] != "b" {
 		t.Fatalf("list request = %#v", list)
 	}

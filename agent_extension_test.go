@@ -165,7 +165,7 @@ func TestExtensionAuthAndConfigAdditionalBranches(t *testing.T) {
 		}),
 	)
 	logoutAgent.sessions["s"] = &Session{agent: logoutAgent, id: "s", client: &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}}
-	if _, err := logoutAgent.UnstableLogout(ctx, acp.UnstableLogoutRequest{}); err == nil || !strings.Contains(err.Error(), "close failed") || !strings.Contains(err.Error(), "logout factory failed") {
+	if _, err := logoutAgent.Logout(ctx, acp.LogoutRequest{}); err == nil || !strings.Contains(err.Error(), "close failed") || !strings.Contains(err.Error(), "logout factory failed") {
 		t.Fatalf("logout close/factory error = %v", err)
 	}
 	client.logoutErr = errors.New("logout failed")
@@ -173,7 +173,7 @@ func TestExtensionAuthAndConfigAdditionalBranches(t *testing.T) {
 		WithAllowAccountLogout(true),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
-	if _, err := logoutAgent.UnstableLogout(ctx, acp.UnstableLogoutRequest{}); err == nil || !strings.Contains(err.Error(), "logout failed") {
+	if _, err := logoutAgent.Logout(ctx, acp.LogoutRequest{}); err == nil || !strings.Contains(err.Error(), "logout failed") {
 		t.Fatalf("logout provider error = %v", err)
 	}
 }

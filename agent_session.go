@@ -87,7 +87,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		SessionId:     id,
 		Meta:          sessionResponseMeta(snapshot),
 		Modes:         modeState(snapshot.mode),
-		Models:        modelState(snapshot.model, models),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -150,18 +149,11 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	if err := validateOptionalAbsolutePath(jsonFieldCwd, params.Cwd); err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
-	if err := validateAbsolutePaths("additionalDirectories", params.AdditionalDirectories); err != nil {
-		return acp.ListSessionsResponse{}, err
-	}
-
 	a.mu.Lock()
 	active := make([]*Session, 0, len(a.sessions))
 	activeThreadIDs := map[string]struct{}{}
 	for _, session := range a.sessions {
 		if params.Cwd != nil && session.cwd != *params.Cwd {
-			continue
-		}
-		if len(params.AdditionalDirectories) > 0 && !slicesEqual(session.additionalDirectories, params.AdditionalDirectories) {
 			continue
 		}
 		active = append(active, session)
@@ -174,7 +166,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	for _, session := range active {
 		addSessionInfo(&sessions, seen, session.info())
 	}
-	if params.Cwd != nil && len(params.AdditionalDirectories) == 0 {
+	if params.Cwd != nil {
 		storeSessions, err := a.listStoredSessions(ctx, *params.Cwd, seen)
 		if err != nil {
 			return acp.ListSessionsResponse{}, err
@@ -183,14 +175,12 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 			addSessionInfo(&sessions, seen, session)
 		}
 	}
-	if len(params.AdditionalDirectories) == 0 {
-		codexSessions, err := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
-		if err != nil {
-			return acp.ListSessionsResponse{}, err
-		}
-		for _, session := range codexSessions {
-			addSessionInfo(&sessions, seen, session)
-		}
+	codexSessions, err := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	for _, session := range codexSessions {
+		addSessionInfo(&sessions, seen, session)
 	}
 
 	paged, nextCursor, err := paginateSessionInfos(sessions, params.Cursor)
@@ -437,7 +427,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
 			Modes:         modeState(snapshot.mode),
-			Models:        modelState(snapshot.model, models),
 			ConfigOptions: sessionConfigOptions(session, models),
 		}, nil
 	}
@@ -492,7 +481,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
 		Modes:         modeState(snapshot.mode),
-		Models:        modelState(snapshot.model, models),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -566,7 +554,6 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
 		Modes:         modeState(snapshot.mode),
-		Models:        modelState(snapshot.model, models),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -612,7 +599,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
 			Modes:         modeState(snapshot.mode),
-			Models:        modelState(snapshot.model, models),
 			ConfigOptions: sessionConfigOptions(existing, models),
 		}, nil
 	}
@@ -788,7 +774,6 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	return acp.LoadSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
 		Modes:         modeState(snapshot.mode),
-		Models:        modelState(snapshot.model, models),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -869,7 +854,6 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 		SessionId:     id,
 		Meta:          sessionResponseMeta(snapshot),
 		Modes:         modeState(snapshot.mode),
-		Models:        unstableModelState(snapshot.model, models),
 		ConfigOptions: sessionUnstableConfigOptions(session, models),
 	}, nil
 }
@@ -915,62 +899,6 @@ func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeReq
 	return acp.SetSessionModeResponse{}, nil
 }
 
-func (a *Agent) UnstableSetSessionModel(ctx context.Context, params acp.UnstableSetSessionModelRequest) (acp.UnstableSetSessionModelResponse, error) {
-	session, err := a.session(params.SessionId)
-	if err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-	releaseTurn, err := session.acquireTurn(ctx)
-	if err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-	defer releaseTurn()
-
-	session.mu.Lock()
-	session.model = string(params.ModelId)
-	session.updatedAt = nowRFC3339()
-	session.mu.Unlock()
-
-	options := sessionConfigOptions(session, modelList(ctx, session.client))
-	if err := session.emitUpdates(ctx, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}); err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-
-	return acp.UnstableSetSessionModelResponse{Meta: sessionResponseMeta(session.snapshot())}, nil
-}
-
-func modelState(current string, models []codex.Model) *acp.SessionModelState {
-	if current == "" {
-		current = "default"
-	}
-	available := make([]acp.ModelInfo, 0, len(models)+1)
-	seen := map[string]struct{}{}
-	if len(models) == 0 {
-		models = []codex.Model{{ID: current, Name: current}}
-	}
-	for _, model := range models {
-		id := firstNonEmpty(model.ID, model.Name)
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		available = append(available, acp.ModelInfo{
-			ModelId:     acp.ModelId(id),
-			Name:        firstNonEmpty(model.Name, id),
-			Description: stringPtrIfNotEmpty(model.Description),
-			Meta:        model.Raw,
-		})
-	}
-	if _, ok := seen[current]; !ok {
-		available = append(available, acp.ModelInfo{ModelId: acp.ModelId(current), Name: current})
-	}
-
-	return &acp.SessionModelState{CurrentModelId: acp.ModelId(current), AvailableModels: available}
-}
-
 func modelList(ctx context.Context, client codex.Client) []codex.Model {
 	if client == nil {
 		return nil
@@ -981,51 +909,6 @@ func modelList(ctx context.Context, client codex.Client) []codex.Model {
 	}
 
 	return models
-}
-
-func unstableModelState(current string, models []codex.Model) *acp.UnstableSessionModelState {
-	if current == "" {
-		current = "default"
-	}
-	available := make([]acp.UnstableModelInfo, 0, len(models)+1)
-	seen := map[string]struct{}{}
-	if len(models) == 0 {
-		models = []codex.Model{{ID: current, Name: current}}
-	}
-	for _, model := range models {
-		id := firstNonEmpty(model.ID, model.Name)
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		available = append(available, acp.UnstableModelInfo{
-			ModelId:     acp.UnstableModelId(id),
-			Name:        firstNonEmpty(model.Name, id),
-			Description: stringPtrIfNotEmpty(model.Description),
-			Meta:        model.Raw,
-		})
-	}
-	if _, ok := seen[current]; !ok {
-		available = append(available, acp.UnstableModelInfo{ModelId: acp.UnstableModelId(current), Name: current})
-	}
-
-	return &acp.UnstableSessionModelState{CurrentModelId: acp.UnstableModelId(current), AvailableModels: available}
-}
-
-func slicesEqual(a []string, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-
-	return true
 }
 
 func nowRFC3339() string {

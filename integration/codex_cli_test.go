@@ -43,12 +43,6 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 	if session.SessionId == "" {
 		t.Fatal("session id is empty")
 	}
-	if session.Models == nil || session.Models.CurrentModelId == "" || len(session.Models.AvailableModels) == 0 {
-		t.Fatalf("models not populated: %#v", session.Models)
-	}
-	if !containsModelID(sessionModelIDs(session.Models.AvailableModels), session.Models.CurrentModelId) {
-		t.Fatalf("current model %q missing from available models", session.Models.CurrentModelId)
-	}
 	modelConfig := findSessionSelectConfig(session.ConfigOptions, "model")
 	if modelConfig == nil || modelConfig.Category == nil || *modelConfig.Category != acp.SessionConfigOptionCategoryModel || len(*modelConfig.Options.Ungrouped) == 0 {
 		t.Fatalf("model config not populated: %#v", session.ConfigOptions)
@@ -98,9 +92,12 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reset session mode: %v", err)
 	}
-	if _, err := conn.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
-		SessionId: session.SessionId,
-		ModelId:   acp.UnstableModelId(session.Models.CurrentModelId),
+	if _, err := conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: session.SessionId,
+			ConfigId:  "model",
+			Value:     modelConfig.CurrentValue,
+		},
 	}); err != nil {
 		t.Fatalf("set session model: %v", err)
 	}
@@ -119,7 +116,7 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 		return false
 	})
 
-	if _, err := conn.UnstableLogout(ctx, acp.UnstableLogoutRequest{}); err == nil {
+	if _, err := conn.Logout(ctx, acp.LogoutRequest{}); err == nil {
 		t.Fatal("logout succeeded without explicit guarded logout opt-in")
 	}
 	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {

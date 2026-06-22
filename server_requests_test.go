@@ -151,9 +151,6 @@ func TestServerRequestHelperBranches(t *testing.T) {
 	if sliceOfMaps("bad") != nil {
 		t.Fatal("sliceOfMaps accepted non-slice")
 	}
-	if !slicesEqual([]string{"a", "b"}, []string{"a", "b"}) || slicesEqual([]string{"a"}, []string{"a", "b"}) || slicesEqual([]string{"a"}, []string{"b"}) {
-		t.Fatal("slicesEqual failed")
-	}
 	boolOpt := acp.SessionConfigOption{Boolean: &acp.SessionConfigOptionBoolean{Id: "b", Name: "Bool", Type: "checkbox", CurrentValue: true}}
 	if unstableConfigOption(boolOpt).Boolean == nil {
 		t.Fatal("unstableConfigOption did not map boolean")

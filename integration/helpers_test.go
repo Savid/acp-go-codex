@@ -648,15 +648,6 @@ func never(t *testing.T, duration time.Duration, interval time.Duration, conditi
 	}
 }
 
-func sessionModelIDs(models []acp.ModelInfo) []acp.ModelId {
-	ids := make([]acp.ModelId, 0, len(models))
-	for _, model := range models {
-		ids = append(ids, model.ModelId)
-	}
-
-	return ids
-}
-
 func findSessionSelectConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
 	for _, option := range options {
 		if option.Select != nil && option.Select.Id == id {
@@ -682,16 +673,6 @@ func authAgentMethodIDs(methods []acp.AuthMethod) []string {
 }
 
 func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-
-	return false
-}
-
-func containsModelID(values []acp.ModelId, target acp.ModelId) bool {
 	for _, value := range values {
 		if value == target {
 			return true

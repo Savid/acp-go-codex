@@ -59,7 +59,7 @@ var (
 	localAgentHandlers = map[string]localAgentHandler{
 		acp.AgentMethodAuthenticate:           localResponse((*Agent).Authenticate),
 		acp.AgentMethodInitialize:             localResponse((*Agent).Initialize),
-		acp.AgentMethodLogout:                 localResponse((*Agent).UnstableLogout),
+		acp.AgentMethodLogout:                 localResponse((*Agent).Logout),
 		acp.AgentMethodSessionCancel:          localNotification((*Agent).Cancel),
 		acp.AgentMethodSessionClose:           localResponse((*Agent).CloseSession),
 		acp.AgentMethodSessionFork:            localResponse((*Agent).UnstableForkSession),
@@ -70,7 +70,6 @@ var (
 		acp.AgentMethodSessionResume:          localResponse((*Agent).ResumeSession),
 		acp.AgentMethodSessionSetConfigOption: localResponse((*Agent).SetSessionConfigOption),
 		acp.AgentMethodSessionSetMode:         localResponse((*Agent).SetSessionMode),
-		acp.AgentMethodSessionSetModel:        localResponse((*Agent).UnstableSetSessionModel),
 	}
 )
 

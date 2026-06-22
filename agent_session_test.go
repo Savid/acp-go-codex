@@ -285,16 +285,12 @@ func TestLifecycleErrorAndCloseBranches(t *testing.T) {
 			_, err := closed.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: "thread", ModeId: modePlan})
 			return err
 		},
-		"setModel": func() error {
-			_, err := closed.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{SessionId: "thread", ModelId: "gpt"})
-			return err
-		},
 		"authenticate": func() error {
 			_, err := closed.Authenticate(ctx, acp.AuthenticateRequest{})
 			return err
 		},
 		"logout": func() error {
-			_, err := closed.UnstableLogout(ctx, acp.UnstableLogoutRequest{})
+			_, err := closed.Logout(ctx, acp.LogoutRequest{})
 			return err
 		},
 		"extension": func() error {
@@ -479,33 +475,11 @@ func TestSessionLifecycleConfigModelAndAccountEdges(t *testing.T) {
 	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: "missing", ModeId: modeDefault}); err == nil {
 		t.Fatal("SetSessionMode missing session succeeded")
 	}
-	if _, err := agent.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{SessionId: "missing", ModelId: "gpt"}); err == nil {
-		t.Fatal("SetSessionModel missing session succeeded")
-	}
 	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}); err == nil {
 		t.Fatal("Cancel missing session succeeded")
 	}
-	if _, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsAdditionalDirectories("relative"))); err == nil {
-		t.Fatal("ListSessions accepted relative additional directory")
-	}
 	if got := modelList(ctx, nil); got != nil {
 		t.Fatalf("modelList nil = %#v", got)
-	}
-	if got := modelState("", []codex.Model{{ID: ""}, {ID: "a", Name: "A"}, {ID: "a", Name: "dup"}}); got.CurrentModelId != "default" || len(got.AvailableModels) != 2 {
-		t.Fatalf("modelState = %#v", got)
-	}
-	if got := unstableModelState("", nil); got.CurrentModelId != "default" || len(got.AvailableModels) != 1 {
-		t.Fatalf("unstableModelState = %#v", got)
-	}
-	unstableModels := []codex.Model{
-		{ID: ""},
-		{ID: "a", Name: "A", Description: "Alpha", Raw: map[string]any{"id": "a"}},
-		{ID: "a", Name: "Duplicate"},
-	}
-	if got := unstableModelState("current", unstableModels); got.CurrentModelId != "current" || len(got.AvailableModels) != 2 {
-		t.Fatalf("unstableModelState with catalog = %#v", got)
-	} else if got.AvailableModels[0].Description == nil || *got.AvailableModels[0].Description != "Alpha" || got.AvailableModels[0].Meta["id"] != "a" {
-		t.Fatalf("unstableModelState model info = %#v", got.AvailableModels[0])
 	}
 	if clientAccountMeta(ctx, nil) != nil {
 		t.Fatal("clientAccountMeta nil client returned data")
@@ -518,9 +492,6 @@ func TestSessionLifecycleConfigModelAndAccountEdges(t *testing.T) {
 	}
 	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: resp.SessionId, ModeId: modePlan}); err == nil {
 		t.Fatal("SetSessionMode with update failure succeeded")
-	}
-	if _, err := agent.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{SessionId: resp.SessionId, ModelId: "gpt"}); err == nil {
-		t.Fatal("SetSessionModel with update failure succeeded")
 	}
 }
 
@@ -742,30 +713,22 @@ func TestSessionFingerprintAndListHelperBranches(t *testing.T) {
 
 func TestSessionListLoadAndForkErrorBranches(t *testing.T) {
 	ctx := context.Background()
-	client := &errorCodexClient{
-		spyCodexClient: newSpyCodexClient(),
-		listThreads: []codex.Thread{
-			{},
-			{ID: "thread-1", SessionID: "thread-1"},
-			{ID: "active-thread", SessionID: "active-session"},
-			{ID: "new-thread", Model: "gpt", Cwd: "/tmp/project"},
-		},
-	}
+	client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{}}
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
 	active := newSession(agent, "active-session", "/tmp/project", []string{"/tmp/extra"}, codex.Thread{ID: "active-thread", Model: "gpt"}, client, sessionMeta{})
 	if err := agent.storeStartedSession(active); err != nil {
 		t.Fatalf("store active session: %v", err)
 	}
 	cwd := "/tmp/project"
-	list, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsAdditionalDirectories("/tmp/other")))
+	list, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
 	if err != nil {
-		t.Fatalf("ListSessions filtered returned error: %v", err)
+		t.Fatalf("ListSessions returned error: %v", err)
 	}
-	if len(list.Sessions) != 0 {
-		t.Fatalf("filtered list = %#v", list.Sessions)
+	if len(list.Sessions) != 1 || list.Sessions[0].SessionId != "active-session" {
+		t.Fatalf("cwd list = %#v", list.Sessions)
 	}
 	otherCwd := t.TempDir()
-	list, err = agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(otherCwd), WithListSessionsAdditionalDirectories("/tmp/extra")))
+	list, err = agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(otherCwd)))
 	if err != nil {
 		t.Fatalf("ListSessions cwd mismatch returned error: %v", err)
 	}
@@ -1090,7 +1053,9 @@ func TestListSessionsPaginationAndCursorErrors(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 	additional := t.TempDir()
-	agent := NewAgent()
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{}}, nil
+	}))
 	for i := 0; i < listSessionsPageSize+1; i++ {
 		id := acp.SessionId("session-" + strconv.Itoa(i))
 		session := newSession(agent, id, cwd, []string{additional}, codex.Thread{ID: "thread-" + strconv.Itoa(i)}, newSpyCodexClient(), sessionMeta{})
@@ -1099,25 +1064,25 @@ func TestListSessionsPaginationAndCursorErrors(t *testing.T) {
 		}
 	}
 
-	first, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsAdditionalDirectories(additional)))
+	first, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
 	if err != nil {
 		t.Fatalf("first ListSessions returned error: %v", err)
 	}
 	if len(first.Sessions) != listSessionsPageSize || first.NextCursor == nil {
 		t.Fatalf("first page len=%d cursor=%v", len(first.Sessions), first.NextCursor)
 	}
-	second, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsAdditionalDirectories(additional), WithListSessionsCursor(*first.NextCursor)))
+	second, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsCursor(*first.NextCursor)))
 	if err != nil {
 		t.Fatalf("second ListSessions returned error: %v", err)
 	}
 	if len(second.Sessions) != 1 || second.NextCursor != nil {
 		t.Fatalf("second page len=%d cursor=%v", len(second.Sessions), second.NextCursor)
 	}
-	if _, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsAdditionalDirectories(additional), WithListSessionsCursor("bad"))); err == nil {
+	if _, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsCursor("bad"))); err == nil {
 		t.Fatal("ListSessions accepted invalid cursor")
 	}
 	pastEnd := encodeListCursor(listSessionsPageSize + 2)
-	if _, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsAdditionalDirectories(additional), WithListSessionsCursor(pastEnd))); err == nil {
+	if _, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd), WithListSessionsCursor(pastEnd))); err == nil {
 		t.Fatal("ListSessions accepted cursor past end")
 	}
 }
@@ -1132,7 +1097,7 @@ func TestSessionResumeForkCancelSettersAndClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResumeSession returned error: %v", err)
 	}
-	if resume.Models == nil || resume.ConfigOptions == nil {
+	if resume.ConfigOptions == nil {
 		t.Fatalf("resume response = %#v", resume)
 	}
 	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "thread-1"}); err != nil {
@@ -1141,14 +1106,20 @@ func TestSessionResumeForkCancelSettersAndClose(t *testing.T) {
 	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: "thread-1", ModeId: modePlan}); err != nil {
 		t.Fatalf("SetSessionMode returned error: %v", err)
 	}
-	if _, err := agent.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{SessionId: "thread-1", ModelId: "gpt-other"}); err != nil {
-		t.Fatalf("UnstableSetSessionModel returned error: %v", err)
+	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: "thread-1",
+			ConfigId:  configModel,
+			Value:     "gpt-other",
+		},
+	}); err != nil {
+		t.Fatalf("SetSessionConfigOption model returned error: %v", err)
 	}
 	fork, err := agent.UnstableForkSession(ctx, ForkSessionRequest("thread-1", "/tmp/project"))
 	if err != nil {
 		t.Fatalf("UnstableForkSession returned error: %v", err)
 	}
-	if fork.SessionId == "" || fork.ConfigOptions == nil || fork.Models == nil {
+	if fork.SessionId == "" || fork.ConfigOptions == nil {
 		t.Fatalf("fork response = %#v", fork)
 	}
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {

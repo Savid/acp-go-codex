@@ -95,12 +95,12 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	return acp.AuthenticateResponse{Meta: accountResponseMeta(account)}, nil
 }
 
-func (a *Agent) UnstableLogout(ctx context.Context, _ acp.UnstableLogoutRequest) (acp.UnstableLogoutResponse, error) {
+func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResponse, error) {
 	if err := a.ensureOpen(); err != nil {
-		return acp.UnstableLogoutResponse{}, err
+		return acp.LogoutResponse{}, err
 	}
 	if !a.options.AllowAccountLogout {
-		return acp.UnstableLogoutResponse{}, acp.NewInvalidRequest(map[string]any{
+		return acp.LogoutResponse{}, acp.NewInvalidRequest(map[string]any{
 			jsonFieldError: "Codex account logout is disabled; set WithAllowAccountLogout for adapter-owned CODEX_HOME",
 		})
 	}
@@ -121,12 +121,12 @@ func (a *Agent) UnstableLogout(ctx context.Context, _ acp.UnstableLogoutRequest)
 
 	client, clientErr := a.newClient(ctx, nil, nil)
 	if clientErr != nil {
-		return acp.UnstableLogoutResponse{}, errors.Join(err, clientErr)
+		return acp.LogoutResponse{}, errors.Join(err, clientErr)
 	}
 	defer client.Close(context.Background())
 	err = errors.Join(err, client.Logout(ctx))
 
-	return acp.UnstableLogoutResponse{}, err
+	return acp.LogoutResponse{}, err
 }
 
 func parseChatGPTAuthTokens(meta map[string]any) (codex.ChatGPTAuthTokens, error) {

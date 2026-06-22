@@ -201,7 +201,13 @@ func TestSessionModeAndModelSettersRespectTurnLock(t *testing.T) {
 	if _, err := agent.SetSessionMode(canceledContext(), acp.SetSessionModeRequest{SessionId: resp.SessionId, ModeId: modePlan}); err == nil {
 		t.Fatal("SetSessionMode ignored canceled turn lock")
 	}
-	if _, err := agent.UnstableSetSessionModel(canceledContext(), acp.UnstableSetSessionModelRequest{SessionId: resp.SessionId, ModelId: "gpt-other"}); err == nil {
+	if _, err := agent.SetSessionConfigOption(canceledContext(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: resp.SessionId,
+			ConfigId:  configModel,
+			Value:     "gpt-other",
+		},
+	}); err == nil {
 		t.Fatal("SetSessionModel ignored canceled turn lock")
 	}
 }
