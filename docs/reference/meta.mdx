@@ -71,7 +71,7 @@ or `session/fork`; it is not a portable ACP core field.
 `mode` selects the initial ACP session mode. Supported values are `default` and
 `plan`. Codex-native `request_user_input` is only available to the model when
 the session is in `plan` mode; hosts can also switch modes later with
-`session/set_mode` or the `mode` config option.
+`session/set_config_option` using the `mode` config option.
 
 `env` overlays the launched Codex app-server process environment for that
 session. `approvalPolicy` and `sandboxPolicy` are forwarded to Codex as native
@@ -216,7 +216,7 @@ builders and overwritten by the adapter.
 ## Codex model metadata
 
 Session responses include the active model, provider, reasoning effort,
-service tier, and personality when Codex reports them. ACP model state carries
+service tier, and personality when Codex reports them. ACP config options carry
 the current model and available model list for hosts that render a portable
 model picker.
 

@@ -42,7 +42,7 @@ emits them.
 | `account/updated` | refreshes redacted account metadata |
 | `thread/goal/updated` | `session_info_update._meta.codex.goal` |
 | `thread/goal/cleared` | `session_info_update._meta.codex.goal: null` |
-| Client mode/config change | `current_mode_update` and/or `config_option_update` |
+| Client config change | `config_option_update` |
 | Completed turn | final prompt stop reason, `PromptResponse.usage`, `PromptResponse._meta`, and `usage_update` metadata |
 
 `account/updated` and goal notifications are consumed even when no turn is
@@ -78,17 +78,10 @@ breakdown.
 Codex app-server does not currently report USD cost through this path, so the
 adapter does not synthesize `cost`.
 
-## Mode and config updates
-
-`session/set_mode` emits:
-
-- `current_mode_update` with the selected mode;
-- `config_option_update` with refreshed model/config options.
+## Config updates
 
 `session/set_config_option` emits `config_option_update` after any accepted
-change. If the changed option is `mode`, it also emits `current_mode_update`.
-`session/set_model` emits `config_option_update` for hosts that use the
-unstable model method.
+change, including model and mode changes.
 
 ## Replay
 

@@ -40,8 +40,9 @@ trying a provider-local user-input tool path.
 Codex exposes the native `request_user_input` tool only in `plan` collaboration
 mode. Start the session with `_meta.codex.options.mode = "plan"`,
 `WithDefaultMode("plan")`, or `-mode plan`, or switch later with
-`session/set_mode`. In `default` mode Codex refuses the tool before the adapter
-receives a server request, so there is no ACP elicitation to translate.
+`session/set_config_option` using the `mode` config option. In `default` mode
+Codex refuses the tool before the adapter receives a server request, so there is
+no ACP elicitation to translate.
 
 The ACP client chooses how to render the elicitation. The adapter sends the
 client response back to Codex in the app-server response shape Codex expects.

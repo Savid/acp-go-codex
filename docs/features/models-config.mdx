@@ -5,7 +5,7 @@ icon: "sliders-horizontal"
 ---
 
 The adapter discovers Codex model data from the local app-server and advertises
-it through ACP session model state and config options.
+it through ACP session config options.
 
 ## Model selection
 
@@ -31,8 +31,7 @@ codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
 ```
 
 Clients can change the current model with ACP `session/set_config_option` using
-the `model` config option. `session/set_model` is also implemented for hosts
-that still use the unstable ACP model method.
+the `model` config option.
 
 ## Reasoning effort
 
@@ -69,10 +68,9 @@ codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
 ))
 ```
 
-Hosts can also set the active mode with `session/set_mode` or the `mode`
-config option; the next turn uses the selected Codex collaboration mode.
-Codex-native `request_user_input` is available to the model only in `plan`
-mode.
+Hosts can also set the active mode with `session/set_config_option` using the
+`mode` config option; the next turn uses the selected Codex collaboration mode.
+Codex-native `request_user_input` is available to the model only in `plan` mode.
 
 ## Config option IDs
 
@@ -91,9 +89,7 @@ The adapter advertises current values through ACP session config options:
 Codex-specific select options.
 
 After a successful `session/set_config_option`, the adapter emits
-`config_option_update` with refreshed options. Mode changes also emit
-`current_mode_update`. `session/set_model` emits `config_option_update` for
-hosts that still call the unstable model method.
+`config_option_update` with refreshed options.
 
 ## Other Codex options
 
@@ -119,5 +115,5 @@ Codex-specific session options live under `_meta.codex.options`:
 
 Session responses include current model metadata under `_meta.codex`, including
 `model`, `modelProvider`, `effort`, `serviceTier`, and `personality` when known.
-The same response also carries ACP model state for clients that render a model
-picker from the protocol-native fields.
+The same response carries config options for clients that render model, mode,
+and related controls.

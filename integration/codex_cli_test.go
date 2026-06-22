@@ -43,9 +43,16 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 	if session.SessionId == "" {
 		t.Fatal("session id is empty")
 	}
+	if session.Modes != nil {
+		t.Fatalf("legacy modes populated: %#v", session.Modes)
+	}
 	modelConfig := findSessionSelectConfig(session.ConfigOptions, "model")
 	if modelConfig == nil || modelConfig.Category == nil || *modelConfig.Category != acp.SessionConfigOptionCategoryModel || len(*modelConfig.Options.Ungrouped) == 0 {
 		t.Fatalf("model config not populated: %#v", session.ConfigOptions)
+	}
+	modeConfig := findSessionSelectConfig(session.ConfigOptions, "mode")
+	if modeConfig == nil || modeConfig.Category == nil || *modeConfig.Category != acp.SessionConfigOptionCategoryMode || len(*modeConfig.Options.Ungrouped) == 0 {
+		t.Fatalf("mode config not populated: %#v", session.ConfigOptions)
 	}
 	effortConfig := findSessionSelectConfig(session.ConfigOptions, "effort")
 	if effortConfig == nil || effortConfig.Category == nil || *effortConfig.Category != acp.SessionConfigOptionCategoryThoughtLevel || len(*effortConfig.Options.Ungrouped) == 0 {
@@ -80,17 +87,16 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 		t.Fatalf("thread read response %s did not mention thread id %q", string(raw), threadID)
 	}
 
-	if _, err := conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    "plan",
-	}); err != nil {
-		t.Fatalf("set session mode: %v", err)
-	}
-	if _, err := conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    "default",
-	}); err != nil {
-		t.Fatalf("reset session mode: %v", err)
+	for _, mode := range []acp.SessionConfigValueId{"plan", "default"} {
+		if _, err := conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+			ValueId: &acp.SetSessionConfigOptionValueId{
+				SessionId: session.SessionId,
+				ConfigId:  "mode",
+				Value:     mode,
+			},
+		}); err != nil {
+			t.Fatalf("set session mode config %q: %v", mode, err)
+		}
 	}
 	if _, err := conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{

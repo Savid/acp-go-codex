@@ -174,6 +174,9 @@ func TestLocalAgentConnectionHandleBranches(t *testing.T) {
 	if _, reqErr := conn.handle(context.Background(), "missing/method", json.RawMessage(`{}`)); reqErr == nil {
 		t.Fatal("missing method succeeded")
 	}
+	if _, reqErr := conn.handle(context.Background(), acp.AgentMethodSessionSetMode, json.RawMessage(`{"sessionId":"missing","modeId":"plan"}`)); reqErr == nil {
+		t.Fatal("legacy session/set_mode succeeded")
+	}
 	if _, reqErr := conn.handle(context.Background(), acp.AgentMethodSessionCancel, json.RawMessage(`{"sessionId":"missing"}`)); reqErr == nil {
 		t.Fatal("cancel missing session succeeded")
 	}

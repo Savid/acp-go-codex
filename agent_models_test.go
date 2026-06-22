@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -28,6 +29,7 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
+	requireNoTopLevelConfigState(t, resp)
 	if len(resp.ConfigOptions) != 5 {
 		t.Fatalf("config options = %d, want 5", len(resp.ConfigOptions))
 	}
@@ -70,13 +72,12 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 		t.Fatalf("collaboration mode = %#v, want plan", turn.CollaborationMode)
 	}
 	if len(conn.updates) == 0 {
-		t.Fatal("expected config/mode updates")
+		t.Fatal("expected config updates")
 	}
-}
-
-func TestModeStateDefaults(t *testing.T) {
-	if modeState("").CurrentModeId != modeDefault {
-		t.Fatal("empty mode did not default")
+	for _, update := range conn.updates {
+		if update.Update.CurrentModeUpdate != nil {
+			t.Fatalf("legacy mode update emitted: %#v", update.Update.CurrentModeUpdate)
+		}
 	}
 }
 
@@ -90,16 +91,20 @@ func TestNewSessionInitialMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession with default mode returned error: %v", err)
 	}
-	if resp.Modes == nil || resp.Modes.CurrentModeId != modePlan {
-		t.Fatalf("default mode response = %#v", resp.Modes)
+	requireNoTopLevelConfigState(t, resp)
+	modeConfig := findSelectConfig(resp.ConfigOptions, configMode)
+	if modeConfig == nil || modeConfig.CurrentValue != acp.SessionConfigValueId(modePlan) {
+		t.Fatalf("default mode config = %#v", modeConfig)
 	}
 
 	resp, err = agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionCodexOptions(NewCodexOptions(WithCodexMode(modeDefault)))))
 	if err != nil {
 		t.Fatalf("NewSession with meta mode returned error: %v", err)
 	}
-	if resp.Modes == nil || resp.Modes.CurrentModeId != modeDefault {
-		t.Fatalf("meta mode response = %#v", resp.Modes)
+	requireNoTopLevelConfigState(t, resp)
+	modeConfig = findSelectConfig(resp.ConfigOptions, configMode)
+	if modeConfig == nil || modeConfig.CurrentValue != acp.SessionConfigValueId(modeDefault) {
+		t.Fatalf("meta mode config = %#v", modeConfig)
 	}
 }
 
@@ -185,7 +190,7 @@ func TestEffortConfigValuesCoverCatalogEdges(t *testing.T) {
 	}
 }
 
-func TestSessionModeAndModelSettersRespectTurnLock(t *testing.T) {
+func TestSessionConfigSettersRespectTurnLock(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
@@ -198,8 +203,14 @@ func TestSessionModeAndModelSettersRespectTurnLock(t *testing.T) {
 	held <- struct{}{}
 	defer func() { <-held }()
 
-	if _, err := agent.SetSessionMode(canceledContext(), acp.SetSessionModeRequest{SessionId: resp.SessionId, ModeId: modePlan}); err == nil {
-		t.Fatal("SetSessionMode ignored canceled turn lock")
+	if _, err := agent.SetSessionConfigOption(canceledContext(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: resp.SessionId,
+			ConfigId:  configMode,
+			Value:     acp.SessionConfigValueId(modePlan),
+		},
+	}); err == nil {
+		t.Fatal("SetSessionConfigOption mode ignored canceled turn lock")
 	}
 	if _, err := agent.SetSessionConfigOption(canceledContext(), acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{
@@ -208,6 +219,39 @@ func TestSessionModeAndModelSettersRespectTurnLock(t *testing.T) {
 			Value:     "gpt-other",
 		},
 	}); err == nil {
-		t.Fatal("SetSessionModel ignored canceled turn lock")
+		t.Fatal("SetSessionConfigOption model ignored canceled turn lock")
+	}
+}
+
+func findSelectConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
+	for _, option := range options {
+		if option.Select != nil && option.Select.Id == id {
+			return option.Select
+		}
+	}
+
+	return nil
+}
+
+func requireNoTopLevelConfigState(t *testing.T, response any) {
+	t.Helper()
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &object); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if _, ok := object["configOptions"]; !ok {
+		t.Fatalf("response missing configOptions: %s", string(encoded))
+	}
+	if _, ok := object["models"]; ok {
+		t.Fatalf("response contains legacy models: %s", string(encoded))
+	}
+	if _, ok := object["modes"]; ok {
+		t.Fatalf("response contains legacy modes: %s", string(encoded))
 	}
 }

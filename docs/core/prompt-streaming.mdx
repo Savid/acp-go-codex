@@ -23,7 +23,7 @@ The adapter maps Codex events into portable ACP updates where possible:
 | Diff update | tool-call content/update when Codex provides it |
 | Account or warning update | `session_info_update` metadata where possible |
 | Goal update | `session_info_update._meta.codex.goal` |
-| Mode/config change | `current_mode_update` / `config_option_update` |
+| Config change | `config_option_update` |
 | Completed turn | final stop reason, `PromptResponse.usage`, and usage update metadata |
 
 When Codex emits only completed items, the mapper emits final text once. When

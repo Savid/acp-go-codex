@@ -281,10 +281,6 @@ func TestLifecycleErrorAndCloseBranches(t *testing.T) {
 			})
 			return err
 		},
-		"setMode": func() error {
-			_, err := closed.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: "thread", ModeId: modePlan})
-			return err
-		},
 		"authenticate": func() error {
 			_, err := closed.Authenticate(ctx, acp.AuthenticateRequest{})
 			return err
@@ -472,9 +468,6 @@ func TestSessionLifecycleConfigModelAndAccountEdges(t *testing.T) {
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{SessionId: resp.SessionId, ConfigId: "missing", Value: "x"}}); err == nil {
 		t.Fatal("SetSessionConfigOption unknown config succeeded")
 	}
-	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: "missing", ModeId: modeDefault}); err == nil {
-		t.Fatal("SetSessionMode missing session succeeded")
-	}
 	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}); err == nil {
 		t.Fatal("Cancel missing session succeeded")
 	}
@@ -489,9 +482,6 @@ func TestSessionLifecycleConfigModelAndAccountEdges(t *testing.T) {
 	agent.setAgentClient(errConn)
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{SessionId: resp.SessionId, ConfigId: configServiceTier, Value: "flex"}}); err == nil {
 		t.Fatal("SetSessionConfigOption with update failure succeeded")
-	}
-	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: resp.SessionId, ModeId: modePlan}); err == nil {
-		t.Fatal("SetSessionMode with update failure succeeded")
 	}
 }
 
@@ -1100,11 +1090,18 @@ func TestSessionResumeForkCancelSettersAndClose(t *testing.T) {
 	if resume.ConfigOptions == nil {
 		t.Fatalf("resume response = %#v", resume)
 	}
+	requireNoTopLevelConfigState(t, resume)
 	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "thread-1"}); err != nil {
 		t.Fatalf("Cancel returned error: %v", err)
 	}
-	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: "thread-1", ModeId: modePlan}); err != nil {
-		t.Fatalf("SetSessionMode returned error: %v", err)
+	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: "thread-1",
+			ConfigId:  configMode,
+			Value:     acp.SessionConfigValueId(modePlan),
+		},
+	}); err != nil {
+		t.Fatalf("SetSessionConfigOption mode returned error: %v", err)
 	}
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{
@@ -1122,11 +1119,18 @@ func TestSessionResumeForkCancelSettersAndClose(t *testing.T) {
 	if fork.SessionId == "" || fork.ConfigOptions == nil {
 		t.Fatalf("fork response = %#v", fork)
 	}
+	requireNoTopLevelConfigState(t, fork)
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {
 		t.Fatal("empty config option succeeded")
 	}
-	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: "thread-1", ModeId: "bad"}); err == nil {
-		t.Fatal("bad mode succeeded")
+	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: "thread-1",
+			ConfigId:  configMode,
+			Value:     "bad",
+		},
+	}); err == nil {
+		t.Fatal("bad mode config succeeded")
 	}
 	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "thread-1"}); err != nil {
 		t.Fatalf("CloseSession returned error: %v", err)

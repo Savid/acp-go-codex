@@ -21,7 +21,6 @@ stdio or through streams passed to `codexacp.Serve`.
 | `session/list` | implemented | [Session List](https://agentclientprotocol.com/protocol/session-list) |
 | `session/load` | implemented | [Session Setup](https://agentclientprotocol.com/protocol/session-setup), [Schema](https://agentclientprotocol.com/protocol/schema) |
 | `session/resume` | implemented | [Schema](https://agentclientprotocol.com/protocol/schema), [Session resume RFD](https://agentclientprotocol.com/rfds/session-resume) |
-| `session/set_mode` | implemented | [Session Modes](https://agentclientprotocol.com/protocol/session-modes) |
 | `session/set_config_option` | implemented | [Session Config Options](https://agentclientprotocol.com/protocol/session-config-options) |
 
 ## Unstable methods
@@ -33,7 +32,6 @@ where available.
 | Method | Status | ACP docs |
 | --- | --- | --- |
 | `session/fork` | implemented | [Session fork RFD](https://agentclientprotocol.com/rfds/session-fork) |
-| `session/set_model` | implemented for hosts that use the unstable ACP model method; prefer `session/set_config_option` with `model` | [Session Config Options](https://agentclientprotocol.com/protocol/session-config-options), [model config RFD](https://agentclientprotocol.com/rfds/model-config-category) |
 | `logout` | calls Codex `account/logout` only when explicitly enabled | [Logout Method RFD](https://agentclientprotocol.com/rfds/logout-method) |
 | `mcp/message` | implemented for ACP-transport MCP | [MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp) |
 

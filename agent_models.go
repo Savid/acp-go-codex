@@ -200,7 +200,6 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 	}
 	defer releaseTurn()
 
-	var modeChanged bool
 	switch params.ConfigId {
 	case configModel:
 		session.mu.Lock()
@@ -216,7 +215,6 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.mode = mode
 		session.updatedAt = nowRFC3339()
 		session.mu.Unlock()
-		modeChanged = true
 	case configEffort:
 		if !validReasoningEffort(string(params.Value)) {
 			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"configId": params.ConfigId, "value": params.Value})
@@ -244,14 +242,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 
 	models := modelList(ctx, session.client)
 	options := sessionConfigOptions(session, models)
-	updates := []acp.SessionUpdate{{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}}
-	if modeChanged {
-		session.mu.Lock()
-		mode := session.mode
-		session.mu.Unlock()
-		updates = append(updates, acp.SessionUpdate{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{CurrentModeId: mode}})
-	}
-	if err := session.emitUpdates(ctx, updates...); err != nil {
+	if err := session.emitUpdates(ctx, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 

@@ -233,20 +233,6 @@ func goalSummaryFromSnapshot(goal *CodexGoal) any {
 	return goalSummaryMeta(*goal)
 }
 
-func modeState(mode acp.SessionModeId) *acp.SessionModeState {
-	if mode == "" {
-		mode = modeDefault
-	}
-
-	return &acp.SessionModeState{
-		CurrentModeId: mode,
-		AvailableModes: []acp.SessionMode{
-			{Id: modeDefault, Name: "Default"},
-			{Id: modePlan, Name: "Plan"},
-		},
-	}
-}
-
 func cloneAnyMap(values map[string]any) map[string]any {
 	if values == nil {
 		return nil

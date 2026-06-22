@@ -86,7 +86,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	return acp.NewSessionResponse{
 		SessionId:     id,
 		Meta:          sessionResponseMeta(snapshot),
-		Modes:         modeState(snapshot.mode),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -426,7 +425,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 		return acp.ResumeSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
-			Modes:         modeState(snapshot.mode),
 			ConfigOptions: sessionConfigOptions(session, models),
 		}, nil
 	}
@@ -480,7 +478,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
-		Modes:         modeState(snapshot.mode),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -553,7 +550,6 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
-		Modes:         modeState(snapshot.mode),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -598,7 +594,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		snapshot := existing.snapshot()
 		return acp.LoadSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
-			Modes:         modeState(snapshot.mode),
 			ConfigOptions: sessionConfigOptions(existing, models),
 		}, nil
 	}
@@ -773,7 +768,6 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	return acp.LoadSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
-		Modes:         modeState(snapshot.mode),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
 }
@@ -853,7 +847,6 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 	return acp.UnstableForkSessionResponse{
 		SessionId:     id,
 		Meta:          sessionResponseMeta(snapshot),
-		Modes:         modeState(snapshot.mode),
 		ConfigOptions: sessionUnstableConfigOptions(session, models),
 	}, nil
 }
@@ -869,34 +862,12 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	}
 }
 
-func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
-	session, err := a.session(params.SessionId)
-	if err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-	if params.ModeId != modeDefault && params.ModeId != modePlan {
-		return acp.SetSessionModeResponse{}, acp.NewInvalidParams(map[string]any{"modeId": params.ModeId})
-	}
-	releaseTurn, err := session.acquireTurn(ctx)
-	if err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-	defer releaseTurn()
-
-	session.mu.Lock()
-	session.mode = params.ModeId
-	session.updatedAt = nowRFC3339()
-	session.mu.Unlock()
-
-	options := sessionConfigOptions(session, modelList(ctx, session.client))
-	if err := session.emitUpdates(ctx,
-		acp.SessionUpdate{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{CurrentModeId: params.ModeId}},
-		acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}},
-	); err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-
-	return acp.SetSessionModeResponse{}, nil
+// SetSessionMode exists only because github.com/coder/acp-go-sdk's generated
+// Agent interface still requires it. The local ACP dispatcher intentionally
+// does not route session/set_mode; use session/set_config_option with configId
+// "mode".
+func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
 func modelList(ctx context.Context, client codex.Client) []codex.Model {
