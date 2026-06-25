@@ -28,6 +28,8 @@ const (
 	envCodexHome      = "ACP_GO_CODEX_HOME"
 	envModel          = "ACP_GO_CODEX_MODEL"
 	envLiveTurn       = "ACP_GO_CODEX_LIVE_TURN"
+	envDebug          = "ACP_GO_CODEX_DEBUG_INTEGRATION"
+	envOpenAIAPIKey   = "OPENAI_API_KEY" //nolint:gosec // Environment variable name, not a credential value.
 
 	livePromptRefusalRetries = 1
 )
@@ -36,6 +38,9 @@ var integrationLogger = slog.New(slog.DiscardHandler)
 
 func TestMain(m *testing.M) {
 	previousLogger := slog.Default()
+	if os.Getenv(envDebug) == "1" {
+		integrationLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
 	slog.SetDefault(integrationLogger)
 
 	code := m.Run()
@@ -359,16 +364,34 @@ func integrationCodexHome(t *testing.T) string {
 	return os.Getenv(envCodexHome)
 }
 
-func isolatedCodexHome(t *testing.T) string {
+func integrationCodexSourceHome(t *testing.T) (string, bool) {
 	t.Helper()
 
 	source := integrationCodexHome(t)
-	if source == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			t.Fatalf("user home: %v", err)
-		}
-		source = filepath.Join(home, ".codex")
+	if source != "" {
+		return source, true
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("user home: %v", err)
+	}
+
+	return filepath.Join(home, ".codex"), false
+}
+
+func isolatedCodexHome(t *testing.T) string {
+	t.Helper()
+
+	source, explicitSource := integrationCodexSourceHome(t)
+	processAuth := processCodexAuthAvailable()
+	if !processAuth && !codexAuthFileAvailable(t, source) {
+		t.Fatalf(
+			"live Codex integration requires env auth or portable auth.json; refusing to launch without isolated auth. "+
+				"Set %s or provide auth.json in %s",
+			envOpenAIAPIKey,
+			envCodexHome,
+		)
 	}
 
 	base, err := filepath.Abs(filepath.Join("..", ".tmp", "integration-codex-home"))
@@ -384,13 +407,62 @@ func isolatedCodexHome(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(target) })
 
-	for _, name := range []string{"auth.json", "config.json", "config.toml", "models_cache.json", "installation_id"} {
-		if err := copyCodexHomeFile(source, target, name); err != nil {
-			t.Fatalf("copy Codex %s: %v", name, err)
+	if explicitSource || !processAuth {
+		for _, name := range []string{"auth.json", "config.json", "config.toml", "models_cache.json", "installation_id"} {
+			if err := copyCodexHomeFile(source, target, name); err != nil {
+				t.Fatalf("copy Codex %s: %v", name, err)
+			}
 		}
 	}
 
 	return target
+}
+
+func processCodexAuthAvailable() bool {
+	return strings.TrimSpace(os.Getenv(envOpenAIAPIKey)) != ""
+}
+
+func codexAuthFileAvailable(t *testing.T, sourceDir string) bool {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(sourceDir, "auth.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("read Codex auth.json: %v", err)
+	}
+
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		t.Fatalf("decode Codex auth.json: %v", err)
+	}
+
+	return codexAuthToken(value) != ""
+}
+
+func codexAuthToken(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "access_token" || key == "api_key" || key == "openai_api_key" {
+				if token, ok := child.(string); ok && strings.TrimSpace(token) != "" {
+					return token
+				}
+			}
+			if token := codexAuthToken(child); token != "" {
+				return token
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if token := codexAuthToken(child); token != "" {
+				return token
+			}
+		}
+	}
+
+	return ""
 }
 
 func copyCodexHomeFile(sourceDir string, targetDir string, name string) error {
@@ -403,7 +475,49 @@ func copyCodexHomeFile(sourceDir string, targetDir string, name string) error {
 		return err
 	}
 
+	if name == "auth.json" {
+		data, err = redactCodexRefreshTokens(data)
+		if err != nil {
+			return err
+		}
+	}
+
 	return os.WriteFile(filepath.Join(targetDir, name), data, 0o600)
+}
+
+func redactCodexRefreshTokens(data []byte) ([]byte, error) {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, err
+	}
+
+	redactCodexRefreshTokensInValue(value)
+
+	out, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+
+	return append(out, '\n'), nil
+}
+
+func redactCodexRefreshTokensInValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "refreshToken" || key == "refresh_token" {
+				// Codex app-server rejects JSON null and needs the field present, but
+				// an empty refresh token keeps copied auth from rotating source auth.
+				typed[key] = ""
+				continue
+			}
+			redactCodexRefreshTokensInValue(child)
+		}
+	case []any:
+		for _, child := range typed {
+			redactCodexRefreshTokensInValue(child)
+		}
+	}
 }
 
 func requireLiveTurn(t *testing.T) {
@@ -461,9 +575,11 @@ func serveLiveAgentRawForTest(
 ) liveAgentPipes {
 	t.Helper()
 
+	codexPath := integrationCodexPath(t)
+	codexHome := isolatedCodexHome(t)
 	base := []codexacp.Option{
-		codexacp.WithCodexPath(integrationCodexPath(t)),
-		codexacp.WithCodexHome(isolatedCodexHome(t)),
+		codexacp.WithCodexPath(codexPath),
+		codexacp.WithCodexHome(codexHome),
 		codexacp.WithDefaultModel(os.Getenv(envModel)),
 		codexacp.WithLogger(integrationLogger),
 	}
@@ -545,7 +661,9 @@ func connectLiveAgentBinary(
 		t.Skipf("set %s to run compiled binary integration coverage", envAgentBinary)
 	}
 
-	args := []string{"-codex", integrationCodexPath(t), "-codex-home", isolatedCodexHome(t)}
+	codexPath := integrationCodexPath(t)
+	codexHome := isolatedCodexHome(t)
+	args := []string{"-codex", codexPath, "-codex-home", codexHome}
 	if model := os.Getenv(envModel); model != "" {
 		args = append(args, "-model", model)
 	}

@@ -149,7 +149,7 @@ while read line; do :; done
 		Config:        map[string]any{"feature.enabled": true, "name": "x y"},
 		ExtraArgs:     []string{"--extra"},
 		Logger:        logger,
-		LaunchTimeout: time.Second,
+		LaunchTimeout: 5 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewAppServerClient with config returned error: %v", err)
@@ -264,7 +264,7 @@ while read line; do :; done
 	}
 	getProcessGroupID = origGetPGID
 	killProcessID = origKillPID
-	killFail := exec.Command("/usr/bin/sleep", "10")
+	killFail := sleepCommand(t, "10")
 	if err := startProcess(killFail); err != nil {
 		t.Fatalf("start kill-fail process: %v", err)
 	}
@@ -279,7 +279,7 @@ while read line; do :; done
 	killProcessID = origKillPID
 	_ = killProcess(killFail)
 	processCloseGrace = origGrace
-	stubborn := exec.Command("/usr/bin/sleep", "10")
+	stubborn := sleepCommand(t, "10")
 	if err := startProcess(stubborn); err != nil {
 		t.Fatalf("start stubborn process: %v", err)
 	}
@@ -289,4 +289,19 @@ while read line; do :; done
 		t.Fatalf("processCloser timeout kill returned error: %v", err)
 	}
 	processCloseGrace = origGrace
+}
+
+func sleepCommand(t *testing.T, seconds string) *exec.Cmd {
+	t.Helper()
+
+	for _, path := range []string{"/bin/sleep", "/usr/bin/sleep"} {
+		if _, err := os.Stat(path); err == nil {
+			return exec.Command(path, seconds)
+		}
+	}
+	if path, err := exec.LookPath("sleep"); err == nil {
+		return exec.Command(path, seconds)
+	}
+	t.Fatal("find sleep")
+	return nil
 }

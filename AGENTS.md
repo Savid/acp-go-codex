@@ -30,9 +30,12 @@ Integration tests are opt-in. `make test-integration-smoke` requires a local
 `make test-integration` also sets `ACP_GO_CODEX_LIVE_TURN=1` and may spend model
 tokens. Use `ACP_GO_CODEX_CODEX_PATH`, `ACP_GO_CODEX_HOME`,
 `ACP_GO_CODEX_MODEL`, and `ACP_GO_CODEX_AGENT_BINARY` to point tests at a
-specific CLI, isolated authenticated Codex home, model, or compiled agent
-binary. When `ACP_GO_CODEX_HOME` is unset, tests use the local Codex default
-home.
+specific CLI, source Codex home, model, or compiled agent binary. Integration
+tests always launch Codex with an isolated temp `CODEX_HOME`. When `OPENAI_API_KEY`
+is set and `ACP_GO_CODEX_HOME` is unset, tests use a fresh temp home. Otherwise
+they copy the source home into the temp home and clear copied auth refresh
+tokens. If neither env auth nor copied `auth.json` is available, tests fail
+instead of launching without isolated auth.
 
 ## Coding Rules
 

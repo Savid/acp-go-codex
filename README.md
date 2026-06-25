@@ -115,6 +115,9 @@ make test-integration-cover
 
 Live integration tests require a local authenticated `codex` CLI. The full
 integration target sets `ACP_GO_CODEX_LIVE_TURN=1` and may spend model tokens.
-By default it uses the normal Codex home, matching `acp-go-claude`; set
-`ACP_GO_CODEX_HOME` only when you want to run against an isolated authenticated
-Codex home.
+Live tests always launch Codex with an isolated temp `CODEX_HOME`. When
+`OPENAI_API_KEY` is set and `ACP_GO_CODEX_HOME` is unset, tests use a fresh temp
+home. Otherwise they copy the source home into the temp home and clear copied
+auth refresh tokens so live tests cannot rotate the source home's refresh token.
+If neither env auth nor copied `auth.json` is available, tests fail instead of
+launching without isolated auth.

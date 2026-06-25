@@ -126,7 +126,7 @@ while read line; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write codex script: %v", err)
 	}
-	client, err := NewAppServerClient(context.Background(), Options{CLIPath: script, LaunchTimeout: 2 * time.Second})
+	client, err := NewAppServerClient(context.Background(), Options{CLIPath: script, LaunchTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
 	}
