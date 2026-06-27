@@ -183,7 +183,7 @@ while read line; do :; done
 		cmd.Stdin = strings.NewReader("")
 		return cmd
 	}
-	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored StdinPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
@@ -194,7 +194,7 @@ while read line; do :; done
 		cmd.Stdout = io.Discard
 		return cmd
 	}
-	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored StdoutPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
@@ -203,19 +203,19 @@ while read line; do :; done
 		}
 		return exec.Command(filepath.Join(t.TempDir(), "missing"))
 	}
-	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored start error")
 	}
 	execCommandContext = func(context.Context, string, ...string) *exec.Cmd {
 		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.1.0")
 	}
-	if _, _, err := launchAppServer(context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored version error")
 	}
 	execCommandContext = origExec
 	t.Setenv(envCodexPath, "")
 	t.Setenv("PATH", t.TempDir())
-	if _, _, err := launchAppServer(context.Background(), Options{}); err == nil {
+	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{}); err == nil {
 		t.Fatal("launchAppServer ignored missing codex path")
 	}
 

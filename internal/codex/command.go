@@ -22,7 +22,11 @@ const (
 var execCommandContext = exec.CommandContext
 var processCloseGrace = 2 * time.Second
 
-func launchAppServer(ctx context.Context, options Options) (*lineTransport, *exec.Cmd, error) {
+// launchAppServer starts the codex app-server. The request-scoped ctx bounds
+// the version check, while procCtx governs the lifetime of the spawned process
+// (see NewAppServerClient): binding the process to procCtx prevents
+// exec.CommandContext from SIGKILLing codex when the launching request returns.
+func launchAppServer(ctx context.Context, procCtx context.Context, options Options) (*lineTransport, *exec.Cmd, error) {
 	path, err := resolveCodexPath(options.CLIPath)
 	if err != nil {
 		return nil, nil, err
@@ -37,7 +41,7 @@ func launchAppServer(ctx context.Context, options Options) (*lineTransport, *exe
 	}
 	args = append(args, options.ExtraArgs...)
 
-	cmd := execCommandContext(ctx, path, args...)
+	cmd := execCommandContext(procCtx, path, args...)
 	cmd.Env = mergedEnv(options)
 
 	stdin, err := cmd.StdinPipe()

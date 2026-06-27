@@ -38,9 +38,10 @@ const (
 )
 
 type AppServerClient struct {
-	options Options
-	rpc     *rpcConn
-	cmd     *exec.Cmd
+	options    Options
+	rpc        *rpcConn
+	cmd        *exec.Cmd
+	procCancel context.CancelFunc
 
 	eventPumpOnce sync.Once
 	eventDone     chan struct{}
@@ -73,15 +74,24 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 		defer cancel()
 	}
 
-	transport, cmd, err := launchAppServer(launchCtx, options)
+	// The codex app-server process must outlive the request that created the
+	// session: exec.CommandContext SIGKILLs the process when its context is
+	// done, so the process is bound to a dedicated context that is only
+	// cancelled by Close. The request ctx still bounds the launch handshake
+	// (version check and initialize) below.
+	procCtx, procCancel := context.WithCancel(context.Background())
+
+	transport, cmd, err := launchAppServer(launchCtx, procCtx, options)
 	if err != nil {
+		procCancel()
 		return nil, err
 	}
 
 	client := &AppServerClient{
-		options: options,
-		rpc:     newRPCConn(transport, options.RequestHandler),
-		cmd:     cmd,
+		options:    options,
+		rpc:        newRPCConn(transport, options.RequestHandler),
+		cmd:        cmd,
+		procCancel: procCancel,
 	}
 	client.ensureEventPump()
 
@@ -471,6 +481,9 @@ func (c *AppServerClient) Close(context.Context) error {
 		<-done
 	} else {
 		c.closeAllTurns()
+	}
+	if c.procCancel != nil {
+		c.procCancel()
 	}
 
 	return err
