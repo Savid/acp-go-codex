@@ -291,6 +291,40 @@ while read line; do :; done
 	processCloseGrace = origGrace
 }
 
+func TestProcessCloserSendsTermBeforeKill(t *testing.T) {
+	origGrace := processCloseGrace
+	processCloseGrace = 20 * time.Millisecond
+	t.Cleanup(func() { processCloseGrace = origGrace })
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "term")
+	script := filepath.Join(dir, "codex-trap-term")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+trap 'printf term > "$TERM_MARK"; exit 0' TERM
+while :; do :; done
+`), 0o700); err != nil {
+		t.Fatalf("write trap script: %v", err)
+	}
+
+	cmd := exec.Command(script)
+	cmd.Env = append(os.Environ(), "TERM_MARK="+marker)
+	if err := startProcess(cmd); err != nil {
+		t.Fatalf("start trap process: %v", err)
+	}
+
+	if err := (processCloser{cmd: cmd}).Close(); err != nil {
+		t.Fatalf("close trap process: %v", err)
+	}
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read term marker: %v", err)
+	}
+	if string(data) != "term" {
+		t.Fatalf("term marker = %q", string(data))
+	}
+}
+
 func sleepCommand(t *testing.T, seconds string) *exec.Cmd {
 	t.Helper()
 

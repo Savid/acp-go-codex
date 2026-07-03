@@ -19,19 +19,27 @@ func startProcess(cmd *exec.Cmd) error {
 	return cmd.Start()
 }
 
+func terminateProcess(cmd *exec.Cmd) error {
+	return signalProcess(cmd, syscall.SIGTERM)
+}
+
 func killProcess(cmd *exec.Cmd) error {
+	return signalProcess(cmd, syscall.SIGKILL)
+}
+
+func signalProcess(cmd *exec.Cmd, signal syscall.Signal) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
 
 	if pgid, err := getProcessGroupID(cmd.Process.Pid); err == nil {
-		if err := killProcessID(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := killProcessID(-pgid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
 		return nil
 	}
 
-	err := cmd.Process.Kill()
+	err := cmd.Process.Signal(signal)
 	if errors.Is(err, os.ErrProcessDone) {
 		return nil
 	}

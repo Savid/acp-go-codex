@@ -226,6 +226,19 @@ func (c processCloser) Close() error {
 		done <- c.cmd.Wait()
 	}()
 
+	// Escalate: stdin EOF → SIGTERM → SIGKILL. The first grace window lets
+	// the app-server exit on its own after stdin closes so in-flight cleanup
+	// (e.g. MCP session termination) completes instead of being cut short.
+	select {
+	case err := <-done:
+		return processCloseError(err)
+	case <-time.After(processCloseGrace):
+	}
+
+	if err := terminateProcess(c.cmd); err != nil {
+		return err
+	}
+
 	select {
 	case err := <-done:
 		return processCloseError(err)
