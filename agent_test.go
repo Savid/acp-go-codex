@@ -2,11 +2,8 @@ package codexacp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -54,19 +51,15 @@ func TestInitializeAdvertisesCodexCapabilities(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing Codex meta: %#v", resp.AgentCapabilities.Meta)
 	}
-	if meta["provider"] != "codex" || meta["preferredTransport"] != "app-server" {
-		t.Fatalf("unexpected Codex meta: %#v", meta)
+	if rawMeta, ok := meta[rawEventCapabilityKey].(map[string]any); !ok || rawMeta["method"] != RawEventMethod {
+		t.Fatalf("missing raw event capability: %#v", meta)
 	}
-	if meta[rawSDKMessagesCapabilityKey] == nil {
-		t.Fatalf("missing raw SDK message capability: %#v", meta)
-	}
-	outputSchemaMeta, ok := meta[outputSchemaCapabilityKey].(map[string]any)
-	if !ok || outputSchemaMeta["result"] != outputSchemaResultPath {
+	outputSchemaMeta, ok := meta[structuredOutputCapabilityKey].(map[string]any)
+	if !ok || outputSchemaMeta["result"] != "_meta.codex.structuredOutput" {
 		t.Fatalf("missing output schema capability: %#v", meta)
 	}
-	approvalMeta, ok := meta["mcpToolApproval"].(map[string]any)
-	if !ok || approvalMeta["defaultMode"] != "_meta.codex.defaultToolsApprovalMode" {
-		t.Fatalf("missing MCP tool approval capability: %#v", meta)
+	if _, ok := meta["goals"]; ok {
+		t.Fatalf("goals capability advertised: %#v", meta)
 	}
 }
 
@@ -298,17 +291,12 @@ func (*recordingClient) WaitForTerminalExit(context.Context, acp.WaitForTerminal
 	return acp.WaitForTerminalExitResponse{}, acp.NewMethodNotFound(acp.ClientMethodTerminalWaitForExit)
 }
 
-func (a *Agent) sessionMust(id acp.SessionId) *Session {
+func (a *Agent) sessionMust(id acp.SessionId) *session {
 	session, err := a.session(id)
 	if err != nil {
 		panic(err)
 	}
 	return session
-}
-
-func quoteJSON(value string) string {
-	raw, _ := json.Marshal(value)
-	return string(raw)
 }
 
 func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
@@ -353,25 +341,6 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	}
 	agent.updateAccountForClient(client, "", codex.Account{})
 	agent.applyCodexClientEvent(context.Background(), client, codex.Event{Kind: codex.EventRaw})
-	agent.applyCodexClientEvent(context.Background(), client, codex.Event{
-		Kind:     codex.EventGoalCleared,
-		ThreadID: "thread-1",
-	})
-	agent.updateGoalForClient(context.Background(), client, codex.Event{
-		Kind:     codex.EventGoalUpdated,
-		ThreadID: "missing-thread",
-		Goal:     &codex.Goal{Objective: "skip"},
-	})
-	badGoalAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()))
-	badGoalSession := newSession(badGoalAgent, "bad-goal", "relative", nil, codex.Thread{ID: "bad-thread"}, client, sessionMeta{})
-	if err := badGoalAgent.storeStartedSession(badGoalSession); err != nil {
-		t.Fatalf("store bad goal session: %v", err)
-	}
-	badGoalAgent.updateGoalForClient(context.Background(), client, codex.Event{
-		Kind:     codex.EventGoalUpdated,
-		ThreadID: "bad-thread",
-		Goal:     &codex.Goal{Objective: "bad"},
-	})
 }
 
 type spyCodexClient struct {
@@ -386,9 +355,6 @@ type spyCodexClient struct {
 	steer     codex.TurnSteerRequest
 	compact   codex.ThreadCompactRequest
 	review    codex.ReviewStartRequest
-	goalSet   codex.GoalSetRequest
-	goal      *codex.Goal
-	goalClear string
 	turns     codex.ThreadTurnsListRequest
 	loggedOut bool
 	login     codex.ChatGPTAuthTokens
@@ -493,46 +459,6 @@ func (c *spyCodexClient) StartReview(_ context.Context, req codex.ReviewStartReq
 	c.review = req
 	c.mu.Unlock()
 	return map[string]any{"status": "reviewing"}, nil
-}
-
-func (c *spyCodexClient) SetGoal(_ context.Context, req codex.GoalSetRequest) (codex.Goal, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.goalSet = req
-	goal := codex.Goal{
-		ThreadID:    req.ThreadID,
-		Objective:   req.Objective,
-		Status:      firstNonEmpty(req.Status, CodexGoalStatusActive),
-		TokenBudget: cloneInt64Ptr(req.TokenBudget),
-	}
-	c.goal = &goal
-
-	return goal, nil
-}
-
-func (c *spyCodexClient) GetGoal(context.Context, string) (*codex.Goal, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.goal == nil {
-		//nolint:nilnil // nil goal with nil error is the GetGoal "not set" result.
-		return nil, nil
-	}
-	goal := *c.goal
-	goal.TokenBudget = cloneInt64Ptr(goal.TokenBudget)
-
-	return &goal, nil
-}
-
-func (c *spyCodexClient) ClearGoal(_ context.Context, threadID string) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.goalClear = threadID
-	existed := c.goal != nil
-	c.goal = nil
-
-	return existed, nil
 }
 
 func (c *spyCodexClient) CollaborationModeList(context.Context) (codex.CollaborationModeListResponse, error) {
@@ -663,8 +589,8 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 
 	agent := NewAgent()
 	agent.options.clientFactory = nil
-	agent.options.CodexPath = filepath.Join(t.TempDir(), "missing-codex")
-	if _, err := agent.newClient(context.Background(), nil, nil); err == nil {
+	agent.options.ExecutablePath = filepath.Join(t.TempDir(), "missing-codex")
+	if _, err := agent.newClient(context.Background(), nil, nil, ""); err == nil {
 		t.Fatal("newClient with nil factory and no Codex CLI succeeded")
 	}
 	var gotOptions codex.Options
@@ -672,19 +598,13 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 		gotOptions = options
 		return newSpyCodexClient(), nil
 	}))
-	if _, err := requestAgent.newClient(context.Background(), nil, nil); err != nil {
+	if _, err := requestAgent.newClient(context.Background(), nil, nil, ""); err != nil {
 		t.Fatalf("newClient for request handler returned error: %v", err)
 	}
 	if _, err := gotOptions.RequestHandler(context.Background(), codex.ServerRequest{Method: "missing"}); err == nil {
 		t.Fatal("Codex request handler accepted missing method")
 	}
 }
-
-func rawPtr(raw json.RawMessage) *json.RawMessage { return &raw }
-
-type errorWriter struct{}
-
-func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
 func canceledContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -709,7 +629,6 @@ type errorCodexClient struct {
 	steerErr         error
 	compactErr       error
 	reviewErr        error
-	goalErr          error
 	readErr          error
 	turnsErr         error
 	collaborationErr error
@@ -717,16 +636,6 @@ type errorCodexClient struct {
 	loginErr         error
 	logoutErr        error
 	listThreads      []codex.Thread
-}
-
-type closingAccountClient struct {
-	*spyCodexClient
-	agent *Agent
-}
-
-func (c *closingAccountClient) AccountRead(context.Context) (codex.Account, error) {
-	_ = c.agent.Close()
-	return codex.Account{ID: "closed"}, nil
 }
 
 func (c *errorCodexClient) StartThread(ctx context.Context, req codex.ThreadStartRequest) (codex.Thread, error) {
@@ -793,27 +702,6 @@ func (c *errorCodexClient) StartReview(ctx context.Context, req codex.ReviewStar
 		return nil, c.reviewErr
 	}
 	return c.spyCodexClient.StartReview(ctx, req)
-}
-
-func (c *errorCodexClient) SetGoal(ctx context.Context, req codex.GoalSetRequest) (codex.Goal, error) {
-	if c.goalErr != nil {
-		return codex.Goal{}, c.goalErr
-	}
-	return c.spyCodexClient.SetGoal(ctx, req)
-}
-
-func (c *errorCodexClient) GetGoal(ctx context.Context, threadID string) (*codex.Goal, error) {
-	if c.goalErr != nil {
-		return nil, c.goalErr
-	}
-	return c.spyCodexClient.GetGoal(ctx, threadID)
-}
-
-func (c *errorCodexClient) ClearGoal(ctx context.Context, threadID string) (bool, error) {
-	if c.goalErr != nil {
-		return false, c.goalErr
-	}
-	return c.spyCodexClient.ClearGoal(ctx, threadID)
 }
 
 func (c *errorCodexClient) CollaborationModeList(ctx context.Context) (codex.CollaborationModeListResponse, error) {
@@ -907,14 +795,6 @@ func (c *blockingPermissionAgentClient) RequestPermission(context.Context, acp.R
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionAccept)}, nil
 }
 
-type connectErrorMCPAgentClient struct {
-	*recordingMCPAgentClient
-}
-
-func (c *connectErrorMCPAgentClient) UnstableConnectMcp(context.Context, acp.UnstableConnectMcpRequest) (acp.UnstableConnectMcpResponse, error) {
-	return acp.UnstableConnectMcpResponse{}, errors.New("connect failed")
-}
-
 type readErrorClient struct {
 	codex.Client
 }
@@ -923,58 +803,9 @@ func (c readErrorClient) ReadThread(context.Context, codex.ThreadReadRequest) (c
 	return codex.ThreadHistory{}, errors.New("read failed")
 }
 
-type errorSessionStore struct {
-	loadErr error
-	listErr error
-}
-
-func (s errorSessionStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
-	return nil
-}
-
-func (s errorSessionStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
-	if s.loadErr != nil {
-		return nil, s.loadErr
-	}
-	return nil, nil
-}
-func (s errorSessionStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
-	return nil
-}
-
-func (s errorSessionStore) ListSessions(context.Context, string) ([]SessionSummary, error) {
-	if s.listErr != nil {
-		return nil, s.listErr
-	}
-	return nil, nil
-}
-
-func bufioReadLine(conn net.Conn) (string, error) {
-	buf := make([]byte, 0, 128)
-	tmp := make([]byte, 1)
-	for {
-		n, err := conn.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[0])
-			if tmp[0] == '\n' {
-				return string(buf), nil
-			}
-		}
-		if err != nil {
-			return string(buf), err
-		}
-	}
-}
-
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
-
-type noListStore struct{}
-
-func (noListStore) Append(context.Context, SessionKey, []SessionStoreEntry) error  { return nil }
-func (noListStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error)  { return nil, nil }
-func (noListStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
 
 type appendErrorStore struct{}
 
@@ -984,42 +815,12 @@ func (appendErrorStore) Append(context.Context, SessionKey, []SessionStoreEntry)
 func (appendErrorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
 	return nil, nil
 }
-func (appendErrorStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
+func (appendErrorStore) Replace(context.Context, SessionKey, []SessionStoreReplacement) error {
 	return nil
 }
-
-type loadErrorStore struct{}
-
-func (loadErrorStore) Append(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
-func (loadErrorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
-	return nil, errors.New("load failed")
-}
-func (loadErrorStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
-
-type existingNoReplaceStore struct{}
-
-func (existingNoReplaceStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
-	return nil
-}
-func (existingNoReplaceStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
-	return []SessionStoreEntry{SessionStoreEntry(`{"type":"old"}`)}, nil
-}
-func (existingNoReplaceStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
-	return nil
-}
-
-type replaceErrorStore struct{}
-
-func (replaceErrorStore) Append(context.Context, SessionKey, []SessionStoreEntry) error { return nil }
-func (replaceErrorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
-	return []SessionStoreEntry{SessionStoreEntry(`{"type":"old"}`)}, nil
-}
-func (replaceErrorStore) Replace(context.Context, SessionKey, []SessionStoreEntry) error {
-	return nil
-}
-func (replaceErrorStore) ReplaceSession(context.Context, SessionKey, []SessionStoreReplacement) error {
-	return errors.New("replace failed")
-}
+func (appendErrorStore) Delete(context.Context, SessionKey) error                  { return nil }
+func (appendErrorStore) ListSessions(context.Context) ([]SessionSummary, error)    { return nil, nil }
+func (appendErrorStore) ListSubkeys(context.Context, SessionKey) ([]string, error) { return nil, nil }
 
 type extensionErrorClient struct {
 	*recordingAgentClient
@@ -1100,17 +901,9 @@ func (c *openRunEventsClient) CancelTurn(context.Context, string, string) error 
 func (c *openRunEventsClient) UnsubscribeThread(context.Context, string) error  { return nil }
 func (c *openRunEventsClient) Close(context.Context) error                      { return nil }
 
-type cancelErrorClient struct {
-	*spyCodexClient
-}
-
-func (c *cancelErrorClient) CancelTurn(context.Context, string, string) error {
-	return errors.New("cancel failed")
-}
-
 type cancelDuringRunClient struct {
 	*spyCodexClient
-	session *Session
+	session *session
 }
 
 func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest) (<-chan codex.Event, error) {
@@ -1126,35 +919,3 @@ func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest)
 func (c *cancelDuringRunClient) CancelTurn(context.Context, string, string) error { return nil }
 func (c *cancelDuringRunClient) UnsubscribeThread(context.Context, string) error  { return nil }
 func (c *cancelDuringRunClient) Close(context.Context) error                      { return nil }
-
-type messageErrorMCPClient struct {
-	*recordingMCPAgentClient
-}
-
-func (c *messageErrorMCPClient) UnstableMessageMcp(context.Context, acp.UnstableMessageMcpRequest) (acp.UnstableMessageMcpResponse, error) {
-	return nil, acp.NewInvalidParams(map[string]any{"mcp": "failed"})
-}
-
-type errorListener struct{}
-
-func (errorListener) Accept() (net.Conn, error) { return nil, errors.New("accept failed") }
-func (errorListener) Close() error              { return nil }
-func (errorListener) Addr() net.Addr            { return dummyAddr("tcp") }
-
-type dummyAddr string
-
-func (a dummyAddr) Network() string { return string(a) }
-func (a dummyAddr) String() string  { return string(a) }
-
-type noopConn struct{}
-
-func (noopConn) Read([]byte) (int, error)         { return 0, io.EOF }
-func (noopConn) Write([]byte) (int, error)        { return 0, io.ErrClosedPipe }
-func (noopConn) Close() error                     { return nil }
-func (noopConn) LocalAddr() net.Addr              { return dummyAddr("local") }
-func (noopConn) RemoteAddr() net.Addr             { return dummyAddr("remote") }
-func (noopConn) SetDeadline(time.Time) error      { return nil }
-func (noopConn) SetReadDeadline(time.Time) error  { return nil }
-func (noopConn) SetWriteDeadline(time.Time) error { return nil }
-
-var _ fmt.Stringer = dummyAddr("")

@@ -72,19 +72,6 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if _, err := client.StartReview(ctx, ReviewStartRequest{ThreadID: "thread-1", Target: map[string]any{"type": "uncommittedChanges"}, Delivery: "inline"}); err != nil {
 		t.Fatalf("StartReview returned error: %v", err)
 	}
-	budget := int64(5000)
-	goal, err := client.SetGoal(ctx, GoalSetRequest{ThreadID: "thread-1", Objective: "ship", Status: "active", TokenBudget: &budget})
-	if err != nil || goal.Objective != "ship" || goal.TokenBudget == nil || *goal.TokenBudget != budget {
-		t.Fatalf("SetGoal = %#v err=%v", goal, err)
-	}
-	gotGoal, err := client.GetGoal(ctx, "thread-1")
-	if err != nil || gotGoal == nil || gotGoal.Objective != "ship" {
-		t.Fatalf("GetGoal = %#v err=%v", gotGoal, err)
-	}
-	cleared, err := client.ClearGoal(ctx, "thread-1")
-	if err != nil || !cleared {
-		t.Fatalf("ClearGoal cleared=%v err=%v", cleared, err)
-	}
 	modes, err := client.CollaborationModeList(ctx)
 	if err != nil || len(modes.Modes) != 2 || modes.Modes[0].ID != "default" {
 		t.Fatalf("CollaborationModeList = %#v err=%v", modes, err)
@@ -116,7 +103,7 @@ func TestNewAppServerClientLaunchesCLI(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.134.0
+  echo codex-cli 0.141.0
   exit 0
 fi
 read line || exit 0
@@ -293,22 +280,6 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	if int64Value(map[string]any{"x": int64(4)}, "x") != 4 || int64Value(map[string]any{"x": 5}, "x") != 5 || int64Value(nil, "x") != 0 {
 		t.Fatal("int64Value branches failed")
 	}
-	if int64PtrValue(nil, "x") != nil || int64PtrValue(map[string]any{}, "x") != nil {
-		t.Fatal("int64PtrValue nil branches failed")
-	}
-	rootGoal := goalFromResponse(map[string]any{
-		"threadId":        "thread-root",
-		"objective":       "ship",
-		"status":          "active",
-		"tokenBudget":     float64(100),
-		"tokensUsed":      float64(1),
-		"timeUsedSeconds": float64(2),
-		"createdAt":       float64(3),
-		"updatedAt":       float64(4),
-	})
-	if rootGoal.ThreadID != "thread-root" || rootGoal.TokenBudget == nil || *rootGoal.TokenBudget != 100 || rootGoal.TokensUsed != 1 {
-		t.Fatalf("root goal response = %#v", rootGoal)
-	}
 	if firstNonEmptyMapSlice(map[string]any{"templates": []any{map[string]any{"name": "t"}}}, "resourceTemplates", "templates")[0]["name"] != "t" {
 		t.Fatal("firstNonEmptyMapSlice fallback failed")
 	}
@@ -327,21 +298,6 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	}
 	if threads := threadsFromResponse(map[string]any{"threads": []any{"bad"}}); len(threads) != 0 {
 		t.Fatalf("threadsFromResponse = %#v", threads)
-	}
-}
-
-func TestAppServerGoalNilResponse(t *testing.T) {
-	client := &AppServerClient{rpc: newRPCConn(&responseTransport{responses: map[string]any{
-		methodThreadGoalGet: map[string]any{"goal": nil},
-	}}, nil)}
-	defer client.Close(context.Background())
-
-	goal, err := client.GetGoal(context.Background(), "thread-1")
-	if err != nil {
-		t.Fatalf("GetGoal returned error: %v", err)
-	}
-	if goal != nil {
-		t.Fatalf("nil goal response = %#v", goal)
 	}
 }
 
@@ -366,8 +322,6 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 		{"turn/diff/updated", map[string]any{"patch": "diff"}, EventDiffUpdated},
 		{"turn/completed", map[string]any{"turn": map[string]any{"status": "interrupted"}}, EventCompleted},
 		{"account/updated", map[string]any{"account": map[string]any{"chatgptAccountId": "acct", "email": "u@example.com", "chatgptPlanType": "plus"}}, EventAccountUpdated},
-		{"thread/goal/updated", map[string]any{"threadId": "thread-1", "goal": map[string]any{"threadId": "thread-1", "objective": "ship", "status": "active"}}, EventGoalUpdated},
-		{"thread/goal/cleared", map[string]any{"threadId": "thread-1"}, EventGoalCleared},
 		{"warning", map[string]any{"message": "warn"}, EventWarning},
 		{"error", map[string]any{"error": "boom"}, EventError},
 		{"rawResponseItem/completed", map[string]any{}, EventRaw},
@@ -453,15 +407,6 @@ func TestAppServerClientRPCErrorBranches(t *testing.T) {
 	}
 	if _, err := client.StartReview(ctx, ReviewStartRequest{}); err == nil {
 		t.Fatal("StartReview with RPC error succeeded")
-	}
-	if _, err := client.SetGoal(ctx, GoalSetRequest{}); err == nil {
-		t.Fatal("SetGoal with RPC error succeeded")
-	}
-	if _, err := client.GetGoal(ctx, "thread"); err == nil {
-		t.Fatal("GetGoal with RPC error succeeded")
-	}
-	if _, err := client.ClearGoal(ctx, "thread"); err == nil {
-		t.Fatal("ClearGoal with RPC error succeeded")
 	}
 	if _, err := client.CollaborationModeList(ctx); err == nil {
 		t.Fatal("CollaborationModeList with RPC error succeeded")
@@ -655,10 +600,6 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	accountClient.dispatchEvent(Event{Kind: EventAccountUpdated, Account: Account{ID: "acct"}})
 	if event := <-updated; event.Account.ID != "acct" {
 		t.Fatalf("account update event = %#v", event)
-	}
-	accountClient.dispatchEvent(Event{Kind: EventGoalCleared, ThreadID: "thread-1"})
-	if event := <-updated; event.Kind != EventGoalCleared {
-		t.Fatalf("goal event = %#v", event)
 	}
 	accountClient.setAccount(Account{})
 	_ = accountClient.Close(context.Background())
@@ -861,12 +802,6 @@ func (t *scriptTransport) response(method string) any {
 		return map[string]any{"status": "compacted"}
 	case methodReviewStart:
 		return map[string]any{"status": "reviewing"}
-	case methodThreadGoalSet:
-		return map[string]any{"goal": map[string]any{"threadId": "thread-1", "objective": "ship", "status": "active", "tokenBudget": float64(5000)}}
-	case methodThreadGoalGet:
-		return map[string]any{"goal": map[string]any{"threadId": "thread-1", "objective": "ship", "status": "active"}}
-	case methodThreadGoalClear:
-		return map[string]any{"cleared": true}
 	case methodCollaborationList:
 		return map[string]any{"data": []any{map[string]any{"id": "default", "name": "Default"}, map[string]any{"mode": "plan"}}}
 	case methodMCPStatusList:
@@ -909,7 +844,7 @@ func TestAppServerLifecycleMappingEdges(t *testing.T) {
 	initErrorScript := filepath.Join(t.TempDir(), "codex-init-error")
 	if err := os.WriteFile(initErrorScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.134.0
+  echo codex-cli 0.141.0
   exit 0
 fi
 read line || exit 0

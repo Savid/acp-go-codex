@@ -8,7 +8,7 @@ import (
 )
 
 func TestSessionInteractionCancellationBranches(t *testing.T) {
-	session := &Session{}
+	session := &session{}
 	interactionCtx, finish := session.beginInteraction(context.TODO(), "")
 	if interactionCtx.Err() != nil {
 		t.Fatal("interaction without parent started canceled")
@@ -43,7 +43,7 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 }
 
 func TestSessionSnapshotConcurrentAccountUpdates(t *testing.T) {
-	session := &Session{
+	session := &session{
 		id:              "s",
 		cwd:             "/tmp/project",
 		codexThreadID:   "thread",
@@ -75,10 +75,14 @@ func TestSessionSnapshotConcurrentAccountUpdates(t *testing.T) {
 	for range 1000 {
 		meta := sessionResponseMeta(session.snapshot())
 		codexMeta := meta[codexMetaKey].(map[string]any)
-		packageMeta := meta[packageMetaKey].(map[string]any)
+		if _, ok := meta["github.com/savid/acp-go-codex"]; ok {
+			t.Fatal("deleted package-path meta was emitted")
+		}
 		codexMeta[codexAccountMetaKey].(map[string]any)["id"] = "changed"
-		if packageMeta[codexAccountMetaKey].(map[string]any)["id"] == "changed" {
-			t.Fatal("package meta aliases codex meta")
+		nextMeta := sessionResponseMeta(session.snapshot())
+		nextCodexMeta := nextMeta[codexMetaKey].(map[string]any)
+		if nextCodexMeta[codexAccountMetaKey].(map[string]any)["id"] == "changed" {
+			t.Fatal("session account meta aliases response meta")
 		}
 		_ = codexAuthRequiredError(errors.New("not logged in"), session.accountMetaSnapshot())
 	}
@@ -91,7 +95,7 @@ func TestSessionCloseJoinsClientAndMaterializedErrors(t *testing.T) {
 		return errors.New("remove failed")
 	}
 
-	session := &Session{
+	session := &session{
 		client:           &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")},
 		materializedPath: "/tmp/rollout.jsonl",
 	}

@@ -13,11 +13,10 @@ func TestRequestBuilderClones(t *testing.T) {
 	sandboxPolicy := map[string]any{"type": "workspaceWrite"}
 	req := NewSessionRequest("/repo",
 		WithSessionAdditionalDirectories("/extra"),
-		WithSessionRawSDKMessages(true),
+		WithSessionRawEvents(true),
 		WithSessionMeta(meta),
 		WithSessionCodexOptions(NewCodexOptions(
 			WithCodexModel("gpt"),
-			WithCodexMode(modePlan),
 			WithCodexEffort("low"),
 			WithCodexEnv(env),
 			WithCodexApprovalPolicy(approvalPolicy),
@@ -35,9 +34,6 @@ func TestRequestBuilderClones(t *testing.T) {
 	options := req.Meta[codexMetaKey].(map[string]any)[metaOptionsKey].(map[string]any)
 	if options[metaEnvKey].(map[string]string)["SECRET"] != "value" {
 		t.Fatalf("Codex env was not cloned: %#v", options)
-	}
-	if options[metaModeKey] != string(modePlan) {
-		t.Fatalf("Codex mode was not set: %#v", options)
 	}
 	if options[metaApprovalPolicyKey].(map[string]any)["mode"] != "never" {
 		t.Fatalf("Codex approval policy was not cloned: %#v", options)

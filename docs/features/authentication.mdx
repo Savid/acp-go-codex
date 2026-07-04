@@ -1,86 +1,29 @@
 ---
 title: "Authentication"
-description: "Terminal login, external ChatGPT tokens, account status, and logout"
-icon: "key-round"
+description: "Codex login, external ChatGPT tokens, and logout."
 ---
 
-Codex authentication belongs to the Codex CLI and the configured `CODEX_HOME`.
-The adapter exposes ACP hooks for hosts that need to start login, provide
-external ChatGPT tokens, observe account status, or perform guarded logout.
+Terminal login helpers:
 
-## Terminal auth
-
-Standalone mode advertises terminal authentication commands. Hosts can run:
-
-```bash
-acp-go-codex -cli login
-acp-go-codex -cli login -device-auth
+```sh
+acp-go-codex login
+acp-go-codex login -device-auth
+acp-go-codex logout
 ```
 
-The command delegates to `codex login` with the same `-codex` and
-`-codex-home` settings as the agent process.
+During ACP initialize, terminal auth is advertised only when the client
+declares terminal auth support. Agent auth always advertises the stable method
+`codex-chatgpt-auth-tokens`.
 
-When the ACP client advertises terminal auth, `initialize` includes a terminal
-auth method:
-
-| Method ID | Meaning |
-| --- | --- |
-| `codex-login` | Run `acp-go-codex -cli login --device-auth` with the configured Codex path/home. |
-
-## External ChatGPT tokens
-
-Hosts that own ChatGPT auth can call ACP `authenticate` with:
-
-```json
-{
-  "methodId": "codex-chatgpt-auth-tokens",
-  "_meta": {
-    "codex": {
-      "auth": {
-        "chatgptAuthTokens": {
-          "accessToken": "secret",
-          "refreshToken": "secret",
-          "expiresAt": 1790000000
-        }
-      }
-    }
-  }
-}
-```
-
-The `codex-chatgpt-auth-tokens` method is always advertised as an agent auth
-method. It is for hosts that own ChatGPT OAuth state and want the adapter to
-pass those tokens to Codex app-server account APIs.
-
-Embedded hosts can also provide:
+Embedded token refresh:
 
 ```go
-codexacp.WithChatGPTAuthTokenRefresher(func(ctx context.Context) (codex.ChatGPTAuthTokens, error) {
-    return tokens, nil
-})
+agent := codexacp.NewAgent(
+    codexacp.WithCodexChatGPTAuthTokenRefresher(func(ctx context.Context) (codexacp.ChatGPTAuthTokens, error) {
+        return codexacp.ChatGPTAuthTokens{AccessToken: "token"}, nil
+    }),
+)
 ```
 
-The refresher handles Codex app-server token refresh callbacks. Tokens are
-kept out of response metadata and logs.
-
-## Account status
-
-Codex `account/updated` notifications refresh the session account cache even
-when no turn is active. Session responses expose redacted account state under
-`_meta.codex.account`.
-
-Access tokens, refresh tokens, raw credential files, and authorization headers
-are never emitted.
-
-## Logout
-
-ACP `logout` is guarded. It calls Codex `account/logout` only when the agent is
-configured with:
-
-```go
-codexacp.WithAllowAccountLogout(true)
-```
-
-Leave logout disabled when `CODEX_HOME` points at a user's normal local Codex
-credentials. Use it only for adapter-owned homes where the host controls
-credential lifecycle.
+ACP logout is disabled unless explicitly enabled with
+`WithCodexAllowAccountLogout(true)` or `-codex-allow-account-logout`.

@@ -8,28 +8,20 @@ import (
 )
 
 func TestMCPConfigArgs(t *testing.T) {
-	agent := NewAgent(WithMCPProxyCommand("/bin/proxy", "--debug"))
+	agent := NewAgent()
 	args, env, err := agent.mcpServerConfigArgs([]acp.McpServer{
 		{Stdio: &acp.McpServerStdio{Name: "Local Tool", Command: "tool", Args: []string{"--one"}, Env: []acp.EnvVariable{{Name: "A", Value: "B"}}}},
 		{Http: &acp.McpServerHttpInline{
 			Name:    "HTTP",
 			Url:     "https://example.com/mcp",
 			Headers: []acp.HttpHeader{{Name: "Authorization", Value: "Bearer x"}},
-			Meta: map[string]any{
-				codexMetaKey: map[string]any{
-					mcpDefaultApprovalModeKey: mcpApprovalModeApprove,
-					mcpToolsKey: map[string]any{
-						"search": map[string]any{mcpToolApprovalModeKey: mcpApprovalModeAuto},
-					},
-				},
-			},
 		}},
-	})
+	}, mcpApprovalModeApprove)
 	if err != nil {
 		t.Fatalf("mcpServerConfigArgs returned error: %v", err)
 	}
 	joined := jsonString(args)
-	if !containsAll(joined, "mcp_servers.Local_Tool.command", "mcp_servers.HTTP.url", "env_http_headers", "Authorization", "default_tools_approval_mode", "tools.search.approval_mode") {
+	if !containsAll(joined, "mcp_servers.Local_Tool.command", "mcp_servers.HTTP.url", "env_http_headers", "Authorization", "default_tools_approval_mode") {
 		t.Fatalf("args = %v", args)
 	}
 	if !containsArg(args, `mcp_servers.Local_Tool.args=["--one"]`) ||
@@ -39,107 +31,45 @@ func TestMCPConfigArgs(t *testing.T) {
 	if env["CODEX_MCP_HEADER_HTTP_AUTHORIZATION"] != "Bearer x" {
 		t.Fatalf("header env = %#v", env)
 	}
-	if !containsArg(args, `mcp_servers.HTTP.default_tools_approval_mode="approve"`) ||
-		!containsArg(args, `mcp_servers.HTTP.tools.search.approval_mode="auto"`) {
+	if !containsArg(args, `mcp_servers.HTTP.default_tools_approval_mode="approve"`) {
 		t.Fatalf("MCP approval args missing: %v", args)
 	}
 
-	_, _, err = agent.mcpServerConfigArgs([]acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "Client", Id: "client-1"}}})
+	_, _, err = agent.mcpServerConfigArgs([]acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "Client", Id: "client-1"}}}, "")
 	if err == nil {
 		t.Fatal("unprepared ACP MCP config succeeded")
 	}
 
-	_, _, err = agent.mcpServerConfigArgs([]acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://example.com/sse"}}})
+	_, _, err = agent.mcpServerConfigArgs([]acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://example.com/sse"}}}, "")
 	if err == nil {
 		t.Fatal("SSE MCP config succeeded")
 	}
 }
 
-func TestMCPApprovalConfigArgsRejectsInvalidMeta(t *testing.T) {
+func TestMCPApprovalConfigArgsRejectsInvalidMode(t *testing.T) {
 	tests := []struct {
-		name   string
-		server acp.McpServer
+		name string
+		mode string
 	}{
-		{
-			name: "bad default mode type",
-			server: acp.McpServer{Stdio: &acp.McpServerStdio{Name: "mcp", Meta: map[string]any{
-				codexMetaKey: map[string]any{mcpDefaultApprovalModeKey: 1},
-			}}},
-		},
-		{
-			name: "bad default mode value",
-			server: acp.McpServer{Stdio: &acp.McpServerStdio{Name: "mcp", Meta: map[string]any{
-				codexMetaKey: map[string]any{mcpDefaultApprovalModeKey: "never"},
-			}}},
-		},
-		{
-			name: "bad tools type",
-			server: acp.McpServer{Stdio: &acp.McpServerStdio{Name: "mcp", Meta: map[string]any{
-				codexMetaKey: map[string]any{mcpToolsKey: []any{}},
-			}}},
-		},
-		{
-			name: "empty tool name",
-			server: acp.McpServer{Stdio: &acp.McpServerStdio{Name: "mcp", Meta: map[string]any{
-				codexMetaKey: map[string]any{mcpToolsKey: map[string]any{" ": map[string]any{mcpToolApprovalModeKey: mcpApprovalModeApprove}}},
-			}}},
-		},
-		{
-			name: "bad tool config type",
-			server: acp.McpServer{Stdio: &acp.McpServerStdio{Name: "mcp", Meta: map[string]any{
-				codexMetaKey: map[string]any{mcpToolsKey: map[string]any{"execute": mcpApprovalModeApprove}},
-			}}},
-		},
-		{
-			name: "bad tool mode value",
-			server: acp.McpServer{Stdio: &acp.McpServerStdio{Name: "mcp", Meta: map[string]any{
-				codexMetaKey: map[string]any{mcpToolsKey: map[string]any{"execute": map[string]any{mcpToolApprovalModeKey: "never"}}},
-			}}},
-		},
+		{name: "bad mode", mode: "never"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, _, err := NewAgent().mcpServerConfigArgs([]acp.McpServer{test.server}); err == nil {
-				t.Fatal("invalid MCP approval metadata was accepted")
+			if _, _, err := NewAgent().mcpServerConfigArgs([]acp.McpServer{{Stdio: &acp.McpServerStdio{Name: "mcp", Command: "mcp"}}}, test.mode); err == nil {
+				t.Fatal("invalid MCP approval mode was accepted")
 			}
 		})
 	}
 }
 
-func TestMCPApprovalConfigArgsSkipsPartialMeta(t *testing.T) {
-	args, err := mcpApprovalConfigArgs("remote", acp.McpServer{Http: &acp.McpServerHttpInline{
-		Meta: map[string]any{
-			codexMetaKey: map[string]any{
-				mcpToolsKey: map[string]any{
-					"execute": map[string]any{"unrelated": true},
-				},
-			},
-		},
-	}})
+func TestMCPApprovalConfigArgsSkipsEmptyMode(t *testing.T) {
+	args, err := mcpApprovalConfigArgs("remote", "")
 	if err != nil {
-		t.Fatalf("partial MCP approval metadata returned error: %v", err)
+		t.Fatalf("empty MCP approval mode returned error: %v", err)
 	}
 	if len(args) != 0 {
-		t.Fatalf("partial MCP approval metadata emitted args: %#v", args)
-	}
-}
-
-func TestMCPServerMeta(t *testing.T) {
-	if mcpServerMeta(acp.McpServer{Stdio: &acp.McpServerStdio{Meta: map[string]any{"kind": "stdio"}}})["kind"] != "stdio" {
-		t.Fatal("stdio MCP metadata not returned")
-	}
-	if mcpServerMeta(acp.McpServer{Http: &acp.McpServerHttpInline{Meta: map[string]any{"kind": "http"}}})["kind"] != "http" {
-		t.Fatal("HTTP MCP metadata not returned")
-	}
-	if mcpServerMeta(acp.McpServer{Acp: &acp.McpServerAcpInline{Meta: map[string]any{"kind": "acp"}}})["kind"] != "acp" {
-		t.Fatal("ACP MCP metadata not returned")
-	}
-	if mcpServerMeta(acp.McpServer{Sse: &acp.McpServerSseInline{Meta: map[string]any{"kind": "sse"}}})["kind"] != "sse" {
-		t.Fatal("SSE MCP metadata not returned")
-	}
-	if mcpServerMeta(acp.McpServer{}) != nil {
-		t.Fatal("empty MCP server returned metadata")
+		t.Fatalf("empty MCP approval mode emitted args: %#v", args)
 	}
 }
 
@@ -177,7 +107,7 @@ func containsArg(args []string, needle string) bool {
 }
 
 func TestMCPConfigRejectsMissingTransportAndSanitizesName(t *testing.T) {
-	if _, _, err := NewAgent().mcpServerConfigArgs([]acp.McpServer{{}}); err == nil {
+	if _, _, err := NewAgent().mcpServerConfigArgs([]acp.McpServer{{}}, ""); err == nil {
 		t.Fatal("MCP config accepted server without transport")
 	}
 	if name := mcpServerConfigName(acp.McpServer{Stdio: &acp.McpServerStdio{Name: "!!!"}}, 4, map[string]int{}); name != "server_5" {

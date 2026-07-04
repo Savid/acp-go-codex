@@ -6,14 +6,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
-	"flag"
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -40,9 +36,7 @@ func TestCodexCLIRawExtensionNotifications(t *testing.T) {
 		Cwd:        t.TempDir(),
 		McpServers: []acp.McpServer{},
 		Meta: map[string]any{"codex": map[string]any{
-			"emitRawSDKMessages": []any{
-				map[string]any{"type": "event_msg", "payloadType": "agent_message"},
-			},
+			"rawEvent": map[string]any{"enabled": true},
 		}},
 	})
 	if err != nil {
@@ -61,12 +55,12 @@ func TestCodexCLIRawExtensionNotifications(t *testing.T) {
 
 	eventually(t, 30*time.Second, 250*time.Millisecond, func() bool {
 		for _, notification := range client.extensionSnapshot() {
-			message, _ := notification.Params["message"].(map[string]any)
-			payload, _ := message["payload"].(map[string]any)
+			event, _ := notification.Params["event"].(map[string]any)
+			payload, _ := event["payload"].(map[string]any)
 			rawJSON, _ := notification.Params["rawJSON"].(string)
-			if notification.Method == "_codex/sdkMessage" &&
+			if notification.Method == codexacp.RawEventMethod &&
 				notification.Params["sessionId"] == string(session.SessionId) &&
-				message["type"] == "event_msg" &&
+				event["type"] == "event_msg" &&
 				payload["type"] == "agent_message" &&
 				strings.Contains(rawJSON, `"agent_message"`) {
 				return true
@@ -215,7 +209,7 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 		t.Fatalf("resume text = %q", client.text())
 	}
 
-	fork, err := conn.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{
+	fork, err := codexacp.CallForkSession(ctx, conn, acp.UnstableForkSessionRequest{
 		SessionId:  acp.SessionId(threadID),
 		Cwd:        cwd,
 		McpServers: []acp.UnstableMcpServer{},
@@ -502,22 +496,22 @@ func TestCodexCLIMCPStdioTool(t *testing.T) {
 	client := &recordingClient{permission: acp.PermissionOptionId("accept")}
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 
-	session, err := conn.NewSession(ctx, acp.NewSessionRequest{
-		Cwd: t.TempDir(),
-		McpServers: []acp.McpServer{
-			{
+	session, err := conn.NewSession(ctx, codexacp.NewSessionRequest(
+		t.TempDir(),
+		codexacp.WithSessionMCPServers(
+			acp.McpServer{
 				Stdio: &acp.McpServerStdio{
 					Name:    "acp_stdio",
 					Command: os.Args[0],
 					Args:    []string{"-test.run=TestIntegrationMCPStdioHelper"},
 					Env:     []acp.EnvVariable{{Name: helperMCPStdioEnv, Value: "1"}},
-					Meta: map[string]any{
-						"codex": map[string]any{"defaultToolsApprovalMode": "approve"},
-					},
 				},
 			},
-		},
-	})
+		),
+		codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+			codexacp.WithCodexMCPToolApprovalMode("approve"),
+		)),
+	))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -552,124 +546,6 @@ func TestCodexCLIMCPStdioTool(t *testing.T) {
 	}
 
 	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
-		t.Fatalf("close session: %v", err)
-	}
-}
-
-func TestCodexCLIACPMCPBridgeTool(t *testing.T) {
-	requireLiveTurn(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-
-	client := &rawACPIntegrationClient{}
-	client.permission = acp.PermissionOptionId("accept")
-
-	clientConn := serveLiveAgentConnectionForTest(
-		t,
-		ctx,
-		client.handle,
-		codexacp.WithMCPProxyCommand(os.Args[0], "-test.run=TestIntegrationMCPProxyHelper", "--"),
-	)
-
-	if _, err := acp.SendRequest[acp.InitializeResponse](clientConn, ctx, acp.AgentMethodInitialize, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-	}); err != nil {
-		t.Fatalf("initialize: %v", err)
-	}
-
-	session, err := acp.SendRequest[acp.NewSessionResponse](clientConn, ctx, acp.AgentMethodSessionNew, acp.NewSessionRequest{
-		Cwd: t.TempDir(),
-		McpServers: []acp.McpServer{
-			{Acp: &acp.McpServerAcpInline{
-				Name: "acp_bridge",
-				Id:   "bridge-1",
-				Type: "acp",
-				Meta: map[string]any{
-					"codex": map[string]any{"defaultToolsApprovalMode": "approve"},
-				},
-			}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-
-	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
-		return acp.SendRequest[acp.PromptResponse](clientConn, ctx, acp.AgentMethodSessionPrompt, acp.PromptRequest{
-			SessionId: session.SessionId,
-			Prompt: []acp.ContentBlock{acp.TextBlock(
-				"Use the acp_bridge MCP server's echo tool with message ACP_MCP_ACP_OK. " +
-					"After the tool returns, reply exactly ACP_MCP_ACP_DONE.",
-			)},
-		})
-	})
-	if resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("stop reason = %s", resp.StopReason)
-	}
-	if !strings.Contains(client.text(), "ACP_MCP_ACP_DONE") {
-		t.Fatalf("ACP MCP text = %q", client.text())
-	}
-	eventually(t, 30*time.Second, 250*time.Millisecond, func() bool {
-		return slices.Contains(client.mcpRequestMethods(), "tools/call")
-	})
-
-	if _, err := acp.SendRequest[acp.CloseSessionResponse](clientConn, ctx, acp.AgentMethodSessionClose, acp.CloseSessionRequest{
-		SessionId: session.SessionId,
-	}); err != nil {
-		t.Fatalf("close session: %v", err)
-	}
-}
-
-func TestCodexCLIACPMCPBridgeRejectsBadProxyIdentity(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	client := &rawACPIntegrationClient{}
-	client.permission = acp.PermissionOptionId("accept")
-	marker := filepath.Join(t.TempDir(), "proxy-started")
-
-	clientConn := serveLiveAgentConnectionForTest(
-		t,
-		ctx,
-		client.handle,
-		codexacp.WithMCPProxyCommand(
-			os.Args[0],
-			"-test.run=TestIntegrationMCPProxyHelper",
-			"--",
-			"--bad-id",
-			"--marker", marker,
-		),
-	)
-
-	if _, err := acp.SendRequest[acp.InitializeResponse](clientConn, ctx, acp.AgentMethodInitialize, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-	}); err != nil {
-		t.Fatalf("initialize: %v", err)
-	}
-
-	session, err := acp.SendRequest[acp.NewSessionResponse](clientConn, ctx, acp.AgentMethodSessionNew, acp.NewSessionRequest{
-		Cwd: t.TempDir(),
-		McpServers: []acp.McpServer{
-			{Acp: &acp.McpServerAcpInline{Name: "acp_bridge_bad", Id: "bridge-1", Type: "acp"}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-
-	eventually(t, 30*time.Second, 250*time.Millisecond, func() bool {
-		_, statErr := os.Stat(marker)
-
-		return statErr == nil
-	})
-	never(t, time.Second, 100*time.Millisecond, func() bool {
-		return client.mcpConnectCount() > 0
-	})
-
-	if _, err := acp.SendRequest[acp.CloseSessionResponse](clientConn, ctx, acp.AgentMethodSessionClose, acp.CloseSessionRequest{
-		SessionId: session.SessionId,
-	}); err != nil {
 		t.Fatalf("close session: %v", err)
 	}
 }
@@ -766,225 +642,12 @@ func toolUpdateContentContains(update *acp.SessionToolCallUpdate, text string) b
 	return false
 }
 
-type rawACPIntegrationClient struct {
-	recordingClient
-
-	mu             sync.Mutex
-	mcpRequests    []acp.UnstableMessageMcpRequest
-	mcpConnects    []acp.UnstableConnectMcpRequest
-	mcpDisconnects []acp.UnstableDisconnectMcpRequest
-}
-
-func (c *rawACPIntegrationClient) handle(
-	ctx context.Context,
-	method string,
-	params json.RawMessage,
-) (any, *acp.RequestError) {
-	switch method {
-	case acp.ClientMethodSessionUpdate:
-		var request acp.SessionNotification
-		if err := json.Unmarshal(params, &request); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{"error": err.Error()})
-		}
-
-		return nil, integrationRequestError(c.SessionUpdate(ctx, request))
-	case acp.ClientMethodSessionRequestPermission:
-		var request acp.RequestPermissionRequest
-		if err := json.Unmarshal(params, &request); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{"error": err.Error()})
-		}
-
-		resp, err := c.RequestPermission(ctx, request)
-
-		return resp, integrationRequestError(err)
-	case acp.ClientMethodMcpConnect:
-		var request acp.UnstableConnectMcpRequest
-		if err := json.Unmarshal(params, &request); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{"error": err.Error()})
-		}
-
-		c.mu.Lock()
-		c.mcpConnects = append(c.mcpConnects, request)
-		c.mu.Unlock()
-
-		return acp.UnstableConnectMcpResponse{ConnectionId: "acp-conn-1"}, nil
-	case acp.ClientMethodMcpMessage:
-		var request acp.UnstableMessageMcpRequest
-		if err := json.Unmarshal(params, &request); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{"error": err.Error()})
-		}
-
-		c.mu.Lock()
-		c.mcpRequests = append(c.mcpRequests, request)
-		c.mu.Unlock()
-
-		return mcpACPResponse(request), nil
-	case acp.ClientMethodMcpDisconnect:
-		var request acp.UnstableDisconnectMcpRequest
-		if err := json.Unmarshal(params, &request); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{"error": err.Error()})
-		}
-
-		c.mu.Lock()
-		c.mcpDisconnects = append(c.mcpDisconnects, request)
-		c.mu.Unlock()
-
-		return acp.UnstableDisconnectMcpResponse{}, nil
-	case acp.ClientMethodElicitationCreate:
-		var request acp.UnstableCreateElicitationRequest
-		if err := json.Unmarshal(params, &request); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{"error": err.Error()})
-		}
-
-		resp, err := c.UnstableCreateElicitation(ctx, request)
-
-		return resp, integrationRequestError(err)
-	case acp.ClientMethodTerminalCreate:
-		return acp.CreateTerminalResponse{TerminalId: "terminal-1"}, nil
-	case acp.ClientMethodTerminalKill:
-		return acp.KillTerminalResponse{}, nil
-	case acp.ClientMethodTerminalOutput:
-		return acp.TerminalOutputResponse{}, nil
-	case acp.ClientMethodTerminalRelease:
-		return acp.ReleaseTerminalResponse{}, nil
-	case acp.ClientMethodTerminalWaitForExit:
-		return acp.WaitForTerminalExitResponse{}, nil
-	case acp.ClientMethodFsReadTextFile:
-		return acp.ReadTextFileResponse{}, nil
-	case acp.ClientMethodFsWriteTextFile:
-		return acp.WriteTextFileResponse{}, nil
-	default:
-		return nil, acp.NewMethodNotFound(method)
-	}
-}
-
-func (c *rawACPIntegrationClient) mcpRequestMethods() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	methods := make([]string, 0, len(c.mcpRequests))
-	for _, request := range c.mcpRequests {
-		methods = append(methods, request.Method)
-	}
-
-	return methods
-}
-
-func (c *rawACPIntegrationClient) mcpConnectCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.mcpConnects)
-}
-
-func mcpACPResponse(request acp.UnstableMessageMcpRequest) any {
-	switch request.Method {
-	case "initialize":
-		return map[string]any{
-			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "acp-bridge", "version": "1.0.0"},
-		}
-	case "tools/list":
-		return map[string]any{
-			"tools": []map[string]any{
-				{
-					"name":        "echo",
-					"description": "Return the provided message.",
-					"inputSchema": map[string]any{
-						"type":       "object",
-						"properties": map[string]any{"message": map[string]any{"type": "string"}},
-						"required":   []string{"message"},
-					},
-				},
-			},
-		}
-	case "tools/call":
-		return map[string]any{
-			"content": []map[string]any{{"type": "text", "text": "ACP_MCP_ACP_OK"}},
-			"isError": false,
-		}
-	default:
-		return map[string]any{}
-	}
-}
-
-func integrationRequestError(err error) *acp.RequestError {
-	if err == nil {
-		return nil
-	}
-
-	var requestErr *acp.RequestError
-	if errors.As(err, &requestErr) {
-		return requestErr
-	}
-
-	return acp.NewInternalError(map[string]any{"error": err.Error()})
-}
-
 func TestIntegrationMCPStdioHelper(t *testing.T) {
 	if os.Getenv(helperMCPStdioEnv) != "1" {
 		return
 	}
 
 	if err := runMCPStdioServer(os.Stdin, os.Stdout); err != nil {
-		os.Exit(1)
-	}
-
-	os.Exit(0)
-}
-
-func TestIntegrationMCPProxyHelper(t *testing.T) {
-	args := os.Args
-	mcpIndex := slices.Index(args, "mcp-proxy")
-	if mcpIndex < 0 {
-		return
-	}
-
-	var marker string
-	badID := false
-	for index := 0; index < mcpIndex; index++ {
-		switch args[index] {
-		case "--bad-id":
-			badID = true
-		case "--marker":
-			if index+1 >= mcpIndex {
-				os.Exit(2)
-			}
-			marker = args[index+1]
-			index++
-		}
-	}
-
-	fs := flag.NewFlagSet("mcp-proxy", flag.ContinueOnError)
-	network := fs.String("network", "tcp", "")
-	address := fs.String("address", "", "")
-	acpID := fs.String("acp-id", "", "")
-	if err := fs.Parse(args[mcpIndex+1:]); err != nil {
-		os.Exit(2)
-	}
-
-	if marker != "" {
-		_ = os.WriteFile(marker, []byte("started"), 0o600)
-	}
-
-	data, err := os.ReadFile(os.Getenv(codexacp.MCPProxyTokenFileEnv)) // #nosec G304,G703 -- path is supplied by the parent agent.
-	if err != nil {
-		os.Exit(2)
-	}
-
-	proxyACPID := *acpID
-	if badID {
-		proxyACPID += "-wrong"
-	}
-
-	err = codexacp.RunMCPProxy(context.Background(), os.Stdin, os.Stdout, codexacp.MCPProxyOptions{
-		Network: *network,
-		Address: *address,
-		Token:   string(data),
-		ACPID:   proxyACPID,
-	})
-	if err != nil {
 		os.Exit(1)
 	}
 

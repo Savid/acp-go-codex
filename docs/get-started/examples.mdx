@@ -1,42 +1,31 @@
 ---
 title: "Examples"
-description: "Runnable examples for ACP clients and session restore"
-icon: "flask-conical"
+description: "Runnable examples included in the repository."
 ---
 
-Examples live under `examples/` and exercise the same public ACP surface that a
-host uses.
+## Minimal Client
 
-## Minimal client
-
-```bash
+```sh
 go run ./examples/minimal-client "Reply with hello from ACP"
 ```
 
-The minimal client launches `acp-go-codex`, initializes ACP, creates a session,
-sends one prompt, prints streamed updates, and closes the session.
+The client launches `acp-go-codex`, initializes ACP, creates a session, sends
+one prompt, and closes the session.
 
-## Interactive chat
+## Interactive Chat
 
-```bash
+```sh
 go run ./examples/interactive-chat
 ```
 
-The interactive client keeps a session open for repeated turns. It is useful
-for checking prompt streaming, tool updates, cancellation, permission prompts,
-elicitation callbacks, and usage reporting.
+The interactive example keeps one ACP session open and streams updates to the
+terminal.
 
-## Resume from file
+## Resume From File
 
-```bash
-go run ./examples/resume-from-file ./rollout.jsonl
+```sh
+go run ./examples/resume-from-file -session-file ./examples/resume-from-file/session.jsonl
 ```
 
-The resume example imports Codex rollout JSONL through the
-[`_codex/session/import*`](/docs/reference/session-import) extension surface and
-then calls `session/load` to replay the restored timeline.
-
-<Tip>
-  Integration tests under `integration/` use the same examples and public
-  methods as smoke coverage for a local Codex CLI.
-</Tip>
+This example seeds an in-process `SessionStore` with Codex rollout JSONL and
+then calls `session/load`.

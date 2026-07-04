@@ -31,7 +31,7 @@ func rolloutNativeThreadID(entries []SessionStoreEntry) string {
 	return ""
 }
 
-func (s *Session) replayRollout(ctx context.Context, entries []SessionStoreEntry) error {
+func (s *session) replayRollout(ctx context.Context, entries []SessionStoreEntry) error {
 	updates, err := rolloutReplayUpdates(entries)
 	if err != nil {
 		return err
@@ -45,7 +45,7 @@ func (s *Session) replayRollout(ctx context.Context, entries []SessionStoreEntry
 	return nil
 }
 
-func (s *Session) replayThreadHistory(ctx context.Context) error {
+func (s *session) replayThreadHistory(ctx context.Context) error {
 	if s.client == nil || s.codexThreadID == "" {
 		return nil
 	}

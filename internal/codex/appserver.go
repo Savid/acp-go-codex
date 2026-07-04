@@ -22,9 +22,6 @@ const (
 	methodThreadTurnsList   = "thread/turns/list"
 	methodThreadUnsubscribe = "thread/unsubscribe"
 	methodThreadCompact     = "thread/compact/start"
-	methodThreadGoalSet     = "thread/goal/set"
-	methodThreadGoalGet     = "thread/goal/get"
-	methodThreadGoalClear   = "thread/goal/clear"
 	methodTurnStart         = "turn/start"
 	methodTurnSteer         = "turn/steer"
 	methodTurnInterrupt     = "turn/interrupt"
@@ -296,47 +293,6 @@ func (c *AppServerClient) StartReview(ctx context.Context, req ReviewStartReques
 	return resp, nil
 }
 
-func (c *AppServerClient) SetGoal(ctx context.Context, req GoalSetRequest) (Goal, error) {
-	params := map[string]any{"threadId": req.ThreadID}
-	setNonEmpty(params, "objective", req.Objective)
-	setNonEmpty(params, "status", req.Status)
-	if req.TokenBudget != nil {
-		params["tokenBudget"] = *req.TokenBudget
-	}
-
-	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodThreadGoalSet, params, &resp); err != nil {
-		return Goal{}, normalizeThreadError(err)
-	}
-
-	return goalFromResponse(resp), nil
-}
-
-func (c *AppServerClient) GetGoal(ctx context.Context, threadID string) (*Goal, error) {
-	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodThreadGoalGet, map[string]any{"threadId": threadID}, &resp); err != nil {
-		return nil, normalizeThreadError(err)
-	}
-	rawGoal := mapValue(resp, "goal")
-	if rawGoal == nil {
-		//nolint:nilnil // nil goal with nil error is the GetGoal "not set" result.
-		return nil, nil
-	}
-	goal := goalFromResponse(resp)
-
-	return &goal, nil
-}
-
-func (c *AppServerClient) ClearGoal(ctx context.Context, threadID string) (bool, error) {
-	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodThreadGoalClear, map[string]any{"threadId": threadID}, &resp); err != nil {
-		return false, normalizeThreadError(err)
-	}
-	cleared, _ := resp["cleared"].(bool)
-
-	return cleared, nil
-}
-
 func (c *AppServerClient) CollaborationModeList(ctx context.Context) (CollaborationModeListResponse, error) {
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodCollaborationList, map[string]any{}, &resp); err != nil {
@@ -526,10 +482,8 @@ func (c *AppServerClient) runEventPump(done chan<- struct{}) {
 }
 
 func (c *AppServerClient) dispatchEvent(event Event) {
-	if event.Kind == EventAccountUpdated || event.Kind == EventGoalUpdated || event.Kind == EventGoalCleared {
-		if event.Kind == EventAccountUpdated {
-			c.setAccount(event.Account)
-		}
+	if event.Kind == EventAccountUpdated {
+		c.setAccount(event.Account)
 		if c.options.EventHandler != nil {
 			c.options.EventHandler(context.Background(), event)
 		}
@@ -810,12 +764,6 @@ func eventFromRPC(raw rpcEvent) Event {
 	case "account/updated":
 		event.Kind = EventAccountUpdated
 		event.Account = accountFromResponse(params)
-	case "thread/goal/updated":
-		event.Kind = EventGoalUpdated
-		goal := goalFromResponse(params)
-		event.Goal = &goal
-	case "thread/goal/cleared":
-		event.Kind = EventGoalCleared
 	case "warning", "guardianWarning", "deprecationNotice", "configWarning":
 		event.Kind = EventWarning
 		event.Text = firstNonEmpty(stringValue(params, "message"), stringValue(params, "text"))
@@ -860,25 +808,6 @@ func accountFromResponse(resp map[string]any) Account {
 		Email:    stringValue(rawAccount, "email"),
 		PlanType: firstNonEmpty(stringValue(rawAccount, "chatgptPlanType"), stringValue(rawAccount, "planType")),
 		Raw:      rawAccount,
-	}
-}
-
-func goalFromResponse(resp map[string]any) Goal {
-	rawGoal := mapValue(resp, "goal")
-	if rawGoal == nil {
-		rawGoal = resp
-	}
-
-	return Goal{
-		ThreadID:        firstNonEmpty(stringValue(rawGoal, "threadId"), stringValue(resp, "threadId")),
-		Objective:       stringValue(rawGoal, "objective"),
-		Status:          stringValue(rawGoal, "status"),
-		TokenBudget:     int64PtrValue(rawGoal, "tokenBudget"),
-		TokensUsed:      int64Value(rawGoal, "tokensUsed"),
-		TimeUsedSeconds: int64Value(rawGoal, "timeUsedSeconds"),
-		CreatedAt:       int64Value(rawGoal, "createdAt"),
-		UpdatedAt:       int64Value(rawGoal, "updatedAt"),
-		Raw:             rawGoal,
 	}
 }
 
@@ -1201,18 +1130,6 @@ func int64Value(values map[string]any, key string) int64 {
 	default:
 		return 0
 	}
-}
-
-func int64PtrValue(values map[string]any, key string) *int64 {
-	if values == nil {
-		return nil
-	}
-	if _, ok := values[key]; !ok || values[key] == nil {
-		return nil
-	}
-	value := int64Value(values, key)
-
-	return &value
 }
 
 func timestampValue(values map[string]any, key string) string {

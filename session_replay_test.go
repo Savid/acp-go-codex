@@ -18,7 +18,6 @@ func TestRolloutReplayResponseItemVariants(t *testing.T) {
 		SessionStoreEntry(`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"patch-1","output":{"ok":true}}}`),
 		SessionStoreEntry(`{"type":"response_item","payload":{"type":"local_shell_call","call_id":"shell-1","status":"completed","action":{"exec":{"command":["git","status"]}}}}`),
 		SessionStoreEntry(`{"type":"response_item","payload":{"type":"image_generation_call","id":"img-1","status":"failed","revised_prompt":"draw"}}`),
-		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"thread_goal_updated","goal":"ship"}}`),
 	}
 	updates, err := rolloutReplayUpdates(entries)
 	if err != nil {
@@ -116,9 +115,6 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	if replayEventMsg(map[string]any{"type": "context_compacted"})[0].AgentThoughtChunk == nil {
 		t.Fatal("context_compacted fallback did not emit thought")
 	}
-	if replayEventMsg(map[string]any{"type": "thread_goal_updated"}) != nil {
-		t.Fatal("empty thread goal emitted update")
-	}
 	if replayResponseItem(map[string]any{"type": "reasoning"}, replayFallbacks{}) != nil {
 		t.Fatal("reasoning without fallback emitted update")
 	}
@@ -150,7 +146,7 @@ func TestReplayAdditionalBranches(t *testing.T) {
 		t.Fatal("firstNonNil all nil failed")
 	}
 
-	session := &Session{agent: NewAgent(), id: "s"}
+	session := &session{agent: NewAgent(), id: "s"}
 	if err := session.replayRollout(context.Background(), []SessionStoreEntry{SessionStoreEntry(`{"payload":{}}`)}); err == nil {
 		t.Fatal("replayRollout invalid row succeeded")
 	}
@@ -176,10 +172,6 @@ func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 	agent.setAgentClient(conn)
 	ctx := context.Background()
 	cwd := t.TempDir()
-	projectKey, err := projectKeyForDirectory(cwd)
-	if err != nil {
-		t.Fatalf("project key returned error: %v", err)
-	}
 	entries := []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_reasoning","text":"thinking"}}`),
@@ -189,7 +181,7 @@ func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 		SessionStoreEntry(`{"type":"response_item","payload":{"type":"web_search_call","id":"search-1","status":"completed"}}`),
 		SessionStoreEntry(`{"type":"compacted","payload":{"message":"compacted"}}`),
 	}
-	if err := store.Append(ctx, SessionKey{ProjectKey: projectKey, SessionID: "stored-session"}, entries); err != nil {
+	if err := store.Append(ctx, SessionKey{SessionID: "stored-session"}, entries); err != nil {
 		t.Fatalf("store Append returned error: %v", err)
 	}
 

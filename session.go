@@ -10,10 +10,8 @@ import (
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
-// Session is an opaque handle for one Codex app-server process owned by an ACP
-// session. Callers receive Session values from Agent methods; constructing one
-// directly is unsupported.
-type Session struct {
+// session is one Codex app-server process owned by an ACP session.
+type session struct {
 	agent                 *Agent
 	id                    acp.SessionId
 	cwd                   string
@@ -36,24 +34,22 @@ type Session struct {
 	rawMessages           rawMessageConfig
 	outputSchema          any
 	accountMeta           map[string]any
-	goal                  *CodexGoal
-	goalRevision          int64
 
-	client    codex.Client
-	mcpBridge *mcpSessionBridge
+	client codex.Client
 
-	turn           chan struct{}
-	mu             sync.Mutex
-	cancel         context.CancelFunc
-	turnDone       <-chan struct{}
-	turnID         string
-	turnCancelled  bool
-	interactions   map[string]*sessionInteraction
-	mirrorMu       sync.Mutex
-	mirroredRows   int
-	emittedRawRows int
-	completionRows int
-	visibleRows    int
+	turn             chan struct{}
+	mu               sync.Mutex
+	cancel           context.CancelFunc
+	turnDone         <-chan struct{}
+	turnID           string
+	turnCancelled    bool
+	interactions     map[string]*sessionInteraction
+	mirrorMu         sync.Mutex
+	mirroredRows     int
+	emittedRawRows   int
+	rawEventSequence int64
+	completionRows   int
+	visibleRows      int
 }
 
 type sessionInteraction struct {
@@ -78,10 +74,9 @@ type sessionSnapshot struct {
 	sandboxPolicy         any
 	outputSchema          any
 	accountMeta           map[string]any
-	goal                  *CodexGoal
 }
 
-func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, thread codex.Thread, client codex.Client, meta sessionMeta) *Session {
+func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, thread codex.Thread, client codex.Client, meta sessionMeta) *session {
 	title := thread.Title
 	if title == "" {
 		title = "Codex session"
@@ -91,7 +86,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		updatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	return &Session{
+	return &session{
 		agent:                 agent,
 		id:                    id,
 		cwd:                   cwd,
@@ -102,7 +97,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		updatedAt:             updatedAt,
 		model:                 firstNonEmpty(thread.Model, meta.Model),
 		modelProvider:         thread.Provider,
-		mode:                  initialSessionMode(meta.Mode, agent.options.DefaultMode),
+		mode:                  modeDefault,
 		reasoningEffort:       firstNonEmpty(meta.ReasoningEffort, thread.ReasoningEffort),
 		serviceTier:           meta.ServiceTier,
 		personality:           meta.Personality,
@@ -115,39 +110,34 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 	}
 }
 
-func initialSessionMode(metaMode acp.SessionModeId, defaultMode acp.SessionModeId) acp.SessionModeId {
-	switch {
-	case validCodexMode(metaMode) && metaMode != "":
-		return metaMode
-	case validCodexMode(defaultMode) && defaultMode != "":
-		return defaultMode
-	default:
-		return modeDefault
-	}
-}
-
-func (s *Session) acquireTurn(ctx context.Context) (func(), error) {
+func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
 	select {
 	case turn <- struct{}{}:
 		return func() { <-turn }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	default:
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "session_prompt"})
 	}
 }
 
-func (s *Session) turnQueue() chan struct{} {
+func (s *session) turnQueue() chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.turn == nil {
-		s.turn = make(chan struct{}, 1)
+		limit := defaultMaxConcurrentPrompts
+		if s.agent != nil && s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts > 0 {
+			limit = s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts
+		}
+		s.turn = make(chan struct{}, limit)
 	}
 
 	return s.turn
 }
 
-func (s *Session) beginTurn(ctx context.Context) context.Context {
+func (s *session) beginTurn(ctx context.Context) context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -159,7 +149,7 @@ func (s *Session) beginTurn(ctx context.Context) context.Context {
 	return turnCtx
 }
 
-func (s *Session) finishTurn() {
+func (s *session) finishTurn() {
 	s.mu.Lock()
 	cancel := s.cancel
 	interactions := s.detachInteractionsLocked()
@@ -178,7 +168,7 @@ func (s *Session) finishTurn() {
 	}
 }
 
-func (s *Session) setTurnID(turnID string) {
+func (s *session) setTurnID(turnID string) {
 	if turnID == "" {
 		return
 	}
@@ -188,21 +178,21 @@ func (s *Session) setTurnID(turnID string) {
 	s.mu.Unlock()
 }
 
-func (s *Session) activeTurnID() string {
+func (s *session) activeTurnID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.turnID
 }
 
-func (s *Session) currentModel() string {
+func (s *session) currentModel() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.model
 }
 
-func (s *Session) snapshot() sessionSnapshot {
+func (s *session) snapshot() sessionSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -224,25 +214,24 @@ func (s *Session) snapshot() sessionSnapshot {
 		sandboxPolicy:         cloneAny(s.sandboxPolicy),
 		outputSchema:          cloneAny(s.outputSchema),
 		accountMeta:           cloneAnyMap(s.accountMeta),
-		goal:                  cloneCodexGoalPtr(s.goal),
 	}
 }
 
-func (s *Session) accountMetaSnapshot() map[string]any {
+func (s *session) accountMetaSnapshot() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return cloneAnyMap(s.accountMeta)
 }
 
-func (s *Session) closeState() (codex.Client, string, *mcpSessionBridge, string) {
+func (s *session) closeState() (codex.Client, string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.client, s.codexThreadID, s.mcpBridge, s.materializedPath
+	return s.client, s.codexThreadID, s.materializedPath
 }
 
-func (s *Session) cancelTurn() {
+func (s *session) cancelTurn() {
 	s.mu.Lock()
 	cancel := s.cancel
 	if cancel != nil {
@@ -259,14 +248,14 @@ func (s *Session) cancelTurn() {
 	}
 }
 
-func (s *Session) wasTurnCancelled() bool {
+func (s *session) wasTurnCancelled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.turnCancelled
 }
 
-func (s *Session) setAccount(meta map[string]any) {
+func (s *session) setAccount(meta map[string]any) {
 	if len(meta) == 0 {
 		return
 	}
@@ -275,7 +264,7 @@ func (s *Session) setAccount(meta map[string]any) {
 	s.mu.Unlock()
 }
 
-func (s *Session) beginInteraction(parent context.Context, key string) (context.Context, func()) {
+func (s *session) beginInteraction(parent context.Context, key string) (context.Context, func()) {
 	if key == "" {
 		key = "codex-server-request"
 	}
@@ -316,7 +305,7 @@ func (s *Session) beginInteraction(parent context.Context, key string) (context.
 	return ctx, finish
 }
 
-func (s *Session) detachInteractionsLocked() []context.CancelFunc {
+func (s *session) detachInteractionsLocked() []context.CancelFunc {
 	if len(s.interactions) == 0 {
 		return nil
 	}
@@ -329,18 +318,15 @@ func (s *Session) detachInteractionsLocked() []context.CancelFunc {
 	return cancels
 }
 
-func (s *Session) Close(ctx context.Context) error {
+func (s *session) Close(ctx context.Context) error {
 	s.cancelTurn()
-	client, codexThreadID, mcpBridge, materializedPath := s.closeState()
+	client, codexThreadID, materializedPath := s.closeState()
 	var err error
 	if client != nil && codexThreadID != "" {
 		_ = client.UnsubscribeThread(ctx, codexThreadID)
 	}
 	if client != nil {
 		err = client.Close(ctx)
-	}
-	if mcpBridge != nil {
-		err = errors.Join(err, mcpBridge.Close())
 	}
 	if materializedPath != "" {
 		err = errors.Join(err, removeMaterializedRollout(materializedPath))
@@ -349,7 +335,7 @@ func (s *Session) Close(ctx context.Context) error {
 	return err
 }
 
-func (s *Session) info() acp.SessionInfo {
+func (s *session) info() acp.SessionInfo {
 	snapshot := s.snapshot()
 	title := snapshot.title
 	updatedAt := snapshot.updatedAt

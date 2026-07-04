@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -15,10 +17,19 @@ import (
 )
 
 const (
-	listSessionsPageSize = 50
+	listSessionsPageSize            = 50
+	defaultMaxActiveSessions        = 32
+	defaultMaxConcurrentPrompts     = 1
+	defaultMaxConcurrentClientCalls = 16
+	closeTimeout                    = 5 * time.Second
 
-	jsonFieldError   = "error"
-	jsonFieldMessage = "message"
+	jsonFieldError     = "error"
+	jsonFieldMessage   = "message"
+	jsonFieldCwd       = "cwd"
+	jsonFieldEntries   = "entries"
+	jsonFieldIndex     = "index"
+	jsonFieldSessionID = "sessionId"
+	validationRequired = "required"
 
 	modeDefault acp.SessionModeId = "default"
 	modePlan    acp.SessionModeId = "plan"
@@ -34,19 +45,18 @@ const (
 
 // Agent exposes Codex through ACP.
 type Agent struct {
-	options Options
-	log     *slog.Logger
-	observe *observer.Observer
+	options    Options
+	log        *slog.Logger
+	observe    *observer.Observer
+	optionsErr error
 
-	mu       sync.Mutex
-	closed   bool
-	conn     agentClient
-	sessions map[acp.SessionId]*Session
-	imports  map[string]*sessionImport
-
-	importStore    *InMemorySessionStore
-	mcpConnections map[acp.UnstableMcpConnectionId]*mcpBridgeConn
-	authTokens     *codex.ChatGPTAuthTokens
+	mu          sync.Mutex
+	closed      bool
+	conn        agentClient
+	sessions    map[acp.SessionId]*session
+	deleted     map[acp.SessionId]struct{}
+	clientCalls chan struct{}
+	authTokens  *ChatGPTAuthTokens
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -69,6 +79,8 @@ var (
 // NewAgent creates an ACP agent for Codex.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
+	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
+	options.ConcurrencyLimits = limits
 
 	log := options.Logger
 	if log == nil {
@@ -76,18 +88,18 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	return &Agent{
-		options: options,
-		log:     log,
+		options:    options,
+		log:        log,
+		optionsErr: optionsErr,
 		observe: observer.New(observer.Config{
 			MeterProvider:  options.MeterProvider,
 			Propagator:     options.TextMapPropagator,
 			TracerProvider: options.TracerProvider,
 			Version:        options.AgentVersion,
 		}),
-		sessions:       make(map[acp.SessionId]*Session),
-		imports:        make(map[string]*sessionImport),
-		importStore:    NewInMemorySessionStore(),
-		mcpConnections: make(map[acp.UnstableMcpConnectionId]*mcpBridgeConn),
+		sessions:    make(map[acp.SessionId]*session),
+		deleted:     make(map[acp.SessionId]struct{}),
+		clientCalls: make(chan struct{}, limits.MaxConcurrentClientCalls),
 	}
 }
 
@@ -121,25 +133,27 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 // Close cancels and closes all resources owned by the agent.
 func (a *Agent) Close() error {
 	a.mu.Lock()
-	sessions := make([]*Session, 0, len(a.sessions))
+	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
 	}
-	a.sessions = make(map[acp.SessionId]*Session)
+	a.sessions = make(map[acp.SessionId]*session)
 	a.closed = true
 	a.conn = nil
 	a.mu.Unlock()
 
 	var err error
 	for _, session := range sessions {
-		err = errors.Join(err, session.Close(context.Background()))
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err = errors.Join(err, session.Close(ctx))
+		cancel()
 	}
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 
 	return err
 }
 
-func (a *Agent) setExternalAuthTokens(tokens codex.ChatGPTAuthTokens) {
+func (a *Agent) setExternalAuthTokens(tokens ChatGPTAuthTokens) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -154,12 +168,12 @@ func (a *Agent) clearExternalAuthTokens() {
 	a.authTokens = nil
 }
 
-func (a *Agent) externalAuthTokens() (codex.ChatGPTAuthTokens, bool) {
+func (a *Agent) externalAuthTokens() (ChatGPTAuthTokens, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.authTokens == nil {
-		return codex.ChatGPTAuthTokens{}, false
+		return ChatGPTAuthTokens{}, false
 	}
 
 	return *a.authTokens, true
@@ -167,6 +181,9 @@ func (a *Agent) externalAuthTokens() (codex.ChatGPTAuthTokens, bool) {
 
 // Initialize implements ACP initialize.
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
+	if a.optionsErr != nil {
+		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
+	}
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 	a.mu.Lock()
@@ -175,39 +192,32 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	a.mu.Unlock()
 
 	codexMeta := map[string]any{
-		"provider":           "codex",
-		"preferredTransport": "app-server",
-		rawSDKMessagesCapabilityKey: map[string]any{
-			capabilityScopeKey:         capabilityScopeSession,
-			rawSDKMessagesMethodKey:    rawCodexSDKMessageMethod,
-			rawSDKMessagesEnabledByKey: rawSDKMessagesEnabledByPath,
+		"fork": map[string]any{
+			"unstable": true,
+			"method":   ForkSessionMethod,
+			"request":  "acp.UnstableForkSessionRequest JSON payload only",
+			"response": "acp.UnstableForkSessionResponse JSON payload only",
 		},
-		outputSchemaCapabilityKey: map[string]any{
-			capabilityScopeKey: "session",
-			"types":            []string{"json_schema"},
-			"config":           outputSchemaConfigPath,
-			"result":           outputSchemaResultPath,
-			"rawEvents":        rawCodexSDKMessageMethod,
+		"elicitation": map[string]any{
+			"unstable": true,
+			"scope":    "session",
+			"tracks":   "in-progress ACP elicitation RFD",
 		},
-		"mcpToolApproval": map[string]any{
-			capabilityScopeKey: "mcpServer",
-			"modes":            []string{mcpApprovalModeAuto, mcpApprovalModePrompt, mcpApprovalModeApprove},
-			"defaultMode":      "_meta.codex.defaultToolsApprovalMode",
-			"perTool":          "_meta.codex.tools.<toolName>.approvalMode",
+		rawEventCapabilityKey: map[string]any{
+			"method":         RawEventMethod,
+			"enabledBy":      rawEventEnabledByPath,
+			"maxBytes":       rawEventMaxBytes,
+			"defaultEnabled": false,
 		},
-		"sessionImport": map[string]any{
-			capabilityScopeKey: "session",
-			"format":           codexSessionImportFormatJSON,
-			"methods": map[string]string{
-				"import":       codexSessionImportMethod,
-				"importChunk":  codexSessionImportChunkMethod,
-				"commitImport": codexSessionCommitImportMethod,
-				"abortImport":  codexSessionAbortImportMethod,
-			},
+		"sessionStore": map[string]any{
+			"format": SessionStoreFormat,
+			"key":    []string{"sessionId", "subpath"},
 		},
-	}
-	if a.options.EnableGoals {
-		codexMeta[codexGoalsCapabilityKey] = codexGoalsCapability()
+		structuredOutputCapabilityKey: map[string]any{
+			"config": "_meta.codex.options.outputSchema",
+			"result": "_meta.codex.structuredOutput",
+			"schema": "json_schema",
+		},
 	}
 
 	return acp.InitializeResponse{
@@ -225,7 +235,6 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			LoadSession: true,
 			Auth:        a.authCapabilities(),
 			McpCapabilities: acp.McpCapabilities{
-				Acp:  true,
 				Http: true,
 			},
 			PositionEncoding: &positionEncoding,
@@ -236,7 +245,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			SessionCapabilities: acp.SessionCapabilities{
 				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
 				Close:                 &acp.SessionCloseCapabilities{},
-				Fork:                  &acp.SessionForkCapabilities{},
+				Delete:                &acp.SessionDeleteCapabilities{},
 				List:                  &acp.SessionListCapabilities{},
 				Resume:                &acp.SessionResumeCapabilities{},
 			},
@@ -244,7 +253,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	}, nil
 }
 
-func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOverlay map[string]string) (codex.Client, error) {
+func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOverlay map[string]string, mcpToolApprovalMode string) (codex.Client, error) {
 	factory := a.options.clientFactory
 	if factory == nil {
 		factory = func(ctx context.Context, options codex.Options) (codex.Client, error) {
@@ -252,7 +261,7 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 		}
 	}
 
-	extraArgs, mcpEnv, err := a.mcpServerConfigArgs(mcpServers)
+	extraArgs, mcpEnv, err := a.mcpServerConfigArgs(mcpServers, mcpToolApprovalMode)
 	if err != nil {
 		return nil, err
 	}
@@ -275,8 +284,8 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 		env[key] = value
 	}
 	client, err := factory(ctx, codex.Options{
-		CLIPath:      a.options.CodexPath,
-		CodexHome:    a.options.CodexHome,
+		CLIPath:      a.options.ExecutablePath,
+		CodexHome:    a.options.Home,
 		DefaultModel: a.options.DefaultModel,
 		Env:          a.observe.InjectTraceEnv(ctx, env),
 		Config:       a.codexConfig(),
@@ -292,7 +301,7 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 	}
 	eventSink.SetClient(client)
 	if tokens, ok := a.externalAuthTokens(); ok {
-		if err := client.LoginWithChatGPTTokens(ctx, tokens); err != nil {
+		if err := client.LoginWithChatGPTTokens(ctx, toCodexAuthTokens(tokens)); err != nil {
 			_ = client.Close(context.Background())
 			return nil, err
 		}
@@ -302,16 +311,12 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 }
 
 func (a *Agent) codexConfig() map[string]any {
-	if !a.options.EnableGoals {
-		return nil
-	}
-
-	return map[string]any{"features.goals": true}
+	return nil
 }
 
 func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	switch event.Kind {
-	case codex.EventAccountUpdated, codex.EventGoalUpdated, codex.EventGoalCleared:
+	case codex.EventAccountUpdated:
 	default:
 		return
 	}
@@ -340,11 +345,8 @@ func (s *codexClientEventSink) SetClient(client codex.Client) {
 }
 
 func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, event codex.Event) {
-	switch event.Kind {
-	case codex.EventAccountUpdated:
+	if event.Kind == codex.EventAccountUpdated {
 		a.updateAccountForClient(client, event.ThreadID, event.Account)
-	case codex.EventGoalUpdated, codex.EventGoalCleared:
-		a.updateGoalForClient(ctx, client, event)
 	}
 }
 
@@ -354,7 +356,7 @@ func (a *Agent) updateAccountForClient(client codex.Client, threadID string, acc
 		return
 	}
 	a.mu.Lock()
-	sessions := make([]*Session, 0, len(a.sessions))
+	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		if session.client != client {
 			continue
@@ -382,7 +384,19 @@ func (a *Agent) ensureOpen() error {
 	return nil
 }
 
-func (a *Agent) session(id acp.SessionId) (*Session, error) {
+func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
+	if a.clientCalls == nil {
+		return func() {}, nil
+	}
+	select {
+	case a.clientCalls <- struct{}{}:
+		return func() { <-a.clientCalls }, nil
+	default:
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "client_calls"})
+	}
+}
+
+func (a *Agent) session(id acp.SessionId) (*session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -398,7 +412,7 @@ func (a *Agent) session(id acp.SessionId) (*Session, error) {
 	return session, nil
 }
 
-func (a *Agent) storeStartedSession(session *Session) error {
+func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -408,6 +422,13 @@ func (a *Agent) storeStartedSession(session *Session) error {
 		return newAgentClosedError()
 	}
 	previous := a.sessions[session.id]
+	if previous == nil && len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
+		a.mu.Unlock()
+		if err := session.Close(context.Background()); err != nil {
+			a.log.DebugContext(context.Background(), "close backpressured Codex session failed", slog.String(jsonFieldError, err.Error()))
+		}
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "active_sessions"})
+	}
 	a.sessions[session.id] = session
 	a.mu.Unlock()
 
@@ -427,7 +448,7 @@ func newAgentClosedError() *acp.RequestError {
 	return acp.NewInternalError(map[string]any{jsonFieldError: "agent is closed"})
 }
 
-func (a *Agent) removeSession(id acp.SessionId) *Session {
+func (a *Agent) removeSession(id acp.SessionId) *session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -437,7 +458,7 @@ func (a *Agent) removeSession(id acp.SessionId) *Session {
 	return session
 }
 
-func (a *Agent) removeSessionIf(id acp.SessionId, session *Session) bool {
+func (a *Agent) removeSessionIf(id acp.SessionId, session *session) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -472,6 +493,19 @@ func (a *Agent) emitUpdate(ctx context.Context, sessionID acp.SessionId, update 
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sessionID, Update: update})
 }
 
+func (a *Agent) sessionStore() SessionStore {
+	if a.options.SessionStore != nil {
+		return a.options.SessionStore
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.options.SessionStore == nil {
+		a.options.SessionStore = NewInMemorySessionStore()
+	}
+
+	return a.options.SessionStore
+}
+
 func selectPositionEncoding(encodings []acp.PositionEncodingKind) acp.PositionEncodingKind {
 	if slices.Contains(encodings, acp.PositionEncodingKindUtf8) {
 		return acp.PositionEncodingKindUtf8
@@ -481,6 +515,29 @@ func selectPositionEncoding(encodings []acp.PositionEncodingKind) acp.PositionEn
 	}
 
 	return acp.PositionEncodingKindUtf16
+}
+
+func normalizeConcurrencyLimits(limits ConcurrencyLimits) (ConcurrencyLimits, error) {
+	if limits.MaxActiveSessions == 0 {
+		limits.MaxActiveSessions = defaultMaxActiveSessions
+	}
+	if limits.MaxConcurrentPrompts == 0 {
+		limits.MaxConcurrentPrompts = defaultMaxConcurrentPrompts
+	}
+	if limits.MaxConcurrentClientCalls == 0 {
+		limits.MaxConcurrentClientCalls = defaultMaxConcurrentClientCalls
+	}
+	if limits.MaxActiveSessions < 0 {
+		return limits, fmt.Errorf("ConcurrencyLimits.MaxActiveSessions must be non-negative")
+	}
+	if limits.MaxConcurrentPrompts < 0 {
+		return limits, fmt.Errorf("ConcurrencyLimits.MaxConcurrentPrompts must be non-negative")
+	}
+	if limits.MaxConcurrentClientCalls < 0 {
+		return limits, fmt.Errorf("ConcurrencyLimits.MaxConcurrentClientCalls must be non-negative")
+	}
+
+	return limits, nil
 }
 
 func cloneClientCapabilities(capabilities acp.ClientCapabilities) acp.ClientCapabilities {

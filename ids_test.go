@@ -26,10 +26,11 @@ func TestSessionIDErrors(t *testing.T) {
 	if err := forkIDAgent.storeStartedSession(newSession(forkIDAgent, "parent-id", "/tmp/project", nil, codex.Thread{ID: "parent-thread"}, newSpyCodexClient(), sessionMeta{})); err != nil {
 		t.Fatalf("store fork id parent: %v", err)
 	}
-	if _, err := forkIDAgent.UnstableForkSession(ctx, ForkSessionRequest("parent-id", "/tmp/project")); err == nil {
-		t.Fatal("ForkSession ignored session id generation failure")
+	raw, err := json.Marshal(ForkSessionRequest("parent-id", "/tmp/project"))
+	if err != nil {
+		t.Fatalf("marshal fork request: %v", err)
 	}
-	if _, err := NewAgent().importCodexSessionChunk(context.Background(), json.RawMessage(`{"sessionId":"s","cwd":"/tmp/project","entries":[{"type":"a"}]}`)); err == nil {
-		t.Fatal("import ignored import id generation failure")
+	if _, err := forkIDAgent.HandleExtensionMethod(ctx, ForkSessionMethod, raw); err == nil {
+		t.Fatal("ForkSession ignored session id generation failure")
 	}
 }

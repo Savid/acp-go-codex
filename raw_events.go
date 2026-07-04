@@ -2,38 +2,29 @@ package codexacp
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 const (
-	rawCodexSDKMessageMethod = "_codex/sdkMessage"
+	ForkSessionMethod = "_codex/session/fork"
+	RawEventMethod    = "_codex/rawEvent"
 
-	codexMetaKey                 = "codex"
-	packageMetaKey               = "github.com/savid/acp-go-codex"
-	emitRawSDKMessagesKey        = "emitRawSDKMessages"
-	rawSDKMessagesCapabilityKey  = "sdkMessages"
-	rawSDKMessagesEnabledByPath  = "_meta.codex.emitRawSDKMessages"
-	rawSDKMessagesMethodKey      = "method"
-	rawSDKMessagesEnabledByKey   = "enabledBy"
-	outputSchemaCapabilityKey    = "outputSchema"
-	outputSchemaConfigPath       = "_meta.codex.options.outputSchema"
-	outputSchemaResultPath       = "session/prompt.result._meta.codex.structuredOutput"
-	structuredOutputMetaKey      = "structuredOutput"
-	capabilityScopeKey           = "scope"
-	capabilityScopeSession       = "session"
-	codexThreadIDMetaKey         = "codexThreadId"
-	codexAccountMetaKey          = "account"
-	codexSessionImportFormatJSON = "codex-rollout-jsonl"
+	codexMetaKey                  = "codex"
+	rawEventKey                   = "rawEvent"
+	rawEventEnabledKey            = "enabled"
+	rawEventCapabilityKey         = "rawEvent"
+	rawEventEnabledByPath         = "_meta.codex.rawEvent.enabled"
+	rawEventMaxBytes              = 64 * 1024
+	structuredOutputCapabilityKey = "structuredOutput"
+	outputSchemaConfigPath        = "_meta.codex.options.outputSchema"
+	outputSchemaResultPath        = "session/prompt.result._meta.codex.structuredOutput"
+	structuredOutputMetaKey       = "structuredOutput"
+	codexThreadIDMetaKey          = "codexThreadId"
+	codexAccountMetaKey           = "account"
 )
 
 type rawMessageConfig struct {
-	All     bool
-	Filters []rawMessageFilter
-}
-
-type rawMessageFilter struct {
-	Type        string
-	PayloadType string
-	PayloadRole string
+	enabled bool
 }
 
 func rawMessageConfigFromMeta(meta map[string]any) rawMessageConfig {
@@ -41,81 +32,21 @@ func rawMessageConfigFromMeta(meta map[string]any) rawMessageConfig {
 	if codexMeta == nil {
 		return rawMessageConfig{}
 	}
-	if config, ok := rawMessageConfigFromValue(codexMeta[emitRawSDKMessagesKey]); ok {
-		return config
+	rawEvent, _ := codexMeta[rawEventKey].(map[string]any)
+	enabled, _ := rawEvent[rawEventEnabledKey].(bool)
+	if enabled {
+		return rawMessageConfig{enabled: true}
 	}
 
 	return rawMessageConfig{}
 }
 
-func rawMessageConfigFromValue(value any) (rawMessageConfig, bool) {
-	switch typed := value.(type) {
-	case bool:
-		return rawMessageConfig{All: typed}, true
-	case []any:
-		filters := make([]rawMessageFilter, 0, len(typed))
-		for _, item := range typed {
-			raw, _ := item.(map[string]any)
-			filter, ok := rawMessageFilterFromMap(raw)
-			if ok {
-				filters = append(filters, filter)
-			}
-		}
-		return rawMessageConfig{Filters: filters}, true
-	default:
-		return rawMessageConfig{}, false
-	}
-}
-
-func rawMessageFilterFromMap(raw map[string]any) (rawMessageFilter, bool) {
-	if raw == nil {
-		return rawMessageFilter{}, false
-	}
-	filter := rawMessageFilter{
-		Type:        stringMeta(raw, "type"),
-		PayloadType: stringMeta(raw, "payloadType"),
-		PayloadRole: stringMeta(raw, "payloadRole"),
-	}
-	if filter.Type == "" {
-		return rawMessageFilter{}, false
-	}
-
-	return filter, true
-}
-
 func (c rawMessageConfig) Enabled() bool {
-	return c.All || len(c.Filters) > 0
+	return c.enabled
 }
 
 func (c rawMessageConfig) ShouldEmit(raw map[string]any) bool {
-	if raw == nil {
-		return false
-	}
-	if c.All {
-		return true
-	}
-	for _, filter := range c.Filters {
-		if filter.Matches(raw) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (f rawMessageFilter) Matches(raw map[string]any) bool {
-	if f.Type == "" || stringMeta(raw, "type") != f.Type {
-		return false
-	}
-	payload, _ := raw["payload"].(map[string]any)
-	if f.PayloadType != "" && stringMeta(payload, "type") != f.PayloadType {
-		return false
-	}
-	if f.PayloadRole != "" && stringMeta(payload, "role") != f.PayloadRole {
-		return false
-	}
-
-	return true
+	return c.enabled && raw != nil
 }
 
 func decodedRawEvent(raw json.RawMessage) map[string]any {
@@ -125,6 +56,31 @@ func decodedRawEvent(raw json.RawMessage) map[string]any {
 	}
 
 	return out
+}
+
+func (s *session) nextRawEventSequence() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.rawEventSequence++
+	return s.rawEventSequence
+}
+
+func capRawEventPayload(payload map[string]any) map[string]any {
+	encoded, err := json.Marshal(payload)
+	if err == nil && len(encoded) <= rawEventMaxBytes {
+		return payload
+	}
+
+	return map[string]any{
+		"sessionId": payload["sessionId"],
+		"sequence":  payload["sequence"],
+		"source":    payload["source"],
+		"event": map[string]any{
+			"truncated": true,
+			"error":     fmt.Sprintf("raw event exceeded %d bytes", rawEventMaxBytes),
+		},
+	}
 }
 
 func stringMeta(values map[string]any, key string) string {

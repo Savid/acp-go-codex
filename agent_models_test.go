@@ -81,33 +81,6 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 	}
 }
 
-func TestNewSessionInitialMode(t *testing.T) {
-	ctx := context.Background()
-	agent := NewAgent(
-		WithDefaultMode(modePlan),
-		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
-	)
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
-	if err != nil {
-		t.Fatalf("NewSession with default mode returned error: %v", err)
-	}
-	requireNoTopLevelConfigState(t, resp)
-	modeConfig := findSelectConfig(resp.ConfigOptions, configMode)
-	if modeConfig == nil || modeConfig.CurrentValue != acp.SessionConfigValueId(modePlan) {
-		t.Fatalf("default mode config = %#v", modeConfig)
-	}
-
-	resp, err = agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionCodexOptions(NewCodexOptions(WithCodexMode(modeDefault)))))
-	if err != nil {
-		t.Fatalf("NewSession with meta mode returned error: %v", err)
-	}
-	requireNoTopLevelConfigState(t, resp)
-	modeConfig = findSelectConfig(resp.ConfigOptions, configMode)
-	if modeConfig == nil || modeConfig.CurrentValue != acp.SessionConfigValueId(modeDefault) {
-		t.Fatalf("meta mode config = %#v", modeConfig)
-	}
-}
-
 func TestSetSessionConfigOptionRejectsBadModeValue(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
@@ -143,11 +116,12 @@ func TestCodexConfigOptionsExposeModelCatalogAndEffort(t *testing.T) {
 		t.Fatalf("model option = %#v", modelOption)
 	}
 	modelValues := *modelOption.Options.Ungrouped
-	if modelValues[0].Name != "GPT-5.5" || modelValues[0].Description == nil || *modelValues[0].Description != "Frontier model" || modelValues[0].Meta["displayName"] != "GPT-5.5" {
+	modelMeta, _ := modelValues[0].Meta[codexMetaKey].(map[string]any)
+	if modelValues[0].Name != "GPT-5.5" || modelValues[0].Description == nil || *modelValues[0].Description != "Frontier model" || modelMeta["modelId"] != "gpt-5.5" {
 		t.Fatalf("model values = %#v", modelValues)
 	}
 	effortOption := options[2].Select
-	if effortOption == nil || effortOption.Id != configEffort || effortOption.CurrentValue != "medium" {
+	if effortOption == nil || effortOption.Id != configEffort || effortOption.CurrentValue != "medium" || effortOption.Category == nil || *effortOption.Category != acp.SessionConfigOptionCategoryThoughtLevel {
 		t.Fatalf("effort option = %#v", effortOption)
 	}
 	effortValues := *effortOption.Options.Ungrouped
@@ -221,16 +195,6 @@ func TestSessionConfigSettersRespectTurnLock(t *testing.T) {
 	}); err == nil {
 		t.Fatal("SetSessionConfigOption model ignored canceled turn lock")
 	}
-}
-
-func findSelectConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
-	for _, option := range options {
-		if option.Select != nil && option.Select.Id == id {
-			return option.Select
-		}
-	}
-
-	return nil
 }
 
 func requireNoTopLevelConfigState(t *testing.T, response any) {

@@ -18,9 +18,6 @@ type Client interface {
 	CancelTurn(context.Context, string, string) error
 	CompactThread(context.Context, ThreadCompactRequest) (map[string]any, error)
 	StartReview(context.Context, ReviewStartRequest) (map[string]any, error)
-	SetGoal(context.Context, GoalSetRequest) (Goal, error)
-	GetGoal(context.Context, string) (*Goal, error)
-	ClearGoal(context.Context, string) (bool, error)
 	CollaborationModeList(context.Context) (CollaborationModeListResponse, error)
 	MCPServerStatusList(context.Context) (MCPServerStatusListResponse, error)
 	UnsubscribeThread(context.Context, string) error
@@ -133,25 +130,6 @@ type ReviewStartRequest struct {
 	Delivery string
 }
 
-type GoalSetRequest struct {
-	ThreadID    string
-	Objective   string
-	Status      string
-	TokenBudget *int64
-}
-
-type Goal struct {
-	ThreadID        string
-	Objective       string
-	Status          string
-	TokenBudget     *int64
-	TokensUsed      int64
-	TimeUsedSeconds int64
-	CreatedAt       int64
-	UpdatedAt       int64
-	Raw             map[string]any
-}
-
 type CollaborationModeListResponse struct {
 	Modes []CollaborationMode
 	Raw   map[string]any
@@ -207,8 +185,6 @@ const (
 	EventDiffUpdated       EventKind = "diff_updated"
 	EventUsageUpdated      EventKind = "usage_updated"
 	EventAccountUpdated    EventKind = "account_updated"
-	EventGoalUpdated       EventKind = "goal_updated"
-	EventGoalCleared       EventKind = "goal_cleared"
 	EventRaw               EventKind = "raw"
 	EventWarning           EventKind = "warning"
 	EventError             EventKind = "error"
@@ -249,7 +225,6 @@ type Event struct {
 	Usage      Usage
 	TokenUsage TokenUsage
 	Account    Account
-	Goal       *Goal
 	Completed  bool
 	RawMethod  string
 	RawParams  json.RawMessage

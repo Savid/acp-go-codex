@@ -7,21 +7,21 @@ import (
 func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 	schema := map[string]any{"type": "object"}
 	meta := CodexOptions{
-		Model:          "gpt",
-		Mode:           modePlan,
-		Effort:         "medium",
-		ServiceTier:    "flex",
-		Personality:    "friendly",
-		Env:            map[string]string{"A": "B"},
-		ApprovalPolicy: "never",
-		SandboxPolicy:  map[string]any{"type": "workspaceWrite"},
-		OutputSchema:   schema,
+		Model:               "gpt",
+		Effort:              "medium",
+		ServiceTier:         "flex",
+		Personality:         "friendly",
+		Env:                 map[string]string{"A": "B"},
+		ApprovalPolicy:      "never",
+		SandboxPolicy:       map[string]any{"type": "workspaceWrite"},
+		OutputSchema:        schema,
+		MCPToolApprovalMode: "approve",
 	}.Meta()
 	parsed, err := sessionMetaFromLifecycle(meta)
 	if err != nil {
 		t.Fatalf("sessionMetaFromLifecycle returned error: %v", err)
 	}
-	if parsed.Model != "gpt" || parsed.Mode != modePlan || parsed.ReasoningEffort != "medium" || parsed.OutputSchema == nil {
+	if parsed.Model != "gpt" || parsed.ReasoningEffort != "medium" || parsed.OutputSchema == nil || parsed.MCPToolApprovalMode != "approve" {
 		t.Fatalf("parsed meta = %#v", parsed)
 	}
 	if parsed.Env["A"] != "B" || parsed.ApprovalPolicy != "never" || parsed.SandboxPolicy.(map[string]any)["type"] != "workspaceWrite" {
@@ -42,10 +42,9 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 
 	cases := []map[string]any{
 		{codexMetaKey: map[string]any{"options": map[string]any{"outputSchema": "bad"}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"mode": 1}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"mode": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"effort": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"personality": "bad"}}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"mcpToolApprovalMode": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"env": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"env": map[string]any{"A": 1}}}},
 	}
@@ -53,18 +52,6 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 		if _, err := sessionMetaFromLifecycle(tc); err == nil {
 			t.Fatalf("expected error for %#v", tc)
 		}
-	}
-}
-
-func TestInitialSessionMode(t *testing.T) {
-	if got := initialSessionMode(modePlan, modeDefault); got != modePlan {
-		t.Fatalf("initial mode = %q, want plan", got)
-	}
-	if got := initialSessionMode("", modePlan); got != modePlan {
-		t.Fatalf("default initial mode = %q, want plan", got)
-	}
-	if got := initialSessionMode("", "bad"); got != modeDefault {
-		t.Fatalf("invalid default initial mode = %q, want default", got)
 	}
 }
 

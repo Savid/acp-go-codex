@@ -45,8 +45,7 @@
               "docs/features/elicitation",
               "docs/features/mcp",
               "docs/features/session-store",
-              "docs/features/raw-events",
-              "docs/features/goals"
+              "docs/features/raw-events"
             ]
           }
         ]
@@ -63,7 +62,6 @@
               "docs/reference/cli",
               "docs/reference/acp-methods",
               "docs/reference/meta",
-              "docs/reference/session-import",
               "docs/reference/updates"
             ]
           },

@@ -1,19 +1,20 @@
 package codexacp
 
 import (
-	"strings"
+	"context"
+	"encoding/json"
 
 	"github.com/coder/acp-go-sdk"
 )
 
 const (
-	metaOptionsKey        = "options"
-	metaModelKey          = "model"
-	metaModeKey           = "mode"
-	metaEnvKey            = "env"
-	metaApprovalPolicyKey = "approvalPolicy"
-	metaSandboxPolicyKey  = "sandboxPolicy"
-	metaOutputSchemaKey   = "outputSchema"
+	metaOptionsKey             = "options"
+	metaModelKey               = "model"
+	metaEnvKey                 = "env"
+	metaApprovalPolicyKey      = "approvalPolicy"
+	metaSandboxPolicyKey       = "sandboxPolicy"
+	metaOutputSchemaKey        = "outputSchema"
+	metaMCPToolApprovalModeKey = "mcpToolApprovalMode"
 )
 
 // CodexOptions is the stable Codex-specific subset accepted at
@@ -21,22 +22,22 @@ const (
 type CodexOptions struct {
 	// Model selects the initial Codex model for this session.
 	Model string `json:"model,omitempty"`
-	// Mode selects the initial ACP mode for this session.
-	Mode acp.SessionModeId `json:"mode,omitempty"`
+	// Env adds session-scoped environment variables for the Codex app-server process.
+	Env map[string]string `json:"env,omitempty"`
+	// OutputSchema configures JSON Schema structured output for this session.
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 	// Effort selects the Codex reasoning effort for turns in this session.
 	Effort string `json:"effort,omitempty"`
 	// ServiceTier selects the Codex service tier for turns in this session.
 	ServiceTier string `json:"serviceTier,omitempty"`
 	// Personality selects the Codex personality setting for turns in this session.
 	Personality string `json:"personality,omitempty"`
-	// Env adds session-scoped environment variables for the Codex app-server process.
-	Env map[string]string `json:"env,omitempty"`
 	// ApprovalPolicy configures Codex approval behavior for this session.
 	ApprovalPolicy any `json:"approvalPolicy,omitempty"`
 	// SandboxPolicy configures Codex sandbox behavior for turns in this session.
 	SandboxPolicy any `json:"sandboxPolicy,omitempty"`
-	// OutputSchema configures JSON Schema structured output for this session.
-	OutputSchema map[string]any `json:"outputSchema,omitempty"`
+	// MCPToolApprovalMode declares the host trust mode for MCP tool calls.
+	MCPToolApprovalMode string `json:"mcpToolApprovalMode,omitempty"`
 }
 
 // Meta returns an ACP _meta object for the supported Codex-specific options.
@@ -45,8 +46,11 @@ func (options CodexOptions) Meta() map[string]any {
 	if options.Model != "" {
 		values[metaModelKey] = options.Model
 	}
-	if options.Mode != "" {
-		values[metaModeKey] = string(options.Mode)
+	if len(options.Env) > 0 {
+		values[metaEnvKey] = cloneStringMap(options.Env)
+	}
+	if options.OutputSchema != nil {
+		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
 	}
 	if options.Effort != "" {
 		values[string(configEffort)] = options.Effort
@@ -57,17 +61,14 @@ func (options CodexOptions) Meta() map[string]any {
 	if options.Personality != "" {
 		values[string(configPersonality)] = options.Personality
 	}
-	if len(options.Env) > 0 {
-		values[metaEnvKey] = cloneStringMap(options.Env)
-	}
 	if options.ApprovalPolicy != nil {
 		values[metaApprovalPolicyKey] = cloneAny(options.ApprovalPolicy)
 	}
 	if options.SandboxPolicy != nil {
 		values[metaSandboxPolicyKey] = cloneAny(options.SandboxPolicy)
 	}
-	if options.OutputSchema != nil {
-		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
+	if options.MCPToolApprovalMode != "" {
+		values[metaMCPToolApprovalModeKey] = options.MCPToolApprovalMode
 	}
 
 	return map[string]any{
@@ -177,17 +178,45 @@ func WithSessionCodexOptions(options CodexOptions) SessionRequestOption {
 	}
 }
 
-// WithSessionRawSDKMessages toggles raw Codex SDK message emission for a
-// session lifecycle request.
-func WithSessionRawSDKMessages(enabled bool) SessionRequestOption {
+// WithSessionRawEvents toggles raw Codex event emission for a session lifecycle request.
+func WithSessionRawEvents(enabled bool) SessionRequestOption {
 	return func(config *sessionRequestConfig) {
 		if config.meta == nil {
 			config.meta = map[string]any{}
 		}
 		codexMeta := ensureMetaMap(config.meta, codexMetaKey)
-		codexMeta[emitRawSDKMessagesKey] = enabled
+		codexMeta[rawEventKey] = map[string]any{rawEventEnabledKey: enabled}
 		config.meta[codexMetaKey] = codexMeta
 	}
+}
+
+// StdioMCPServer constructs an ACP stdio MCP server.
+func StdioMCPServer(name string, command string, args []string, env map[string]string) acp.McpServer {
+	variables := make([]acp.EnvVariable, 0, len(env))
+	for key, value := range env {
+		variables = append(variables, acp.EnvVariable{Name: key, Value: value})
+	}
+
+	return acp.McpServer{Stdio: &acp.McpServerStdio{
+		Name:    name,
+		Command: command,
+		Args:    append([]string(nil), args...),
+		Env:     variables,
+	}}
+}
+
+// HTTPMCPServer constructs an ACP HTTP MCP server.
+func HTTPMCPServer(name string, url string, headers map[string]string) acp.McpServer {
+	values := make([]acp.HttpHeader, 0, len(headers))
+	for key, value := range headers {
+		values = append(values, acp.HttpHeader{Name: key, Value: value})
+	}
+
+	return acp.McpServer{Http: &acp.McpServerHttpInline{
+		Name:    name,
+		Url:     url,
+		Headers: values,
+	}}
 }
 
 // WithSessionOutputSchema configures Codex JSON Schema structured output.
@@ -196,32 +225,6 @@ func WithSessionOutputSchema(schema map[string]any) SessionRequestOption {
 
 	return func(config *sessionRequestConfig) {
 		config.meta = mergeAnyMap(config.meta, CodexOptions{OutputSchema: cloned}.Meta())
-	}
-}
-
-// WithSessionGoal sets initial _meta.codex.goal metadata for a session
-// lifecycle request. It serializes only client-settable goal fields.
-func WithSessionGoal(goal CodexGoal) SessionRequestOption {
-	value := clientGoalMap(goal)
-
-	return func(config *sessionRequestConfig) {
-		config.meta = mergeAnyMap(config.meta, map[string]any{
-			codexMetaKey: map[string]any{
-				codexGoalMetaKey: value,
-			},
-		})
-	}
-}
-
-// WithSessionGoalClear clears _meta.codex.goal metadata for a session lifecycle
-// request.
-func WithSessionGoalClear() SessionRequestOption {
-	return func(config *sessionRequestConfig) {
-		config.meta = mergeAnyMap(config.meta, map[string]any{
-			codexMetaKey: map[string]any{
-				codexGoalMetaKey: nil,
-			},
-		})
 	}
 }
 
@@ -261,22 +264,34 @@ func TextPromptRequest(sessionID acp.SessionId, text string) acp.PromptRequest {
 	return PromptRequest(sessionID, acp.TextBlock(text))
 }
 
-// SetGoalRequest constructs params for the _codex/session/setGoal extension
-// method. It serializes only client-settable goal fields.
-func SetGoalRequest(sessionID acp.SessionId, goal CodexGoal) map[string]any {
-	return map[string]any{
-		jsonFieldSessionID: sessionID,
-		codexGoalMetaKey:   clientGoalMap(goal),
+// SetConfigOptionRequest constructs a session/set_config_option value-id request.
+func SetConfigOptionRequest(sessionID acp.SessionId, configID acp.SessionConfigId, value acp.SessionConfigValueId) acp.SetSessionConfigOptionRequest {
+	return acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: sessionID,
+			ConfigId:  configID,
+			Value:     value,
+		},
 	}
 }
 
-// ClearGoalRequest constructs params for the _codex/session/setGoal extension
-// method that clears goal state.
-func ClearGoalRequest(sessionID acp.SessionId) map[string]any {
-	return map[string]any{
-		jsonFieldSessionID: sessionID,
-		codexGoalMetaKey:   nil,
+// SetModelRequest constructs a session/set_config_option request for the model selector.
+func SetModelRequest(sessionID acp.SessionId, model string) acp.SetSessionConfigOptionRequest {
+	return SetConfigOptionRequest(sessionID, configModel, acp.SessionConfigValueId(model))
+}
+
+// CallForkSession calls the Codex fork extension method and decodes the SDK payload shape.
+func CallForkSession(ctx context.Context, conn *acp.ClientSideConnection, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+	raw, err := conn.CallExtension(ctx, ForkSessionMethod, params)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
 	}
+	var resp acp.UnstableForkSessionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+
+	return resp, nil
 }
 
 // ListSessionsRequestOption configures embedded-Go session/list requests.
@@ -337,13 +352,6 @@ func WithCodexModel(model string) CodexOption {
 	}
 }
 
-// WithCodexMode configures the initial ACP session mode.
-func WithCodexMode(mode acp.SessionModeId) CodexOption {
-	return func(options *CodexOptions) {
-		options.Mode = mode
-	}
-}
-
 // WithCodexEffort configures Codex reasoning effort.
 func WithCodexEffort(effort string) CodexOption {
 	return func(options *CodexOptions) {
@@ -401,34 +409,27 @@ func WithCodexOutputSchema(schema map[string]any) CodexOption {
 	}
 }
 
-func cloneCodexOptions(options CodexOptions) CodexOptions {
-	return CodexOptions{
-		Model:       options.Model,
-		Mode:        options.Mode,
-		Effort:      options.Effort,
-		ServiceTier: options.ServiceTier,
-		Personality: options.Personality,
-		Env:         cloneStringMap(options.Env),
-		ApprovalPolicy: cloneAny(
-			options.ApprovalPolicy,
-		),
-		SandboxPolicy: cloneAny(options.SandboxPolicy),
-		OutputSchema:  cloneAnyMap(options.OutputSchema),
+// WithCodexMCPToolApprovalMode configures host-declared MCP tool trust for the session.
+func WithCodexMCPToolApprovalMode(mode string) CodexOption {
+	return func(options *CodexOptions) {
+		options.MCPToolApprovalMode = mode
 	}
 }
 
-func clientGoalMap(goal CodexGoal) map[string]any {
-	out := map[string]any{
-		goalFieldObjective: strings.TrimSpace(goal.Objective),
+func cloneCodexOptions(options CodexOptions) CodexOptions {
+	return CodexOptions{
+		Model:        options.Model,
+		Env:          cloneStringMap(options.Env),
+		OutputSchema: cloneAnyMap(options.OutputSchema),
+		Effort:       options.Effort,
+		ServiceTier:  options.ServiceTier,
+		Personality:  options.Personality,
+		ApprovalPolicy: cloneAny(
+			options.ApprovalPolicy,
+		),
+		SandboxPolicy:       cloneAny(options.SandboxPolicy),
+		MCPToolApprovalMode: options.MCPToolApprovalMode,
 	}
-	if goal.Status != "" {
-		out[goalFieldStatus] = goal.Status
-	}
-	if goal.TokenBudget != nil {
-		out[goalFieldTokenBudget] = *goal.TokenBudget
-	}
-
-	return out
 }
 
 func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {

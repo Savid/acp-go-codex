@@ -39,7 +39,7 @@ Or try the interactive example:
 go run ./examples/interactive-chat
 ```
 
-Import and resume a stored Codex rollout JSONL file:
+Load and resume a stored Codex rollout JSONL file:
 
 ```sh
 go run ./examples/resume-from-file -session-file ./examples/resume-from-file/session.jsonl
@@ -69,8 +69,8 @@ func main() {
 ```
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as Codex path,
-`CODEX_HOME`, default model/mode, session storage, external ChatGPT token refresh,
-MCP proxy override, guarded logout, and OpenTelemetry providers.
+`CODEX_HOME`, default model, session storage, external ChatGPT token refresh,
+guarded logout, and OpenTelemetry providers.
 
 ## What It Provides
 
@@ -82,15 +82,13 @@ MCP proxy override, guarded logout, and OpenTelemetry providers.
 - Codex structured output through session-level JSON Schema on `turn/start`.
 - Codex command/file/generic permission prompts, tool user input, and MCP
   elicitation bridging.
-- MCP stdio, streamable HTTP, and ACP-transport bridging. SSE MCP is rejected
-  because Codex does not expose a supported SSE path.
+- MCP stdio and streamable HTTP configuration. Other MCP transports are
+  rejected because Codex does not expose supported paths for them.
 - Codex account status, terminal login passthrough, external ChatGPT token
   login/refresh, and guarded logout for adapter-owned `CODEX_HOME` directories.
-- Optional Codex-native session goals through experimental `thread/goal/*`
-  app-server APIs.
-- Session import and optional durable mirroring through a host-provided
-  `SessionStore`; stored rows are Codex rollout JSONL.
-- Optional raw Codex rollout extension notifications through `_codex/sdkMessage`.
+- Durable mirroring through a host-provided `SessionStore`; stored rows are
+  Codex rollout JSONL keyed by `{SessionID, Subpath}`.
+- Optional raw Codex rollout extension notifications through `_codex/rawEvent`.
 - OpenTelemetry adapter telemetry plus native Codex app-server OTLP mapping
   without recording prompt/tool secrets by default.
 
@@ -100,8 +98,6 @@ MCP proxy override, guarded logout, and OpenTelemetry providers.
 - [Run modes](docs/get-started/run-modes.mdx)
 - [Go API](docs/reference/go-api.mdx)
 - [ACP methods](docs/reference/acp-methods.mdx)
-- [Goals](docs/features/goals.mdx)
-- [Session import](docs/reference/session-import.mdx)
 - [Observability](docs/operations/observability.mdx)
 
 ## Development

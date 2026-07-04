@@ -1,75 +1,27 @@
 ---
 title: "MCP"
-description: "MCP server configuration and ACP-transport bridging"
-icon: "network"
+description: "MCP server configuration supported by Codex."
 ---
 
-ACP session requests can include MCP server definitions. The adapter rewrites
-supported transports into Codex app-server MCP configuration for the launched
-session process.
-
-## Configuration
-
-Attach MCP servers to `session/new`, `session/load`, `session/resume`, or
-`session/fork`. Embedded Go callers can use:
+`acp-go-codex` accepts stdio and streamable HTTP MCP servers and converts them
+to Codex app-server configuration.
 
 ```go
 req := codexacp.NewSessionRequest("/workspace/project",
-    codexacp.WithSessionMCPServers(server),
+    codexacp.WithSessionMCPServers(codexacp.StdioMCPServer(
+        "tools",
+        "node",
+        []string{"server.js"},
+        nil,
+    )),
+    codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+        codexacp.WithCodexMCPToolApprovalMode("approve"),
+    )),
 )
 ```
 
-Codex-specific MCP server metadata can configure tool approval modes; see
-[Permissions](/docs/features/permissions#mcp-tool-approvals).
+`mcpToolApprovalMode` accepts `auto`, `prompt`, or `approve` and applies to all
+configured MCP servers for that session.
 
-## Supported transports
-
-| ACP transport | Codex mapping |
-| --- | --- |
-| Stdio | Codex `mcp_servers.<name>.command`, args, and env. |
-| Streamable HTTP | Codex `mcp_servers.<name>.url` plus `env_http_headers`. |
-| ACP transport | Local token-authenticated stdio proxy launched by the adapter. |
-| SSE | Rejected; Codex app-server does not support this transport here. |
-
-HTTP header values are passed through `env_http_headers` so bearer tokens and
-trace headers stay out of process argv.
-
-## Tool naming and inspection
-
-Codex refers to MCP tools by server and tool name. Prompts and tests should use
-that native shape, for example: "Use the `acp_stdio` MCP server's `echo` tool."
-Do not depend on Claude-style synthetic names such as `mcp__server__tool`.
-
-Tool updates use Codex's `server` and `tool` fields when available, so hosts can
-render titles such as `acp_stdio echo`. Hosts that need to inspect the live
-server/tool catalog can call `_codex/mcpServerStatus/list`.
-
-## ACP-transport bridge
-
-ACP-transport MCP servers are not directly understood by Codex. The adapter
-starts a loopback listener and rewrites the server into a Codex stdio MCP
-server that launches:
-
-```bash
-acp-go-codex mcp-proxy -network tcp -address 127.0.0.1:... -acp-id <id>
-```
-
-The proxy reads a 32-byte token from a private token file path supplied in the
-environment. The token is never placed in argv.
-
-## Security boundary
-
-The bridge is loopback-only, token-gated, and same-user scoped. It is designed
-to expose one ACP MCP server to one Codex app-server process, not as a general
-network service.
-
-Temporary token files and materialized rollout files are created under private
-0700 parent directories with 0600 file permissions and cleaned up on session
-close.
-
-## Limits
-
-The MCP bridge enforces request size, pending-forward, and idle timeout limits
-to keep a stuck MCP server from blocking the Codex session indefinitely. Errors
-are surfaced through the Codex tool result path when possible and through ACP
-session errors when the bridge itself cannot start.
+MCP transports other than stdio and streamable HTTP are rejected with invalid
+params.

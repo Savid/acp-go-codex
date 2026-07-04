@@ -5,26 +5,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
-const sessionStoreMainSubpath = ""
+const (
+	// SessionStoreMainSubpath is the main rollout JSONL subpath.
+	SessionStoreMainSubpath = ""
+	// SessionStoreFormat is the canonical Codex rollout store format.
+	SessionStoreFormat = "codex-rollout-jsonl-v1"
+)
 
 // SessionStoreEntry is one opaque Codex rollout JSON object.
 //
 // Implementations should preserve the raw JSON bytes. The agent validates
-// imported entries as single JSON objects before appending them.
+// rollout entries as single JSON objects before appending them.
 type SessionStoreEntry = json.RawMessage
 
 // SessionKey addresses one Codex rollout JSONL in a session store.
 type SessionKey struct {
-	// ProjectKey is the sanitized project directory key for the session cwd.
-	ProjectKey string
-	// SessionID is the ACP-visible session ID or import ID being stored.
+	// SessionID is the ACP-visible session ID being stored.
 	SessionID string
 	// Subpath is reserved for future Codex multi-file session artifacts.
 	Subpath string
@@ -34,8 +36,14 @@ type SessionKey struct {
 type SessionSummary struct {
 	// SessionID is the session ID for a main rollout JSONL.
 	SessionID string
-	// MTime is a Unix millisecond timestamp used for session/list ordering.
-	MTime int64
+	// UpdatedAtUnixMilli is a Unix millisecond timestamp used for session/list ordering.
+	UpdatedAtUnixMilli int64
+	// Cwd is the absolute working directory associated with the session.
+	Cwd string
+	// Title is the display title associated with the session.
+	Title string
+	// Meta is optional host-provided session metadata.
+	Meta map[string]any
 }
 
 // SessionStore mirrors Codex rollout entries into a host-provided backend.
@@ -46,17 +54,10 @@ type SessionSummary struct {
 type SessionStore interface {
 	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
 	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
-	Replace(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
-}
-
-// SessionStoreLister lists main rollout JSONL keys for one Codex project key.
-type SessionStoreLister interface {
-	ListSessions(ctx context.Context, projectKey string) ([]SessionSummary, error)
-}
-
-// SessionStoreDeleter deletes one rollout JSONL key.
-type SessionStoreDeleter interface {
+	Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error
 	Delete(ctx context.Context, key SessionKey) error
+	ListSessions(ctx context.Context) ([]SessionSummary, error)
+	ListSubkeys(ctx context.Context, key SessionKey) ([]string, error)
 }
 
 // SessionStoreReplacement is one rollout JSONL written during an atomic store replace.
@@ -65,29 +66,22 @@ type SessionStoreReplacement struct {
 	Entries []SessionStoreEntry
 }
 
-// SessionStoreReplacer atomically replaces one main rollout JSONL and its related
-// artifacts.
-type SessionStoreReplacer interface {
-	ReplaceSession(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error
-}
-
 // InMemorySessionStore is a development and test store for Codex rollout rows.
 type InMemorySessionStore struct {
-	mu      sync.Mutex
-	entries map[SessionKey][]SessionStoreEntry
-	mtime   map[SessionKey]int64
+	mu         sync.Mutex
+	entries    map[SessionKey][]SessionStoreEntry
+	updatedAt  map[SessionKey]int64
+	tombstones map[SessionKey]int64
 }
 
 var _ SessionStore = (*InMemorySessionStore)(nil)
-var _ SessionStoreLister = (*InMemorySessionStore)(nil)
-var _ SessionStoreDeleter = (*InMemorySessionStore)(nil)
-var _ SessionStoreReplacer = (*InMemorySessionStore)(nil)
 
 // NewInMemorySessionStore creates an empty process-local rollout store.
 func NewInMemorySessionStore() *InMemorySessionStore {
 	return &InMemorySessionStore{
-		entries: make(map[SessionKey][]SessionStoreEntry),
-		mtime:   make(map[SessionKey]int64),
+		entries:    make(map[SessionKey][]SessionStoreEntry),
+		updatedAt:  make(map[SessionKey]int64),
+		tombstones: make(map[SessionKey]int64),
 	}
 }
 
@@ -109,14 +103,20 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	if s.entries == nil {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
-	if s.mtime == nil {
-		s.mtime = make(map[SessionKey]int64)
+	if s.updatedAt == nil {
+		s.updatedAt = make(map[SessionKey]int64)
+	}
+	if s.tombstones == nil {
+		s.tombstones = make(map[SessionKey]int64)
+	}
+	if s.isTombstonedLocked(key) {
+		return nil
 	}
 
 	for _, entry := range entries {
 		s.entries[key] = append(s.entries[key], cloneStoreEntry(entry))
 	}
-	s.mtime[key] = time.Now().UnixMilli()
+	s.updatedAt[key] = time.Now().UnixMilli()
 
 	return nil
 }
@@ -133,11 +133,15 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.isTombstonedLocked(key) {
+		return nil, nil
+	}
+
 	return cloneStoreEntries(s.entries[key]), nil
 }
 
-// Replace atomically replaces one exact rollout key.
-func (s *InMemorySessionStore) Replace(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
+// Replace atomically replaces a complete committed generation for one session.
+func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -151,22 +155,57 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, key SessionKey, entr
 	if s.entries == nil {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
-	if s.mtime == nil {
-		s.mtime = make(map[SessionKey]int64)
+	if s.updatedAt == nil {
+		s.updatedAt = make(map[SessionKey]int64)
 	}
-	if len(entries) == 0 {
-		delete(s.entries, key)
-		delete(s.mtime, key)
-		return nil
+	if s.tombstones == nil {
+		s.tombstones = make(map[SessionKey]int64)
 	}
-	s.entries[key] = cloneStoreEntries(entries)
-	s.mtime[key] = time.Now().UnixMilli()
+	if main.SessionID == "" {
+		return fmt.Errorf("main session id is required")
+	}
+	if main.Subpath != SessionStoreMainSubpath {
+		return fmt.Errorf("main subpath must be %q", SessionStoreMainSubpath)
+	}
+	mainCount := 0
+	for _, replacement := range replacements {
+		if replacement.Key.SessionID != main.SessionID {
+			return fmt.Errorf("replacement key does not match main session")
+		}
+		if replacement.Key.Subpath == SessionStoreMainSubpath {
+			mainCount++
+		}
+	}
+	if mainCount != 1 {
+		return fmt.Errorf("replacements must include the main key exactly once")
+	}
+
+	for candidate := range s.entries {
+		if candidate.SessionID == main.SessionID {
+			delete(s.entries, candidate)
+			delete(s.updatedAt, candidate)
+			s.tombstones[candidate] = time.Now().UnixMilli()
+		}
+	}
+
+	updatedAt := time.Now().UnixMilli()
+	for _, replacement := range replacements {
+		if len(replacement.Entries) == 0 {
+			delete(s.entries, replacement.Key)
+			delete(s.updatedAt, replacement.Key)
+			s.tombstones[replacement.Key] = updatedAt
+			continue
+		}
+		s.entries[replacement.Key] = cloneStoreEntries(replacement.Entries)
+		s.updatedAt[replacement.Key] = updatedAt
+		delete(s.tombstones, replacement.Key)
+	}
 
 	return nil
 }
 
-// ListSessions lists main sessions for one project key.
-func (s *InMemorySessionStore) ListSessions(ctx context.Context, projectKey string) ([]SessionSummary, error) {
+// ListSessions lists committed, non-tombstoned main sessions.
+func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -179,17 +218,17 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context, projectKey stri
 
 	summaries := make([]SessionSummary, 0)
 	for key := range s.entries {
-		if key.ProjectKey != projectKey || key.SessionID == "" || key.Subpath != sessionStoreMainSubpath {
+		if key.SessionID == "" || key.Subpath != SessionStoreMainSubpath || s.isTombstonedLocked(key) {
 			continue
 		}
 		summaries = append(summaries, SessionSummary{
-			SessionID: key.SessionID,
-			MTime:     s.mtime[key],
+			SessionID:          key.SessionID,
+			UpdatedAtUnixMilli: s.updatedAt[key],
 		})
 	}
 
 	slices.SortFunc(summaries, func(left, right SessionSummary) int {
-		if byTime := cmp.Compare(right.MTime, left.MTime); byTime != 0 {
+		if byTime := cmp.Compare(right.UpdatedAtUnixMilli, left.UpdatedAtUnixMilli); byTime != 0 {
 			return byTime
 		}
 		return strings.Compare(left.SessionID, right.SessionID)
@@ -198,8 +237,7 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context, projectKey stri
 	return summaries, nil
 }
 
-// Delete removes a rollout JSONL key. Deleting the main key cascades to matching
-// reserved subpaths.
+// Delete writes a tombstone. Deleting the main key cascades to subpaths.
 func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -211,60 +249,61 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.entries == nil {
+		s.entries = make(map[SessionKey][]SessionStoreEntry)
+	}
+	if s.updatedAt == nil {
+		s.updatedAt = make(map[SessionKey]int64)
+	}
+	if s.tombstones == nil {
+		s.tombstones = make(map[SessionKey]int64)
+	}
+	now := time.Now().UnixMilli()
+	matched := false
 	for candidate := range s.entries {
-		if candidate.ProjectKey != key.ProjectKey || candidate.SessionID != key.SessionID {
+		if candidate.SessionID != key.SessionID {
 			continue
 		}
-		if key.Subpath != sessionStoreMainSubpath && candidate.Subpath != key.Subpath {
+		if key.Subpath != SessionStoreMainSubpath && candidate.Subpath != key.Subpath {
 			continue
 		}
 		delete(s.entries, candidate)
-		delete(s.mtime, candidate)
+		delete(s.updatedAt, candidate)
+		s.tombstones[candidate] = now
+		matched = true
+	}
+	if !matched {
+		s.tombstones[key] = now
+	}
+	if key.Subpath == SessionStoreMainSubpath {
+		s.tombstones[mainSessionKey(key.SessionID)] = now
 	}
 
 	return nil
 }
 
-// ReplaceSession atomically replaces a main rollout JSONL and related artifacts.
-func (s *InMemorySessionStore) ReplaceSession(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
+// ListSubkeys lists committed, non-tombstoned subpaths for a session.
+func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) ([]string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if s == nil {
-		return fmt.Errorf("nil InMemorySessionStore")
-	}
-	for _, replacement := range replacements {
-		if replacement.Key.ProjectKey != main.ProjectKey || replacement.Key.SessionID != main.SessionID {
-			return fmt.Errorf("replacement key does not match main session")
-		}
+		return nil, fmt.Errorf("nil InMemorySessionStore")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.entries == nil {
-		s.entries = make(map[SessionKey][]SessionStoreEntry)
-	}
-	if s.mtime == nil {
-		s.mtime = make(map[SessionKey]int64)
-	}
+	subpaths := make([]string, 0)
 	for candidate := range s.entries {
-		if candidate.ProjectKey == main.ProjectKey && candidate.SessionID == main.SessionID {
-			delete(s.entries, candidate)
-			delete(s.mtime, candidate)
-		}
-	}
-
-	mtime := time.Now().UnixMilli()
-	for _, replacement := range replacements {
-		if len(replacement.Entries) == 0 {
+		if candidate.SessionID != key.SessionID || candidate.Subpath == SessionStoreMainSubpath || s.isTombstonedLocked(candidate) {
 			continue
 		}
-		s.entries[replacement.Key] = cloneStoreEntries(replacement.Entries)
-		s.mtime[replacement.Key] = mtime
+		subpaths = append(subpaths, candidate.Subpath)
 	}
+	slices.Sort(subpaths)
 
-	return nil
+	return subpaths, nil
 }
 
 func cloneStoreEntry(entry SessionStoreEntry) SessionStoreEntry {
@@ -284,35 +323,20 @@ func cloneStoreEntries(entries []SessionStoreEntry) []SessionStoreEntry {
 	return clone
 }
 
-func projectKeyForDirectory(cwd string) (string, error) {
-	if strings.TrimSpace(cwd) == "" {
-		return "", fmt.Errorf("cwd is required")
+func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
+	if s.tombstones == nil {
+		return false
 	}
-	if !filepath.IsAbs(cwd) {
-		return "", fmt.Errorf("cwd must be an absolute path")
+	if _, ok := s.tombstones[key]; ok {
+		return true
 	}
-
-	absolute := filepath.Clean(cwd)
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err == nil {
-		absolute = resolved
+	if key.Subpath != SessionStoreMainSubpath {
+		_, ok := s.tombstones[mainSessionKey(key.SessionID)]
+		return ok
 	}
-
-	return sanitizeSessionProjectPath(filepath.Clean(absolute)), nil
+	return false
 }
 
-func sanitizeSessionProjectPath(path string) string {
-	var builder strings.Builder
-	for _, char := range path {
-		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
-			builder.WriteRune(char)
-		} else {
-			builder.WriteByte('-')
-		}
-	}
-	if builder.Len() == 0 {
-		return "-"
-	}
-
-	return builder.String()
+func mainSessionKey(sessionID string) SessionKey {
+	return SessionKey{SessionID: sessionID, Subpath: SessionStoreMainSubpath}
 }

@@ -10,29 +10,22 @@
 // Hosts should use [Serve] for the JSON-RPC transport. Codex authentication and
 // account configuration remain owned by the local Codex installation unless the
 // host explicitly supplies external ChatGPT auth tokens through ACP
-// authenticate and [WithChatGPTAuthTokenRefresher].
+// authenticate and [WithCodexChatGPTAuthTokenRefresher].
 //
 // Hosts that need durable remote resume can provide [WithSessionStore]. A
 // session store receives Codex rollout JSONL rows keyed by the ACP-visible
-// session ID, can back session/list, and can hydrate rollout JSONL into a
-// temporary file for session/load or session/resume when the local Codex thread
-// state is absent.
-// Codex-specific session import extension methods are advertised under
-// _meta.codex when the agent is initialized.
+// session ID and subpath, can back session/list, and can hydrate rollout JSONL
+// into a temporary file for session/load or session/resume when the local Codex
+// thread state is absent.
 //
 // Hosts that need structured output can attach [CodexOptions] with
 // [WithSessionCodexOptions] or use [WithSessionOutputSchema]. The schema is
 // sent to Codex on each turn/start and parsed response objects are returned
 // under _meta.codex.structuredOutput.
-// Hosts that need Codex-native request_user_input from the first turn should
-// start sessions in plan mode with [WithDefaultMode] or
-// [CodexOptions.Mode].
 //
-// Hosts that need Codex-native session goals can opt in with
-// [WithCodexGoals]. Goal state is accepted through [WithSessionGoal],
-// [WithSessionGoalClear], and the _codex/session/setGoal extension method.
-// Durable stores also mirror the latest visible goal snapshot as a reserved
-// goal sidecar next to the rollout JSONL.
+// Hosts can call [CallForkSession] for the Codex fork extension method
+// _codex/session/fork. Raw Codex events are emitted only when a session request
+// opts in with [WithSessionRawEvents].
 //
 // Hosts that need adapter telemetry can provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]. The package never configures

@@ -1,6 +1,23 @@
 package codexacp
 
-import "github.com/coder/acp-go-sdk"
+import (
+	"path/filepath"
+
+	"github.com/coder/acp-go-sdk"
+)
+
+const validationAbsolutePath = "must be an absolute path"
+
+func validateRequiredAbsolutePath(field string, path string) error {
+	if path == "" {
+		return acp.NewInvalidParams(map[string]any{field: validationRequired})
+	}
+	if !filepath.IsAbs(path) {
+		return acp.NewInvalidParams(map[string]any{field: validationAbsolutePath})
+	}
+
+	return nil
+}
 
 func validateSessionStartPaths(cwd string, additionalDirectories []string) error {
 	if err := validateRequiredAbsolutePath(jsonFieldCwd, cwd); err != nil {
@@ -20,10 +37,17 @@ func validateOptionalAbsolutePath(field string, value *string) error {
 
 func validateAbsolutePaths(field string, paths []string) error {
 	for index, path := range paths {
-		if err := validateRequiredAbsolutePath(field, path); err != nil {
+		if path == "" {
 			return acp.NewInvalidParams(map[string]any{field: map[string]any{
 				jsonFieldIndex: index,
-				jsonFieldError: err.Error(),
+				jsonFieldError: validationRequired,
+			}})
+		}
+		if !filepath.IsAbs(path) {
+			return acp.NewInvalidParams(map[string]any{field: map[string]any{
+				jsonFieldIndex: index,
+				"path":         path,
+				jsonFieldError: validationAbsolutePath,
 			}})
 		}
 	}

@@ -1,92 +1,27 @@
 ---
-title: "CLI reference"
-description: "Binary flags, subcommands, and environment behavior"
-icon: "terminal"
+title: "CLI"
+description: "acp-go-codex command-line reference."
 ---
 
-## Agent mode
-
-```bash
+```sh
 acp-go-codex [flags]
 ```
 
-The default mode serves ACP over
-[stdin/stdout](https://agentclientprotocol.com/protocol/transports). It is the
-[standalone CLI](/docs/get-started/run-modes#standalone-cli)
-counterpart to the embedded [`Serve`](/docs/reference/go-api#serve) API.
-
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-codex` | `codex` on `PATH` | Codex CLI executable path. |
-| `-codex-home` | unset | Codex home directory passed as `CODEX_HOME`. |
-| `-model` | unset | Default Codex model. |
-| `-mode` | `default` | Default ACP session mode: `default` or `plan`. |
-| `-enable-goals` | `false` | Enable Codex experimental native thread goal APIs. |
-| `-debug` | `false` | Write debug logs to stderr. |
-| `-cli` | unset | Run a local Codex auth passthrough command instead of serving ACP. |
-| `-device-auth` | `false` | Add `--device-auth` to `-cli login`. |
+| `-path` | `codex` on `PATH` | Codex CLI executable path. |
+| `-home` | unset | Codex home directory passed as `CODEX_HOME`. |
+| `-model` | unset | Default model preference. |
+| `-debug` | `false` | Write adapter debug logs to stderr. |
+| `-version` | `false` | Print adapter version and exit. |
+| `-codex-allow-account-logout` | `false` | Permit ACP logout to call Codex logout. |
 
-When `OTEL_LOGS_EXPORTER` is configured, standalone mode also sends adapter
-logs through the configured OpenTelemetry log exporter. `-debug` remains
-stderr-only and additive.
+Login helpers:
 
-## Terminal auth passthrough
-
-```bash
-acp-go-codex -cli login
-acp-go-codex -cli login -device-auth
-acp-go-codex -cli logout
+```sh
+acp-go-codex login [-path PATH] [-home DIR] [-device-auth]
+acp-go-codex logout [-path PATH] [-home DIR]
 ```
 
-This mode is advertised to ACP clients as terminal auth when supported. It
-forwards stdio and signals to the real Codex CLI. Codex is discovered through
-`-codex`, then `PATH`.
-
-See [Authentication](/docs/features/authentication#terminal-auth).
-
-## MCP proxy subcommand
-
-```bash
-acp-go-codex mcp-proxy \
-  -network tcp \
-  -address 127.0.0.1:12345 \
-  -acp-id server-id
-```
-
-The bridge token is read from `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE`. This
-subcommand is internal to
-[ACP-transport MCP](/docs/features/mcp#acp-transport-bridge) and is normally
-launched by Codex through generated MCP config.
-
-## Codex launch arguments
-
-Interactive sessions use Codex app-server:
-
-```bash
-codex app-server
-```
-
-The adapter adds `-c` config overrides as needed for model defaults, native
-Codex OTEL, MCP servers, MCP approval modes, and experimental goal support.
-Per-turn settings such as reasoning effort, approval policy, sandbox policy,
-service tier, personality, and structured output are sent through app-server
-requests.
-
-When native Codex OTEL is enabled, the adapter also passes
-`--analytics-default-enabled`.
-
-## Environment
-
-| Variable | Meaning |
-| --- | --- |
-| `CODEX_HOME` | Codex home, set by `-codex-home` or `WithCodexHome`. |
-| `ACP_GO_CODEX_MCP_PROXY_TOKEN_FILE` | Private token file path for the internal MCP proxy subcommand. |
-| `TRACEPARENT` | Injected into launched Codex app-server processes from ACP metadata when available. |
-| `TRACESTATE` | Injected into launched Codex app-server processes from ACP metadata when available. |
-| `BAGGAGE` | Injected into launched Codex app-server processes from ACP metadata when available. |
-| `OTEL_*` | Used by standalone mode to configure adapter telemetry and safe native Codex OTEL mapping. |
-| `CODEX_OTEL_ENVIRONMENT` | Native Codex `otel.environment` tag. |
-
-For embedded equivalents to these flags and env vars, see
-[Go API](/docs/reference/go-api). Native OTEL behavior is covered in
-[Observability](/docs/operations/observability).
+`CODEX_EXECUTABLE` is still honored by Codex process resolution when no
+explicit `-path` or `WithExecutablePath` is supplied.

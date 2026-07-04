@@ -19,18 +19,9 @@ type agentClient interface {
 	Done() <-chan struct{}
 	CreateElicitation(context.Context, acp.UnstableCreateElicitationRequest, elicitationScope) (acp.UnstableCreateElicitationResponse, error)
 	UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
-	UnstableConnectMcp(context.Context, acp.UnstableConnectMcpRequest) (acp.UnstableConnectMcpResponse, error)
-	UnstableDisconnectMcp(context.Context, acp.UnstableDisconnectMcpRequest) (acp.UnstableDisconnectMcpResponse, error)
 	RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
 	SessionUpdate(context.Context, acp.SessionNotification) error
 	NotifyExtension(context.Context, string, any) error
-}
-
-type mcpAgentClient interface {
-	UnstableConnectMcp(context.Context, acp.UnstableConnectMcpRequest) (acp.UnstableConnectMcpResponse, error)
-	UnstableDisconnectMcp(context.Context, acp.UnstableDisconnectMcpRequest) (acp.UnstableDisconnectMcpResponse, error)
-	UnstableMessageMcp(context.Context, acp.UnstableMessageMcpRequest) (acp.UnstableMessageMcpResponse, error)
-	UnstableNotifyMcp(context.Context, acp.UnstableMessageMcpNotification) error
 }
 
 type elicitationScope struct {
@@ -53,8 +44,7 @@ type localAgentParams[Req any] interface {
 }
 
 var (
-	_ agentClient    = (*localAgentConnection)(nil)
-	_ mcpAgentClient = (*localAgentConnection)(nil)
+	_ agentClient = (*localAgentConnection)(nil)
 
 	localAgentHandlers = map[string]localAgentHandler{
 		acp.AgentMethodAuthenticate:           localResponse((*Agent).Authenticate),
@@ -62,7 +52,7 @@ var (
 		acp.AgentMethodLogout:                 localResponse((*Agent).Logout),
 		acp.AgentMethodSessionCancel:          localNotification((*Agent).Cancel),
 		acp.AgentMethodSessionClose:           localResponse((*Agent).CloseSession),
-		acp.AgentMethodSessionFork:            localResponse((*Agent).UnstableForkSession),
+		acp.AgentMethodSessionDelete:          localResponse((*Agent).UnstableDeleteSession),
 		acp.AgentMethodSessionList:            localResponse((*Agent).ListSessions),
 		acp.AgentMethodSessionLoad:            localResponse((*Agent).LoadSession),
 		acp.AgentMethodSessionNew:             localResponse((*Agent).NewSession),
@@ -127,11 +117,6 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
 		reqErr = requestError(err)
-		return result, reqErr
-	}
-	if method == acp.AgentMethodMcpMessage {
-		result, err := c.agent.handleMCPMessage(ctx, params)
-		reqErr = err
 		return result, reqErr
 	}
 
@@ -209,46 +194,35 @@ func (c *localAgentConnection) CreateElicitation(
 	if err != nil {
 		return acp.UnstableCreateElicitationResponse{}, err
 	}
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+	defer release()
 
 	return acp.SendRequest[acp.UnstableCreateElicitationResponse](c.conn, ctx, acp.ClientMethodElicitationCreate, raw)
-}
-
-func (c *localAgentConnection) UnstableConnectMcp(
-	ctx context.Context,
-	params acp.UnstableConnectMcpRequest,
-) (acp.UnstableConnectMcpResponse, error) {
-	return acp.SendRequest[acp.UnstableConnectMcpResponse](c.conn, ctx, acp.ClientMethodMcpConnect, params)
-}
-
-func (c *localAgentConnection) UnstableDisconnectMcp(
-	ctx context.Context,
-	params acp.UnstableDisconnectMcpRequest,
-) (acp.UnstableDisconnectMcpResponse, error) {
-	return acp.SendRequest[acp.UnstableDisconnectMcpResponse](c.conn, ctx, acp.ClientMethodMcpDisconnect, params)
-}
-
-func (c *localAgentConnection) UnstableMessageMcp(
-	ctx context.Context,
-	params acp.UnstableMessageMcpRequest,
-) (acp.UnstableMessageMcpResponse, error) {
-	return acp.SendRequest[acp.UnstableMessageMcpResponse](c.conn, ctx, acp.ClientMethodMcpMessage, params)
-}
-
-func (c *localAgentConnection) UnstableNotifyMcp(
-	ctx context.Context,
-	params acp.UnstableMessageMcpNotification,
-) error {
-	return c.conn.SendNotification(ctx, acp.ClientMethodMcpMessage, params)
 }
 
 func (c *localAgentConnection) RequestPermission(
 	ctx context.Context,
 	params acp.RequestPermissionRequest,
 ) (acp.RequestPermissionResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.RequestPermissionResponse](c.conn, ctx, acp.ClientMethodSessionRequestPermission, params)
 }
 
 func (c *localAgentConnection) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	return c.conn.SendNotification(ctx, acp.ClientMethodSessionUpdate, params)
 }
 
@@ -256,6 +230,11 @@ func (c *localAgentConnection) NotifyExtension(ctx context.Context, method strin
 	if method == "" || !strings.HasPrefix(method, "_") {
 		return fmt.Errorf("extension method name must start with '_' (got %q)", method)
 	}
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	return c.conn.SendNotification(ctx, method, params)
 }

@@ -1,66 +1,40 @@
 ---
-title: "Run Modes"
-description: "Run as a subprocess or embed the ACP server in Go"
-icon: "route"
+title: "Run modes"
+description: "Run acp-go-codex as a stdio ACP agent or embedded Go adapter."
 ---
 
-The adapter has two supported integration modes. Both expose the same ACP
-method surface and start local Codex app-server sessions on demand.
+## Standalone
 
-## Standalone CLI
-
-Run `acp-go-codex` as an ACP stdio subprocess:
-
-```bash
-acp-go-codex -codex /usr/local/bin/codex -model gpt-5.5
+```sh
+acp-go-codex -path /usr/local/bin/codex -home /tmp/codex-home -model gpt-5.5
 ```
 
-Useful flags:
+The command speaks ACP JSON-RPC over stdin/stdout.
 
 | Flag | Purpose |
 | --- | --- |
-| `-codex` | Path to the Codex CLI. Defaults to `codex` on `PATH`. |
-| `-codex-home` | `CODEX_HOME` for launched Codex processes. |
-| `-model` | Default Codex model for new sessions. |
-| `-enable-goals` | Enable Codex experimental native thread goal APIs. |
-| `-debug` | Write adapter debug logs to stderr. |
-| `-cli login` | Run a local Codex login command. |
-| `-cli logout` | Run a local Codex logout command. |
+| `-path` | Codex CLI executable path. |
+| `-home` | `CODEX_HOME` for launched Codex processes. |
+| `-model` | Default model preference for new sessions. |
+| `-debug` | Write adapter diagnostics to stderr. |
+| `-version` | Print adapter version and exit. |
+| `-codex-allow-account-logout` | Permit ACP logout to mutate adapter-owned Codex auth. |
 
-ACP stdio uses stdout for JSON-RPC. Logs and diagnostics must go to stderr or a
-separate telemetry backend.
+## Login helpers
+
+```sh
+acp-go-codex login -path /usr/local/bin/codex -home /tmp/codex-home -device-auth
+acp-go-codex logout -path /usr/local/bin/codex -home /tmp/codex-home
+```
 
 ## Embedded Go
 
-Embed the same agent in a Go process:
-
 ```go
-err := codexacp.Serve(ctx, input, output,
-    codexacp.WithCodexPath("/usr/local/bin/codex"),
-    codexacp.WithCodexHome("/tmp/codex-home"),
+err := codexacp.Serve(ctx, stdin, stdout,
+    codexacp.WithExecutablePath("/usr/local/bin/codex"),
+    codexacp.WithHome("/tmp/codex-home"),
     codexacp.WithDefaultModel("gpt-5.5"),
 )
 ```
 
-Use this mode when your host already owns process lifetime, logging,
-OpenTelemetry providers, auth refresh, or durable [SessionStore](/docs/features/session-store)
-integration.
-
-## Same ACP contract
-
-Standalone and embedded modes share:
-
-- the same [`initialize`](/docs/reference/acp-methods) capabilities;
-- the same session lifecycle methods;
-- the same permission, elicitation, MCP, raw-event, goal, and import
-  extension behavior;
-- the same update mapping from Codex app-server events.
-
-The only difference is ownership. Standalone mode owns process flags and
-environment. Embedded mode accepts Go options and caller-owned streams.
-
-## MCP proxy subcommand
-
-`acp-go-codex mcp-proxy` is an internal subcommand launched by the adapter when
-it rewrites ACP-transport MCP servers into Codex stdio MCP config. Hosts should
-not call it directly; configure MCP servers on session requests instead.
+Embedded mode exposes the same ACP surface as the standalone binary.

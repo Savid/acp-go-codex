@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -10,13 +11,10 @@ import (
 )
 
 const (
-	mcpHeaderEnvPrefix        = "CODEX_MCP_HEADER"
-	mcpApprovalModeAuto       = "auto"
-	mcpApprovalModePrompt     = "prompt"
-	mcpApprovalModeApprove    = "approve"
-	mcpDefaultApprovalModeKey = "defaultToolsApprovalMode"
-	mcpToolsKey               = "tools"
-	mcpToolApprovalModeKey    = "approvalMode"
+	mcpHeaderEnvPrefix     = "CODEX_MCP_HEADER"
+	mcpApprovalModeAuto    = "auto"
+	mcpApprovalModePrompt  = "prompt"
+	mcpApprovalModeApprove = "approve"
 )
 
 var mcpNamePartRE = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
@@ -24,7 +22,24 @@ var mcpEnvPartRE = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
 type tomlLiteral string
 
-func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer) ([]string, map[string]string, error) {
+func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []acp.McpServer) ([]acp.McpServer, error) {
+	for index, server := range servers {
+		switch {
+		case server.Stdio != nil, server.Http != nil:
+			continue
+		case server.Sse != nil:
+			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": map[string]any{"index": index, "name": mcpServerName(server), "error": "SSE MCP is not supported"}})
+		case server.Acp != nil:
+			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": map[string]any{"index": index, "name": mcpServerName(server), "error": "ACP MCP transport is not supported"}})
+		default:
+			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": fmt.Sprintf("server %d has no transport", index)})
+		}
+	}
+
+	return cloneMCPServers(servers), nil
+}
+
+func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer, defaultApprovalMode string) ([]string, map[string]string, error) {
 	if len(servers) == 0 {
 		return nil, nil, nil
 	}
@@ -53,13 +68,13 @@ func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer) ([]string, map[stri
 				}
 			}
 		case server.Acp != nil:
-			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": "ACP MCP servers must be rewritten by the session MCP bridge before Codex config generation"})
+			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": "ACP MCP transport is not supported"})
 		case server.Sse != nil:
 			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": "SSE MCP is not supported by Codex"})
 		default:
 			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": fmt.Sprintf("server %d has no transport", index)})
 		}
-		approvalArgs, err := mcpApprovalConfigArgs(name, server)
+		approvalArgs, err := mcpApprovalConfigArgs(name, defaultApprovalMode)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -99,75 +114,15 @@ func mcpServerConfigName(server acp.McpServer, index int, seen map[string]int) s
 	return name
 }
 
-func mcpApprovalConfigArgs(serverConfigName string, server acp.McpServer) ([]string, error) {
-	meta := mcpServerMeta(server)
-	codexMeta, _ := meta[codexMetaKey].(map[string]any)
-	if len(codexMeta) == 0 {
+func mcpApprovalConfigArgs(serverConfigName string, defaultMode string) ([]string, error) {
+	if defaultMode == "" {
 		return nil, nil
 	}
-
-	args := []string{}
-	if rawDefault, ok := codexMeta[mcpDefaultApprovalModeKey]; ok {
-		defaultMode, err := mcpApprovalModeFromMeta(rawDefault, "_meta.codex."+mcpDefaultApprovalModeKey)
-		if err != nil {
-			return nil, err
-		}
-		args = append(args, codexConfigArg("mcp_servers."+serverConfigName+".default_tools_approval_mode", defaultMode)...)
+	if !validMCPApprovalMode(defaultMode) {
+		return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.options.mcpToolApprovalMode must be one of auto, prompt, approve"})
 	}
 
-	if rawTools, ok := codexMeta[mcpToolsKey]; ok {
-		tools, ok := rawTools.(map[string]any)
-		if !ok {
-			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.tools must be an object"})
-		}
-		for toolName, rawConfig := range tools {
-			if strings.TrimSpace(toolName) == "" {
-				return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.tools keys must be non-empty tool names"})
-			}
-			config, ok := rawConfig.(map[string]any)
-			if !ok {
-				return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.tools entries must be objects"})
-			}
-			rawMode, ok := config[mcpToolApprovalModeKey]
-			if !ok {
-				continue
-			}
-			mode, err := mcpApprovalModeFromMeta(rawMode, "_meta.codex.tools."+toolName+"."+mcpToolApprovalModeKey)
-			if err != nil {
-				return nil, err
-			}
-			args = append(args, codexConfigArg("mcp_servers."+serverConfigName+".tools."+toolName+".approval_mode", mode)...)
-		}
-	}
-
-	return args, nil
-}
-
-func mcpServerMeta(server acp.McpServer) map[string]any {
-	switch {
-	case server.Stdio != nil:
-		return server.Stdio.Meta
-	case server.Http != nil:
-		return server.Http.Meta
-	case server.Acp != nil:
-		return server.Acp.Meta
-	case server.Sse != nil:
-		return server.Sse.Meta
-	default:
-		return nil
-	}
-}
-
-func mcpApprovalModeFromMeta(raw any, path string) (string, error) {
-	mode, ok := raw.(string)
-	if !ok {
-		return "", acp.NewInvalidParams(map[string]any{"mcpServers": path + " must be a string"})
-	}
-	if !validMCPApprovalMode(mode) {
-		return "", acp.NewInvalidParams(map[string]any{"mcpServers": path + " must be one of auto, prompt, approve"})
-	}
-
-	return mode, nil
+	return codexConfigArg("mcp_servers."+serverConfigName+".default_tools_approval_mode", defaultMode), nil
 }
 
 func validMCPApprovalMode(mode string) bool {

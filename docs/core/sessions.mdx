@@ -1,114 +1,16 @@
 ---
 title: "Sessions"
-description: "Create, prompt, cancel, close, list, load, resume, and fork Codex sessions"
-icon: "messages-square"
+description: "ACP session lifecycle behavior."
 ---
 
-Each [ACP session](https://agentclientprotocol.com/protocol/session-setup)
-maps to one Codex app-server process and one native Codex thread. Codex persists
-native thread state as rollout JSONL under its home directory, and the adapter
-can mirror/import those rows through a [SessionStore](/docs/features/session-store).
+`session/new` starts a Codex thread. `session/prompt` starts a Codex turn and
+streams ACP updates until Codex completes, cancels, or errors.
 
-Sessions behave the same in [standalone CLI and embedded Go](/docs/get-started/run-modes).
-Configuration happens before the ACP `session/*` methods arrive; use
-[CLI reference](/docs/reference/cli) for flags and
-[Go API](/docs/reference/go-api) for embedded options.
+`session/load` and `session/resume` first check active sessions, then the
+configured `SessionStore`, then native Codex thread state.
 
-## Create
+`session/delete` writes a store tombstone first, closes any active session, and
+hides the session from list, load, and resume.
 
-ACP [`session/new`](https://agentclientprotocol.com/protocol/session-setup)
-starts a fresh Codex thread with:
-
-- absolute `cwd`
-- optional `additionalDirectories`
-- optional MCP servers
-- optional `_meta.codex.options`
-- optional `_meta.codex.goal`
-- optional raw-message emission settings
-
-The response includes `sessionId`,
-[config options](https://agentclientprotocol.com/protocol/session-config-options),
-and Codex-specific [`_meta.codex`](/docs/reference/meta) thread, account,
-model, usage, and goal metadata.
-
-## Prompt
-
-ACP [`session/prompt`](https://agentclientprotocol.com/protocol/prompt-turn)
-sends one turn to Codex. Prompts are queued per session: if a turn is already
-active, the next prompt waits for the turn semaphore.
-
-The response includes stop reason,
-[usage](https://agentclientprotocol.com/rfds/session-usage) when Codex reports
-it, structured-output metadata when configured, and the user message ID
-supplied by the client.
-
-## Cancel
-
-`session/cancel` interrupts the active Codex turn through `turn/interrupt`. It
-also cancels outstanding ACP permission and elicitation interactions tied to
-that turn. A cancelled prompt returns `cancelled`.
-
-## Close
-
-`session/close` closes the Codex app-server client and associated MCP bridge,
-materialized rollout file, pending interactions, and active turn resources.
-`Agent.Close` closes all sessions.
-
-## List
-
-ACP [`session/list`](https://agentclientprotocol.com/protocol/session-list)
-merges active sessions, Codex-native threads, and store-backed sessions for the
-requested `cwd`.
-
-Results are de-duplicated by ACP-visible session ID and cursor-paginated with a
-page size of 50. When a configured `SessionStore` implements
-`SessionStoreLister`, list results include remote rollout bundles for the same
-project key.
-
-## Load vs resume
-
-| Method | Behavior |
-| --- | --- |
-| [`session/load`](https://agentclientprotocol.com/rfds/session-resume) | Starts or reuses the session and replays saved rollout updates to the ACP client before returning. |
-| [`session/resume`](https://agentclientprotocol.com/rfds/session-resume) | Starts or reuses the session without replaying history. |
-
-Both methods can hydrate missing local Codex rollout JSONL from a configured
-`SessionStore`. Remote upload uses the Codex-specific
-[session import](/docs/reference/session-import) extension.
-
-If a matching session is already active, both methods reuse it instead of
-launching another Codex process. The match includes `cwd`, additional
-directories, MCP configuration, Codex options, and raw-message settings.
-
-## Error semantics
-
-When a requested live session is missing, the adapter returns ACP resource not
-found with the requested `sessionId` in error data. Hosts can use that to enter
-their restore/import path.
-
-When the whole agent has been closed, lifecycle and prompt methods return ACP
-internal error with `data.error = "agent is closed"`. Treat that as a closed
-runtime/transport, not as a missing session that can be restored on the same
-agent instance.
-
-## Goals
-
-Codex-specific [goal metadata](/docs/features/goals) is session state. Clients
-can set or clear `_meta.codex.goal` at session start or with the
-`_codex/session/setGoal` extension method when goals are enabled.
-Goal-only updates are emitted through `session_info_update._meta.codex.goal`.
-
-Goal state can also be mirrored to the session store as `goal.json` so restored
-rollout bundles retain the latest visible goal snapshot.
-
-## Fork
-
-Unstable [`session/fork`](https://agentclientprotocol.com/rfds/session-fork)
-calls Codex `thread/fork`, creates a new ACP session ID, and starts a new
-app-server client for the forked native thread.
-
-<Note>
-  Codex has two identifiers: the ACP-visible session ID and the native Codex
-  thread ID. Durable stores are keyed by the ACP session ID; the native Codex
-  thread ID stays in metadata and rollout JSONL.
-</Note>
+Forking is a Codex extension method named `_codex/session/fork`; the stable ACP
+`session/fork` method is not routed.

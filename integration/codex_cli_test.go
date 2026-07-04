@@ -4,7 +4,7 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -63,28 +63,13 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 		t.Fatalf("codex thread id missing from meta: %#v", session.Meta)
 	}
 
-	raw, err := conn.CallExtension(ctx, "_codex/collaborationMode/list", map[string]any{"sessionId": session.SessionId})
-	if err != nil {
-		t.Fatalf("collaboration mode list: %v", err)
-	}
-	if len(raw) == 0 || !json.Valid(raw) {
-		t.Fatalf("collaboration mode list returned invalid JSON: %s", string(raw))
-	}
-
-	raw, err = conn.CallExtension(ctx, "_codex/mcpServerStatus/list", map[string]any{"sessionId": session.SessionId})
-	if err != nil {
-		t.Fatalf("MCP server status list: %v", err)
-	}
-	if len(raw) == 0 || !json.Valid(raw) {
-		t.Fatalf("MCP status list returned invalid JSON: %s", string(raw))
-	}
-
-	raw, err = conn.CallExtension(ctx, "_codex/thread/read", map[string]any{"sessionId": session.SessionId})
-	if err != nil {
-		t.Fatalf("thread read: %v", err)
-	}
-	if !strings.Contains(string(raw), threadID) {
-		t.Fatalf("thread read response %s did not mention thread id %q", string(raw), threadID)
+	for _, method := range []string{
+		"_codex/collaborationMode/list",
+		"_codex/mcpServerStatus/list",
+		"_codex/thread/read",
+		"_codex/thread/turns/list",
+	} {
+		requireExtensionMethodNotFound(t, conn, ctx, method, map[string]any{"sessionId": session.SessionId})
 	}
 
 	for _, mode := range []acp.SessionConfigValueId{"plan", "default"} {
@@ -169,18 +154,26 @@ func TestCodexCLIACPConversation(t *testing.T) {
 		t.Fatalf("agent text %q does not contain sentinel", client.text())
 	}
 
-	raw, err := conn.CallExtension(ctx, "_codex/thread/turns/list", map[string]any{
-		"sessionId": session.SessionId,
-		"limit":     10,
-	})
-	if err != nil {
-		t.Fatalf("thread turns list: %v", err)
-	}
-	if len(raw) == 0 || !json.Valid(raw) {
-		t.Fatalf("thread turns list returned invalid JSON: %s", string(raw))
-	}
-
 	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
 		t.Fatalf("close session: %v", err)
+	}
+}
+
+func requireExtensionMethodNotFound(
+	t *testing.T,
+	conn *acp.ClientSideConnection,
+	ctx context.Context,
+	method string,
+	params any,
+) {
+	t.Helper()
+
+	_, err := conn.CallExtension(ctx, method, params)
+	if err == nil {
+		t.Fatalf("%s unexpectedly succeeded", method)
+	}
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) || reqErr.Code != -32601 {
+		t.Fatalf("%s error = %#v, want method-not-found", method, err)
 	}
 }

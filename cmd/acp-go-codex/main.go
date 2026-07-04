@@ -10,9 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 
-	"github.com/coder/acp-go-sdk"
 	codexacp "github.com/savid/acp-go-codex"
 )
 
@@ -29,41 +27,25 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "mcp-proxy" {
-		if err := runMCPProxy(ctx, args[1:], stdin, stdout, stderr); err != nil {
-			_, _ = fmt.Fprintf(stderr, "acp-go-codex mcp-proxy: %v\n", err)
-			return 1
-		}
-
-		return 0
+	if len(args) > 0 && (args[0] == "login" || args[0] == "logout") {
+		return runCodexCLISubcommand(ctx, args, stdin, stdout, stderr)
 	}
 
 	flags := flag.NewFlagSet("acp-go-codex", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	codexPath := flags.String("codex", "", "path to codex CLI")
-	codexHome := flags.String("codex-home", "", "Codex home directory")
+	codexPath := flags.String("path", "", "path to codex CLI")
+	codexHome := flags.String("home", "", "Codex home directory")
 	model := flags.String("model", "", "default Codex model")
-	mode := flags.String("mode", "", "default ACP session mode: default or plan")
-	enableGoals := flags.Bool("enable-goals", false, "enable Codex experimental thread goal APIs")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
-	cli := flags.String("cli", "", "run a local Codex CLI auth command")
-	deviceAuth := flags.Bool("device-auth", false, "use Codex device auth for --cli login")
+	printVersion := flags.Bool("version", false, "print adapter version and exit")
+	allowAccountLogout := flags.Bool("codex-allow-account-logout", false, "permit ACP logout to mutate adapter-owned Codex auth")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if *mode != "" && *mode != "default" && *mode != "plan" {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex: unsupported -mode %q\n", *mode)
-
-		return 2
-	}
-	if *cli != "" {
-		if err := runCodexCLICommand(ctx, *codexPath, *codexHome, *cli, *deviceAuth, stdin, stdout, stderr); err != nil {
-			_, _ = fmt.Fprintf(stderr, "acp-go-codex: %v\n", err)
-			return commandExitCode(err)
-		}
-
+	if *printVersion {
+		_, _ = fmt.Fprintln(stdout, agentVersion())
 		return 0
 	}
 
@@ -92,15 +74,12 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	serveOptions := make([]codexacp.Option, 0, 5+len(telemetry.options))
 	serveOptions = append(serveOptions,
 		codexacp.WithAgentVersion(version),
-		codexacp.WithCodexPath(*codexPath),
-		codexacp.WithCodexHome(*codexHome),
+		codexacp.WithExecutablePath(*codexPath),
+		codexacp.WithHome(*codexHome),
 		codexacp.WithDefaultModel(*model),
-		codexacp.WithCodexGoals(*enableGoals),
+		codexacp.WithCodexAllowAccountLogout(*allowAccountLogout),
 		codexacp.WithLogger(logger),
 	)
-	if *mode != "" {
-		serveOptions = append(serveOptions, codexacp.WithDefaultMode(acp.SessionModeId(*mode)))
-	}
 	serveOptions = append(serveOptions, telemetry.options...)
 
 	err = serve(ctx, stdin, stdout, serveOptions...)
@@ -122,37 +101,22 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	return 0
 }
 
-func runMCPProxy(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	flags := flag.NewFlagSet("mcp-proxy", flag.ContinueOnError)
+func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	mode := args[0]
+	flags := flag.NewFlagSet("acp-go-codex "+mode, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	network := flags.String("network", "tcp", "bridge listener network")
-	address := flags.String("address", "", "bridge listener address")
-	acpID := flags.String("acp-id", "", "ACP MCP server id")
-	if err := flags.Parse(args); err != nil {
-		return err
+	codexPath := flags.String("path", "", "path to codex CLI")
+	codexHome := flags.String("home", "", "Codex home directory")
+	deviceAuth := flags.Bool("device-auth", false, "use Codex device auth for login")
+	if err := flags.Parse(args[1:]); err != nil {
+		return 2
 	}
-	if *address == "" {
-		return fmt.Errorf("-address is required")
-	}
-	if *acpID == "" {
-		return fmt.Errorf("-acp-id is required")
+	if err := runCodexCLICommand(ctx, *codexPath, *codexHome, mode, *deviceAuth, stdin, stdout, stderr); err != nil {
+		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: %v\n", mode, err)
+		return commandExitCode(err)
 	}
 
-	tokenFile := os.Getenv(codexacp.MCPProxyTokenFileEnv)
-	if tokenFile == "" {
-		return fmt.Errorf("%s is required", codexacp.MCPProxyTokenFileEnv)
-	}
-	tokenBytes, err := os.ReadFile(tokenFile) // #nosec G304,G703 -- adapter-owned proxy passes the token file path through env.
-	if err != nil {
-		return fmt.Errorf("read MCP proxy token: %w", err)
-	}
-
-	return codexacp.RunMCPProxy(ctx, stdin, stdout, codexacp.MCPProxyOptions{
-		Network: *network,
-		Address: *address,
-		Token:   strings.TrimSpace(string(tokenBytes)),
-		ACPID:   *acpID,
-	})
+	return 0
 }
 
 func runCodexCLI(ctx context.Context, codexPath string, codexHome string, mode string, deviceAuth bool, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
@@ -169,10 +133,10 @@ func runCodexCLI(ctx context.Context, codexPath string, codexHome string, mode s
 	case "logout":
 		args = []string{"logout"}
 	default:
-		return fmt.Errorf("unsupported --cli command %q", mode)
+		return fmt.Errorf("unsupported command %q", mode)
 	}
 
-	cmd := exec.CommandContext(ctx, codexPath, args...)
+	cmd := exec.CommandContext(ctx, codexPath, args...) // #nosec G204,G702 -- codexPath is the explicit user-configured Codex executable.
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

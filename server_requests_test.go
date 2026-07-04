@@ -277,8 +277,8 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 		t.Fatalf("canceled MCP elicitation = %#v err=%v", mcp, err)
 	}
 
-	refreshAgent := NewAgent(WithChatGPTAuthTokenRefresher(func(context.Context) (codex.ChatGPTAuthTokens, error) {
-		return codex.ChatGPTAuthTokens{}, errors.New("refresh failed")
+	refreshAgent := NewAgent(WithCodexChatGPTAuthTokenRefresher(func(context.Context) (ChatGPTAuthTokens, error) {
+		return ChatGPTAuthTokens{}, errors.New("refresh failed")
 	}))
 	if _, err := refreshAgent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codexReqAuthTokenRefresh}); err == nil {
 		t.Fatal("refresh callback error succeeded")
@@ -340,8 +340,8 @@ func TestServerRequestLateApprovalIsDetachedOnCancel(t *testing.T) {
 func TestServerRequestsApprovalElicitationAndRefresh(t *testing.T) {
 	client := newSpyCodexClient()
 	agent := NewAgent(
-		WithChatGPTAuthTokenRefresher(func(context.Context) (codex.ChatGPTAuthTokens, error) {
-			return codex.ChatGPTAuthTokens{AccessToken: "new", RefreshToken: "refresh-new", AccountID: "acct", PlanType: "pro", ExpiresAtUnixSec: 456}, nil
+		WithCodexChatGPTAuthTokenRefresher(func(context.Context) (ChatGPTAuthTokens, error) {
+			return ChatGPTAuthTokens{AccessToken: "new", RefreshToken: "refresh-new", AccountID: "acct", PlanType: "pro", ExpiresAtUnixSec: 456}, nil
 		}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)

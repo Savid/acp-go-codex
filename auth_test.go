@@ -62,7 +62,7 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 	}
 
 	logoutAgent := NewAgent(
-		WithAllowAccountLogout(true),
+		WithCodexAllowAccountLogout(true),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
 	if _, err := logoutAgent.Logout(ctx, acp.LogoutRequest{}); err != nil {
@@ -74,7 +74,7 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 }
 
 func TestAuthCapabilitiesTerminalArgsAndAuthRequired(t *testing.T) {
-	agent := NewAgent(WithCodexPath("/bin/codex"), WithCodexHome("/tmp/codex-home"), WithAllowAccountLogout(true))
+	agent := NewAgent(WithExecutablePath("/bin/codex"), WithHome("/tmp/codex-home"), WithCodexAllowAccountLogout(true))
 	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{
 		ClientCapabilities: acp.ClientCapabilities{
 			Auth: acp.AuthCapabilities{Terminal: true},
@@ -90,7 +90,7 @@ func TestAuthCapabilitiesTerminalArgsAndAuthRequired(t *testing.T) {
 		t.Fatalf("auth methods = %#v", resp.AuthMethods)
 	}
 	args := resp.AuthMethods[0].Terminal.Args
-	if !containsAll(jsonString(args), "--codex", "/bin/codex", "--codex-home", "/tmp/codex-home", "--cli", "login") {
+	if !containsAll(jsonString(args), "login", "-device-auth", "-path", "/bin/codex", "-home", "/tmp/codex-home") {
 		t.Fatalf("terminal auth args = %#v", args)
 	}
 
@@ -120,9 +120,6 @@ func TestAuthHelperBranches(t *testing.T) {
 	}
 	if accountResponseMeta(codex.Account{}) != nil {
 		t.Fatal("empty account emitted meta")
-	}
-	if clientMetaBool(map[string]any{"x": "true"}, "x") {
-		t.Fatal("non-bool client meta parsed as true")
 	}
 	if !isCodexAuthError(errors.New("401 unauthorized")) || isCodexAuthError(errors.New("plain failure")) {
 		t.Fatal("auth error classifier failed")

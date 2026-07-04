@@ -1,328 +1,38 @@
 ---
 title: "Metadata"
-description: "Supported _meta fields and Codex-specific metadata"
-icon: "tags"
+description: "_meta.codex vocabulary."
 ---
 
-ACP reserves `_meta` for extension metadata on requests, responses, and
-notifications. Portable clients should ignore metadata they do not understand.
-
-Codex metadata is emitted under both namespaces:
-
-- `_meta.codex`
-- `_meta["github.com/savid/acp-go-codex"]`
-
-The values are the same. The short `codex` namespace is convenient for hosts;
-the package namespace is collision-resistant.
-
-## Trace context
-
-Inbound ACP `_meta` can contain W3C trace context:
-
-```json
-{
-  "traceparent": "00-...",
-  "tracestate": "...",
-  "baggage": "..."
-}
-```
-
-The adapter uses this to parent its own spans and injects launch-time trace
-context into Codex app-server environments.
-
-## Session options
+Accepted session lifecycle metadata:
 
 ```json
 {
   "codex": {
     "options": {
       "model": "gpt-5.5",
-      "mode": "plan",
       "effort": "high",
       "serviceTier": "flex",
       "personality": "pragmatic",
-      "env": {
-        "EXAMPLE": "value"
-      },
-      "approvalPolicy": {
-        "mode": "ask"
-      },
-      "sandboxPolicy": {
-        "mode": "workspace-write"
-      },
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "ok": {"type": "boolean"}
-        },
-        "required": ["ok"],
-        "additionalProperties": false
-      }
+      "approvalPolicy": "never",
+      "sandboxPolicy": "workspace-write",
+      "mcpToolApprovalMode": "approve",
+      "outputSchema": {"type": "object"}
     },
-    "emitRawSDKMessages": true
-  }
-}
-```
-
-`outputSchema` configures Codex structured output. The schema is sent on each
-`turn/start`, so attach it to `session/new`, `session/load`, `session/resume`,
-or `session/fork`; it is not a portable ACP core field.
-
-`mode` selects the initial ACP session mode. Supported values are `default` and
-`plan`. Codex-native `request_user_input` is only available to the model when
-the session is in `plan` mode; hosts can also switch modes later with
-`session/set_config_option` using the `mode` config option.
-
-`env` overlays the launched Codex app-server process environment for that
-session. `approvalPolicy` and `sandboxPolicy` are forwarded to Codex as native
-policy objects; hosts should treat those shapes as Codex-owned.
-
-## MCP server metadata
-
-Codex-specific metadata on individual MCP server definitions can configure
-Codex MCP tool approval:
-
-```json
-{
-  "codex": {
-    "defaultToolsApprovalMode": "approve",
-    "tools": {
-      "execute": {
-        "approvalMode": "approve"
-      },
-      "search": {
-        "approvalMode": "auto"
-      }
+    "rawEvent": {
+      "enabled": true
     }
   }
 }
 ```
 
-Supported modes are `auto`, `prompt`, and `approve`. The metadata is scoped to
-the MCP server that carries it and maps to Codex
-`mcp_servers.<name>.default_tools_approval_mode` and
-`mcp_servers.<name>.tools.<tool>.approval_mode`.
+Accepted initialize capability metadata under `_meta.codex`:
 
-## Raw event emission
+| Key | Purpose |
+| --- | --- |
+| `fork` | `_codex/session/fork` extension method. |
+| `elicitation` | Client capability gated elicitation support. |
+| `rawEvent` | `_codex/rawEvent` notification opt-in details. |
+| `sessionStore` | Store format and key shape. |
+| `structuredOutput` | JSON Schema request and response paths. |
 
-Enable all raw rollout rows:
-
-```json
-{
-  "codex": {
-    "emitRawSDKMessages": true
-  }
-}
-```
-
-Or enable selected rows:
-
-```json
-{
-  "codex": {
-    "emitRawSDKMessages": [
-      {"type": "event_msg", "payloadType": "agent_message"},
-      {"type": "response_item", "payloadRole": "assistant"}
-    ]
-  }
-}
-```
-
-Filters match top-level rollout row `type`, optional `payload.type`, and
-optional `payload.role`. See [Raw Events](/docs/features/raw-events).
-
-## External auth input
-
-Hosts that implement explicit external ChatGPT auth can pass tokens through
-`authenticate` metadata:
-
-```json
-{
-  "codex": {
-    "auth": {
-      "chatgptAuthTokens": {
-        "accessToken": "secret",
-        "refreshToken": "secret",
-        "expiresAt": 1790000000
-      }
-    }
-  }
-}
-```
-
-Tokens are passed to Codex `account/login/start`, kept in memory for new
-app-server clients, and redacted from response metadata.
-
-## Session response metadata
-
-Session responses include:
-
-```json
-{
-  "codex": {
-    "codexThreadId": "thread-id",
-    "modelProvider": "openai",
-    "model": "gpt-5.5",
-    "effort": "high",
-    "serviceTier": "flex",
-    "personality": "pragmatic",
-    "account": {
-      "id": "acct_...",
-      "email": "user@example.com",
-      "planType": "plus"
-    },
-    "goal": {
-      "objective": "ship the release",
-      "status": "active",
-      "tokenBudget": 50000,
-      "tokensUsed": 0,
-      "timeUsedSeconds": 0,
-      "createdAt": 0,
-      "updatedAt": 0,
-      "threadId": "thread-id",
-      "source": "client"
-    }
-  }
-}
-```
-
-`account` is redacted. Access tokens, refresh tokens, and raw credential file
-contents are never emitted.
-
-`goal` is always present in session lifecycle response metadata when goals are
-enabled. It is either a full snapshot or `null`.
-
-## Goals
-
-When the agent is started with `WithCodexGoals(true)` or `-enable-goals`, hosts
-can pass full-snapshot goal metadata on session lifecycle requests:
-
-```json
-{
-  "codex": {
-    "goal": {
-      "objective": "ship the release",
-      "status": "active",
-      "tokenBudget": 50000
-    }
-  }
-}
-```
-
-Use `goal: null` to clear goal state. Client input may set only `objective`,
-`status`, and `tokenBudget`; Codex-owned runtime fields are omitted by request
-builders and overwritten by the adapter.
-
-## Codex model metadata
-
-Session responses include the active model, provider, reasoning effort,
-service tier, and personality when Codex reports them. ACP config options carry
-the current model and available model list for hosts that render a portable
-model picker.
-
-## Structured output result metadata
-
-When structured output is configured and the final agent text parses as JSON,
-the `session/prompt` response includes the parsed object at
-`result._meta.codex.structuredOutput`:
-
-```json
-{
-  "codex": {
-    "structuredOutput": {
-      "ok": true
-    }
-  }
-}
-```
-
-The raw text remains the normal ACP agent message stream.
-
-## Usage metadata
-
-ACP's standard per-turn token breakdown is `PromptResponse.usage`. Codex emits
-native usage on `thread/tokenUsage/updated`; the adapter maps
-`tokenUsage.last` to `PromptResponse.usage` and emits a streamed
-`usage_update` before the turn is finalized. Per-turn details are preserved
-under `_meta.codex.usage`:
-
-```json
-{
-  "codex": {
-    "usage": {
-      "inputTokens": 22143,
-      "cachedReadTokens": 6528,
-      "cachedWriteTokens": 0,
-      "outputTokens": 322,
-      "reasoningOutputTokens": 157,
-      "totalTokens": 22465
-    }
-  }
-}
-```
-
-When Codex also reports cumulative thread usage, `usage_update.used` is set from
-`tokenUsage.total.totalTokens`, `usage_update.size` is set from
-`modelContextWindow`, and the cumulative breakdown is mirrored under
-`_meta.codex.threadUsage`.
-
-`reasoningOutputTokens` maps to ACP `usage.thoughtTokens` in
-`PromptResponse.usage`. Codex does not provide USD cost here, so no cost is
-emitted unless Codex exposes pricing data through a future app-server field.
-
-## Initialize capability metadata
-
-The initialize response advertises Codex capability metadata under
-`agentCapabilities.meta.codex`:
-
-```json
-{
-  "provider": "codex",
-  "preferredTransport": "app-server",
-  "sdkMessages": {
-    "scope": "session",
-    "method": "_codex/sdkMessage",
-    "enabledBy": "_meta.codex.emitRawSDKMessages"
-  },
-  "outputSchema": {
-    "scope": "session",
-    "types": ["json_schema"],
-    "config": "_meta.codex.options.outputSchema",
-    "result": "session/prompt.result._meta.codex.structuredOutput",
-    "rawEvents": "_codex/sdkMessage"
-  },
-  "mcpToolApproval": {
-    "scope": "mcpServer",
-    "modes": ["auto", "prompt", "approve"],
-    "defaultMode": "_meta.codex.defaultToolsApprovalMode",
-    "perTool": "_meta.codex.tools.<toolName>.approvalMode"
-  },
-  "sessionImport": {
-    "scope": "session",
-    "format": "codex-rollout-jsonl",
-    "methods": {
-      "import": "_codex/session/import",
-      "importChunk": "_codex/session/importChunk",
-      "commitImport": "_codex/session/commitImport",
-      "abortImport": "_codex/session/abortImport"
-    }
-  },
-  "goals": {
-    "scope": "session",
-    "state": "session_info_update._meta.codex.goal",
-    "setMethod": "_codex/session/setGoal",
-    "semantics": "full-snapshot",
-    "statuses": ["active", "paused", "budgetLimited", "complete"],
-    "clearValue": null
-  }
-}
-```
-
-`goals` is advertised only when Codex goals are enabled for the adapter
-instance.
-
-## Extension methods
-
-Codex extension methods are listed in [ACP Methods](/docs/reference/acp-methods).
-The most common host-facing extensions are `_codex/sdkMessage` for raw rollout
-diagnostics and `_codex/session/import*` for durable restore.
+Unknown keys in the adapter-owned namespace fail closed with invalid params.

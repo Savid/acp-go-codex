@@ -1,119 +1,37 @@
 ---
-title: "Models And Config"
-description: "Model catalog, reasoning effort, modes, and Codex session options"
-icon: "sliders-horizontal"
+title: "Models and Config"
+description: "Model, mode, thought level, and model config options."
 ---
 
-The adapter discovers Codex model data from the local app-server and advertises
-it through ACP session config options.
+Set a default model for new sessions:
 
-## Model selection
-
-Set a process-wide default model:
-
-```bash
+```sh
 acp-go-codex -model gpt-5.5
 ```
-
-or in embedded Go:
 
 ```go
 codexacp.WithDefaultModel("gpt-5.5")
 ```
 
-Per-session model selection uses `_meta.codex.options.model` or the Go request
-builder:
+Session metadata can set Codex-specific options:
 
 ```go
 codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
     codexacp.WithCodexModel("gpt-5.5"),
+    codexacp.WithCodexEffort("high"),
+    codexacp.WithCodexServiceTier("flex"),
+    codexacp.WithCodexPersonality("pragmatic"),
 ))
 ```
 
-Clients can change the current model with ACP `session/set_config_option` using
-the `model` config option.
+ACP config categories are:
 
-## Reasoning effort
-
-Reasoning effort is exposed as a select config option named `effort`.
-
-```go
-codexacp.WithCodexEffort("high")
-```
-
-The supported effort values are derived from the adapter's Codex config surface
-and are sent on each `turn/start`.
-
-## Modes
-
-ACP modes are mapped to Codex collaboration modes where Codex exposes matching
-mode data. Set a process-wide default mode:
-
-```bash
-acp-go-codex -mode plan
-```
-
-or in embedded Go:
-
-```go
-codexacp.WithDefaultMode("plan")
-```
-
-Per-session initial mode uses `_meta.codex.options.mode` or the Go request
-builder:
-
-```go
-codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
-    codexacp.WithCodexMode("plan"),
-))
-```
-
-Hosts can also set the active mode with `session/set_config_option` using the
-`mode` config option; the next turn uses the selected Codex collaboration mode.
-Codex-native `request_user_input` is available to the model only in `plan` mode.
-
-## Config option IDs
-
-The adapter advertises current values through ACP session config options:
-
-| Config ID | Type | Behavior |
-| --- | --- | --- |
-| `model` | select | Changes the active Codex model. |
-| `mode` | select | Changes the ACP/Codex collaboration mode. |
-| `effort` | select | Changes reasoning effort when the selected model reports effort values. |
-| `service_tier` | select | Changes Codex service tier when the session has one selected. |
-| `personality` | select | Changes Codex personality when the session has one selected. |
-
-`model` uses the ACP model-config category. `mode` uses the ACP mode category.
-`effort` uses the thought-level category. Service tier and personality are
-Codex-specific select options.
-
-After a successful `session/set_config_option`, the adapter emits
-`config_option_update` with refreshed options.
-
-## Other Codex options
-
-Codex-specific session options live under `_meta.codex.options`:
-
-| Field | Purpose |
+| Config | Category |
 | --- | --- |
-| `model` | Initial model preference. |
-| `mode` | Initial ACP session mode: `default` or `plan`. |
-| `effort` | Reasoning effort. |
-| `serviceTier` | Codex service tier. |
-| `personality` | Codex personality setting. |
-| `env` | Session-scoped Codex process environment overlay. |
-| `approvalPolicy` | Native Codex approval policy object. |
-| `sandboxPolicy` | Native Codex sandbox policy object. |
-| `outputSchema` | JSON Schema structured output for turns. |
+| `model` | `model` |
+| `mode` | `mode` |
+| `effort` | `thought_level` |
+| `serviceTier` | `model_config` |
+| `personality` | `model_config` |
 
-`approvalPolicy` and `sandboxPolicy` are forwarded as Codex-owned objects. Use
-[Permissions](/docs/features/permissions) for the ACP approval boundary and
-[Metadata](/docs/reference/meta#session-options) for exact paths.
-
-## Codex model metadata
-
-Session responses include current model metadata under `_meta.codex`, including
-`model`, `modelProvider`, `effort`, `serviceTier`, and `personality` when known.
-The same response carries config options for clients that render model, mode,
-and related controls.
+Change mode after session start with `session/set_config_option`.

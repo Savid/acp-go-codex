@@ -22,7 +22,7 @@ const (
 	usageTotalTokensKey       = "totalTokens"
 )
 
-func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
 	releaseTurn, err := s.acquireTurn(ctx)
 	if err != nil {
 		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
@@ -229,7 +229,7 @@ func dedupeCompletedAggregateTextEvent(event codex.Event, priorText string) code
 	return event
 }
 
-func (s *Session) turnSettings() (model string, effort string, serviceTier string, personality any, collaborationMode any) {
+func (s *session) turnSettings() (model string, effort string, serviceTier string, personality any, collaborationMode any) {
 	s.mu.Lock()
 	model = s.model
 	effort = s.reasoningEffort
@@ -263,7 +263,7 @@ func nullableString(value string) any {
 	return value
 }
 
-func (s *Session) emitUpdates(ctx context.Context, updates ...acp.SessionUpdate) error {
+func (s *session) emitUpdates(ctx context.Context, updates ...acp.SessionUpdate) error {
 	if len(updates) > 0 {
 		s.agent.observe.ObserveFirstPromptUpdate(ctx)
 	}
@@ -276,7 +276,7 @@ func (s *Session) emitUpdates(ctx context.Context, updates ...acp.SessionUpdate)
 	return nil
 }
 
-func (s *Session) emitRawCodexEvent(ctx context.Context, event codex.Event) error {
+func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) error {
 	if s.rolloutPath != "" {
 		return nil
 	}
@@ -296,13 +296,15 @@ func (s *Session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 
 	payload := map[string]any{
 		"sessionId": s.id,
-		"message":   raw,
+		"sequence":  s.nextRawEventSequence(),
+		"source":    "codex-app-server",
+		"event":     raw,
 	}
 	if event.RawJSON != "" {
 		payload["rawJSON"] = event.RawJSON
 	}
 
-	return conn.NotifyExtension(ctx, rawCodexSDKMessageMethod, payload)
+	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))
 }
 
 func eventUpdates(event codex.Event) []acp.SessionUpdate {

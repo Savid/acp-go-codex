@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -17,16 +18,18 @@ var (
 	sessionRolloutCompletionFallback = 2 * time.Second
 )
 
+const maxSessionImportLineBytes = 10 * 1024 * 1024
+
 type rolloutMirrorRow struct {
 	index int
 	entry SessionStoreEntry
 }
 
-func (s *Session) mirrorAndEmitRollout(ctx context.Context) error {
+func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
 	return s.mirrorAndEmitRolloutWithCompletion(ctx, nil, nil)
 }
 
-func (s *Session) prepareRolloutLiveCursors() {
+func (s *session) prepareRolloutLiveCursors() {
 	rows, err := countRolloutRows(s.rolloutPath)
 	if err != nil {
 		return
@@ -69,7 +72,7 @@ func countRolloutRows(path string) (int, error) {
 	return rows, nil
 }
 
-func (s *Session) mirrorAndEmitRolloutWithCompletion(
+func (s *session) mirrorAndEmitRolloutWithCompletion(
 	ctx context.Context,
 	completed chan<- struct{},
 	events chan<- codex.Event,
@@ -121,15 +124,8 @@ func (s *Session) mirrorAndEmitRolloutWithCompletion(
 		rows[index] = rolloutMirrorRow{index: startRow + index, entry: entry}
 	}
 	if store != nil {
-		projectKey, err := projectKeyForDirectory(s.cwd)
-		if err != nil {
-			return err
-		}
 		durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
-		if err := appendRolloutEntries(ctx, store, SessionKey{
-			ProjectKey: projectKey,
-			SessionID:  string(s.id),
-		}, durableEntries); err != nil {
+		if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, durableEntries); err != nil {
 			return err
 		}
 		if nextMirroredRow > s.mirroredRows {
@@ -149,7 +145,20 @@ func (s *Session) mirrorAndEmitRolloutWithCompletion(
 	return nil
 }
 
-func (s *Session) rolloutStartRow(
+func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, int, error) {
+	clean := make([]SessionStoreEntry, 0, len(entries))
+	for index, entry := range entries {
+		var obj map[string]any
+		if err := json.Unmarshal(entry, &obj); err != nil || obj == nil {
+			return nil, index, fmt.Errorf("entry %d must be a JSON object", index)
+		}
+		clean = append(clean, cloneStoreEntry(entry))
+	}
+
+	return clean, len(clean), nil
+}
+
+func (s *session) rolloutStartRow(
 	storeEnabled bool,
 	rawEnabled bool,
 	completionEnabled bool,
@@ -207,7 +216,7 @@ func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKe
 	return lastErr
 }
 
-func (s *Session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStoreEntry, int) {
+func (s *session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStoreEntry, int) {
 	entries := make([]SessionStoreEntry, 0, len(rows))
 	var nextRow int
 	for _, row := range rows {
@@ -221,7 +230,7 @@ func (s *Session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStore
 	return entries, nextRow
 }
 
-func (s *Session) emitRawRolloutRows(ctx context.Context, rows []rolloutMirrorRow) {
+func (s *session) emitRawRolloutRows(ctx context.Context, rows []rolloutMirrorRow) {
 	for _, row := range rows {
 		if row.index < s.emittedRawRows {
 			continue
@@ -233,7 +242,7 @@ func (s *Session) emitRawRolloutRows(ctx context.Context, rows []rolloutMirrorRo
 	}
 }
 
-func (s *Session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan<- struct{}) {
+func (s *session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan<- struct{}) {
 	nextRow := s.completionRows
 	for _, row := range rows {
 		if row.index < s.completionRows {
@@ -252,7 +261,7 @@ func (s *Session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan
 	}
 }
 
-func (s *Session) emitRolloutEvents(rows []rolloutMirrorRow, events chan<- codex.Event) {
+func (s *session) emitRolloutEvents(rows []rolloutMirrorRow, events chan<- codex.Event) {
 	nextRow := s.visibleRows
 	for _, row := range rows {
 		if row.index < s.visibleRows {
@@ -310,7 +319,7 @@ func rolloutTaskComplete(entry SessionStoreEntry) bool {
 	return row.Type == "event_msg" && row.Payload.Type == "task_complete"
 }
 
-func (s *Session) startRolloutTail(
+func (s *session) startRolloutTail(
 	ctx context.Context,
 	completed chan<- struct{},
 	events chan<- codex.Event,
@@ -337,7 +346,7 @@ func (s *Session) startRolloutTail(
 	return cancel, done
 }
 
-func (s *Session) emitRawRolloutRow(ctx context.Context, entry SessionStoreEntry) error {
+func (s *session) emitRawRolloutRow(ctx context.Context, entry SessionStoreEntry) error {
 	message := decodedRawEvent(entry)
 	if !s.rawMessages.ShouldEmit(message) {
 		return nil
@@ -348,9 +357,11 @@ func (s *Session) emitRawRolloutRow(ctx context.Context, entry SessionStoreEntry
 		return nil
 	}
 
-	return conn.NotifyExtension(ctx, rawCodexSDKMessageMethod, map[string]any{
+	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(map[string]any{
 		"sessionId": s.id,
-		"message":   message,
+		"sequence":  s.nextRawEventSequence(),
+		"source":    "codex-rollout",
+		"event":     message,
 		"rawJSON":   string(entry),
-	})
+	}))
 }

@@ -90,19 +90,6 @@ func TestPlaceholderClientLifecycleMethods(t *testing.T) {
 	if _, err := client.StartReview(ctx, ReviewStartRequest{ThreadID: resumed.ID, Target: map[string]any{"type": "custom"}}); err != nil {
 		t.Fatalf("StartReview returned error: %v", err)
 	}
-	budget := int64(10)
-	goal, err := client.SetGoal(ctx, GoalSetRequest{ThreadID: resumed.ID, Objective: "ship", TokenBudget: &budget})
-	if err != nil || goal.Objective != "ship" {
-		t.Fatalf("SetGoal = %#v err=%v", goal, err)
-	}
-	gotGoal, err := client.GetGoal(ctx, resumed.ID)
-	if err != nil || gotGoal == nil || gotGoal.TokenBudget == nil || *gotGoal.TokenBudget != budget {
-		t.Fatalf("GetGoal = %#v err=%v", gotGoal, err)
-	}
-	cleared, err := client.ClearGoal(ctx, resumed.ID)
-	if err != nil || !cleared {
-		t.Fatalf("ClearGoal cleared=%v err=%v", cleared, err)
-	}
 	if modes, err := client.CollaborationModeList(ctx); err != nil || len(modes.Modes) != 2 {
 		t.Fatalf("CollaborationModeList = %#v err=%v", modes, err)
 	}
@@ -127,34 +114,13 @@ func TestPlaceholderClientLifecycleMethods(t *testing.T) {
 	if forked.ID == resumed.ID {
 		t.Fatalf("fork did not create a new thread: %q", forked.ID)
 	}
-	zeroGoals := &PlaceholderClient{threads: map[string]Thread{}}
-	started, err := zeroGoals.StartThread(ctx, ThreadStartRequest{Cwd: "/zero"})
-	if err != nil {
-		t.Fatalf("zero-goals StartThread returned error: %v", err)
-	}
-	if zeroGoals.goals == nil {
-		t.Fatal("StartThread did not initialize nil goals map")
+	zeroClient := &PlaceholderClient{threads: map[string]Thread{}}
+	if _, err := zeroClient.StartThread(ctx, ThreadStartRequest{Cwd: "/zero"}); err != nil {
+		t.Fatalf("zero-thread StartThread returned error: %v", err)
 	}
 	zeroResume := &PlaceholderClient{threads: map[string]Thread{}}
 	if _, err := zeroResume.ResumeThread(ctx, ThreadResumeRequest{ThreadID: "resume-zero"}); err != nil {
-		t.Fatalf("zero-goals ResumeThread returned error: %v", err)
-	}
-	if zeroResume.goals == nil {
-		t.Fatal("ResumeThread did not initialize nil goals map")
-	}
-	zeroSet := &PlaceholderClient{threads: map[string]Thread{started.ID: started}}
-	if _, err := zeroSet.SetGoal(ctx, GoalSetRequest{ThreadID: started.ID, Objective: "zero"}); err != nil {
-		t.Fatalf("zero-goals SetGoal returned error: %v", err)
-	}
-	if zeroSet.goals == nil {
-		t.Fatal("SetGoal did not initialize nil goals map")
-	}
-	freshGoal, err := client.GetGoal(ctx, forked.ID)
-	if err != nil {
-		t.Fatalf("GetGoal fresh returned error: %v", err)
-	}
-	if freshGoal != nil {
-		t.Fatalf("fresh goal = %#v", freshGoal)
+		t.Fatalf("zero-thread ResumeThread returned error: %v", err)
 	}
 	if err := client.Close(ctx); err != nil {
 		t.Fatalf("Close returned error: %v", err)
@@ -198,15 +164,6 @@ func TestPlaceholderClientErrorBranches(t *testing.T) {
 	if _, err := client.StartReview(canceled, ReviewStartRequest{}); err == nil {
 		t.Fatal("StartReview with canceled context succeeded")
 	}
-	if _, err := client.SetGoal(canceled, GoalSetRequest{}); err == nil {
-		t.Fatal("SetGoal with canceled context succeeded")
-	}
-	if _, err := client.GetGoal(canceled, "thread"); err == nil {
-		t.Fatal("GetGoal with canceled context succeeded")
-	}
-	if _, err := client.ClearGoal(canceled, "thread"); err == nil {
-		t.Fatal("ClearGoal with canceled context succeeded")
-	}
 
 	ctx := context.Background()
 	if _, err := client.ForkThread(ctx, ThreadForkRequest{ThreadID: "missing"}); !errors.Is(err, ErrThreadNotFound) {
@@ -226,15 +183,6 @@ func TestPlaceholderClientErrorBranches(t *testing.T) {
 	}
 	if _, err := client.StartReview(ctx, ReviewStartRequest{ThreadID: "missing"}); !errors.Is(err, ErrThreadNotFound) {
 		t.Fatalf("StartReview missing error = %v", err)
-	}
-	if _, err := client.SetGoal(ctx, GoalSetRequest{ThreadID: "missing"}); !errors.Is(err, ErrThreadNotFound) {
-		t.Fatalf("SetGoal missing error = %v", err)
-	}
-	if _, err := client.GetGoal(ctx, "missing"); !errors.Is(err, ErrThreadNotFound) {
-		t.Fatalf("GetGoal missing error = %v", err)
-	}
-	if _, err := client.ClearGoal(ctx, "missing"); !errors.Is(err, ErrThreadNotFound) {
-		t.Fatalf("ClearGoal missing error = %v", err)
 	}
 
 	thread, err := client.StartThread(ctx, ThreadStartRequest{})
@@ -257,8 +205,5 @@ func TestPlaceholderClientErrorBranches(t *testing.T) {
 	}
 	if _, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID}); err == nil {
 		t.Fatal("RunTurn after close succeeded")
-	}
-	if cloneInt64Ptr(nil) != nil {
-		t.Fatal("cloneInt64Ptr nil returned value")
 	}
 }

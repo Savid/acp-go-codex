@@ -51,7 +51,7 @@ func TestCommandHelpers(t *testing.T) {
 	if parseCodexVersion("codex-cli 0.129.0") != "0.129.0" || parseCodexVersion("codex 1.2.3-beta") != "1.2.3" || parseCodexVersion("none") != "" {
 		t.Fatal("parseCodexVersion failed")
 	}
-	if compareSemver("0.134.1", minCodexVersion) <= 0 || compareSemver("0.133.9", minCodexVersion) >= 0 || compareSemver(minCodexVersion, minCodexVersion) != 0 {
+	if compareSemver("0.141.1", minCodexVersion) <= 0 || compareSemver("0.140.9", minCodexVersion) >= 0 || compareSemver(minCodexVersion, minCodexVersion) != 0 {
 		t.Fatal("compareSemver failed")
 	}
 	t.Setenv(envCodexPath, "")
@@ -63,7 +63,7 @@ func TestCommandHelpers(t *testing.T) {
 
 func TestValidateCodexVersion(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "codex")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho codex-cli 0.134.0\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho codex-cli 0.141.0\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
 	if err := validateCodexVersion(context.Background(), script); err != nil {
@@ -116,7 +116,7 @@ func envContains(env []string, want string) bool {
 func TestCommandLaunchAndProcessErrors(t *testing.T) {
 	dir := t.TempDir()
 	codexPath := filepath.Join(dir, "codex")
-	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.134.0\n"), 0o700); err != nil {
+	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.141.0\n"), 0o700); err != nil {
 		t.Fatalf("write codex: %v", err)
 	}
 	t.Setenv(envCodexPath, "")
@@ -129,7 +129,7 @@ func TestCommandLaunchAndProcessErrors(t *testing.T) {
 	script := filepath.Join(dir, "codex-app")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.134.0
+  echo codex-cli 0.141.0
   exit 0
 fi
 printf '%s\n' "$*" > "$TEST_ARGS"
@@ -173,7 +173,7 @@ while read line; do :; done
 	origExec := execCommandContext
 	t.Cleanup(func() { execCommandContext = origExec })
 	versionCmd := func(context.Context, string, ...string) *exec.Cmd {
-		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.134.0")
+		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.141.0")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
 		if len(args) == 1 && args[0] == "--version" {

@@ -11,7 +11,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -23,11 +22,8 @@ import (
 )
 
 const (
-	agentPackage             = "github.com/savid/acp-go-codex/cmd/acp-go-codex"
-	codexSessionImportMethod = "_codex/session/import"
-	codexSessionImportFormat = "codex-rollout-jsonl"
-	defaultSessionFile       = "session.jsonl"
-	defaultPrompt            = "Reply with exactly RESUME_OK and do not use tools."
+	defaultSessionFile = "session.jsonl"
+	defaultPrompt      = "Reply with exactly RESUME_OK and do not use tools."
 )
 
 type client struct {
@@ -44,7 +40,6 @@ var _ acp.Client = (*client)(nil)
 
 type agentConnection interface {
 	Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error)
-	CallExtension(context.Context, string, any) (json.RawMessage, error)
 	LoadSession(context.Context, acp.LoadSessionRequest) (acp.LoadSessionResponse, error)
 	Prompt(context.Context, acp.PromptRequest) (acp.PromptResponse, error)
 	CloseSession(context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error)
@@ -63,17 +58,9 @@ type config struct {
 	prompt      string
 }
 
-type sessionImportParams struct {
-	SessionID string            `json:"sessionId"`
-	Cwd       string            `json:"cwd"`
-	Format    string            `json:"format"`
-	Entries   []json.RawMessage `json:"entries"`
-}
-
 var startAgent = startAgentProcess
 var getwd = os.Getwd
 var exit = os.Exit
-var commandContext = exec.CommandContext
 var runtimeCaller = runtime.Caller
 var errPromptInterrupted = errors.New("typed prompt interrupted")
 
@@ -332,7 +319,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return 1
 	}
 
-	agent, err := startAgent(ctx, stdout, stderr)
+	store := codexacp.NewInMemorySessionStore()
+	if err := seedSessionStore(ctx, store, cfg.sessionID, entries); err != nil {
+		printError(stderr, err)
+
+		return 1
+	}
+
+	agent, err := startAgent(ctx, stdout, stderr, store)
 	if err != nil {
 		printError(stderr, err)
 
@@ -371,7 +365,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 
 	flags := flag.NewFlagSet("resume-from-file", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&cfg.sessionFile, "session-file", cfg.sessionFile, "Codex rollout JSONL file to import")
+	flags.StringVar(&cfg.sessionFile, "session-file", cfg.sessionFile, "Codex rollout JSONL file to load")
 	flags.StringVar(&cfg.sessionID, "session-id", "", "Codex session ID; inferred from session_id/sessionId when omitted")
 	flags.StringVar(&cfg.cwd, "cwd", "", "absolute working directory for the resumed Codex session")
 	flags.StringVar(&cfg.prompt, "prompt", cfg.prompt, "prompt to send after session/resume")
@@ -449,6 +443,18 @@ func validateJSONLine(line []byte) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), line...), nil
 }
 
+func seedSessionStore(ctx context.Context, store codexacp.SessionStore, sessionID string, entries []json.RawMessage) error {
+	storeEntries := make([]codexacp.SessionStoreEntry, 0, len(entries))
+	for _, entry := range entries {
+		storeEntries = append(storeEntries, append(json.RawMessage(nil), entry...))
+	}
+
+	return store.Replace(ctx, codexacp.SessionKey{SessionID: sessionID}, []codexacp.SessionStoreReplacement{{
+		Key:     codexacp.SessionKey{SessionID: sessionID},
+		Entries: storeEntries,
+	}})
+}
+
 func sessionIDFromEntries(entries []json.RawMessage) string {
 	for _, entry := range entries {
 		var object map[string]json.RawMessage
@@ -477,37 +483,32 @@ func sessionIDFromEntries(entries []json.RawMessage) string {
 	return ""
 }
 
-func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer) (*startedAgent, error) {
-	cmd := commandContext(ctx, "go", "run", agentPackage)
+func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer, store codexacp.SessionStore) (*startedAgent, error) {
+	clientToAgentR, clientToAgentW := io.Pipe()
+	agentToClientR, agentToClientW := io.Pipe()
+	serveCtx, stopServe := context.WithCancel(ctx)
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- codexacp.Serve(serveCtx, clientToAgentR, agentToClientW, codexacp.WithSessionStore(store))
+	}()
 
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	agentStdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	cmd.Stderr = stderr
-
-	err = cmd.Start()
-	if err != nil {
-		return nil, err
-	}
-
-	agentOutputGate := newConnectionInputGate(agentStdout)
-	conn := acp.NewClientSideConnection(&client{output: output}, stdin, agentOutputGate)
+	agentOutputGate := newConnectionInputGate(agentToClientR)
+	conn := acp.NewClientSideConnection(&client{output: output}, clientToAgentW, agentOutputGate)
 	conn.SetLogger(slog.New(slog.DiscardHandler))
 	agentOutputGate.open()
 
 	return &startedAgent{
 		conn: conn,
 		close: func() {
-			_ = stdin.Close()
+			stopServe()
+			_ = clientToAgentR.Close()
+			_ = clientToAgentW.Close()
+			_ = agentToClientR.Close()
+			_ = agentToClientW.Close()
 		},
-		wait: cmd.Wait,
+		wait: func() error {
+			return <-serveErr
+		},
 	}, nil
 }
 
@@ -547,16 +548,6 @@ func runImportedResume(
 	stdout io.Writer,
 ) error {
 	_, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
-	if err != nil {
-		return err
-	}
-
-	_, err = conn.CallExtension(ctx, codexSessionImportMethod, sessionImportParams{
-		SessionID: cfg.sessionID,
-		Cwd:       cfg.cwd,
-		Format:    codexSessionImportFormat,
-		Entries:   entries,
-	})
 	if err != nil {
 		return err
 	}

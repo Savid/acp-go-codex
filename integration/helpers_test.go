@@ -578,8 +578,8 @@ func serveLiveAgentRawForTest(
 	codexPath := integrationCodexPath(t)
 	codexHome := isolatedCodexHome(t)
 	base := []codexacp.Option{
-		codexacp.WithCodexPath(codexPath),
-		codexacp.WithCodexHome(codexHome),
+		codexacp.WithExecutablePath(codexPath),
+		codexacp.WithHome(codexHome),
 		codexacp.WithDefaultModel(os.Getenv(envModel)),
 		codexacp.WithLogger(integrationLogger),
 	}
@@ -663,7 +663,7 @@ func connectLiveAgentBinary(
 
 	codexPath := integrationCodexPath(t)
 	codexHome := isolatedCodexHome(t)
-	args := []string{"-codex", codexPath, "-codex-home", codexHome}
+	args := []string{"-path", codexPath, "-home", codexHome}
 	if model := os.Getenv(envModel); model != "" {
 		args = append(args, "-model", model)
 	}

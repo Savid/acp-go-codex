@@ -94,9 +94,6 @@ type recordingSessionStore struct {
 }
 
 var _ codexacp.SessionStore = (*recordingSessionStore)(nil)
-var _ codexacp.SessionStoreLister = (*recordingSessionStore)(nil)
-var _ codexacp.SessionStoreDeleter = (*recordingSessionStore)(nil)
-var _ codexacp.SessionStoreReplacer = (*recordingSessionStore)(nil)
 
 func newRecordingSessionStore() *recordingSessionStore {
 	return &recordingSessionStore{
@@ -141,8 +138,8 @@ func (s *recordingSessionStore) Load(
 
 func (s *recordingSessionStore) Replace(
 	ctx context.Context,
-	key codexacp.SessionKey,
-	entries []codexacp.SessionStoreEntry,
+	main codexacp.SessionKey,
+	replacements []codexacp.SessionStoreReplacement,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -151,16 +148,29 @@ func (s *recordingSessionStore) Replace(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.entries[key] = cloneSessionStoreEntries(entries)
-	s.mtime[key] = time.Now().UnixMilli()
+	s.replaceCalls++
+
+	for candidate := range s.entries {
+		if candidate.SessionID == main.SessionID {
+			delete(s.entries, candidate)
+			delete(s.mtime, candidate)
+		}
+	}
+
+	mtime := time.Now().UnixMilli()
+	for _, replacement := range replacements {
+		if replacement.Key.SessionID != main.SessionID {
+			continue
+		}
+
+		s.entries[replacement.Key] = cloneSessionStoreEntries(replacement.Entries)
+		s.mtime[replacement.Key] = mtime
+	}
 
 	return nil
 }
 
-func (s *recordingSessionStore) ListSessions(
-	ctx context.Context,
-	projectKey string,
-) ([]codexacp.SessionSummary, error) {
+func (s *recordingSessionStore) ListSessions(ctx context.Context) ([]codexacp.SessionSummary, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -170,13 +180,13 @@ func (s *recordingSessionStore) ListSessions(
 
 	summaries := make([]codexacp.SessionSummary, 0)
 	for key := range s.entries {
-		if key.ProjectKey != projectKey || key.SessionID == "" || key.Subpath != "" {
+		if key.SessionID == "" || key.Subpath != "" {
 			continue
 		}
 
 		summaries = append(summaries, codexacp.SessionSummary{
-			SessionID: key.SessionID,
-			MTime:     s.mtime[key],
+			SessionID:          key.SessionID,
+			UpdatedAtUnixMilli: s.mtime[key],
 		})
 	}
 
@@ -194,7 +204,7 @@ func (s *recordingSessionStore) Delete(ctx context.Context, key codexacp.Session
 	s.replaceCalls++
 
 	for candidate := range s.entries {
-		if candidate.ProjectKey != key.ProjectKey || candidate.SessionID != key.SessionID {
+		if candidate.SessionID != key.SessionID {
 			continue
 		}
 
@@ -209,38 +219,24 @@ func (s *recordingSessionStore) Delete(ctx context.Context, key codexacp.Session
 	return nil
 }
 
-func (s *recordingSessionStore) ReplaceSession(
-	ctx context.Context,
-	main codexacp.SessionKey,
-	replacements []codexacp.SessionStoreReplacement,
-) error {
+func (s *recordingSessionStore) ListSubkeys(ctx context.Context, key codexacp.SessionKey) ([]string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.replaceCalls++
-
+	subkeys := make([]string, 0)
 	for candidate := range s.entries {
-		if candidate.ProjectKey == main.ProjectKey && candidate.SessionID == main.SessionID {
-			delete(s.entries, candidate)
-			delete(s.mtime, candidate)
-		}
-	}
-
-	mtime := time.Now().UnixMilli()
-	for _, replacement := range replacements {
-		if replacement.Key.ProjectKey != main.ProjectKey || replacement.Key.SessionID != main.SessionID {
+		if candidate.SessionID != key.SessionID || candidate.Subpath == "" {
 			continue
 		}
-
-		s.entries[replacement.Key] = cloneSessionStoreEntries(replacement.Entries)
-		s.mtime[replacement.Key] = mtime
+		subkeys = append(subkeys, candidate.Subpath)
 	}
+	slices.Sort(subkeys)
 
-	return nil
+	return subkeys, nil
 }
 
 func (s *recordingSessionStore) replaceCount() int {

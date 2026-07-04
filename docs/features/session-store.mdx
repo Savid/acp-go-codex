@@ -1,81 +1,36 @@
 ---
 title: "Session Store"
-description: "Durable rollout JSONL mirroring, import, and remote restore"
-icon: "database"
+description: "Durable Codex rollout JSONL storage."
 ---
 
-Codex persists native thread state as rollout JSONL. `acp-go-codex` can mirror
-those rows to a host-owned `SessionStore` so a later process can restore a
-session even when the local Codex state directory is missing.
+`SessionStore` lets a host mirror Codex rollout rows and later load or resume a
+session when local Codex thread state is absent.
 
-## Why use a store
+```go
+const SessionStoreMainSubpath = ""
+const SessionStoreFormat = "codex-rollout-jsonl-v1"
 
-Use a store when:
+type SessionKey struct {
+    SessionID string
+    Subpath   string
+}
+```
 
-- the ACP host is remote from the agent process;
-- the agent process may be short-lived;
-- session restore must survive local Codex cache cleanup;
-- a host wants to export/import Codex rollout bundles explicitly.
-
-Without a store, Codex can still resume threads that exist in the local Codex
-home.
-
-## Mode support
-
-| Operation | Store behavior |
-| --- | --- |
-| `session/new` | Mirrors newly produced rollout rows after each turn. |
-| `session/load` | Loads stored rows, replays ACP updates, and materializes a rollout file for Codex resume. |
-| `session/resume` | Uses stored rows when present, materializes a rollout file for Codex resume, and does not replay history. |
-| `session/list` | Includes store-backed sessions when the store implements `SessionStoreLister`. |
-| `_codex/session/import*` | Writes host-provided rollout JSONL into the store. |
-
-## Interface
+The store API is:
 
 ```go
 type SessionStore interface {
-    Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
-    Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
-    Replace(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
+    Append(context.Context, SessionKey, []SessionStoreEntry) error
+    Load(context.Context, SessionKey) ([]SessionStoreEntry, error)
+    Replace(context.Context, SessionKey, []SessionStoreReplacement) error
+    Delete(context.Context, SessionKey) error
+    ListSessions(context.Context) ([]SessionSummary, error)
+    ListSubkeys(context.Context, SessionKey) ([]string, error)
 }
 ```
 
-Optional interfaces add list, delete, and atomic session replacement support.
-See [Go API](/docs/reference/go-api#sessionstore) for the full shape.
+`Replace` writes one complete committed generation for a session. The main key
+must be present exactly once, and unlisted subpaths are hidden atomically.
 
-## Key shape
-
-```go
-type SessionKey struct {
-    ProjectKey string
-    SessionID  string
-    Subpath    string
-}
-```
-
-`SessionID` is the ACP-visible session ID, not the native Codex thread ID.
-Native thread IDs remain in rollout JSONL and response metadata.
-
-`Subpath` is empty for the main rollout. Reserved sidecars such as `goal.json`
-store adapter-owned snapshots related to the same session.
-
-## Mirroring
-
-The adapter mirrors complete rollout JSONL rows. It advances durable-store and
-raw-event cursors independently so a failed raw notification cannot duplicate
-rows in the durable store.
-
-Final turn mirroring is bounded and retried. If durable mirroring still fails
-after retry, the prompt fails so the host does not believe a session was safely
-persisted when it was not.
-
-## Materialized resume
-
-For store-backed load or resume, the adapter writes stored rollout rows into a
-private temporary rollout file and asks Codex to resume from the native thread
-ID embedded in the rows. The ACP session ID remains the host-visible key.
-
-Filtered raw events are not a restore mechanism. Exact restore requires the
-full rollout JSONL rows captured through `SessionStore`,
-[`_codex/session/import*`](/docs/reference/session-import), or an unfiltered raw
-capture that kept every restorable row.
+`Delete` writes a tombstone first. Deleting the main subpath cascades to all
+subpaths and hides the session from list, load, and resume.

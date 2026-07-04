@@ -1,80 +1,34 @@
 ---
 title: "Install"
-description: "Install the standalone binary or embed the Go package"
-icon: "download"
+description: "Install the ACP adapter and point it at Codex CLI."
 ---
 
-## Install standalone CLI
-
-Install the ACP subprocess:
-
-```bash
+```sh
 go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
 ```
 
-Then configure your ACP host to launch `acp-go-codex` over stdio. The agent
-starts `codex app-server` processes for sessions on demand.
+For embedded use:
 
-## Install embedded Go
-
-Add the package to a Go module:
-
-```bash
+```sh
 go get github.com/savid/acp-go-codex
 ```
 
-Call [`Serve`](/docs/reference/go-api#serve) when your application already owns
-the ACP input and output streams:
-
 ```go
-err := codexacp.Serve(ctx, input, output,
-    codexacp.WithCodexPath("/usr/local/bin/codex"),
-    codexacp.WithCodexHome("/var/lib/my-host/codex"),
+err := codexacp.Serve(ctx, stdin, stdout,
+    codexacp.WithExecutablePath("/usr/local/bin/codex"),
+    codexacp.WithHome("/var/lib/my-host/codex"),
 )
 ```
 
-## Codex discovery
+Use `-path` or `WithExecutablePath` to select a Codex executable. Use `-home`
+or `WithHome` to set `CODEX_HOME` for launched Codex processes.
 
-The adapter finds Codex in this order:
+Login helpers delegate to Codex:
 
-1. `-codex <path>` in standalone mode or `WithCodexPath(path)` in embedded Go.
-2. `codex` from `PATH`.
-
-Use a pinned CLI path when your host needs reproducible app-server behavior.
-
-## Codex configuration
-
-Use `-codex-home <dir>` or `WithCodexHome(path)` to set `CODEX_HOME` for
-launched Codex processes. Leave it empty to use the user's default Codex home.
-
-For service-owned deployments, prefer an adapter-owned `CODEX_HOME` with
-explicit auth and cleanup policy. For user-owned editor integrations, avoid
-destructive account operations unless the user requested them.
-
-## Authentication commands
-
-The standalone binary can pass through local Codex auth commands:
-
-```bash
-acp-go-codex -cli login
-acp-go-codex -cli login -device-auth
-acp-go-codex -cli logout
+```sh
+acp-go-codex login -device-auth
+acp-go-codex logout
 ```
 
-`logout` through ACP is guarded separately by
-[`WithAllowAccountLogout`](/docs/reference/go-api#auth).
-
-## Environment
-
-Common environment variables:
-
-| Variable | Purpose |
-| --- | --- |
-| `CODEX_HOME` | Used by Codex when no `-codex-home` or `WithCodexHome` override is set. |
-| `OTEL_*` | Configures standalone adapter telemetry and native Codex OTEL mapping. |
-| `CODEX_OTEL_ENVIRONMENT` | Sets the native Codex `otel.environment` tag. |
-
-<Warning>
-  Do not use OpenTelemetry console exporters in ACP stdio mode. Console
-  exporters write to stdout, which is also the JSON-RPC transport.
-</Warning>
+ACP logout is disabled unless the adapter is started with
+`-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`.

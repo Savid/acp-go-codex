@@ -8,54 +8,51 @@ import (
 )
 
 type sessionMeta struct {
-	Model           string
-	Mode            acp.SessionModeId
-	ReasoningEffort string
-	ServiceTier     string
-	Personality     string
-	Env             map[string]string
-	ApprovalPolicy  any
-	SandboxPolicy   any
-	OutputSchema    any
-	RawMessages     rawMessageConfig
-	Goal            goalMetaInput
+	Model               string
+	ReasoningEffort     string
+	ServiceTier         string
+	Personality         string
+	Env                 map[string]string
+	ApprovalPolicy      any
+	SandboxPolicy       any
+	OutputSchema        any
+	RawMessages         rawMessageConfig
+	MCPToolApprovalMode string
 }
 
 func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
-	codexOptions, err := codexOptionsFromMeta(meta)
-	if err != nil {
+	if err := validateLifecycleMeta(meta); err != nil {
 		return sessionMeta{}, err
 	}
-	goal, err := parseGoalFromMeta(meta)
+	codexOptions, err := codexOptionsFromMeta(meta)
 	if err != nil {
 		return sessionMeta{}, err
 	}
 
 	return sessionMeta{
-		Model:           codexOptions.Model,
-		Mode:            codexOptions.Mode,
-		ReasoningEffort: codexOptions.ReasoningEffort,
-		ServiceTier:     codexOptions.ServiceTier,
-		Personality:     codexOptions.Personality,
-		Env:             codexOptions.Env,
-		ApprovalPolicy:  codexOptions.ApprovalPolicy,
-		SandboxPolicy:   codexOptions.SandboxPolicy,
-		OutputSchema:    codexOptions.OutputSchema,
-		RawMessages:     rawMessageConfigFromMeta(meta),
-		Goal:            goal,
+		Model:               codexOptions.Model,
+		ReasoningEffort:     codexOptions.ReasoningEffort,
+		ServiceTier:         codexOptions.ServiceTier,
+		Personality:         codexOptions.Personality,
+		Env:                 codexOptions.Env,
+		ApprovalPolicy:      codexOptions.ApprovalPolicy,
+		SandboxPolicy:       codexOptions.SandboxPolicy,
+		OutputSchema:        codexOptions.OutputSchema,
+		RawMessages:         rawMessageConfigFromMeta(meta),
+		MCPToolApprovalMode: codexOptions.MCPToolApprovalMode,
 	}, nil
 }
 
 type codexOptions struct {
-	Model           string
-	Mode            acp.SessionModeId
-	ReasoningEffort string
-	ServiceTier     string
-	Personality     string
-	Env             map[string]string
-	ApprovalPolicy  any
-	SandboxPolicy   any
-	OutputSchema    any
+	Model               string
+	ReasoningEffort     string
+	ServiceTier         string
+	Personality         string
+	Env                 map[string]string
+	ApprovalPolicy      any
+	SandboxPolicy       any
+	OutputSchema        any
+	MCPToolApprovalMode string
 }
 
 func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
@@ -68,16 +65,6 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 	options := codexOptions{}
 	if model, _ := optionsMap["model"].(string); model != "" {
 		options.Model = model
-	}
-	if rawMode, ok := optionsMap[metaModeKey]; ok {
-		mode, ok := rawMode.(string)
-		if !ok {
-			return codexOptions{}, fmt.Errorf("_meta.codex.options.mode must be a string")
-		}
-		if !validCodexMode(acp.SessionModeId(mode)) {
-			return codexOptions{}, fmt.Errorf("_meta.codex.options.mode is unsupported")
-		}
-		options.Mode = acp.SessionModeId(mode)
 	}
 	if effort, _ := optionsMap["effort"].(string); effort != "" {
 		if !validReasoningEffort(effort) {
@@ -113,8 +100,72 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 		}
 		options.OutputSchema = cloneAny(schema)
 	}
+	if mode, _ := optionsMap["mcpToolApprovalMode"].(string); mode != "" {
+		if !validMCPApprovalMode(mode) {
+			return codexOptions{}, fmt.Errorf("_meta.codex.options.mcpToolApprovalMode is unsupported")
+		}
+		options.MCPToolApprovalMode = mode
+	}
 
 	return options, nil
+}
+
+func validateLifecycleMeta(meta map[string]any) error {
+	if len(meta) == 0 {
+		return nil
+	}
+	if _, ok := meta["github.com/savid/acp-go-codex"]; ok {
+		return unsupportedField("_meta.github.com/savid/acp-go-codex")
+	}
+	codexMeta, ok := meta[codexMetaKey].(map[string]any)
+	if !ok {
+		if _, exists := meta[codexMetaKey]; exists {
+			return fmt.Errorf("_meta.codex must be an object")
+		}
+		return nil
+	}
+	for key, value := range codexMeta {
+		switch key {
+		case metaOptionsKey:
+			optionsMap, ok := value.(map[string]any)
+			if !ok {
+				return fmt.Errorf("_meta.codex.options must be an object")
+			}
+			for optionKey := range optionsMap {
+				switch optionKey {
+				case "model", "env", "outputSchema", "effort", "serviceTier", "personality", "approvalPolicy", "sandboxPolicy", "mcpToolApprovalMode":
+				default:
+					return unsupportedField("_meta.codex.options." + optionKey)
+				}
+			}
+		case rawEventKey:
+			rawEvent, ok := value.(map[string]any)
+			if !ok {
+				return fmt.Errorf("_meta.codex.rawEvent must be an object")
+			}
+			for rawKey, rawValue := range rawEvent {
+				switch rawKey {
+				case rawEventEnabledKey:
+					if _, ok := rawValue.(bool); !ok {
+						return fmt.Errorf("_meta.codex.rawEvent.enabled must be a boolean")
+					}
+				default:
+					return unsupportedField("_meta.codex.rawEvent." + rawKey)
+				}
+			}
+		default:
+			return unsupportedField("_meta.codex." + key)
+		}
+	}
+
+	return nil
+}
+
+func unsupportedField(path string) error {
+	return acp.NewInvalidParams(map[string]any{
+		"error": "unsupported",
+		"field": path,
+	})
 }
 
 func validateSchemaObject(schema any) error {
@@ -141,15 +192,6 @@ func validReasoningEffort(value string) bool {
 func validPersonality(value string) bool {
 	switch value {
 	case "none", "friendly", "pragmatic":
-		return true
-	default:
-		return false
-	}
-}
-
-func validCodexMode(mode acp.SessionModeId) bool {
-	switch mode {
-	case "", modeDefault, modePlan:
 		return true
 	default:
 		return false
@@ -197,40 +239,21 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 	if len(snapshot.accountMeta) > 0 {
 		codexMeta[codexAccountMetaKey] = cloneAnyMap(snapshot.accountMeta)
 	}
-	codexMeta[codexGoalMetaKey] = goalMetaFromSnapshot(snapshot.goal)
+	if snapshot.model != "" {
+		codexMeta["modelId"] = snapshot.model
+	}
 
 	return map[string]any{
-		// The reference docs intentionally advertise both the short provider
-		// namespace and the package namespace for host lookup convenience.
-		codexMetaKey:   codexMeta,
-		packageMetaKey: cloneAnyMap(codexMeta),
+		codexMetaKey: codexMeta,
 	}
 }
 
 func sessionInfoMeta(snapshot sessionSnapshot) map[string]any {
 	codexMeta := cloneAnyMap(sessionResponseMeta(snapshot)[codexMetaKey].(map[string]any))
-	codexMeta[codexGoalMetaKey] = goalSummaryFromSnapshot(snapshot.goal)
 
 	return map[string]any{
-		codexMetaKey:   codexMeta,
-		packageMetaKey: cloneAnyMap(codexMeta),
+		codexMetaKey: codexMeta,
 	}
-}
-
-func goalMetaFromSnapshot(goal *CodexGoal) any {
-	if goal == nil {
-		return nil
-	}
-
-	return canonicalGoalMeta(*goal)
-}
-
-func goalSummaryFromSnapshot(goal *CodexGoal) any {
-	if goal == nil {
-		return nil
-	}
-
-	return goalSummaryMeta(*goal)
 }
 
 func cloneAnyMap(values map[string]any) map[string]any {

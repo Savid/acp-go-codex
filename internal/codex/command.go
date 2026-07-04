@@ -16,7 +16,7 @@ import (
 const (
 	envCodexHome    = "CODEX_HOME"
 	envCodexPath    = "CODEX_EXECUTABLE"
-	minCodexVersion = "0.134.0"
+	minCodexVersion = "0.141.0"
 )
 
 var execCommandContext = exec.CommandContext

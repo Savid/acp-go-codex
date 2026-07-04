@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
@@ -20,24 +19,28 @@ func TestOptionsSetters(t *testing.T) {
 	meterProvider := metricnoop.NewMeterProvider()
 	propagator := propagation.TraceContext{}
 	options := applyOptions([]Option{
-		WithCodexPath("/bin/codex"),
-		WithCodexHome("/tmp/codex"),
-		WithDefaultMode(acp.SessionModeId("plan")),
+		WithExecutablePath("/bin/codex"),
+		WithHome("/tmp/codex"),
+		WithDefaultModel("gpt-5.5"),
 		WithLogger(logger),
 		WithEnv(map[string]string{"A": "B"}),
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentPrompts: 2, MaxConcurrentClientCalls: 3}),
 		WithTracerProvider(tracerProvider),
 		WithMeterProvider(meterProvider),
 		WithTextMapPropagator(propagator),
 	})
-	if options.CodexPath != "/bin/codex" ||
-		options.CodexHome != "/tmp/codex" ||
-		options.DefaultMode != acp.SessionModeId("plan") ||
+	if options.ExecutablePath != "/bin/codex" ||
+		options.Home != "/tmp/codex" ||
+		options.DefaultModel != "gpt-5.5" ||
 		options.Logger != logger ||
 		options.Env["A"] != "B" ||
 		options.SessionStore != store ||
 		options.SessionStoreLoadTimeout != time.Second ||
+		options.ConcurrencyLimits.MaxActiveSessions != 1 ||
+		options.ConcurrencyLimits.MaxConcurrentPrompts != 2 ||
+		options.ConcurrencyLimits.MaxConcurrentClientCalls != 3 ||
 		options.TracerProvider != tracerProvider ||
 		options.MeterProvider != meterProvider ||
 		options.TextMapPropagator == nil {

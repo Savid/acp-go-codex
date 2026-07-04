@@ -17,28 +17,28 @@ import (
 func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	session := &Session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
-	held := session.turnQueue()
+	promptSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
+	held := promptSession.turnQueue()
 	held <- struct{}{}
-	if resp, err := session.Prompt(canceledContext(), TextPromptRequest("s", "hi")); err != nil || resp.StopReason != acp.StopReasonCancelled {
+	if resp, err := promptSession.Prompt(canceledContext(), TextPromptRequest("s", "hi")); err != nil || resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("canceled acquire resp=%#v err=%v", resp, err)
 	}
 	<-held
-	if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: []acp.ContentBlock{acp.AudioBlock("x", "audio/wav")}}); err == nil {
+	if _, err := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: []acp.ContentBlock{acp.AudioBlock("x", "audio/wav")}}); err == nil {
 		t.Fatal("Prompt accepted audio block")
 	}
 
-	session.client = &runEventsClient{runErr: errors.New("not logged in")}
-	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	promptSession.client = &runEventsClient{runErr: errors.New("not logged in")}
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt accepted RunTurn error")
 	}
 
 	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
-	session.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventAgentMessageDelta, ThreadID: "thread", TurnID: "turn", Text: "hi"}}}
-	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventAgentMessageDelta, ThreadID: "thread", TurnID: "turn", Text: "hi"}}}
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored update error")
 	}
-	session.client = &runEventsClient{events: []codex.Event{{
+	promptSession.client = &runEventsClient{events: []codex.Event{{
 		Kind:     codex.EventUsageUpdated,
 		ThreadID: "thread",
 		TurnID:   "turn",
@@ -46,34 +46,34 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 			Last: codex.Usage{InputTokens: 1, OutputTokens: 2},
 		},
 	}}}
-	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored usage update error")
 	}
 
 	agent.setAgentClient(newRecordingAgentClient())
-	session.rawMessages = rawMessageConfig{All: true}
-	session.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventRaw, ThreadID: "thread", TurnID: "turn", RawMethod: "raw", RawParams: json.RawMessage(`{"type":"event_msg"}`)}}}
+	promptSession.rawMessages = rawMessageConfig{enabled: true}
+	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventRaw, ThreadID: "thread", TurnID: "turn", RawMethod: "raw", RawParams: json.RawMessage(`{"type":"event_msg"}`)}}}
 	agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
-	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored raw extension error")
 	}
 
 	agent.setAgentClient(newRecordingAgentClient())
-	session.rawMessages = rawMessageConfig{}
-	session.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("boom")}}}
-	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	promptSession.rawMessages = rawMessageConfig{}
+	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("boom")}}}
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored event error")
 	}
 
-	session.client = &runEventsClient{}
-	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); !errors.Is(err, codex.ErrConnectionClosed) {
+	promptSession.client = &runEventsClient{}
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); !errors.Is(err, codex.ErrConnectionClosed) {
 		t.Fatalf("Prompt with closed event stream err=%v, want connection closed", err)
 	}
 
-	session.rawMessages = rawMessageConfig{All: true}
-	session.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"}}}
-	session.rolloutPath = filepath.Join(t.TempDir(), "missing.jsonl")
-	if _, err := session.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	promptSession.rawMessages = rawMessageConfig{enabled: true}
+	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"}}}
+	promptSession.rolloutPath = filepath.Join(t.TempDir(), "missing.jsonl")
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored final rollout mirror error")
 	}
 
@@ -81,8 +81,8 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatalf("write empty rollout: %v", err)
 	}
-	session.rolloutPath = empty
-	if err := session.mirrorAndEmitRollout(ctx); err != nil {
+	promptSession.rolloutPath = empty
+	if err := promptSession.mirrorAndEmitRollout(ctx); err != nil {
 		t.Fatalf("empty mirror returned error: %v", err)
 	}
 
@@ -90,8 +90,8 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	if err := os.WriteFile(huge, []byte(strings.Repeat("x", maxSessionImportLineBytes+1)), 0o600); err != nil {
 		t.Fatalf("write huge rollout: %v", err)
 	}
-	session.rolloutPath = huge
-	if err := session.mirrorAndEmitRollout(ctx); err == nil {
+	promptSession.rolloutPath = huge
+	if err := promptSession.mirrorAndEmitRollout(ctx); err == nil {
 		t.Fatal("mirror accepted scanner error")
 	}
 
@@ -99,8 +99,8 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	if err := os.WriteFile(invalid, []byte("[]\n"), 0o600); err != nil {
 		t.Fatalf("write invalid rollout: %v", err)
 	}
-	session.rolloutPath = invalid
-	if err := session.mirrorAndEmitRollout(ctx); err == nil {
+	promptSession.rolloutPath = invalid
+	if err := promptSession.mirrorAndEmitRollout(ctx); err == nil {
 		t.Fatal("mirror accepted invalid rollout entry")
 	}
 
@@ -108,68 +108,49 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	if err := os.WriteFile(valid, []byte(`{"type":"event_msg"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write valid rollout: %v", err)
 	}
-	session.rolloutPath = valid
-	session.cwd = "relative"
-	session.agent = NewAgent(WithSessionStore(NewInMemorySessionStore()))
-	if err := session.mirrorAndEmitRollout(ctx); err == nil {
-		t.Fatal("mirror accepted relative cwd for store")
-	}
-	session.cwd = "/tmp/project"
-	session.agent = NewAgent(WithSessionStore(appendErrorStore{}))
+	promptSession.rolloutPath = valid
+	promptSession.cwd = "/tmp/project"
+	promptSession.agent = NewAgent(WithSessionStore(appendErrorStore{}))
 	withRolloutAppendSettings(t, time.Second, []time.Duration{0})
-	if err := session.mirrorAndEmitRollout(ctx); err == nil {
+	if err := promptSession.mirrorAndEmitRollout(ctx); err == nil {
 		t.Fatal("mirror ignored store append error")
 	}
-	session.agent = NewAgent()
-	session.agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
-	session.rawMessages = rawMessageConfig{All: true}
-	if err := session.mirrorAndEmitRollout(ctx); err != nil {
+	promptSession.agent = NewAgent()
+	promptSession.agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
+	promptSession.rawMessages = rawMessageConfig{enabled: true}
+	if err := promptSession.mirrorAndEmitRollout(ctx); err != nil {
 		t.Fatalf("raw rollout extension error was fatal: %v", err)
 	}
-	if session.emittedRawRows != 0 {
+	if promptSession.emittedRawRows != 0 {
 		t.Fatal("failed raw rollout emission advanced cursor")
 	}
 
-	session.rawMessages = rawMessageConfig{Filters: []rawMessageFilter{{Type: "other"}}}
-	if err := session.emitRawRolloutRow(ctx, SessionStoreEntry(`{"type":"event_msg"}`)); err != nil {
-		t.Fatalf("filtered raw rollout row returned error: %v", err)
+	promptSession.rawMessages = rawMessageConfig{}
+	if err := promptSession.emitRawRolloutRow(ctx, SessionStoreEntry(`{"type":"event_msg"}`)); err != nil {
+		t.Fatalf("disabled raw rollout row returned error: %v", err)
 	}
 }
 
 func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
-	session := &Session{agent: NewAgent(), id: "s"}
-	session.setTurnID("")
-	session.cancelTurn()
-	if session.wasTurnCancelled() {
+	promptSession := &session{agent: NewAgent(), id: "s"}
+	promptSession.setTurnID("")
+	promptSession.cancelTurn()
+	if promptSession.wasTurnCancelled() {
 		t.Fatal("cancel without active turn marked canceled")
 	}
-	session.setAccount(nil)
-	if len(session.accountMeta) != 0 {
+	promptSession.setAccount(nil)
+	if len(promptSession.accountMeta) != 0 {
 		t.Fatal("empty account meta was stored")
 	}
-	if err := (&Session{materializedPath: filepath.Join(t.TempDir(), "missing")}).Close(context.Background()); err != nil {
+	if err := (&session{materializedPath: filepath.Join(t.TempDir(), "missing")}).Close(context.Background()); err != nil {
 		t.Fatalf("close missing materialized path returned error: %v", err)
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "child"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write child: %v", err)
 	}
-	if err := (&Session{materializedPath: dir}).Close(context.Background()); err == nil {
+	if err := (&session{materializedPath: dir}).Close(context.Background()); err == nil {
 		t.Fatal("close ignored materialized remove error")
-	}
-	bridgeDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bridgeDir, "child"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write bridge child: %v", err)
-	}
-	if err := (&Session{client: newSpyCodexClient(), mcpBridge: &mcpSessionBridge{done: make(chan struct{}), tokenFile: bridgeDir, conns: make(map[*mcpBridgeConn]struct{})}}).Close(context.Background()); err == nil {
-		t.Fatal("close with client ignored MCP bridge error")
-	}
-	bridgeDir = t.TempDir()
-	if err := os.WriteFile(filepath.Join(bridgeDir, "child"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write bridge child: %v", err)
-	}
-	if err := (&Session{mcpBridge: &mcpSessionBridge{done: make(chan struct{}), tokenFile: bridgeDir, conns: make(map[*mcpBridgeConn]struct{})}}).Close(context.Background()); err == nil {
-		t.Fatal("close without client ignored MCP bridge error")
 	}
 	if update := eventUpdates(codex.Event{Kind: codex.EventWarning, Text: "warn"}); len(update) != 1 || update[0].AgentThoughtChunk == nil {
 		t.Fatalf("warning update = %#v", update)
@@ -180,14 +161,14 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 
 	agent := NewAgent()
 	agent.setAgentClient(newRecordingAgentClient())
-	cancelSession := &Session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread"}
+	cancelSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread"}
 	cancelSession.client = &cancelDuringRunClient{session: cancelSession}
 	resp, err := cancelSession.Prompt(context.Background(), TextPromptRequest("s", "hi"))
 	if err != nil || resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("canceled event prompt resp=%#v err=%v", resp, err)
 	}
 
-	interactionSession := &Session{agent: agent, id: "interaction"}
+	interactionSession := &session{agent: agent, id: "interaction"}
 	interactionSession.beginTurn(context.Background())
 	interactionCtx, finishInteraction := interactionSession.beginInteraction(context.Background(), "input")
 	interactionSession.mu.Lock()
@@ -202,7 +183,7 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	finishInteraction()
 	interactionSession.finishTurn()
 
-	accountSession := &Session{
+	accountSession := &session{
 		agent:         agent,
 		id:            "acct",
 		cwd:           "/tmp/project",
@@ -222,7 +203,7 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	dedupeAgent := NewAgent()
 	dedupeConn := newRecordingAgentClient()
 	dedupeAgent.setAgentClient(dedupeConn)
-	dedupeSession := &Session{
+	dedupeSession := &session{
 		agent:         dedupeAgent,
 		id:            "dedupe",
 		cwd:           "/tmp/project",
@@ -260,7 +241,7 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	usageAgent := NewAgent()
 	usageConn := newRecordingAgentClient()
 	usageAgent.setAgentClient(usageConn)
-	usageSession := &Session{
+	usageSession := &session{
 		agent:         usageAgent,
 		id:            "usage",
 		cwd:           "/tmp/project",
@@ -337,7 +318,7 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	if err := os.WriteFile(rollout, []byte("\n"+`{"type":"event_msg"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
 	}
-	rawSession := &Session{agent: NewAgent(), id: "raw", cwd: "/tmp/project", rolloutPath: rollout, rawMessages: rawMessageConfig{All: true}}
+	rawSession := &session{agent: NewAgent(), id: "raw", cwd: "/tmp/project", rolloutPath: rollout, rawMessages: rawMessageConfig{enabled: true}}
 	if err := rawSession.mirrorAndEmitRollout(context.Background()); err != nil {
 		t.Fatalf("mirror blank+valid rollout returned error: %v", err)
 	}
@@ -373,7 +354,7 @@ func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
 			t.Fatalf("write rollout rows: %v", err)
 		}
 	}()
-	session := &Session{
+	session := &session{
 		agent:         agent,
 		id:            "fallback",
 		cwd:           "/tmp/project",
@@ -412,7 +393,7 @@ func TestPromptUsesImmediateRolloutTaskCompleteFallback(t *testing.T) {
 			t.Fatalf("write rollout rows: %v", err)
 		}
 	}()
-	session := &Session{
+	session := &session{
 		agent:         NewAgent(),
 		id:            "fallback",
 		cwd:           "/tmp/project",
@@ -452,7 +433,7 @@ func TestPromptReturnsRolloutEventUpdateError(t *testing.T) {
 		}
 	}()
 
-	session := &Session{
+	session := &session{
 		agent:         agent,
 		id:            "fallback",
 		cwd:           "/tmp/project",

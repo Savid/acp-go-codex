@@ -298,14 +298,13 @@ func TestParseOTELResourceAttributesSkipsEmptyKeys(t *testing.T) {
 	}
 }
 
-func TestAgentNewClientMergesCodexOTELWithGoalsMCPAndEnv(t *testing.T) {
+func TestAgentNewClientMergesCodexOTELWithMCPAndEnv(t *testing.T) {
 	original := osEnviron
 	t.Cleanup(func() { osEnviron = original })
 	osEnviron = func() []string { return nil }
 
 	var gotOptions codex.Options
 	agent := NewAgent(
-		WithCodexGoals(true),
 		WithEnv(map[string]string{
 			"OTEL_TRACES_EXPORTER":        "none",
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
@@ -324,12 +323,9 @@ func TestAgentNewClientMergesCodexOTELWithGoalsMCPAndEnv(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
 		"OTEL_METRICS_EXPORTER":       "none",
 		"BASE":                        "session",
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("newClient returned error: %v", err)
-	}
-	if gotOptions.Config["features.goals"] != true {
-		t.Fatalf("Codex config missing goals: %#v", gotOptions.Config)
 	}
 	if gotOptions.Env["BASE"] != "session" {
 		t.Fatalf("Codex env precedence = %#v", gotOptions.Env)
@@ -355,7 +351,7 @@ func TestAgentNewClientReturnsCodexOTELError(t *testing.T) {
 			return newSpyCodexClient(), nil
 		}),
 	)
-	if _, err := agent.newClient(context.Background(), nil, nil); err == nil {
+	if _, err := agent.newClient(context.Background(), nil, nil, ""); err == nil {
 		t.Fatal("newClient accepted invalid Codex OTEL config")
 	}
 }

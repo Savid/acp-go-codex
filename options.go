@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -14,6 +13,22 @@ import (
 
 // Option configures the Codex ACP agent.
 type Option func(*Options)
+
+// ChatGPTAuthTokens are externally supplied ChatGPT auth credentials for Codex.
+type ChatGPTAuthTokens struct {
+	AccessToken      string
+	RefreshToken     string
+	AccountID        string
+	PlanType         string
+	ExpiresAtUnixSec int64
+}
+
+// ConcurrencyLimits bounds work accepted by one Agent.
+type ConcurrencyLimits struct {
+	MaxActiveSessions        int
+	MaxConcurrentPrompts     int
+	MaxConcurrentClientCalls int
+}
 
 // Options configures the ACP agent process and Codex sessions it starts.
 type Options struct {
@@ -24,37 +39,28 @@ type Options struct {
 	// AgentVersion is the agent version advertised during ACP initialize.
 	AgentVersion string
 
-	// CodexPath is the Codex CLI executable path. If empty, PATH will be used.
-	CodexPath string
-	// CodexHome sets CODEX_HOME for launched Codex CLI sessions.
-	CodexHome string
+	// ExecutablePath is the Codex CLI executable path. If empty, PATH will be used.
+	ExecutablePath string
+	// Home sets CODEX_HOME for launched Codex CLI sessions.
+	Home string
 	// DefaultModel is the model preference for newly created Codex threads.
 	DefaultModel string
-	// DefaultMode is the ACP mode used for newly created Codex sessions when
-	// session metadata does not set _meta.codex.options.mode.
-	DefaultMode acp.SessionModeId
-	// EnableGoals enables Codex's experimental native thread goal APIs.
-	EnableGoals bool
+	// Env is merged into launched Codex process environments.
+	Env map[string]string
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
 	Logger *slog.Logger
-	// Env is merged into launched Codex process environments.
-	Env map[string]string
-	// MCPProxyCommand is used to expose ACP-transport MCP servers to Codex as
-	// stdio MCP servers.
-	MCPProxyCommand string
-	// MCPProxyArgs are inserted after MCPProxyCommand and before adapter-owned
-	// proxy arguments.
-	MCPProxyArgs []string
-	// SessionStore mirrors/imports Codex rollout JSONL rows for durable remote
-	// session restore. If nil, imports are stored in-process.
+	// SessionStore mirrors Codex rollout JSONL rows for durable remote session
+	// restore. If nil, an in-process store is used.
 	SessionStore SessionStore
 	// SessionStoreLoadTimeout bounds store-backed load/list operations. Values
 	// <= 0 use the default.
 	SessionStoreLoadTimeout time.Duration
+	// ConcurrencyLimits bounds active sessions, prompts, and server-to-client calls.
+	ConcurrencyLimits ConcurrencyLimits
 	// ChatGPTAuthTokenRefresher handles Codex external-auth refresh callbacks
 	// from the app-server.
-	ChatGPTAuthTokenRefresher func(context.Context) (codex.ChatGPTAuthTokens, error)
+	ChatGPTAuthTokenRefresher func(context.Context) (ChatGPTAuthTokens, error)
 	// AllowAccountLogout permits ACP logout to call Codex account/logout. Leave
 	// false when CODEX_HOME points at a user's normal local Codex credentials.
 	AllowAccountLogout bool
@@ -73,7 +79,6 @@ func applyOptions(opts []Option) Options {
 		AgentName:               "acp-go-codex",
 		AgentTitle:              "acp-go-codex",
 		AgentVersion:            "0.1.0",
-		DefaultMode:             modeDefault,
 		SessionStoreLoadTimeout: 10 * time.Second,
 		clientFactory: func(ctx context.Context, options codex.Options) (codex.Client, error) {
 			return codex.NewAppServerClient(ctx, options)
@@ -114,17 +119,17 @@ func WithAgentVersion(version string) Option {
 	}
 }
 
-// WithCodexPath sets the Codex CLI executable path.
-func WithCodexPath(path string) Option {
+// WithExecutablePath sets the Codex CLI executable path.
+func WithExecutablePath(path string) Option {
 	return func(options *Options) {
-		options.CodexPath = path
+		options.ExecutablePath = path
 	}
 }
 
-// WithCodexHome sets CODEX_HOME for launched Codex CLI sessions.
-func WithCodexHome(path string) Option {
+// WithHome sets CODEX_HOME for launched Codex CLI sessions.
+func WithHome(path string) Option {
 	return func(options *Options) {
-		options.CodexHome = path
+		options.Home = path
 	}
 }
 
@@ -132,22 +137,6 @@ func WithCodexHome(path string) Option {
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
 		options.DefaultModel = model
-	}
-}
-
-// WithDefaultMode selects the ACP mode for newly created sessions. Use "plan"
-// when Codex-native request_user_input should be available from the first turn.
-func WithDefaultMode(mode acp.SessionModeId) Option {
-	return func(options *Options) {
-		options.DefaultMode = mode
-	}
-}
-
-// WithCodexGoals enables Codex's experimental native thread goal APIs for
-// launched app-server processes.
-func WithCodexGoals(enabled bool) Option {
-	return func(options *Options) {
-		options.EnableGoals = enabled
 	}
 }
 
@@ -168,17 +157,6 @@ func WithEnv(env map[string]string) Option {
 	}
 }
 
-// WithMCPProxyCommand configures the command used for ACP-transport MCP
-// servers. Normal stdio and HTTP MCP servers do not use this proxy.
-func WithMCPProxyCommand(command string, args ...string) Option {
-	copied := append([]string(nil), args...)
-
-	return func(options *Options) {
-		options.MCPProxyCommand = command
-		options.MCPProxyArgs = append([]string(nil), copied...)
-	}
-}
-
 // WithSessionStore configures durable storage for Codex rollout JSONL rows.
 func WithSessionStore(store SessionStore) Option {
 	return func(options *Options) {
@@ -194,16 +172,23 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithChatGPTAuthTokenRefresher configures external ChatGPT token refresh for
+// WithConcurrencyLimits configures agent concurrency limits. Zero fields use defaults.
+func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
+	return func(options *Options) {
+		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithCodexChatGPTAuthTokenRefresher configures external ChatGPT token refresh for
 // Codex app-server auth callbacks.
-func WithChatGPTAuthTokenRefresher(refresher func(context.Context) (codex.ChatGPTAuthTokens, error)) Option {
+func WithCodexChatGPTAuthTokenRefresher(refresher func(context.Context) (ChatGPTAuthTokens, error)) Option {
 	return func(options *Options) {
 		options.ChatGPTAuthTokenRefresher = refresher
 	}
 }
 
-// WithAllowAccountLogout permits ACP logout to call Codex account/logout.
-func WithAllowAccountLogout(enabled bool) Option {
+// WithCodexAllowAccountLogout permits ACP logout to call Codex account/logout.
+func WithCodexAllowAccountLogout(enabled bool) Option {
 	return func(options *Options) {
 		options.AllowAccountLogout = enabled
 	}
