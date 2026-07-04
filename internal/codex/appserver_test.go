@@ -339,6 +339,12 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 	if eventFromRPC(rpcEvent{Method: "error", Params: mustRaw(map[string]any{"message": "boom"})}).Err == nil {
 		t.Fatal("error event did not include error")
 	}
+	if event := eventFromRPC(rpcEvent{Method: "error", Params: mustRaw(map[string]any{"error": ""})}); event.Text != `Codex app-server error event: {"error":""}` {
+		t.Fatalf("empty error event text = %q", event.Text)
+	}
+	if event := eventFromRPC(rpcEvent{Method: "error"}); event.Text != "Codex app-server emitted error event without details" {
+		t.Fatalf("missing error event text = %q", event.Text)
+	}
 	if account := eventFromRPC(rpcEvent{Method: "account/updated", Params: mustRaw(map[string]any{"email": "plain@example.com"})}).Account; account.Email != "plain@example.com" {
 		t.Fatalf("plain account event = %#v", account)
 	}

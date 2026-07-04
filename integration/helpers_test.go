@@ -385,7 +385,8 @@ func isolatedCodexHome(t *testing.T) string {
 
 	source, explicitSource := integrationCodexSourceHome(t)
 	processAuth := processCodexAuthAvailable()
-	if !processAuth && !codexAuthFileAvailable(t, source) {
+	sourceAuth := codexAuthFileAvailable(t, source)
+	if !processAuth && !sourceAuth {
 		t.Fatalf(
 			"live Codex integration requires env auth or portable auth.json; refusing to launch without isolated auth. "+
 				"Set %s or provide auth.json in %s",
@@ -407,7 +408,7 @@ func isolatedCodexHome(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(target) })
 
-	if explicitSource || !processAuth {
+	if explicitSource || sourceAuth {
 		for _, name := range []string{"auth.json", "config.json", "config.toml", "models_cache.json", "installation_id"} {
 			if err := copyCodexHomeFile(source, target, name); err != nil {
 				t.Fatalf("copy Codex %s: %v", name, err)

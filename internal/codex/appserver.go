@@ -778,7 +778,7 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Text = firstNonEmpty(stringValue(params, "message"), stringValue(params, "text"))
 	case "error":
 		event.Kind = EventError
-		event.Text = firstNonEmpty(stringValue(params, "message"), stringValue(params, "error"))
+		event.Text = errorEventText(params, raw.Params)
 		event.Err = errors.New(event.Text)
 	case "rawResponseItem/completed":
 		event.Kind = EventRaw
@@ -787,6 +787,17 @@ func eventFromRPC(raw rpcEvent) Event {
 	}
 
 	return event
+}
+
+func errorEventText(params map[string]any, raw json.RawMessage) string {
+	if text := firstNonEmpty(stringValue(params, "message"), stringValue(params, "error")); text != "" {
+		return text
+	}
+	if len(raw) > 0 && string(raw) != "null" {
+		return "Codex app-server error event: " + string(raw)
+	}
+
+	return "Codex app-server emitted error event without details"
 }
 
 func startedItemEvent(event Event, params map[string]any) Event {

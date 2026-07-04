@@ -319,7 +319,7 @@ func TestCodexCLIPermissionAllowForSessionAndReplay(t *testing.T) {
 	client := &recordingClient{permission: acp.PermissionOptionId("acceptForSession")}
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 
-	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
+	session, err := conn.NewSession(ctx, permissionPromptSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestCodexCLICancelPendingPermissionRequest(t *testing.T) {
 	client := newBlockingPermissionClient()
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 
-	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
+	session, err := conn.NewSession(ctx, permissionPromptSessionRequest(t.TempDir()))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -441,6 +441,16 @@ func TestCodexCLICancelPendingPermissionRequest(t *testing.T) {
 	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
 		t.Fatalf("close session: %v", err)
 	}
+}
+
+func permissionPromptSessionRequest(cwd string) acp.NewSessionRequest {
+	return codexacp.NewSessionRequest(
+		cwd,
+		codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+			codexacp.WithCodexApprovalPolicy("untrusted"),
+			codexacp.WithCodexSandboxPolicy("read-only"),
+		)),
+	)
 }
 
 func TestCodexCLIMultimodalPrompt(t *testing.T) {
