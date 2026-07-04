@@ -80,6 +80,8 @@ guarded logout, and OpenTelemetry providers.
 - Prompt streaming for messages, reasoning, plans, tool calls, diffs, usage, and
   session metadata.
 - Codex structured output through session-level JSON Schema on `turn/start`.
+- No ACP slash-command advertisement. `/review`, `/plan`, `/compact`, and other
+  slash-prefixed text is sent to Codex as ordinary `turn/start` input.
 - Codex command/file/generic permission prompts, tool user input, and MCP
   elicitation bridging.
 - MCP stdio and streamable HTTP configuration. Other MCP transports are
@@ -91,6 +93,16 @@ guarded logout, and OpenTelemetry providers.
 - Optional raw Codex rollout extension notifications through `_codex/rawEvent`.
 - OpenTelemetry adapter telemetry plus native Codex app-server OTLP mapping
   without recording prompt/tool secrets by default.
+
+## Slash Commands
+
+Codex app-server does not expose a documented native command discovery and
+execution surface for this adapter to project into ACP `AvailableCommand`
+entries. Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are NOT
+commands and must not be projected as `AvailableCommand` entries absent a
+documented native command projection. Re-entry criteria: documented
+`commands/list`+execute, or documented server-side `/x` parsing in `turn/start`,
+or documented skill→command projection.
 
 ## Docs
 

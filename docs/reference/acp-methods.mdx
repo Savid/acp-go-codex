@@ -27,3 +27,15 @@ Codex extension methods:
 
 Unsupported or removed methods return method-not-found uniformly. `session/fork`
 and `session/set_mode` are intentionally not routed.
+
+## Slash Commands
+
+acp-go-codex advertises no ACP slash commands. `/review`, `/plan`, `/compact`,
+and other slash-prefixed text remains ordinary `session/prompt` text and reaches
+Codex as `turn/start` input.
+
+Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are NOT commands
+and must not be projected as `AvailableCommand` entries absent a documented
+native command projection. Re-entry criteria: documented `commands/list`+execute,
+or documented server-side `/x` parsing in `turn/start`, or documented
+skill→command projection.

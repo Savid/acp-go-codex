@@ -26,6 +26,13 @@
 // Hosts can call [CallForkSession] for the Codex fork extension method
 // _codex/session/fork. Raw Codex events are emitted only when a session request
 // opts in with [WithSessionRawEvents].
+// The adapter advertises no ACP slash commands: slash-prefixed text such as
+// /review, /plan, and /compact remains ordinary session/prompt input for Codex
+// turn/start. Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items)
+// are NOT commands and must not be projected as `AvailableCommand` entries
+// absent a documented native command projection. Re-entry criteria: documented
+// `commands/list`+execute, or documented server-side `/x` parsing in
+// `turn/start`, or documented skill→command projection.
 //
 // Hosts that need adapter telemetry can provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]. The package never configures
