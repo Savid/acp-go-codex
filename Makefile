@@ -56,7 +56,7 @@ modernize-check:
 
 ## docs-audit: check public docs and examples for removed public terms
 docs-audit:
-	@! rg -n 'opencode acp|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp|^  "codex"\s*:' README.md doc.go docs.json docs examples cmd/acp-go-codex/*.go
+	@! rg -n 'opencode acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp|^  "codex"\s*:' README.md doc.go docs.json docs examples cmd/acp-go-codex/*.go
 
 ## audit: run local checks
 audit: fmt lint build test coverage-check tidy vuln modernize-check docs-audit

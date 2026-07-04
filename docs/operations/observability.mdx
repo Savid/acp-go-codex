@@ -204,7 +204,7 @@ The adapter only uses providers passed through `WithTracerProvider`,
 ## Privacy defaults
 
 Telemetry must not include rollout JSONL rows, MCP payload bodies, diffs,
-terminal output, auth tokens, proxy tokens, authorization headers, or raw
+terminal output, auth tokens, network-intermediary credentials, authorization headers, or raw
 prompt text by default.
 
 Native prompt logging is disabled by default. The only supported opt-in is:
