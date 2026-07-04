@@ -490,6 +490,19 @@ func (a *Agent) clientElicitationCapabilities() *acp.ElicitationCapabilities {
 	return a.clientCapabilities.Elicitation
 }
 
+func (a *Agent) clientSupportsFormElicitation() bool {
+	caps := a.clientElicitationCapabilities()
+	if caps == nil {
+		return false
+	}
+	return caps.Form != nil || caps.Url == nil
+}
+
+func (a *Agent) clientSupportsURLElicitation() bool {
+	caps := a.clientElicitationCapabilities()
+	return caps != nil && caps.Url != nil
+}
+
 func (a *Agent) emitUpdate(ctx context.Context, sessionID acp.SessionId, update acp.SessionUpdate) error {
 	conn := a.connection()
 	if conn == nil {

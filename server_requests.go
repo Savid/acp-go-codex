@@ -190,7 +190,7 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 	if conn == nil {
 		return map[string]any{"answers": map[string]any{}}, nil
 	}
-	if caps := a.clientElicitationCapabilities(); caps == nil || caps.Form == nil {
+	if !a.clientSupportsFormElicitation() {
 		return map[string]any{"answers": map[string]any{}}, nil
 	}
 
@@ -290,7 +290,7 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 
 	var request acp.UnstableCreateElicitationRequest
 	if mode == "url" {
-		if caps := a.clientElicitationCapabilities(); caps == nil || caps.Url == nil {
+		if !a.clientSupportsURLElicitation() {
 			return map[string]any{"action": "decline"}, nil
 		}
 		request.Url = &acp.UnstableCreateElicitationUrl{
@@ -301,7 +301,7 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 			Meta:          map[string]any{codexMetaKey: params},
 		}
 	} else {
-		if caps := a.clientElicitationCapabilities(); caps == nil || caps.Form == nil {
+		if !a.clientSupportsFormElicitation() {
 			return map[string]any{"action": "decline"}, nil
 		}
 		request.Form = &acp.UnstableCreateElicitationForm{

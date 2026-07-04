@@ -26,6 +26,35 @@ func enableClientElicitation(agent *Agent, form bool, url bool) {
 	agent.clientCapabilities.Elicitation = caps
 }
 
+func TestClientElicitationCapabilityGating(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		caps     *acp.ElicitationCapabilities
+		wantForm bool
+		wantURL  bool
+	}{
+		{name: "nil", caps: nil, wantForm: false, wantURL: false},
+		{name: "empty object", caps: &acp.ElicitationCapabilities{}, wantForm: true, wantURL: false},
+		{name: "url only", caps: &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}, wantForm: false, wantURL: true},
+		{name: "form explicit", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}, wantForm: true, wantURL: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agent := NewAgent()
+			agent.clientCapabilities.Elicitation = tt.caps
+			if got := agent.clientSupportsFormElicitation(); got != tt.wantForm {
+				t.Fatalf("clientSupportsFormElicitation() = %v, want %v", got, tt.wantForm)
+			}
+			if got := agent.clientSupportsURLElicitation(); got != tt.wantURL {
+				t.Fatalf("clientSupportsURLElicitation() = %v, want %v", got, tt.wantURL)
+			}
+		})
+	}
+}
+
 func TestServerRequestHelperBranches(t *testing.T) {
 	if approvalTitle(codexReqFileChangeApproval, map[string]any{"grantRoot": "/repo"}) != "/repo" {
 		t.Fatal("file approval title did not use grant root")

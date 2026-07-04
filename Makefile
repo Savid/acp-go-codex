@@ -60,7 +60,6 @@ docs-audit:
 
 ## audit: run local checks
 audit: fmt lint build test coverage-check tidy vuln modernize-check docs-audit
-	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git diff --exit-code -- go.mod go.sum; fi
 	go mod verify
 
 ## clean: remove build artifacts

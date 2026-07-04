@@ -1,8 +1,6 @@
 module github.com/savid/acp-go-codex
 
-go 1.25.0
-
-toolchain go1.26.4
+go 1.26.4
 
 require (
 	github.com/coder/acp-go-sdk v0.13.5
