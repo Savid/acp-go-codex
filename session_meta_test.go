@@ -5,6 +5,10 @@ import (
 )
 
 func TestSessionMetaStructuredOutputValidation(t *testing.T) {
+	if err := validateLifecycleMeta(map[string]any{"other": true}); err != nil {
+		t.Fatalf("unrelated lifecycle meta returned error: %v", err)
+	}
+
 	schema := map[string]any{"type": "object"}
 	meta := CodexOptions{
 		Model:               "gpt",
@@ -41,7 +45,16 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 	}
 
 	cases := []map[string]any{
+		{"github.com/savid/acp-go-codex": map[string]any{}},
+		{codexMetaKey: "bad"},
+		{codexMetaKey: map[string]any{"options": "bad"}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"old": true}}},
+		{codexMetaKey: map[string]any{"rawEvent": "bad"}},
+		{codexMetaKey: map[string]any{"rawEvent": map[string]any{"enabled": "yes"}}},
+		{codexMetaKey: map[string]any{"rawEvent": map[string]any{"extra": true}}},
+		{codexMetaKey: map[string]any{"unexpected": true}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"outputSchema": "bad"}}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"effort": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"personality": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"mcpToolApprovalMode": "bad"}}},

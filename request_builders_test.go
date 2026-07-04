@@ -1,9 +1,13 @@
 package codexacp
 
 import (
+	"context"
+	"encoding/json"
+	"io"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 func TestRequestBuilderClones(t *testing.T) {
@@ -46,6 +50,12 @@ func TestRequestBuilderClones(t *testing.T) {
 	}
 	if DeleteSessionRequest("s").SessionId != "s" {
 		t.Fatal("delete session request returned unexpected value")
+	}
+	if SetConfigOptionRequest("s", configEffort, "high").ValueId.Value != "high" {
+		t.Fatal("set config option request returned unexpected value")
+	}
+	if SetModelRequest("s", "gpt-next").ValueId.Value != "gpt-next" {
+		t.Fatal("set model request returned unexpected value")
 	}
 	list := ListSessionsRequest(WithListSessionsCwd("/repo"), WithListSessionsCursor("c"), WithListSessionsMeta(map[string]any{"a": "b"}))
 	if *list.Cwd != "/repo" || *list.Cursor != "c" || list.Meta["a"] != "b" {
@@ -93,6 +103,12 @@ func TestRequestBuilderHelperBranches(t *testing.T) {
 	if cloneMCPServer(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Headers: []acp.HttpHeader{{Name: "H"}}}}).Sse == nil {
 		t.Fatal("SSE MCP server did not clone")
 	}
+	if cloneMCPServer(acp.McpServer{Http: &acp.McpServerHttpInline{Name: "http", Headers: []acp.HttpHeader{{Name: "H"}}}}).Http == nil {
+		t.Fatal("HTTP MCP server did not clone")
+	}
+	if cloneMCPServer(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp"}}).Acp == nil {
+		t.Fatal("ACP MCP server did not clone")
+	}
 	if cloneMCPServer(acp.McpServer{Stdio: &acp.McpServerStdio{Name: "stdio"}}).Stdio == nil {
 		t.Fatal("stdio MCP server did not clone")
 	}
@@ -102,7 +118,77 @@ func TestRequestBuilderHelperBranches(t *testing.T) {
 	if unstableMCPServerFromStable(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}).Sse == nil {
 		t.Fatal("stable SSE MCP did not convert")
 	}
+	if unstableMCPServerFromStable(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp"}}).Acp == nil {
+		t.Fatal("stable ACP MCP did not convert")
+	}
 	if unstableMCPServerFromStable(acp.McpServer{}).Stdio != nil {
 		t.Fatal("empty stable MCP converted to stdio")
+	}
+
+	stdio := StdioMCPServer("stdio", "cmd", []string{"arg"}, map[string]string{"A": "B"})
+	if stdio.Stdio == nil || stdio.Stdio.Args[0] != "arg" || stdio.Stdio.Env[0].Value != "B" {
+		t.Fatalf("StdioMCPServer = %#v", stdio)
+	}
+	httpServer := HTTPMCPServer("http", "https://example.com", map[string]string{"H": "V"})
+	if httpServer.Http == nil || httpServer.Http.Headers[0].Value != "V" {
+		t.Fatalf("HTTPMCPServer = %#v", httpServer)
+	}
+	options := NewCodexOptions(WithCodexMCPToolApprovalMode("prompt"))
+	if options.MCPToolApprovalMode != "prompt" {
+		t.Fatalf("MCP approval option = %#v", options)
+	}
+}
+
+func TestCallForkSessionHelper(t *testing.T) {
+	ctx := context.Background()
+	c2aR, c2aW := io.Pipe()
+	a2cR, a2cW := io.Pipe()
+	t.Cleanup(func() {
+		_ = c2aR.Close()
+		_ = c2aW.Close()
+		_ = a2cR.Close()
+		_ = a2cW.Close()
+	})
+
+	clientConn := acp.NewClientSideConnection(&recordingClient{}, c2aW, a2cR)
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return newSpyCodexClient(), nil
+	}))
+	agentConn := newLocalAgentConnection(agent, a2cW, c2aR)
+	agent.setAgentClient(agentConn)
+
+	if _, err := clientConn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	parent, err := clientConn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+	fork, err := CallForkSession(ctx, clientConn, ForkSessionRequest(parent.SessionId, "/tmp/project"))
+	if err != nil {
+		t.Fatalf("CallForkSession returned error: %v", err)
+	}
+	if fork.SessionId == "" {
+		t.Fatalf("fork response = %#v", fork)
+	}
+	if _, err := CallForkSession(ctx, clientConn, acp.UnstableForkSessionRequest{}); err == nil {
+		t.Fatal("CallForkSession accepted invalid request")
+	}
+
+	badC2AR, badC2AW := io.Pipe()
+	badA2CR, badA2CW := io.Pipe()
+	t.Cleanup(func() {
+		_ = badC2AR.Close()
+		_ = badC2AW.Close()
+		_ = badA2CR.Close()
+		_ = badA2CW.Close()
+	})
+	badClientConn := acp.NewClientSideConnection(&recordingClient{}, badC2AW, badA2CR)
+	badPeer := acp.NewConnection(func(context.Context, string, json.RawMessage) (any, *acp.RequestError) {
+		return "not a fork response", nil
+	}, badA2CW, badC2AR)
+	_ = badPeer
+	if _, err := CallForkSession(ctx, badClientConn, ForkSessionRequest("parent", "/tmp/project")); err == nil {
+		t.Fatal("CallForkSession accepted undecodable response")
 	}
 }

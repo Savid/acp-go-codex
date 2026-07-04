@@ -49,6 +49,10 @@ func TestMaterializeRolloutFileHookErrorBranches(t *testing.T) {
 }
 
 func TestMaterializeRolloutBranches(t *testing.T) {
+	emptyPath, err := materializeRollout(nil)
+	if err != nil || emptyPath != "" {
+		t.Fatalf("empty materializeRollout path=%q err=%v", emptyPath, err)
+	}
 	path, err := materializeRollout([]SessionStoreEntry{json.RawMessage(`{"type":"a"}`)})
 	if err != nil {
 		t.Fatalf("materializeRollout returned error: %v", err)

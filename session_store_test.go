@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -73,9 +74,11 @@ func TestInMemorySessionStoreReplaceValidation(t *testing.T) {
 		main         SessionKey
 		replacements []SessionStoreReplacement
 	}{
+		{name: "missing session id", main: SessionKey{}, replacements: []SessionStoreReplacement{{Key: SessionKey{}}}},
 		{name: "main subpath", main: SessionKey{SessionID: "s", Subpath: "x"}, replacements: []SessionStoreReplacement{{Key: SessionKey{SessionID: "s", Subpath: "x"}}}},
 		{name: "missing main", main: SessionKey{SessionID: "s"}, replacements: []SessionStoreReplacement{{Key: SessionKey{SessionID: "s", Subpath: "x"}}}},
 		{name: "wrong session", main: SessionKey{SessionID: "s"}, replacements: []SessionStoreReplacement{{Key: SessionKey{SessionID: "other"}}}},
+		{name: "duplicate main", main: SessionKey{SessionID: "s"}, replacements: []SessionStoreReplacement{{Key: SessionKey{SessionID: "s"}}, {Key: SessionKey{SessionID: "s"}}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -83,5 +86,162 @@ func TestInMemorySessionStoreReplaceValidation(t *testing.T) {
 				t.Fatal("Replace accepted invalid generation")
 			}
 		})
+	}
+}
+
+func TestInMemorySessionStoreEdgeBranches(t *testing.T) {
+	ctx := context.Background()
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	var nilStore *InMemorySessionStore
+	key := SessionKey{SessionID: "s"}
+
+	if err := nilStore.Append(ctx, key, []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
+		t.Fatal("nil Append succeeded")
+	}
+	if _, err := nilStore.Load(ctx, key); err == nil {
+		t.Fatal("nil Load succeeded")
+	}
+	if err := nilStore.Replace(ctx, key, []SessionStoreReplacement{{Key: key}}); err == nil {
+		t.Fatal("nil Replace succeeded")
+	}
+	if err := nilStore.Delete(ctx, key); err == nil {
+		t.Fatal("nil Delete succeeded")
+	}
+	if _, err := nilStore.ListSessions(ctx); err == nil {
+		t.Fatal("nil ListSessions succeeded")
+	}
+	if _, err := nilStore.ListSubkeys(ctx, key); err == nil {
+		t.Fatal("nil ListSubkeys succeeded")
+	}
+
+	store := &InMemorySessionStore{}
+	if err := store.Append(canceled, key, []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Append err=%v", err)
+	}
+	if _, err := store.Load(canceled, key); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Load err=%v", err)
+	}
+	if err := store.Replace(canceled, key, []SessionStoreReplacement{{Key: key}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Replace err=%v", err)
+	}
+	if err := store.Delete(canceled, key); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Delete err=%v", err)
+	}
+	if _, err := store.ListSessions(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ListSessions err=%v", err)
+	}
+	if _, err := store.ListSubkeys(canceled, key); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ListSubkeys err=%v", err)
+	}
+
+	if err := store.Append(ctx, key, nil); err != nil {
+		t.Fatalf("empty Append returned error: %v", err)
+	}
+	if err := store.Append(ctx, key, []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err != nil {
+		t.Fatalf("Append with zero-value maps returned error: %v", err)
+	}
+	loaded, err := store.Load(ctx, key)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("Load after append = %q err=%v", loaded, err)
+	}
+	loaded[0][0] = '{'
+	loadedAgain, err := store.Load(ctx, key)
+	if err != nil || string(loadedAgain[0]) != `{"x":1}` {
+		t.Fatalf("Load did not clone entries: %q err=%v", loadedAgain, err)
+	}
+	if err := store.Replace(ctx, key, []SessionStoreReplacement{{Key: key}}); err != nil {
+		t.Fatalf("Replace tombstone returned error: %v", err)
+	}
+	if got, err := store.Load(ctx, key); err != nil || got != nil {
+		t.Fatalf("Load tombstoned = %q err=%v", got, err)
+	}
+	if summaries, err := store.ListSessions(ctx); err != nil || len(summaries) != 0 {
+		t.Fatalf("ListSessions after tombstone = %#v err=%v", summaries, err)
+	}
+	sub := SessionKey{SessionID: "s", Subpath: "sub"}
+	if err := store.Append(ctx, sub, []SessionStoreEntry{SessionStoreEntry(`{"sub":true}`)}); err != nil {
+		t.Fatalf("Append tombstoned sub returned error: %v", err)
+	}
+	if subkeys, err := store.ListSubkeys(ctx, key); err != nil || len(subkeys) != 0 {
+		t.Fatalf("ListSubkeys tombstoned = %#v err=%v", subkeys, err)
+	}
+	if !store.isTombstonedLocked(sub) {
+		t.Fatal("subpath did not inherit main tombstone")
+	}
+}
+
+func TestInMemorySessionStoreListAndDeleteBranches(t *testing.T) {
+	ctx := context.Background()
+	zeroReplace := &InMemorySessionStore{}
+	if err := zeroReplace.Replace(ctx, SessionKey{SessionID: "zero"}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: "zero"},
+		Entries: []SessionStoreEntry{SessionStoreEntry(`{"zero":true}`)},
+	}}); err != nil {
+		t.Fatalf("zero Replace: %v", err)
+	}
+	zeroDelete := &InMemorySessionStore{}
+	if err := zeroDelete.Delete(ctx, SessionKey{SessionID: "zero"}); err != nil {
+		t.Fatalf("zero Delete: %v", err)
+	}
+	if zeroDelete.isTombstonedLocked(SessionKey{SessionID: "other"}) {
+		t.Fatal("unexpected tombstone in zero delete store")
+	}
+
+	store := NewInMemorySessionStore()
+	mainA := SessionKey{SessionID: "a"}
+	mainB := SessionKey{SessionID: "b"}
+	subA := SessionKey{SessionID: "a", Subpath: "sub"}
+	if err := store.Append(ctx, mainB, []SessionStoreEntry{SessionStoreEntry(`{"b":1}`)}); err != nil {
+		t.Fatalf("Append mainB: %v", err)
+	}
+	if err := store.Append(ctx, mainA, []SessionStoreEntry{SessionStoreEntry(`{"a":1}`)}); err != nil {
+		t.Fatalf("Append mainA: %v", err)
+	}
+	if err := store.Append(ctx, subA, []SessionStoreEntry{SessionStoreEntry(`{"sub":1}`)}); err != nil {
+		t.Fatalf("Append subA: %v", err)
+	}
+	summaries, err := store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(summaries) != 2 || summaries[0].SessionID == "" || summaries[1].SessionID == "" {
+		t.Fatalf("summaries = %#v", summaries)
+	}
+
+	if err := store.Delete(ctx, subA); err != nil {
+		t.Fatalf("Delete subA: %v", err)
+	}
+	if got, err := store.Load(ctx, subA); err != nil || len(got) != 0 {
+		t.Fatalf("deleted sub load = %q err=%v", got, err)
+	}
+	if got, err := store.Load(ctx, mainA); err != nil || len(got) != 1 {
+		t.Fatalf("main load after sub delete = %q err=%v", got, err)
+	}
+
+	missingSub := SessionKey{SessionID: "a", Subpath: "missing"}
+	if err := store.Delete(ctx, missingSub); err != nil {
+		t.Fatalf("Delete missing sub: %v", err)
+	}
+	if !store.isTombstonedLocked(missingSub) {
+		t.Fatal("missing sub delete did not create tombstone")
+	}
+	if store.isTombstonedLocked(SessionKey{SessionID: "other", Subpath: "sub"}) {
+		t.Fatal("unrelated subpath was tombstoned")
+	}
+
+	sortStore := &InMemorySessionStore{
+		entries: map[SessionKey][]SessionStoreEntry{
+			{SessionID: "older"}: {SessionStoreEntry(`{"older":true}`)},
+			{SessionID: "newer"}: {SessionStoreEntry(`{"newer":true}`)},
+		},
+		updatedAt: map[SessionKey]int64{
+			{SessionID: "older"}: 1,
+			{SessionID: "newer"}: 2,
+		},
+	}
+	sorted, err := sortStore.ListSessions(ctx)
+	if err != nil || len(sorted) != 2 || sorted[0].SessionID != "newer" {
+		t.Fatalf("sorted sessions = %#v err=%v", sorted, err)
 	}
 }

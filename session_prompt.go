@@ -284,10 +284,10 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 		return nil
 	}
 	raw := decodedRawEvent(event.RawParams)
-	raw["method"] = event.RawMethod
 	if !s.rawMessages.ShouldEmit(raw) {
 		return nil
 	}
+	raw["method"] = event.RawMethod
 
 	conn := s.agent.connection()
 	if conn == nil {

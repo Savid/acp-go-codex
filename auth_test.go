@@ -124,4 +124,81 @@ func TestAuthHelperBranches(t *testing.T) {
 	if !isCodexAuthError(errors.New("401 unauthorized")) || isCodexAuthError(errors.New("plain failure")) {
 		t.Fatal("auth error classifier failed")
 	}
+	if converted := toCodexAuthTokens(tokens); converted.AccessToken != "a" || converted.AccountID != "acct" || converted.ExpiresAtUnixSec != 42 {
+		t.Fatalf("converted tokens = %#v", converted)
+	}
+	if codexAuthRequiredError(nil, nil) != nil {
+		t.Fatal("nil auth error changed")
+	}
+}
+
+func TestAuthErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	closed := NewAgent()
+	if err := closed.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if _, err := closed.Authenticate(ctx, acp.AuthenticateRequest{MethodId: authMethodChatGPTAuthTokens}); err == nil {
+		t.Fatal("Authenticate on closed agent succeeded")
+	}
+	if _, err := closed.Logout(ctx, acp.LogoutRequest{}); err == nil {
+		t.Fatal("Logout on closed agent succeeded")
+	}
+
+	agent := NewAgent()
+	if _, err := agent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: "terminal"}); err == nil {
+		t.Fatal("Authenticate accepted unsupported method")
+	}
+	if _, err := agent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: authMethodChatGPTAuthTokens, Meta: map[string]any{}}); err == nil {
+		t.Fatal("Authenticate accepted missing token metadata")
+	}
+
+	meta := map[string]any{codexMetaKey: map[string]any{"auth": map[string]any{authChatGPTAuthTokensMetaPath: map[string]any{"accessToken": "access"}}}}
+	newClientErr := errors.New("new client failed")
+	failingNewClient := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return nil, newClientErr
+	}))
+	if _, err := failingNewClient.Authenticate(ctx, acp.AuthenticateRequest{MethodId: authMethodChatGPTAuthTokens, Meta: meta}); !errors.Is(err, newClientErr) {
+		t.Fatalf("Authenticate newClient error = %v", err)
+	}
+	if _, ok := failingNewClient.externalAuthTokens(); ok {
+		t.Fatal("Authenticate left external auth tokens after newClient failure")
+	}
+
+	loginClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), loginErr: errors.New("login failed")}
+	loginAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return loginClient, nil
+	}))
+	if _, err := loginAgent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: authMethodChatGPTAuthTokens, Meta: meta}); err == nil {
+		t.Fatal("Authenticate swallowed login failure")
+	}
+	if !loginClient.closed {
+		t.Fatal("newClient did not close client after login failure")
+	}
+
+	logoutClientErr := errors.New("logout client failed")
+	logoutNewClient := NewAgent(
+		WithCodexAllowAccountLogout(true),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return nil, logoutClientErr }),
+	)
+	if _, err := logoutNewClient.Logout(ctx, acp.LogoutRequest{}); !errors.Is(err, logoutClientErr) {
+		t.Fatalf("Logout newClient error = %v", err)
+	}
+
+	logoutErr := errors.New("logout failed")
+	logoutClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), logoutErr: logoutErr}
+	logoutAgent := NewAgent(
+		WithCodexAllowAccountLogout(true),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return logoutClient, nil }),
+	)
+	closeErr := errors.New("logout close failed")
+	logoutSession := newSession(logoutAgent, "logout-session", "/tmp/project", nil, codex.Thread{ID: "logout-thread"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}, sessionMeta{})
+	if err := logoutAgent.storeStartedSession(logoutSession); err != nil {
+		t.Fatalf("store logout session: %v", err)
+	}
+	if _, err := logoutAgent.Logout(ctx, acp.LogoutRequest{}); !errors.Is(err, logoutErr) {
+		t.Fatalf("Logout error = %v", err)
+	} else if !errors.Is(err, closeErr) {
+		t.Fatalf("Logout missing session close error = %v", err)
+	}
 }

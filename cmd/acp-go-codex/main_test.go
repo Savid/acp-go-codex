@@ -105,6 +105,32 @@ func TestRunErrorPathsAndVersion(t *testing.T) {
 	}
 }
 
+func TestRunReturnsPendingSignalCode(t *testing.T) {
+	originalServe := serve
+	originalShutdown := shutdownOpenTelemetry
+	t.Cleanup(func() {
+		serve = originalServe
+		shutdownOpenTelemetry = originalShutdown
+	})
+
+	serve = func(context.Context, io.Reader, io.Writer, ...codexacp.Option) error {
+		proc, err := os.FindProcess(os.Getpid())
+		if err != nil {
+			t.Fatalf("FindProcess returned error: %v", err)
+		}
+		if err := proc.Signal(syscall.SIGHUP); err != nil {
+			t.Fatalf("signal self: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
+
+	if code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != signalCode(syscall.SIGHUP) {
+		t.Fatalf("run signal code = %d, want %d", code, signalCode(syscall.SIGHUP))
+	}
+}
+
 func TestRunCodexCLISubcommand(t *testing.T) {
 	originalCLI := runCodexCLICommand
 	t.Cleanup(func() { runCodexCLICommand = originalCLI })

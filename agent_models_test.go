@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -130,6 +131,46 @@ func TestCodexConfigOptionsExposeModelCatalogAndEffort(t *testing.T) {
 	}
 }
 
+func TestCodexConfigOptionsEdgeBranches(t *testing.T) {
+	models := []codex.Model{
+		{},
+		{
+			ID:          "gpt-a",
+			Name:        "GPT A",
+			Context:     123,
+			Description: "primary",
+			ReasoningEfforts: []codex.ModelReasoningEffort{
+				{ID: "low"},
+			},
+			Raw: map[string]any{"capabilities": []any{"vision", "", 42}},
+		},
+		{ID: "gpt-a", Name: "duplicate"},
+	}
+
+	options := codexConfigOptions("custom-model", "", "", "priority", "friendly", models)
+	if len(options) != 4 {
+		t.Fatalf("config options = %#v", options)
+	}
+	if options[1].Select.CurrentValue != acp.SessionConfigValueId(modeDefault) {
+		t.Fatalf("default mode option = %#v", options[1].Select)
+	}
+	modelValues := *options[0].Select.Options.Ungrouped
+	if len(modelValues) != 2 || modelValues[1].Value != "custom-model" {
+		t.Fatalf("model values = %#v", modelValues)
+	}
+	modelMeta, _ := modelValues[0].Meta[codexMetaKey].(map[string]any)
+	if modelMeta["contextWindow"] == nil {
+		t.Fatalf("model meta missing context: %#v", modelMeta)
+	}
+	capabilities, _ := modelMeta["capabilities"].([]string)
+	if len(capabilities) != 1 || capabilities[0] != "vision" {
+		t.Fatalf("model capabilities = %#v", modelMeta["capabilities"])
+	}
+	if modelByID("missing", models) != nil {
+		t.Fatal("modelByID found missing model")
+	}
+}
+
 func TestEffortConfigValuesCoverCatalogEdges(t *testing.T) {
 	models := []codex.Model{{
 		ID:                     "gpt-5.5",
@@ -194,6 +235,40 @@ func TestSessionConfigSettersRespectTurnLock(t *testing.T) {
 		},
 	}); err == nil {
 		t.Fatal("SetSessionConfigOption model ignored canceled turn lock")
+	}
+}
+
+func TestSetSessionConfigOptionErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("missing", configModel, "gpt")); err == nil {
+		t.Fatal("SetSessionConfigOption accepted missing session")
+	}
+	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {
+		t.Fatal("SetSessionConfigOption accepted empty request")
+	}
+	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		Boolean: &acp.SetSessionConfigOptionBoolean{
+			SessionId: "missing",
+			ConfigId:  configModel,
+			Value:     true,
+		},
+	}); err == nil {
+		t.Fatal("SetSessionConfigOption accepted boolean config")
+	}
+	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{}); err == nil {
+		t.Fatal("SetSessionMode succeeded")
+	}
+
+	updateErr := errors.New("update failed")
+	agent = NewAgent()
+	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
+	session := newSession(agent, "session-1", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, newSpyCodexClient(), sessionMeta{})
+	if err := agent.storeStartedSession(session); err != nil {
+		t.Fatalf("store session: %v", err)
+	}
+	if _, err := agent.SetSessionConfigOption(ctx, SetModelRequest("session-1", "gpt-other")); !errors.Is(err, updateErr) {
+		t.Fatalf("SetSessionConfigOption update error = %v", err)
 	}
 }
 

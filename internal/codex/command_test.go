@@ -279,6 +279,29 @@ while read line; do :; done
 	killProcessID = origKillPID
 	_ = killProcess(killFail)
 	processCloseGrace = origGrace
+
+	finalKillFail := sleepCommand(t, "10")
+	if err := startProcess(finalKillFail); err != nil {
+		t.Fatalf("start final-kill-fail process: %v", err)
+	}
+	signalCount := 0
+	getProcessGroupID = func(int) (int, error) { return 123, nil }
+	killProcessID = func(int, syscall.Signal) error {
+		signalCount++
+		if signalCount == 1 {
+			return nil
+		}
+		return errors.New("final kill failed")
+	}
+	processCloseGrace = 0
+	if err := (processCloser{cmd: finalKillFail}).Close(); err == nil {
+		t.Fatal("processCloser ignored final kill error")
+	}
+	getProcessGroupID = origGetPGID
+	killProcessID = origKillPID
+	_ = killProcess(finalKillFail)
+	processCloseGrace = origGrace
+
 	stubborn := sleepCommand(t, "10")
 	if err := startProcess(stubborn); err != nil {
 		t.Fatalf("start stubborn process: %v", err)

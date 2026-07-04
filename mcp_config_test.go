@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -43,6 +44,13 @@ func TestMCPConfigArgs(t *testing.T) {
 	_, _, err = agent.mcpServerConfigArgs([]acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://example.com/sse"}}}, "")
 	if err == nil {
 		t.Fatal("SSE MCP config succeeded")
+	}
+}
+
+func TestTOMLEnvTableSkipsEmptyNames(t *testing.T) {
+	got := tomlEnvTable([]acp.EnvVariable{{Name: "", Value: "skip"}, {Name: "A", Value: "B"}})
+	if got != `{ A = "B" }` {
+		t.Fatalf("tomlEnvTable = %q", got)
 	}
 }
 
@@ -107,8 +115,38 @@ func containsArg(args []string, needle string) bool {
 }
 
 func TestMCPConfigRejectsMissingTransportAndSanitizesName(t *testing.T) {
+	agent := NewAgent()
+	ctx := context.Background()
+	if servers, err := agent.prepareMCPServers(ctx, "s", []acp.McpServer{
+		{Stdio: &acp.McpServerStdio{Name: "stdio", Command: "cmd"}},
+		{Http: &acp.McpServerHttpInline{Name: "http", Url: "https://example.com"}},
+	}); err != nil || len(servers) != 2 {
+		t.Fatalf("prepareMCPServers = %#v err=%v", servers, err)
+	}
+	if _, err := agent.prepareMCPServers(ctx, "s", []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "sse"}}}); err == nil {
+		t.Fatal("prepareMCPServers accepted SSE")
+	}
+	if _, err := agent.prepareMCPServers(ctx, "s", []acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "acp"}}}); err == nil {
+		t.Fatal("prepareMCPServers accepted ACP")
+	}
+	if _, err := agent.prepareMCPServers(ctx, "s", []acp.McpServer{{}}); err == nil {
+		t.Fatal("prepareMCPServers accepted missing transport")
+	}
 	if _, _, err := NewAgent().mcpServerConfigArgs([]acp.McpServer{{}}, ""); err == nil {
 		t.Fatal("MCP config accepted server without transport")
+	}
+	seen := map[string]int{}
+	if name := mcpServerConfigName(acp.McpServer{Stdio: &acp.McpServerStdio{Name: "Same"}}, 0, seen); name != "Same" {
+		t.Fatalf("first duplicate name = %q", name)
+	}
+	if name := mcpServerConfigName(acp.McpServer{Http: &acp.McpServerHttpInline{Name: "Same"}}, 1, seen); name != "Same_2" {
+		t.Fatalf("second duplicate name = %q", name)
+	}
+	if name := mcpServerConfigName(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "Client"}}, 2, map[string]int{}); name != "Client" {
+		t.Fatalf("ACP name = %q", name)
+	}
+	if name := mcpServerConfigName(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "Events"}}, 3, map[string]int{}); name != "Events" {
+		t.Fatalf("SSE name = %q", name)
 	}
 	if name := mcpServerConfigName(acp.McpServer{Stdio: &acp.McpServerStdio{Name: "!!!"}}, 4, map[string]int{}); name != "server_5" {
 		t.Fatalf("sanitized empty MCP name = %q", name)
@@ -145,5 +183,21 @@ func TestMCPHeaderEnvTable(t *testing.T) {
 	}
 	if table := mcpHeaderEnvTable("empty", []acp.HttpHeader{{}}, map[string]string{}); table != "" {
 		t.Fatalf("empty env_http_headers table = %s", table)
+	}
+}
+
+func TestStableMCPServersFromUnstable(t *testing.T) {
+	if stableMCPServersFromUnstable(nil) != nil {
+		t.Fatal("nil unstable MCP conversion returned non-nil")
+	}
+	servers := stableMCPServersFromUnstable([]acp.UnstableMcpServer{
+		{Stdio: &acp.McpServerStdio{Name: "stdio", Command: "cmd"}},
+		{Http: &acp.UnstableMcpServerHttp{Name: "http", Url: "https://example.com", Headers: []acp.HttpHeader{{Name: "H", Value: "V"}}, Meta: map[string]any{"m": "h"}}},
+		{Acp: &acp.UnstableMcpServerAcpInline{Name: "acp", Id: "id", Meta: map[string]any{"m": "a"}}},
+		{Sse: &acp.UnstableMcpServerSse{Name: "sse", Url: "https://example.com/sse", Headers: []acp.HttpHeader{{Name: "S", Value: "V"}}, Meta: map[string]any{"m": "s"}}},
+		{},
+	})
+	if len(servers) != 4 || servers[0].Stdio == nil || servers[1].Http == nil || servers[2].Acp == nil || servers[3].Sse == nil {
+		t.Fatalf("stable MCP servers = %#v", servers)
 	}
 }

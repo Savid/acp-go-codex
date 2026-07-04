@@ -82,6 +82,10 @@ func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	options.ConcurrencyLimits = limits
+	clientCallLimit := limits.MaxConcurrentClientCalls
+	if clientCallLimit < 0 {
+		clientCallLimit = 0
+	}
 
 	log := options.Logger
 	if log == nil {
@@ -101,7 +105,7 @@ func NewAgent(opts ...Option) *Agent {
 		sessions:      make(map[acp.SessionId]*session),
 		deleted:       make(map[acp.SessionId]struct{}),
 		explicitStore: options.SessionStore != nil,
-		clientCalls:   make(chan struct{}, limits.MaxConcurrentClientCalls),
+		clientCalls:   make(chan struct{}, clientCallLimit),
 	}
 }
 

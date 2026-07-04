@@ -102,6 +102,9 @@ func TestPlaceholderClientLifecycleMethods(t *testing.T) {
 	if err := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: resumed.ID}); err != nil {
 		t.Fatalf("DeleteThread returned error: %v", err)
 	}
+	if err := client.DeleteThread(ctx, ThreadDeleteRequest{}); err != nil {
+		t.Fatalf("DeleteThread empty thread returned error: %v", err)
+	}
 	if _, err := client.ReadThread(ctx, ThreadReadRequest{ThreadID: resumed.ID}); !errors.Is(err, ErrThreadNotFound) {
 		t.Fatalf("ReadThread after DeleteThread error = %v, want ErrThreadNotFound", err)
 	}

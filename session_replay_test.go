@@ -115,6 +115,12 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	if replayEventMsg(map[string]any{"type": "context_compacted"})[0].AgentThoughtChunk == nil {
 		t.Fatal("context_compacted fallback did not emit thought")
 	}
+	if replayEventMsg(map[string]any{"type": "unknown"}) != nil {
+		t.Fatal("unknown event message emitted update")
+	}
+	if replayResponseItem(map[string]any{"type": "message", "role": "user"}, replayFallbacks{messageUser: true}) != nil {
+		t.Fatal("empty message response item emitted update")
+	}
 	if replayResponseItem(map[string]any{"type": "reasoning"}, replayFallbacks{}) != nil {
 		t.Fatal("reasoning without fallback emitted update")
 	}
@@ -146,18 +152,29 @@ func TestReplayAdditionalBranches(t *testing.T) {
 		t.Fatal("firstNonNil all nil failed")
 	}
 
-	session := &session{agent: NewAgent(), id: "s"}
-	if err := session.replayRollout(context.Background(), []SessionStoreEntry{SessionStoreEntry(`{"payload":{}}`)}); err == nil {
+	replaySession := &session{agent: NewAgent(), id: "s"}
+	if err := replaySession.replayRollout(context.Background(), []SessionStoreEntry{SessionStoreEntry(`{"payload":{}}`)}); err == nil {
 		t.Fatal("replayRollout invalid row succeeded")
 	}
-	if err := session.replayThreadHistory(context.Background()); err != nil {
+	updateErr := errors.New("update failed")
+	errorAgent := NewAgent()
+	errorAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
+	errorSession := &session{agent: errorAgent, id: "s"}
+	if err := errorSession.replayRollout(context.Background(), []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}`)}); !errors.Is(err, updateErr) {
+		t.Fatalf("replayRollout update error = %v", err)
+	}
+	if err := replaySession.replayThreadHistory(context.Background()); err != nil {
 		t.Fatalf("replayThreadHistory without client returned error: %v", err)
 	}
-	session.client = &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("unused")}
-	session.codexThreadID = "thread"
-	session.client = readErrorClient{Client: session.client}
-	if err := session.replayThreadHistory(context.Background()); err == nil {
+	replaySession.client = &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("unused")}
+	replaySession.codexThreadID = "thread"
+	replaySession.client = readErrorClient{Client: replaySession.client}
+	if err := replaySession.replayThreadHistory(context.Background()); err == nil {
 		t.Fatal("replayThreadHistory read error succeeded")
+	}
+	historySession := &session{agent: errorAgent, id: "s", client: newSpyCodexClient(), codexThreadID: "thread-1"}
+	if err := historySession.replayThreadHistory(context.Background()); !errors.Is(err, updateErr) {
+		t.Fatalf("replayThreadHistory update error = %v", err)
 	}
 }
 

@@ -9,6 +9,15 @@ import (
 
 func TestSessionInteractionCancellationBranches(t *testing.T) {
 	session := &session{}
+	release, err := session.acquireTurn(context.Background())
+	if err != nil {
+		t.Fatalf("acquireTurn returned error: %v", err)
+	}
+	if _, err := session.acquireTurn(context.Background()); err == nil {
+		t.Fatal("acquireTurn ignored prompt backpressure")
+	}
+	release()
+
 	interactionCtx, finish := session.beginInteraction(context.TODO(), "")
 	if interactionCtx.Err() != nil {
 		t.Fatal("interaction without parent started canceled")

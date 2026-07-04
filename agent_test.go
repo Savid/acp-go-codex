@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"path/filepath"
@@ -239,8 +240,10 @@ func newPlaceholderAgent(opts ...Option) *Agent {
 }
 
 type recordingClient struct {
-	mu      sync.Mutex
-	updates []acp.SessionNotification
+	mu           sync.Mutex
+	updates      []acp.SessionNotification
+	elicitations []acp.UnstableCreateElicitationRequest
+	extensions   []extensionNotification
 }
 
 func (c *recordingClient) Updates() []acp.SessionNotification {
@@ -259,8 +262,40 @@ func (c *recordingClient) SessionUpdate(_ context.Context, notification acp.Sess
 	return nil
 }
 
+func (c *recordingClient) Elicitations() []acp.UnstableCreateElicitationRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]acp.UnstableCreateElicitationRequest(nil), c.elicitations...)
+}
+
+func (c *recordingClient) Extensions() []extensionNotification {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]extensionNotification(nil), c.extensions...)
+}
+
+func (c *recordingClient) UnstableCreateElicitation(_ context.Context, request acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.elicitations = append(c.elicitations, request)
+	resp := acp.NewUnstableCreateElicitationResponseAccept()
+	resp.Accept.Content = map[string]any{"ok": true}
+	return resp, nil
+}
+
 func (*recordingClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
+}
+
+func (c *recordingClient) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.extensions = append(c.extensions, extensionNotification{method: method, params: append(json.RawMessage(nil), params...)})
+	return map[string]any{"ok": true}, nil
 }
 
 func (*recordingClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
@@ -341,6 +376,91 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	}
 	agent.updateAccountForClient(client, "", codex.Account{})
 	agent.applyCodexClientEvent(context.Background(), client, codex.Event{Kind: codex.EventRaw})
+}
+
+func TestAgentCoreBranchEdges(t *testing.T) {
+	ctx := context.Background()
+
+	invalidLimits := []ConcurrencyLimits{
+		{MaxActiveSessions: -1},
+		{MaxConcurrentPrompts: -1},
+		{MaxConcurrentClientCalls: -1},
+	}
+	for _, limits := range invalidLimits {
+		agent := NewAgent(WithConcurrencyLimits(limits))
+		if _, err := agent.Initialize(ctx, acp.InitializeRequest{}); err == nil {
+			t.Fatalf("Initialize accepted invalid limits %#v", limits)
+		}
+	}
+	if got := selectPositionEncoding([]acp.PositionEncodingKind{acp.PositionEncodingKindUtf16}); got != acp.PositionEncodingKindUtf16 {
+		t.Fatalf("selectPositionEncoding = %q", got)
+	}
+
+	var gotOptions codex.Options
+	envAgent := NewAgent(withClientFactory(func(_ context.Context, options codex.Options) (codex.Client, error) {
+		gotOptions = options
+		return newSpyCodexClient(), nil
+	}))
+	if _, err := envAgent.newClient(ctx, []acp.McpServer{
+		StdioMCPServer("stdio", "cmd", nil, map[string]string{"A": "B"}),
+		HTTPMCPServer("http", "https://example.test", map[string]string{"Authorization": "secret"}),
+	}, map[string]string{"OVERLAY": "1"}, mcpApprovalModePrompt); err != nil {
+		t.Fatalf("newClient with env overlays returned error: %v", err)
+	}
+	if gotOptions.Env["OVERLAY"] != "1" || len(gotOptions.Env) < 2 {
+		t.Fatalf("newClient env = %#v", gotOptions.Env)
+	}
+	if _, err := envAgent.newClient(ctx, []acp.McpServer{StdioMCPServer("stdio", "cmd", nil, nil)}, nil, "bad"); err == nil {
+		t.Fatal("newClient accepted invalid MCP approval mode")
+	}
+
+	nilCalls := NewAgent()
+	nilCalls.clientCalls = nil
+	release, err := nilCalls.acquireClientCall(ctx)
+	if err != nil {
+		t.Fatalf("acquireClientCall nil channel returned error: %v", err)
+	}
+	release()
+
+	closedForSession := NewAgent()
+	if err := closedForSession.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if _, err := closedForSession.session("missing"); err == nil {
+		t.Fatal("session on closed agent succeeded")
+	}
+
+	closedForStore := NewAgent()
+	if err := closedForStore.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	closedSession := newSession(closedForStore, "closed", "/tmp/project", nil, codex.Thread{ID: "closed"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{})
+	if err := closedForStore.storeStartedSession(closedSession); err == nil {
+		t.Fatal("storeStartedSession on closed agent succeeded")
+	}
+
+	limited := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	first := newSession(limited, "first", "/tmp/project", nil, codex.Thread{ID: "first"}, newSpyCodexClient(), sessionMeta{})
+	if err := limited.storeStartedSession(first); err != nil {
+		t.Fatalf("store first session: %v", err)
+	}
+	second := newSession(limited, "second", "/tmp/project", nil, codex.Thread{ID: "second"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{})
+	if err := limited.storeStartedSession(second); err == nil {
+		t.Fatal("storeStartedSession ignored active session limit")
+	}
+
+	replacing := NewAgent()
+	old := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{})
+	if err := replacing.storeStartedSession(old); err != nil {
+		t.Fatalf("store old session: %v", err)
+	}
+	newer := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{})
+	if err := replacing.storeStartedSession(newer); err != nil {
+		t.Fatalf("replace session: %v", err)
+	}
+	if replacing.removeSessionIf("same", old) {
+		t.Fatal("removeSessionIf removed non-current session")
+	}
 }
 
 type spyCodexClient struct {
