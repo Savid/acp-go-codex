@@ -16,15 +16,7 @@ import (
 )
 
 func TestCommandHelpers(t *testing.T) {
-	t.Setenv(envCodexPath, "/tmp/codex-from-env")
-	path, err := resolveCodexPath("")
-	if err != nil {
-		t.Fatalf("resolveCodexPath env returned error: %v", err)
-	}
-	if path != "/tmp/codex-from-env" {
-		t.Fatalf("path = %q", path)
-	}
-	path, err = resolveCodexPath("/custom/codex")
+	path, err := resolveCodexPath("/custom/codex")
 	if err != nil || path != "/custom/codex" {
 		t.Fatalf("explicit path=%q err=%v", path, err)
 	}
@@ -54,7 +46,6 @@ func TestCommandHelpers(t *testing.T) {
 	if compareSemver("0.141.1", minCodexVersion) <= 0 || compareSemver("0.140.9", minCodexVersion) >= 0 || compareSemver(minCodexVersion, minCodexVersion) != 0 {
 		t.Fatal("compareSemver failed")
 	}
-	t.Setenv(envCodexPath, "")
 	t.Setenv("PATH", "")
 	if _, err := resolveCodexPath(""); err == nil {
 		t.Fatal("resolveCodexPath without codex succeeded")
@@ -119,7 +110,6 @@ func TestCommandLaunchAndProcessErrors(t *testing.T) {
 	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.141.0\n"), 0o700); err != nil {
 		t.Fatalf("write codex: %v", err)
 	}
-	t.Setenv(envCodexPath, "")
 	t.Setenv("PATH", dir)
 	if resolved, err := resolveCodexPath(""); err != nil || resolved != codexPath {
 		t.Fatalf("resolve PATH = %q err=%v", resolved, err)
@@ -213,7 +203,6 @@ while read line; do :; done
 		t.Fatal("launchAppServer ignored version error")
 	}
 	execCommandContext = origExec
-	t.Setenv(envCodexPath, "")
 	t.Setenv("PATH", t.TempDir())
 	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{}); err == nil {
 		t.Fatal("launchAppServer ignored missing codex path")

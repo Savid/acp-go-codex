@@ -15,7 +15,6 @@ import (
 
 const (
 	envCodexHome    = "CODEX_HOME"
-	envCodexPath    = "CODEX_EXECUTABLE"
 	minCodexVersion = "0.141.0"
 )
 
@@ -92,9 +91,6 @@ func (w processStderrWriter) Write(p []byte) (int, error) {
 func resolveCodexPath(path string) (string, error) {
 	if strings.TrimSpace(path) != "" {
 		return path, nil
-	}
-	if env := strings.TrimSpace(os.Getenv(envCodexPath)); env != "" {
-		return env, nil
 	}
 
 	resolved, err := exec.LookPath("codex")
