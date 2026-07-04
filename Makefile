@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: audit build clean coverage-check fmt help lint modernize-check test test/cover test-integration test-integration-cover test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt help lint modernize-check test test/cover test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
 
 ## build: build all packages
 build:
@@ -17,9 +17,12 @@ coverage-check: test
 test-integration-smoke:
 	ACP_GO_CODEX_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=300s -parallel=4 -v ./integration/...
 
-## test-integration: run full live integration tests
-test-integration:
+## test-integration-live: run full live integration tests
+test-integration-live:
 	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_LIVE_TURN=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
+
+## test-integration: alias for full live integration tests
+test-integration: test-integration-live
 
 ## test-integration-cover: run full live integration tests with compiled binary coverage
 test-integration-cover:
@@ -36,11 +39,12 @@ lint:
 
 ## fmt: format code with golangci-lint
 fmt:
+	gofmt -w $$(find . -name '*.go' -not -path './.git/*')
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 fmt ./...
 
-## tidy: tidy go modules
+## tidy: verify module files are tidy
 tidy:
-	go mod tidy
+	go mod tidy -diff
 
 ## vuln: run govulncheck
 vuln:
@@ -50,9 +54,12 @@ vuln:
 modernize-check:
 	go fix -n ./...
 
+## docs-audit: check public docs and examples for removed public terms
+docs-audit:
+	@! rg -n 'opencode acp|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp|^  "codex"\s*:' README.md doc.go docs.json docs examples cmd/acp-go-codex/*.go
+
 ## audit: run local checks
-audit: lint build coverage-check
-	go mod tidy -diff
+audit: fmt lint build test coverage-check tidy vuln modernize-check docs-audit
 	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git diff --exit-code -- go.mod go.sum; fi
 	go mod verify
 

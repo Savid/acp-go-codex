@@ -20,6 +20,7 @@ const (
 	methodThreadList        = "thread/list"
 	methodThreadRead        = "thread/read"
 	methodThreadTurnsList   = "thread/turns/list"
+	methodThreadDelete      = "thread/delete"
 	methodThreadUnsubscribe = "thread/unsubscribe"
 	methodThreadCompact     = "thread/compact/start"
 	methodTurnStart         = "turn/start"
@@ -345,6 +346,14 @@ func (c *AppServerClient) UnsubscribeThread(ctx context.Context, threadID string
 	}
 
 	return normalizeThreadError(c.rpc.Call(ctx, methodThreadUnsubscribe, map[string]any{"threadId": threadID}, nil))
+}
+
+func (c *AppServerClient) DeleteThread(ctx context.Context, req ThreadDeleteRequest) error {
+	if req.ThreadID == "" {
+		return nil
+	}
+
+	return normalizeThreadError(c.rpc.Call(ctx, methodThreadDelete, map[string]any{"threadId": req.ThreadID}, nil))
 }
 
 func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {

@@ -99,6 +99,15 @@ func TestPlaceholderClientLifecycleMethods(t *testing.T) {
 	if err := client.UnsubscribeThread(ctx, resumed.ID); err != nil {
 		t.Fatalf("UnsubscribeThread returned error: %v", err)
 	}
+	if err := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: resumed.ID}); err != nil {
+		t.Fatalf("DeleteThread returned error: %v", err)
+	}
+	if _, err := client.ReadThread(ctx, ThreadReadRequest{ThreadID: resumed.ID}); !errors.Is(err, ErrThreadNotFound) {
+		t.Fatalf("ReadThread after DeleteThread error = %v, want ErrThreadNotFound", err)
+	}
+	if err := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: resumed.ID}); !errors.Is(err, ErrThreadNotFound) {
+		t.Fatalf("DeleteThread missing error = %v, want ErrThreadNotFound", err)
+	}
 	if models, err := client.ModelList(ctx); err != nil || models[0].ID != "gpt-default" {
 		t.Fatalf("ModelList = %#v err=%v", models, err)
 	}

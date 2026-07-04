@@ -50,13 +50,14 @@ type Agent struct {
 	observe    *observer.Observer
 	optionsErr error
 
-	mu          sync.Mutex
-	closed      bool
-	conn        agentClient
-	sessions    map[acp.SessionId]*session
-	deleted     map[acp.SessionId]struct{}
-	clientCalls chan struct{}
-	authTokens  *ChatGPTAuthTokens
+	mu            sync.Mutex
+	closed        bool
+	conn          agentClient
+	sessions      map[acp.SessionId]*session
+	deleted       map[acp.SessionId]struct{}
+	explicitStore bool
+	clientCalls   chan struct{}
+	authTokens    *ChatGPTAuthTokens
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -97,9 +98,10 @@ func NewAgent(opts ...Option) *Agent {
 			TracerProvider: options.TracerProvider,
 			Version:        options.AgentVersion,
 		}),
-		sessions:    make(map[acp.SessionId]*session),
-		deleted:     make(map[acp.SessionId]struct{}),
-		clientCalls: make(chan struct{}, limits.MaxConcurrentClientCalls),
+		sessions:      make(map[acp.SessionId]*session),
+		deleted:       make(map[acp.SessionId]struct{}),
+		explicitStore: options.SessionStore != nil,
+		clientCalls:   make(chan struct{}, limits.MaxConcurrentClientCalls),
 	}
 }
 

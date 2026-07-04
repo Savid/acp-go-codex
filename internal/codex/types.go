@@ -20,6 +20,7 @@ type Client interface {
 	StartReview(context.Context, ReviewStartRequest) (map[string]any, error)
 	CollaborationModeList(context.Context) (CollaborationModeListResponse, error)
 	MCPServerStatusList(context.Context) (MCPServerStatusListResponse, error)
+	DeleteThread(context.Context, ThreadDeleteRequest) error
 	UnsubscribeThread(context.Context, string) error
 	ModelList(context.Context) ([]Model, error)
 	AccountRead(context.Context) (Account, error)
@@ -121,6 +122,10 @@ type TurnSteerRequest struct {
 }
 
 type ThreadCompactRequest struct {
+	ThreadID string
+}
+
+type ThreadDeleteRequest struct {
 	ThreadID string
 }
 

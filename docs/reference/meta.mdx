@@ -7,19 +7,21 @@ Accepted session lifecycle metadata:
 
 ```json
 {
-  "codex": {
-    "options": {
-      "model": "gpt-5.5",
-      "effort": "high",
-      "serviceTier": "flex",
-      "personality": "pragmatic",
-      "approvalPolicy": "never",
-      "sandboxPolicy": "workspace-write",
-      "mcpToolApprovalMode": "approve",
-      "outputSchema": {"type": "object"}
-    },
-    "rawEvent": {
-      "enabled": true
+  "_meta": {
+    "codex": {
+      "options": {
+        "model": "gpt-5.5",
+        "effort": "high",
+        "serviceTier": "flex",
+        "personality": "pragmatic",
+        "approvalPolicy": "never",
+        "sandboxPolicy": "workspace-write",
+        "mcpToolApprovalMode": "approve",
+        "outputSchema": {"type": "object"}
+      },
+      "rawEvent": {
+        "enabled": true
+      }
     }
   }
 }

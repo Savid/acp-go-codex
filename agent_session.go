@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -148,14 +149,28 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	delete(a.sessions, params.SessionId)
 	a.deleted[params.SessionId] = struct{}{}
 	a.mu.Unlock()
+
+	threadID := ""
+	if session != nil {
+		threadID = session.snapshot().codexThreadID
+	}
+
+	var cleanupErr error
+	if err := a.deleteNativeCodexSession(ctx, params.SessionId, threadID); err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
 	if session != nil {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
 		err := session.Close(closeCtx)
 		closeCancel()
 		if err != nil {
-			return acp.UnstableDeleteSessionResponse{}, err
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 		a.observe.AddActiveSession(ctx, -1)
+	}
+
+	if cleanupErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, cleanupErr
 	}
 
 	return acp.UnstableDeleteSessionResponse{}, nil
@@ -194,12 +209,15 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 			addSessionInfo(&sessions, seen, session)
 		}
 	}
-	codexSessions, err := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
-	if err != nil {
-		return acp.ListSessionsResponse{}, err
-	}
-	for _, session := range codexSessions {
-		addSessionInfo(&sessions, seen, session)
+	a.retryDeletedNativeCodexSessions(ctx)
+	if a.nativeSessionFallbackEnabled() {
+		codexSessions, err := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
+		if err != nil {
+			return acp.ListSessionsResponse{}, err
+		}
+		for _, session := range codexSessions {
+			addSessionInfo(&sessions, seen, session)
+		}
 	}
 
 	paged, nextCursor, err := paginateSessionInfos(sessions, params.Cursor)
@@ -432,6 +450,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 	if a.isDeleted(params.SessionId) {
+		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
+
 		return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
 	}
 	meta, err := sessionMetaFromLifecycle(params.Meta)
@@ -461,6 +481,11 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 	if len(storeEntries) > 0 {
 		return a.resumeMaterializedSession(ctx, params, storeEntries)
+	}
+	if !a.nativeSessionFallbackEnabled() {
+		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
+
+		return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
 	}
 
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
@@ -566,6 +591,8 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 	if a.isDeleted(params.SessionId) {
+		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
+
 		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
 	}
 	meta, err := sessionMetaFromLifecycle(params.Meta)
@@ -607,6 +634,11 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	}
 	if len(storeEntries) > 0 {
 		return a.loadMaterializedSession(ctx, params, storeEntries)
+	}
+	if !a.nativeSessionFallbackEnabled() {
+		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
+
+		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
 	}
 
 	resp, err := a.ResumeSession(ctx, acp.ResumeSessionRequest(params))
@@ -746,6 +778,69 @@ func (a *Agent) sessionStoreContext(ctx context.Context) (context.Context, conte
 	}
 
 	return context.WithTimeout(ctx, timeout)
+}
+
+func (a *Agent) nativeSessionFallbackEnabled() bool {
+	return !a.explicitStore
+}
+
+func (a *Agent) retryDeletedNativeCodexSessions(ctx context.Context) {
+	a.mu.Lock()
+	ids := make([]acp.SessionId, 0, len(a.deleted))
+	for id := range a.deleted {
+		ids = append(ids, id)
+	}
+	a.mu.Unlock()
+
+	for _, id := range ids {
+		a.retryDeleteNativeCodexSession(ctx, id, "")
+	}
+}
+
+func (a *Agent) retryDeleteNativeCodexSession(ctx context.Context, sessionID acp.SessionId, threadID string) {
+	if err := a.deleteNativeCodexSession(ctx, sessionID, threadID); err != nil {
+		a.log.DebugContext(ctx, "retry delete native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
+	}
+}
+
+func (a *Agent) deleteNativeCodexSession(ctx context.Context, sessionID acp.SessionId, knownThreadID string) error {
+	client, err := a.newClient(ctx, nil, nil, "")
+	if err != nil {
+		return err
+	}
+	defer client.Close(context.Background())
+
+	threadIDs := map[string]struct{}{}
+	if knownThreadID != "" {
+		threadIDs[knownThreadID] = struct{}{}
+	}
+	if sessionID != "" {
+		threadIDs[string(sessionID)] = struct{}{}
+	}
+
+	threads, err := client.ListThreads(ctx, codex.ThreadListRequest{})
+	if err != nil {
+		return err
+	}
+	for _, thread := range threads {
+		if thread.ID == "" {
+			continue
+		}
+		if acp.SessionId(firstNonEmpty(thread.SessionID, thread.ID)) == sessionID || thread.ID == knownThreadID {
+			threadIDs[thread.ID] = struct{}{}
+		}
+	}
+
+	var cleanupErr error
+	for threadID := range threadIDs {
+		err := client.DeleteThread(ctx, codex.ThreadDeleteRequest{ThreadID: threadID})
+		if errors.Is(err, codex.ErrThreadNotFound) {
+			continue
+		}
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
+
+	return cleanupErr
 }
 
 func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {

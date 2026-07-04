@@ -280,6 +280,11 @@ func SetModelRequest(sessionID acp.SessionId, model string) acp.SetSessionConfig
 	return SetConfigOptionRequest(sessionID, configModel, acp.SessionConfigValueId(model))
 }
 
+// DeleteSessionRequest constructs a session/delete request.
+func DeleteSessionRequest(sessionID acp.SessionId) acp.UnstableDeleteSessionRequest {
+	return acp.UnstableDeleteSessionRequest{SessionId: sessionID}
+}
+
 // CallForkSession calls the Codex fork extension method and decodes the SDK payload shape.
 func CallForkSession(ctx context.Context, conn *acp.ClientSideConnection, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
 	raw, err := conn.CallExtension(ctx, ForkSessionMethod, params)

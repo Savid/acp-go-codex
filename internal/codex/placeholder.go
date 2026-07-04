@@ -253,6 +253,19 @@ func (c *PlaceholderClient) MCPServerStatusList(context.Context) (MCPServerStatu
 
 func (c *PlaceholderClient) UnsubscribeThread(context.Context, string) error { return nil }
 
+func (c *PlaceholderClient) DeleteThread(_ context.Context, req ThreadDeleteRequest) error {
+	if req.ThreadID == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.threads[req.ThreadID]; !ok {
+		return ErrThreadNotFound
+	}
+	delete(c.threads, req.ThreadID)
+	return nil
+}
+
 func (c *PlaceholderClient) ModelList(context.Context) ([]Model, error) {
 	model := firstNonEmpty(c.options.DefaultModel, "default")
 

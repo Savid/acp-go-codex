@@ -83,6 +83,9 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if err := client.UnsubscribeThread(ctx, "thread-1"); err != nil {
 		t.Fatalf("UnsubscribeThread returned error: %v", err)
 	}
+	if err := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: "thread-1"}); err != nil {
+		t.Fatalf("DeleteThread returned error: %v", err)
+	}
 	models, err := client.ModelList(ctx)
 	if err != nil || len(models) != 2 || models[0].ID != "gpt-a" || models[0].Name != "GPT A" || models[0].Description != "A model" || models[0].DefaultReasoningEffort != "medium" || len(models[0].ReasoningEfforts) != 2 {
 		t.Fatalf("ModelList = %#v err=%v", models, err)
@@ -419,6 +422,12 @@ func TestAppServerClientRPCErrorBranches(t *testing.T) {
 	}
 	if err := client.UnsubscribeThread(ctx, ""); err != nil {
 		t.Fatalf("UnsubscribeThread empty returned error: %v", err)
+	}
+	if err := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: "thread"}); err == nil {
+		t.Fatal("DeleteThread with RPC error succeeded")
+	}
+	if err := client.DeleteThread(ctx, ThreadDeleteRequest{}); err != nil {
+		t.Fatalf("DeleteThread empty returned error: %v", err)
 	}
 	if _, err := client.ModelList(ctx); err == nil {
 		t.Fatal("ModelList with RPC error succeeded")
@@ -796,7 +805,7 @@ func (t *scriptTransport) response(method string) any {
 		return map[string]any{"data": []any{map[string]any{"id": "turn-1"}}, "nextCursor": "next"}
 	case methodTurnStart:
 		return map[string]any{"turn": map[string]any{"id": "turn-1"}}
-	case methodTurnSteer, methodTurnInterrupt, methodThreadUnsubscribe, methodAccountLoginStart, methodAccountLogout:
+	case methodTurnSteer, methodTurnInterrupt, methodThreadDelete, methodThreadUnsubscribe, methodAccountLoginStart, methodAccountLogout:
 		return map[string]any{}
 	case methodThreadCompact:
 		return map[string]any{"status": "compacted"}

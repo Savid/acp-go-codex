@@ -349,15 +349,17 @@ type spyCodexClient struct {
 	thread codex.Thread
 	closed bool
 
-	start     codex.ThreadStartRequest
-	resume    codex.ThreadResumeRequest
-	lastTurn  codex.TurnStartRequest
-	steer     codex.TurnSteerRequest
-	compact   codex.ThreadCompactRequest
-	review    codex.ReviewStartRequest
-	turns     codex.ThreadTurnsListRequest
-	loggedOut bool
-	login     codex.ChatGPTAuthTokens
+	start          codex.ThreadStartRequest
+	resume         codex.ThreadResumeRequest
+	lastTurn       codex.TurnStartRequest
+	steer          codex.TurnSteerRequest
+	compact        codex.ThreadCompactRequest
+	review         codex.ReviewStartRequest
+	turns          codex.ThreadTurnsListRequest
+	loggedOut      bool
+	login          codex.ChatGPTAuthTokens
+	unsubscribed   []string
+	deletedThreads []string
 }
 
 func newSpyCodexClient() *spyCodexClient {
@@ -469,7 +471,25 @@ func (c *spyCodexClient) MCPServerStatusList(context.Context) (codex.MCPServerSt
 	return codex.MCPServerStatusListResponse{Servers: []codex.MCPServerStatus{{Name: "mcp", Status: "ready"}}}, nil
 }
 
-func (c *spyCodexClient) UnsubscribeThread(context.Context, string) error { return nil }
+func (c *spyCodexClient) UnsubscribeThread(_ context.Context, threadID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unsubscribed = append(c.unsubscribed, threadID)
+	return nil
+}
+
+func (c *spyCodexClient) DeleteThread(_ context.Context, req codex.ThreadDeleteRequest) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deletedThreads = append(c.deletedThreads, req.ThreadID)
+	return nil
+}
+
+func (c *spyCodexClient) deletedThreadSnapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.deletedThreads...)
+}
 
 func (c *spyCodexClient) ModelList(context.Context) ([]codex.Model, error) {
 	return []codex.Model{{ID: "gpt-initial", Name: "GPT Initial"}, {ID: "gpt-other", Name: "GPT Other"}}, nil
@@ -635,6 +655,8 @@ type errorCodexClient struct {
 	mcpStatusErr     error
 	loginErr         error
 	logoutErr        error
+	deleteErr        error
+	unsubscribeErr   error
 	listThreads      []codex.Thread
 }
 
@@ -744,6 +766,20 @@ func (c *errorCodexClient) Logout(ctx context.Context) error {
 		return c.logoutErr
 	}
 	return c.spyCodexClient.Logout(ctx)
+}
+
+func (c *errorCodexClient) UnsubscribeThread(ctx context.Context, threadID string) error {
+	if c.unsubscribeErr != nil {
+		return c.unsubscribeErr
+	}
+	return c.spyCodexClient.UnsubscribeThread(ctx, threadID)
+}
+
+func (c *errorCodexClient) DeleteThread(ctx context.Context, req codex.ThreadDeleteRequest) error {
+	if c.deleteErr != nil {
+		return c.deleteErr
+	}
+	return c.spyCodexClient.DeleteThread(ctx, req)
 }
 
 func (c *errorCodexClient) Close(ctx context.Context) error {
@@ -877,7 +913,10 @@ func (c *runEventsClient) RunTurn(context.Context, codex.TurnStartRequest) (<-ch
 
 func (c *runEventsClient) CancelTurn(context.Context, string, string) error { return nil }
 func (c *runEventsClient) UnsubscribeThread(context.Context, string) error  { return nil }
-func (c *runEventsClient) Close(context.Context) error                      { return nil }
+func (c *runEventsClient) DeleteThread(context.Context, codex.ThreadDeleteRequest) error {
+	return nil
+}
+func (c *runEventsClient) Close(context.Context) error { return nil }
 
 type openRunEventsClient struct {
 	*spyCodexClient
@@ -899,7 +938,10 @@ func (c *openRunEventsClient) RunTurn(ctx context.Context, _ codex.TurnStartRequ
 
 func (c *openRunEventsClient) CancelTurn(context.Context, string, string) error { return nil }
 func (c *openRunEventsClient) UnsubscribeThread(context.Context, string) error  { return nil }
-func (c *openRunEventsClient) Close(context.Context) error                      { return nil }
+func (c *openRunEventsClient) DeleteThread(context.Context, codex.ThreadDeleteRequest) error {
+	return nil
+}
+func (c *openRunEventsClient) Close(context.Context) error { return nil }
 
 type cancelDuringRunClient struct {
 	*spyCodexClient
@@ -918,4 +960,7 @@ func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest)
 
 func (c *cancelDuringRunClient) CancelTurn(context.Context, string, string) error { return nil }
 func (c *cancelDuringRunClient) UnsubscribeThread(context.Context, string) error  { return nil }
-func (c *cancelDuringRunClient) Close(context.Context) error                      { return nil }
+func (c *cancelDuringRunClient) DeleteThread(context.Context, codex.ThreadDeleteRequest) error {
+	return nil
+}
+func (c *cancelDuringRunClient) Close(context.Context) error { return nil }
