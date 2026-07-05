@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: audit build clean coverage-check docs-audit fmt help lint modernize-check test test/cover test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt help lint modernize-check test test/cover test-cross-compile test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
 
 ## build: build all packages
 build:
@@ -50,6 +50,16 @@ tidy:
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+## test-cross-compile: compile platform-specific test branches
+test-cross-compile:
+	rm -rf .tmp/cross
+	mkdir -p .tmp/cross
+	GOOS=linux GOARCH=amd64 go test -c -o .tmp/cross/codex-linux.test ./internal/codex
+	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/codex-darwin.test ./internal/codex
+	GOOS=windows GOARCH=amd64 go build ./...
+	GOOS=freebsd GOARCH=amd64 go build ./...
+	GOOS=openbsd GOARCH=amd64 go build ./...
+
 ## modernize-check: preview Go modernizations without changing files
 modernize-check:
 	go fix -n ./...
@@ -59,7 +69,7 @@ docs-audit:
 	@! rg -n 'opencode acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp|^  "codex"\s*:' README.md doc.go docs.json docs examples cmd/acp-go-codex/*.go
 
 ## audit: run local checks
-audit: fmt lint build test coverage-check tidy vuln modernize-check docs-audit
+audit: fmt lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
 	go mod verify
 
 ## clean: remove build artifacts
