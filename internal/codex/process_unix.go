@@ -15,7 +15,7 @@ var (
 )
 
 func startProcess(cmd *exec.Cmd) error {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	configureProcess(cmd)
 	return cmd.Start()
 }
 

@@ -305,23 +305,36 @@ while read line; do :; done
 
 func TestProcessCloserSendsTermBeforeKill(t *testing.T) {
 	origGrace := processCloseGrace
-	processCloseGrace = 20 * time.Millisecond
+	processCloseGrace = 200 * time.Millisecond
 	t.Cleanup(func() { processCloseGrace = origGrace })
 
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "term")
+	ready := filepath.Join(dir, "ready")
 	script := filepath.Join(dir, "codex-trap-term")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 trap 'printf term > "$TERM_MARK"; exit 0' TERM
+printf ready > "$READY_MARK"
 while :; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write trap script: %v", err)
 	}
 
 	cmd := exec.Command(script)
-	cmd.Env = append(os.Environ(), "TERM_MARK="+marker)
+	cmd.Env = append(os.Environ(), "TERM_MARK="+marker, "READY_MARK="+ready)
 	if err := startProcess(cmd); err != nil {
 		t.Fatalf("start trap process: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("trap script never signalled readiness")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	if err := (processCloser{cmd: cmd}).Close(); err != nil {
