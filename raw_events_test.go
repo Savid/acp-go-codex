@@ -31,7 +31,7 @@ func TestRawMessageConfigFromMeta(t *testing.T) {
 	}
 	payload := map[string]any{"sessionId": "s", "sequence": int64(1), "source": "codex", "event": strings.Repeat("x", rawEventMaxBytes)}
 	capped := capRawEventPayload(payload)
-	event := capped["event"].(map[string]any)
+	event := asType[map[string]any](t, capped["event"])
 	if event["truncated"] != true {
 		t.Fatalf("capped raw event = %#v", capped)
 	}

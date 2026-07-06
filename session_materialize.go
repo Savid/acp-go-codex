@@ -28,23 +28,28 @@ func materializeRollout(entries []SessionStoreEntry) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create materialized rollout: %w", err)
 	}
+
 	name := file.Name()
 
 	for _, entry := range entries {
 		if _, err := file.Write(entry); err != nil {
 			_ = file.Close()
 			_ = removeMaterializedRollout(name)
+
 			return "", fmt.Errorf("write materialized rollout: %w", err)
 		}
+
 		if _, err := file.Write([]byte{'\n'}); err != nil {
 			_ = file.Close()
 			_ = removeMaterializedRollout(name)
+
 			return "", fmt.Errorf("write materialized rollout newline: %w", err)
 		}
 	}
 
 	if err := file.Close(); err != nil {
 		_ = removeMaterializedRollout(name)
+
 		return "", fmt.Errorf("close materialized rollout: %w", err)
 	}
 

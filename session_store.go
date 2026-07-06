@@ -90,9 +90,11 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
+
 	if len(entries) == 0 {
 		return nil
 	}
@@ -103,12 +105,15 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	if s.entries == nil {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
+
 	if s.updatedAt == nil {
 		s.updatedAt = make(map[SessionKey]int64)
 	}
+
 	if s.tombstones == nil {
 		s.tombstones = make(map[SessionKey]int64)
 	}
+
 	if s.isTombstonedLocked(key) {
 		return nil
 	}
@@ -116,6 +121,7 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	for _, entry := range entries {
 		s.entries[key] = append(s.entries[key], cloneStoreEntry(entry))
 	}
+
 	s.updatedAt[key] = time.Now().UnixMilli()
 
 	return nil
@@ -126,6 +132,7 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if s == nil {
 		return nil, fmt.Errorf("nil InMemorySessionStore")
 	}
@@ -145,6 +152,7 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
@@ -155,27 +163,35 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	if s.entries == nil {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
+
 	if s.updatedAt == nil {
 		s.updatedAt = make(map[SessionKey]int64)
 	}
+
 	if s.tombstones == nil {
 		s.tombstones = make(map[SessionKey]int64)
 	}
+
 	if main.SessionID == "" {
 		return fmt.Errorf("main session id is required")
 	}
+
 	if main.Subpath != SessionStoreMainSubpath {
 		return fmt.Errorf("main subpath must be %q", SessionStoreMainSubpath)
 	}
+
 	mainCount := 0
+
 	for _, replacement := range replacements {
 		if replacement.Key.SessionID != main.SessionID {
 			return fmt.Errorf("replacement key does not match main session")
 		}
+
 		if replacement.Key.Subpath == SessionStoreMainSubpath {
 			mainCount++
 		}
 	}
+
 	if mainCount != 1 {
 		return fmt.Errorf("replacements must include the main key exactly once")
 	}
@@ -189,13 +205,16 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	}
 
 	updatedAt := time.Now().UnixMilli()
+
 	for _, replacement := range replacements {
 		if len(replacement.Entries) == 0 {
 			delete(s.entries, replacement.Key)
 			delete(s.updatedAt, replacement.Key)
 			s.tombstones[replacement.Key] = updatedAt
+
 			continue
 		}
+
 		s.entries[replacement.Key] = cloneStoreEntries(replacement.Entries)
 		s.updatedAt[replacement.Key] = updatedAt
 		delete(s.tombstones, replacement.Key)
@@ -209,6 +228,7 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if s == nil {
 		return nil, fmt.Errorf("nil InMemorySessionStore")
 	}
@@ -217,10 +237,12 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 	defer s.mu.Unlock()
 
 	summaries := make([]SessionSummary, 0)
+
 	for key := range s.entries {
 		if key.SessionID == "" || key.Subpath != SessionStoreMainSubpath || s.isTombstonedLocked(key) {
 			continue
 		}
+
 		summaries = append(summaries, SessionSummary{
 			SessionID:          key.SessionID,
 			UpdatedAtUnixMilli: s.updatedAt[key],
@@ -231,6 +253,7 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 		if byTime := cmp.Compare(right.UpdatedAtUnixMilli, left.UpdatedAtUnixMilli); byTime != 0 {
 			return byTime
 		}
+
 		return strings.Compare(left.SessionID, right.SessionID)
 	})
 
@@ -242,6 +265,7 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
@@ -252,29 +276,37 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 	if s.entries == nil {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
+
 	if s.updatedAt == nil {
 		s.updatedAt = make(map[SessionKey]int64)
 	}
+
 	if s.tombstones == nil {
 		s.tombstones = make(map[SessionKey]int64)
 	}
+
 	now := time.Now().UnixMilli()
 	matched := false
+
 	for candidate := range s.entries {
 		if candidate.SessionID != key.SessionID {
 			continue
 		}
+
 		if key.Subpath != SessionStoreMainSubpath && candidate.Subpath != key.Subpath {
 			continue
 		}
+
 		delete(s.entries, candidate)
 		delete(s.updatedAt, candidate)
 		s.tombstones[candidate] = now
 		matched = true
 	}
+
 	if !matched {
 		s.tombstones[key] = now
 	}
+
 	if key.Subpath == SessionStoreMainSubpath {
 		s.tombstones[mainSessionKey(key.SessionID)] = now
 	}
@@ -287,6 +319,7 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if s == nil {
 		return nil, fmt.Errorf("nil InMemorySessionStore")
 	}
@@ -295,12 +328,15 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 	defer s.mu.Unlock()
 
 	subpaths := make([]string, 0)
+
 	for candidate := range s.entries {
 		if candidate.SessionID != key.SessionID || candidate.Subpath == SessionStoreMainSubpath || s.isTombstonedLocked(candidate) {
 			continue
 		}
+
 		subpaths = append(subpaths, candidate.Subpath)
 	}
+
 	slices.Sort(subpaths)
 
 	return subpaths, nil
@@ -327,13 +363,17 @@ func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
 	if s.tombstones == nil {
 		return false
 	}
+
 	if _, ok := s.tombstones[key]; ok {
 		return true
 	}
+
 	if key.Subpath != SessionStoreMainSubpath {
 		_, ok := s.tombstones[mainSessionKey(key.SessionID)]
+
 		return ok
 	}
+
 	return false
 }
 

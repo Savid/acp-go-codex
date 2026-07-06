@@ -71,8 +71,8 @@ func TestRolloutMirrorDoesNotDuplicateDurableRowsWhenRawFails(t *testing.T) {
 
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
-	if err := session.mirrorAndEmitRollout(context.Background()); err != nil {
-		t.Fatalf("mirror after raw recovery returned error: %v", err)
+	if mirrorErr := session.mirrorAndEmitRollout(context.Background()); mirrorErr != nil {
+		t.Fatalf("mirror after raw recovery returned error: %v", mirrorErr)
 	}
 	entries, err = store.Load(context.Background(), SessionKey{SessionID: "session"})
 	if err != nil || len(entries) != 2 {
@@ -204,6 +204,7 @@ func TestAppendRolloutEntriesRetriesAndBoundsStoreCalls(t *testing.T) {
 		if attempts == 1 {
 			return transient
 		}
+
 		return nil
 	}}
 	err := appendRolloutEntries(context.Background(), store, SessionKey{SessionID: "s"}, []SessionStoreEntry{SessionStoreEntry(`{"type":"one"}`)})
@@ -215,6 +216,7 @@ func TestAppendRolloutEntriesRetriesAndBoundsStoreCalls(t *testing.T) {
 	store = &appendFuncStore{append: func(ctx context.Context, _ SessionKey, _ []SessionStoreEntry) error {
 		attempts++
 		<-ctx.Done()
+
 		return ctx.Err()
 	}}
 	err = appendRolloutEntries(context.Background(), store, SessionKey{SessionID: "s"}, []SessionStoreEntry{SessionStoreEntry(`{"type":"one"}`)})
@@ -228,6 +230,7 @@ func TestAppendRolloutEntriesRetriesAndBoundsStoreCalls(t *testing.T) {
 	store = &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
 		attempts++
 		cancel()
+
 		return transient
 	}}
 	err = appendRolloutEntries(ctx, store, SessionKey{SessionID: "s"}, []SessionStoreEntry{SessionStoreEntry(`{"type":"one"}`)})
@@ -279,6 +282,7 @@ func (s *appendFuncStore) Append(ctx context.Context, key SessionKey, entries []
 	if s.append == nil {
 		return nil
 	}
+
 	return s.append(ctx, key, entries)
 }
 

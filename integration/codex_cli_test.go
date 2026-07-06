@@ -44,7 +44,7 @@ func TestCodexCLIACPStartupAndSessionSurface(t *testing.T) {
 		t.Fatal("session id is empty")
 	}
 	if session.Modes != nil {
-		t.Fatalf("legacy modes populated: %#v", session.Modes)
+		t.Fatalf("removed modes populated: %#v", session.Modes)
 	}
 	modelConfig := findSessionSelectConfig(session.ConfigOptions, "model")
 	if modelConfig == nil || modelConfig.Category == nil || *modelConfig.Category != acp.SessionConfigOptionCategoryModel || len(*modelConfig.Options.Ungrouped) == 0 {

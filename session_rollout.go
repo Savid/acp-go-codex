@@ -41,6 +41,7 @@ func (s *session) prepareRolloutLiveCursors() {
 	if rows > s.completionRows {
 		s.completionRows = rows
 	}
+
 	if rows > s.visibleRows {
 		s.visibleRows = rows
 	}
@@ -50,6 +51,7 @@ func countRolloutRows(path string) (int, error) {
 	if path == "" {
 		return 0, nil
 	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -60,11 +62,13 @@ func countRolloutRows(path string) (int, error) {
 	scanner.Buffer(nil, maxSessionImportLineBytes)
 
 	rows := 0
+
 	for scanner.Scan() {
 		if strings.TrimSpace(scanner.Text()) != "" {
 			rows++
 		}
 	}
+
 	if err := scanner.Err(); err != nil {
 		return 0, err
 	}
@@ -81,10 +85,12 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 	defer s.mirrorMu.Unlock()
 
 	store := s.agent.options.SessionStore
+
 	rawEnabled := s.rawMessages.Enabled()
 	if s.rolloutPath == "" || (store == nil && !rawEnabled && completed == nil && events == nil) {
 		return nil
 	}
+
 	startRow := s.rolloutStartRow(store != nil, rawEnabled, completed != nil, events != nil)
 
 	file, err := os.Open(s.rolloutPath)
@@ -98,19 +104,24 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 
 	row := 0
 	entries := make([]json.RawMessage, 0)
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
+
 		if row >= startRow {
 			entries = append(entries, json.RawMessage(line))
 		}
+
 		row++
 	}
-	if err := scanner.Err(); err != nil {
-		return err
+
+	if scanErr := scanner.Err(); scanErr != nil {
+		return scanErr
 	}
+
 	if len(entries) == 0 {
 		return nil
 	}
@@ -119,25 +130,31 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 	if err != nil {
 		return err
 	}
+
 	rows := make([]rolloutMirrorRow, len(clean))
 	for index, entry := range clean {
 		rows[index] = rolloutMirrorRow{index: startRow + index, entry: entry}
 	}
+
 	if store != nil {
 		durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
 		if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, durableEntries); err != nil {
 			return err
 		}
+
 		if nextMirroredRow > s.mirroredRows {
 			s.mirroredRows = nextMirroredRow
 		}
 	}
+
 	if rawEnabled {
 		s.emitRawRolloutRows(ctx, rows)
 	}
+
 	if events != nil {
 		s.emitRolloutEvents(rows, events)
 	}
+
 	if completed != nil {
 		s.emitRolloutCompletions(rows, completed)
 	}
@@ -152,6 +169,7 @@ func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEn
 		if err := json.Unmarshal(entry, &obj); err != nil || obj == nil {
 			return nil, index, fmt.Errorf("entry %d must be a JSON object", index)
 		}
+
 		clean = append(clean, cloneStoreEntry(entry))
 	}
 
@@ -166,6 +184,7 @@ func (s *session) rolloutStartRow(
 ) int {
 	startRow := 0
 	set := false
+
 	for _, cursor := range []struct {
 		enabled bool
 		row     int
@@ -178,6 +197,7 @@ func (s *session) rolloutStartRow(
 		if !cursor.enabled {
 			continue
 		}
+
 		if !set || cursor.row < startRow {
 			startRow = cursor.row
 			set = true
@@ -191,7 +211,9 @@ func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKe
 	if len(entries) == 0 {
 		return nil
 	}
+
 	var lastErr error
+
 	for _, delay := range sessionRolloutAppendDelays {
 		if delay > 0 {
 			select {
@@ -203,11 +225,15 @@ func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKe
 
 		appendCtx, cancel := context.WithTimeout(ctx, sessionRolloutAppendTimeout)
 		err := store.Append(appendCtx, key, entries)
+
 		cancel()
+
 		if err == nil {
 			return nil
 		}
+
 		lastErr = err
+
 		if appendCtx.Err() == context.DeadlineExceeded {
 			break
 		}
@@ -218,11 +244,14 @@ func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKe
 
 func (s *session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStoreEntry, int) {
 	entries := make([]SessionStoreEntry, 0, len(rows))
+
 	var nextRow int
+
 	for _, row := range rows {
 		if row.index < s.mirroredRows {
 			continue
 		}
+
 		entries = append(entries, row.entry)
 		nextRow = row.index + 1
 	}
@@ -235,9 +264,11 @@ func (s *session) emitRawRolloutRows(ctx context.Context, rows []rolloutMirrorRo
 		if row.index < s.emittedRawRows {
 			continue
 		}
+
 		if err := s.emitRawRolloutRow(ctx, row.entry); err != nil {
 			return
 		}
+
 		s.emittedRawRows = row.index + 1
 	}
 }
@@ -248,6 +279,7 @@ func (s *session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan
 		if row.index < s.completionRows {
 			continue
 		}
+
 		nextRow = row.index + 1
 		if rolloutTaskComplete(row.entry) {
 			select {
@@ -256,6 +288,7 @@ func (s *session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan
 			}
 		}
 	}
+
 	if nextRow > s.completionRows {
 		s.completionRows = nextRow
 	}
@@ -267,16 +300,20 @@ func (s *session) emitRolloutEvents(rows []rolloutMirrorRow, events chan<- codex
 		if row.index < s.visibleRows {
 			continue
 		}
+
 		nextRow = row.index + 1
+
 		event, ok := rolloutEvent(row.entry)
 		if !ok {
 			continue
 		}
+
 		select {
 		case events <- event:
 		default:
 		}
 	}
+
 	if nextRow > s.visibleRows {
 		s.visibleRows = nextRow
 	}
@@ -293,7 +330,8 @@ func rolloutEvent(entry SessionStoreEntry) (codex.Event, bool) {
 	if err := json.Unmarshal(entry, &row); err != nil {
 		return codex.Event{}, false
 	}
-	if row.Type != "event_msg" || row.Payload.Type != "agent_message" || row.Payload.Message == "" {
+
+	if row.Type != valueEventMsg || row.Payload.Type != valueAgentMessage || row.Payload.Message == "" {
 		return codex.Event{}, false
 	}
 
@@ -316,7 +354,7 @@ func rolloutTaskComplete(entry SessionStoreEntry) bool {
 		return false
 	}
 
-	return row.Type == "event_msg" && row.Payload.Type == "task_complete"
+	return row.Type == valueEventMsg && row.Payload.Type == "task_complete"
 }
 
 func (s *session) startRolloutTail(
@@ -326,9 +364,11 @@ func (s *session) startRolloutTail(
 ) (context.CancelFunc, <-chan struct{}) {
 	tailCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+
 	go func() {
 		defer recoverAgentGoroutine(ctx, agentLogger(s.agent), "Codex rollout tail")
 		defer close(done)
+
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -336,6 +376,7 @@ func (s *session) startRolloutTail(
 			select {
 			case <-tailCtx.Done():
 				_ = s.mirrorAndEmitRolloutWithCompletion(context.WithoutCancel(ctx), completed, events)
+
 				return
 			case <-ticker.C:
 				_ = s.mirrorAndEmitRolloutWithCompletion(tailCtx, completed, events)
@@ -358,10 +399,10 @@ func (s *session) emitRawRolloutRow(ctx context.Context, entry SessionStoreEntry
 	}
 
 	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(map[string]any{
-		"sessionId": s.id,
-		"sequence":  s.nextRawEventSequence(),
-		"source":    "codex-rollout",
-		"event":     message,
-		"rawJSON":   string(entry),
+		jsonFieldSessionID: s.id,
+		jsonFieldSequence:  s.nextRawEventSequence(),
+		jsonFieldSource:    "codex-rollout",
+		jsonFieldEvent:     message,
+		"rawJSON":          string(entry),
 	}))
 }

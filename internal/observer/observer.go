@@ -119,8 +119,11 @@ func New(config Config) *Observer {
 		)
 	}
 
-	var tracerOptions []trace.TracerOption
-	var meterOptions []metric.MeterOption
+	var (
+		tracerOptions []trace.TracerOption
+		meterOptions  []metric.MeterOption
+	)
+
 	if config.Version != "" {
 		tracerOptions = append(tracerOptions, trace.WithInstrumentationVersion(config.Version))
 		meterOptions = append(meterOptions, metric.WithInstrumentationVersion(config.Version))
@@ -175,12 +178,14 @@ func (o *Observer) Extract(ctx context.Context, meta map[string]any) context.Con
 	}
 
 	carrier := propagation.MapCarrier{}
+
 	for _, key := range []string{metaTraceParent, metaTraceState, metaBaggage} {
 		value, _ := meta[key].(string)
 		if value != "" {
 			carrier[key] = value
 		}
 	}
+
 	if len(carrier) == 0 {
 		return ctx
 	}
@@ -195,6 +200,7 @@ func (o *Observer) InjectTraceEnv(ctx context.Context, env map[string]string) ma
 
 	carrier := propagation.MapCarrier{}
 	o.propagator.Inject(ctx, carrier)
+
 	if len(carrier) == 0 {
 		return cloneEnv(env)
 	}
@@ -203,6 +209,7 @@ func (o *Observer) InjectTraceEnv(ctx context.Context, env map[string]string) ma
 	if out == nil {
 		out = map[string]string{}
 	}
+
 	setUpper(out, envTraceParent, carrier.Get(metaTraceParent))
 	setUpper(out, envTraceState, carrier.Get(metaTraceState))
 	setUpper(out, envBaggage, carrier.Get(metaBaggage))
@@ -222,19 +229,24 @@ func (o *Observer) StartACPRequest(ctx context.Context, method string) (context.
 		),
 	)
 	o.acpRequestCount.Add(ctx, 1, metric.WithAttributes(attribute.String(attrACPMethod, method)))
+
 	start := monotonicNow()
 
 	return ctx, func(err error) {
 		elapsed := monotonicSince(start)
+
 		attrs := []attribute.KeyValue{attribute.String(attrACPMethod, method)}
 		if err != nil {
 			attrs = append(attrs, attribute.String(attrOutcome, outcomeError))
+
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		} else {
 			attrs = append(attrs, attribute.String(attrOutcome, outcomeOK))
+
 			span.SetStatus(codes.Ok, "")
 		}
+
 		o.acpRequestDuration.Record(ctx, elapsed, metric.WithAttributes(attrs...))
 		span.End()
 	}
@@ -253,6 +265,7 @@ func (o *Observer) StartPrompt(ctx context.Context, meta map[string]any, model s
 
 	return ctx, func(result PromptResult) {
 		finalAttrs := promptAttrs(firstNonEmpty(result.Model, model))
+
 		finalAttrs = append(finalAttrs, promptUsageAttrs(result)...)
 		if result.StopReason != "" {
 			finalAttrs = append(finalAttrs,
@@ -260,6 +273,7 @@ func (o *Observer) StartPrompt(ctx context.Context, meta map[string]any, model s
 				attribute.StringSlice(attrGenAIStopReason, []string{result.StopReason}),
 			)
 		}
+
 		outcome := outcomeFromPrompt(result)
 		metricAttrs := append(cloneAttrs(finalAttrs), attribute.String(attrOutcome, outcome))
 
@@ -269,16 +283,20 @@ func (o *Observer) StartPrompt(ctx context.Context, meta map[string]any, model s
 		} else {
 			span.SetStatus(codes.Ok, "")
 		}
+
 		span.SetAttributes(metricAttrs...)
 		span.End()
 
 		elapsed := monotonicSince(state.start)
+
 		o.promptCount.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
 		o.promptDuration.Record(ctx, elapsed, metric.WithAttributes(metricAttrs...))
 		o.genAIDuration.Record(ctx, elapsed, metric.WithAttributes(metricAttrs...))
+
 		if outcome == outcomeCanceled {
 			o.promptCancelCount.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
 		}
+
 		o.recordTokenUsage(ctx, result, finalAttrs)
 	}
 }
@@ -292,11 +310,14 @@ func (o *Observer) ObserveFirstPromptUpdate(ctx context.Context) {
 	if state == nil {
 		return
 	}
+
 	state.mu.Lock()
 	if state.observed {
 		state.mu.Unlock()
+
 		return
 	}
+
 	state.observed = true
 	start := state.start
 	model := state.model
@@ -333,6 +354,7 @@ func (o *Observer) recordTokenUsage(ctx context.Context, result PromptResult, at
 		if item.value <= 0 {
 			continue
 		}
+
 		tokenAttrs := append(cloneAttrs(attrs), attribute.String(attrGenAITokenType, item.name))
 		o.genAITokenUsage.Record(ctx, int64(item.value), metric.WithAttributes(tokenAttrs...))
 	}
@@ -359,18 +381,23 @@ func promptUsageAttrs(result PromptResult) []attribute.KeyValue {
 	if result.InputTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageInputTokens, result.InputTokens))
 	}
+
 	if result.OutputTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageOutputTokens, result.OutputTokens))
 	}
+
 	if result.CachedReadTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheReadTokens, result.CachedReadTokens))
 	}
+
 	if result.CachedWriteTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheCreationTokens, result.CachedWriteTokens))
 	}
+
 	if result.ThoughtTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageReasoningOutputTokens, result.ThoughtTokens))
 	}
+
 	if result.TotalTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageTotalTokens, result.TotalTokens))
 	}
@@ -386,6 +413,7 @@ func outcomeFromPrompt(result PromptResult) string {
 
 		return outcomeError
 	}
+
 	if strings.EqualFold(result.StopReason, "cancelled") || strings.EqualFold(result.StopReason, "canceled") {
 		return outcomeCanceled
 	}

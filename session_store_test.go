@@ -209,19 +209,19 @@ func TestInMemorySessionStoreListAndDeleteBranches(t *testing.T) {
 		t.Fatalf("summaries = %#v", summaries)
 	}
 
-	if err := store.Delete(ctx, subA); err != nil {
-		t.Fatalf("Delete subA: %v", err)
+	if delErr := store.Delete(ctx, subA); delErr != nil {
+		t.Fatalf("Delete subA: %v", delErr)
 	}
-	if got, err := store.Load(ctx, subA); err != nil || len(got) != 0 {
-		t.Fatalf("deleted sub load = %q err=%v", got, err)
+	if got, loadErr := store.Load(ctx, subA); loadErr != nil || len(got) != 0 {
+		t.Fatalf("deleted sub load = %q err=%v", got, loadErr)
 	}
-	if got, err := store.Load(ctx, mainA); err != nil || len(got) != 1 {
-		t.Fatalf("main load after sub delete = %q err=%v", got, err)
+	if got, loadErr := store.Load(ctx, mainA); loadErr != nil || len(got) != 1 {
+		t.Fatalf("main load after sub delete = %q err=%v", got, loadErr)
 	}
 
 	missingSub := SessionKey{SessionID: "a", Subpath: "missing"}
-	if err := store.Delete(ctx, missingSub); err != nil {
-		t.Fatalf("Delete missing sub: %v", err)
+	if delErr := store.Delete(ctx, missingSub); delErr != nil {
+		t.Fatalf("Delete missing sub: %v", delErr)
 	}
 	if !store.isTombstonedLocked(missingSub) {
 		t.Fatal("missing sub delete did not create tombstone")

@@ -122,6 +122,7 @@ func TestRunReturnsPendingSignalCode(t *testing.T) {
 			t.Fatalf("signal self: %v", err)
 		}
 		time.Sleep(50 * time.Millisecond)
+
 		return nil
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
@@ -139,6 +140,7 @@ func TestRunCodexCLISubcommand(t *testing.T) {
 	var gotDeviceAuth bool
 	runCodexCLICommand = func(_ context.Context, path string, home string, mode string, deviceAuth bool, _ io.Reader, _ io.Writer, _ io.Writer) error {
 		gotPath, gotHome, gotMode, gotDeviceAuth = path, home, mode, deviceAuth
+
 		return nil
 	}
 	if code := run(context.Background(), []string{"login", "-path", "/bin/codex", "-home", "/tmp/codex", "-device-auth"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
@@ -212,46 +214,46 @@ func TestRunCodexCLI(t *testing.T) {
 	if !strings.Contains(string(raw), "login --device-auth:/tmp/codex-home") {
 		t.Fatalf("log = %q", string(raw))
 	}
-	if err := runCodexCLI(context.Background(), script, "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err != nil {
-		t.Fatalf("runCodexCLI logout returned error: %v", err)
+	if logoutErr := runCodexCLI(context.Background(), script, "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); logoutErr != nil {
+		t.Fatalf("runCodexCLI logout returned error: %v", logoutErr)
 	}
-	if err := runCodexCLI(context.Background(), script, "", "bad", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err == nil {
+	if badErr := runCodexCLI(context.Background(), script, "", "bad", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); badErr == nil {
 		t.Fatal("unsupported CLI command succeeded")
 	}
 
 	fail := filepath.Join(dir, "codex-fail")
-	if err := os.WriteFile(fail, []byte("#!/bin/sh\nexit 7\n"), 0o700); err != nil {
-		t.Fatalf("write failing script: %v", err)
+	if writeErr := os.WriteFile(fail, []byte("#!/bin/sh\nexit 7\n"), 0o700); writeErr != nil {
+		t.Fatalf("write failing script: %v", writeErr)
 	}
-	if err := runCodexCLI(context.Background(), fail, "", "login", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err == nil || commandExitCode(err) != 7 {
-		t.Fatalf("failing cli err=%v code=%d", err, commandExitCode(err))
+	if failErr := runCodexCLI(context.Background(), fail, "", "login", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); failErr == nil || commandExitCode(failErr) != 7 {
+		t.Fatalf("failing cli err=%v code=%d", failErr, commandExitCode(failErr))
 	}
 
 	pathDir := t.TempDir()
 	pathScript := filepath.Join(pathDir, "codex")
-	if err := os.WriteFile(pathScript, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatalf("write PATH codex: %v", err)
+	if writePathErr := os.WriteFile(pathScript, []byte("#!/bin/sh\nexit 0\n"), 0o700); writePathErr != nil {
+		t.Fatalf("write PATH codex: %v", writePathErr)
 	}
 	t.Setenv("PATH", pathDir)
-	if err := runCodexCLI(context.Background(), "", "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err != nil {
-		t.Fatalf("runCodexCLI default path returned error: %v", err)
+	if defaultPathErr := runCodexCLI(context.Background(), "", "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); defaultPathErr != nil {
+		t.Fatalf("runCodexCLI default path returned error: %v", defaultPathErr)
 	}
-	if err := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err == nil {
+	if missingErr := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); missingErr == nil {
 		t.Fatal("runCodexCLI accepted missing executable")
 	}
 
 	signalScript := filepath.Join(dir, "codex-signal")
 	readyPath := filepath.Join(dir, "ready")
 	signalPath := filepath.Join(dir, "signal")
-	if err := os.WriteFile(signalScript, []byte(`#!/bin/sh
+	if writeSignalErr := os.WriteFile(signalScript, []byte(`#!/bin/sh
 if [ "$1" = "logout" ]; then
   trap 'echo hup > "$TEST_SIGNAL_LOG"; exit 0' HUP
   echo ready > "$TEST_READY_LOG"
   while :; do sleep 1; done
 fi
 exit 2
-`), 0o700); err != nil {
-		t.Fatalf("write signal script: %v", err)
+`), 0o700); writeSignalErr != nil {
+		t.Fatalf("write signal script: %v", writeSignalErr)
 	}
 	t.Setenv("TEST_READY_LOG", readyPath)
 	t.Setenv("TEST_SIGNAL_LOG", signalPath)
@@ -260,21 +262,22 @@ exit 2
 		errCh <- runCodexCLI(context.Background(), signalScript, "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
 	}()
 	waitUntil(t, func() bool {
-		_, err := os.Stat(readyPath)
-		return err == nil
+		_, statErr := os.Stat(readyPath)
+
+		return statErr == nil
 	})
 	proc, err := os.FindProcess(os.Getpid())
 	if err != nil {
 		t.Fatalf("find self: %v", err)
 	}
-	if err := proc.Signal(syscall.SIGHUP); err != nil {
-		t.Fatalf("signal self: %v", err)
+	if signalErr := proc.Signal(syscall.SIGHUP); signalErr != nil {
+		t.Fatalf("signal self: %v", signalErr)
 	}
-	if err := <-errCh; err != nil {
-		t.Fatalf("runCodexCLI signal forwarding returned error: %v", err)
+	if runErr := <-errCh; runErr != nil {
+		t.Fatalf("runCodexCLI signal forwarding returned error: %v", runErr)
 	}
-	if raw, err := os.ReadFile(signalPath); err != nil || strings.TrimSpace(string(raw)) != "hup" {
-		t.Fatalf("signal forwarding log=%q err=%v", raw, err)
+	if sigRaw, sigErr := os.ReadFile(signalPath); sigErr != nil || strings.TrimSpace(string(sigRaw)) != "hup" {
+		t.Fatalf("signal forwarding log=%q err=%v", sigRaw, sigErr)
 	}
 	if commandExitCode(assertError("plain")) != 1 {
 		t.Fatal("plain command error did not map to exit code 1")

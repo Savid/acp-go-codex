@@ -42,6 +42,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 			name: "new",
 			run: func(ctx context.Context, conn *acp.ClientSideConnection) error {
 				_, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+
 				return err
 			},
 		},
@@ -53,6 +54,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 					return err
 				}
 				_, err = conn.ResumeSession(ctx, ResumeSessionRequest(session.SessionId, "/tmp/project"))
+
 				return err
 			},
 		},
@@ -64,6 +66,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 					return err
 				}
 				_, err = conn.LoadSession(ctx, LoadSessionRequest(session.SessionId, "/tmp/project"))
+
 				return err
 			},
 		},
@@ -75,6 +78,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 					return err
 				}
 				_, err = CallForkSession(ctx, conn, ForkSessionRequest(session.SessionId, "/tmp/project"))
+
 				return err
 			},
 		},
@@ -211,6 +215,7 @@ func (c *spyCodexClient) commandContractSnapshot() (codex.TurnStartRequest, code
 
 	turn := c.lastTurn
 	turn.Prompt = append([]codex.UserInput(nil), c.lastTurn.Prompt...)
+
 	return turn, c.compact, c.review
 }
 
@@ -219,5 +224,6 @@ func runTurnText(turn codex.TurnStartRequest) string {
 		return ""
 	}
 	text, _ := turn.Prompt[0]["text"].(string)
+
 	return text
 }

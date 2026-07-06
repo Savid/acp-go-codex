@@ -111,6 +111,15 @@ func TestPlaceholderClientLifecycleMethods(t *testing.T) {
 	if err := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: resumed.ID}); !errors.Is(err, ErrThreadNotFound) {
 		t.Fatalf("DeleteThread missing error = %v, want ErrThreadNotFound", err)
 	}
+	if forked.ID == resumed.ID {
+		t.Fatalf("fork did not create a new thread: %q", forked.ID)
+	}
+}
+
+func TestPlaceholderClientModelAccountAndClose(t *testing.T) {
+	client := NewPlaceholderClient(Options{DefaultModel: "gpt-default", Env: map[string]string{"A": "B"}})
+	ctx := context.Background()
+
 	if models, err := client.ModelList(ctx); err != nil || models[0].ID != "gpt-default" {
 		t.Fatalf("ModelList = %#v err=%v", models, err)
 	}
@@ -122,9 +131,6 @@ func TestPlaceholderClientLifecycleMethods(t *testing.T) {
 	}
 	if err := client.Logout(ctx); err != nil {
 		t.Fatalf("Logout returned error: %v", err)
-	}
-	if forked.ID == resumed.ID {
-		t.Fatalf("fork did not create a new thread: %q", forked.ID)
 	}
 	zeroClient := &PlaceholderClient{threads: map[string]Thread{}}
 	if _, err := zeroClient.StartThread(ctx, ThreadStartRequest{Cwd: "/zero"}); err != nil {

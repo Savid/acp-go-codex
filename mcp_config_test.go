@@ -83,6 +83,7 @@ func TestMCPApprovalConfigArgsSkipsEmptyMode(t *testing.T) {
 
 func jsonString(value any) string {
 	raw, _ := json.Marshal(value)
+
 	return string(raw)
 }
 
@@ -92,6 +93,7 @@ func containsAll(value string, needles ...string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -101,6 +103,7 @@ func contains(value string, needle string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 

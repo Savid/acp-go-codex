@@ -15,6 +15,7 @@ func normalizeThreadError(err error) error {
 	if err == nil || errors.Is(err, ErrThreadNotFound) {
 		return err
 	}
+
 	if !isNativeThreadNotFound(err) {
 		return err
 	}

@@ -101,6 +101,7 @@ func envContains(env []string, want string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -156,7 +157,9 @@ while read line; do :; done
 	if !strings.Contains(logBuffer.String(), "app-server-stderr") {
 		t.Fatalf("stderr log = %q", logBuffer.String())
 	}
+}
 
+func TestCommandLaunchAppServerErrors(t *testing.T) {
 	if parseCodexVersion("codex 1.2.3+meta") != "1.2.3" {
 		t.Fatal("parseCodexVersion did not trim build metadata")
 	}
@@ -171,6 +174,7 @@ while read line; do :; done
 		}
 		cmd := exec.Command("/bin/sh", "-c", "cat")
 		cmd.Stdin = strings.NewReader("")
+
 		return cmd
 	}
 	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
@@ -182,6 +186,7 @@ while read line; do :; done
 		}
 		cmd := exec.Command("/bin/sh", "-c", "cat")
 		cmd.Stdout = io.Discard
+
 		return cmd
 	}
 	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
@@ -191,6 +196,7 @@ while read line; do :; done
 		if len(args) == 1 && args[0] == "--version" {
 			return versionCmd(ctx, path, args...)
 		}
+
 		return exec.Command(filepath.Join(t.TempDir(), "missing"))
 	}
 	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
@@ -207,7 +213,9 @@ while read line; do :; done
 	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{}); err == nil {
 		t.Fatal("launchAppServer ignored missing codex path")
 	}
+}
 
+func TestCommandProcessKillBranches(t *testing.T) {
 	exited := exec.Command("/bin/sh", "-c", "exit 0")
 	if err := exited.Run(); err != nil {
 		t.Fatalf("run exited cmd: %v", err)
@@ -280,6 +288,7 @@ while read line; do :; done
 		if signalCount == 1 {
 			return nil
 		}
+
 		return errors.New("final kill failed")
 	}
 	processCloseGrace = 0
@@ -362,5 +371,6 @@ func sleepCommand(t *testing.T, seconds string) *exec.Cmd {
 		return exec.Command(path, seconds)
 	}
 	t.Fatal("find sleep")
+
 	return nil
 }

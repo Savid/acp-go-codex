@@ -23,11 +23,11 @@ import (
 
 const (
 	envRunIntegration = "ACP_GO_CODEX_RUN_INTEGRATION"
-	envCodexPath      = "ACP_GO_CODEX_CODEX_PATH"
+	envCodexPath      = "ACP_GO_CODEX_HARNESS_PATH"
 	envAgentBinary    = "ACP_GO_CODEX_AGENT_BINARY"
 	envCodexHome      = "ACP_GO_CODEX_HOME"
 	envModel          = "ACP_GO_CODEX_MODEL"
-	envLiveTurn       = "ACP_GO_CODEX_LIVE_TURN"
+	envLiveTurn       = "ACP_GO_CODEX_RUN_LIVE_TOKENS"
 	envDebug          = "ACP_GO_CODEX_DEBUG_INTEGRATION"
 	envOpenAIAPIKey   = "OPENAI_API_KEY" //nolint:gosec // Environment variable name, not a credential value.
 

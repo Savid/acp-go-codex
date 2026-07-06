@@ -32,7 +32,9 @@ func rawMessageConfigFromMeta(meta map[string]any) rawMessageConfig {
 	if codexMeta == nil {
 		return rawMessageConfig{}
 	}
+
 	rawEvent, _ := codexMeta[rawEventKey].(map[string]any)
+
 	enabled, _ := rawEvent[rawEventEnabledKey].(bool)
 	if enabled {
 		return rawMessageConfig{enabled: true}
@@ -63,6 +65,7 @@ func (s *session) nextRawEventSequence() int64 {
 	defer s.mu.Unlock()
 
 	s.rawEventSequence++
+
 	return s.rawEventSequence
 }
 
@@ -73,17 +76,18 @@ func capRawEventPayload(payload map[string]any) map[string]any {
 	}
 
 	return map[string]any{
-		"sessionId": payload["sessionId"],
-		"sequence":  payload["sequence"],
-		"source":    payload["source"],
-		"event": map[string]any{
-			"truncated": true,
-			"error":     fmt.Sprintf("raw event exceeded %d bytes", rawEventMaxBytes),
+		jsonFieldSessionID: payload[jsonFieldSessionID],
+		jsonFieldSequence:  payload[jsonFieldSequence],
+		jsonFieldSource:    payload[jsonFieldSource],
+		jsonFieldEvent: map[string]any{
+			"truncated":    true,
+			jsonFieldError: fmt.Sprintf("raw event exceeded %d bytes", rawEventMaxBytes),
 		},
 	}
 }
 
 func stringMeta(values map[string]any, key string) string {
 	value, _ := values[key].(string)
+
 	return value
 }

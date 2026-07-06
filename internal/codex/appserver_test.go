@@ -35,18 +35,18 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if start["permissions"] == nil || start["personality"] != "pragmatic" || start["serviceTier"] != "flex" {
 		t.Fatalf("thread/start params = %#v", start)
 	}
-	if _, err := client.StartThread(ctx, ThreadStartRequest{Personality: ""}); err != nil {
-		t.Fatalf("StartThread with empty personality returned error: %v", err)
+	if _, startErr := client.StartThread(ctx, ThreadStartRequest{Personality: ""}); startErr != nil {
+		t.Fatalf("StartThread with empty personality returned error: %v", startErr)
 	}
 	if _, ok := transport.sentParams(methodThreadStart)["personality"]; ok {
 		t.Fatalf("empty personality was sent: %#v", transport.sentParams(methodThreadStart))
 	}
 
-	if _, err := client.ResumeThread(ctx, ThreadResumeRequest{ThreadID: "thread-1", Path: "/tmp/rollout.jsonl", Cwd: "/repo"}); err != nil {
-		t.Fatalf("ResumeThread returned error: %v", err)
+	if _, resumeErr := client.ResumeThread(ctx, ThreadResumeRequest{ThreadID: "thread-1", Path: "/tmp/rollout.jsonl", Cwd: "/repo"}); resumeErr != nil {
+		t.Fatalf("ResumeThread returned error: %v", resumeErr)
 	}
-	if _, err := client.ForkThread(ctx, ThreadForkRequest{ThreadID: "thread-1", Cwd: "/repo"}); err != nil {
-		t.Fatalf("ForkThread returned error: %v", err)
+	if _, forkErr := client.ForkThread(ctx, ThreadForkRequest{ThreadID: "thread-1", Cwd: "/repo"}); forkErr != nil {
+		t.Fatalf("ForkThread returned error: %v", forkErr)
 	}
 	threads, err := client.ListThreads(ctx, ThreadListRequest{Cwd: "/repo"})
 	if err != nil || len(threads) != 1 {
@@ -60,17 +60,25 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if err != nil || len(turns.Turns) != 1 || turns.NextCursor != "next" {
 		t.Fatalf("ListTurns = %#v err=%v", turns, err)
 	}
-	if err := client.SteerTurn(ctx, TurnSteerRequest{ThreadID: "thread-1", ExpectedTurnID: "turn-1", Input: []UserInput{{"type": "text", "text": "more"}}}); err != nil {
-		t.Fatalf("SteerTurn returned error: %v", err)
+}
+
+func TestAppServerClientTurnAndDiscoveryMethods(t *testing.T) {
+	transport := newScriptTransport()
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	defer client.Close(context.Background())
+
+	ctx := context.Background()
+	if steerErr := client.SteerTurn(ctx, TurnSteerRequest{ThreadID: "thread-1", ExpectedTurnID: "turn-1", Input: []UserInput{{"type": "text", "text": "more"}}}); steerErr != nil {
+		t.Fatalf("SteerTurn returned error: %v", steerErr)
 	}
-	if err := client.CancelTurn(ctx, "thread-1", "turn-1"); err != nil {
-		t.Fatalf("CancelTurn returned error: %v", err)
+	if cancelErr := client.CancelTurn(ctx, "thread-1", "turn-1"); cancelErr != nil {
+		t.Fatalf("CancelTurn returned error: %v", cancelErr)
 	}
-	if _, err := client.CompactThread(ctx, ThreadCompactRequest{ThreadID: "thread-1"}); err != nil {
-		t.Fatalf("CompactThread returned error: %v", err)
+	if _, compactErr := client.CompactThread(ctx, ThreadCompactRequest{ThreadID: "thread-1"}); compactErr != nil {
+		t.Fatalf("CompactThread returned error: %v", compactErr)
 	}
-	if _, err := client.StartReview(ctx, ReviewStartRequest{ThreadID: "thread-1", Target: map[string]any{"type": "uncommittedChanges"}, Delivery: "inline"}); err != nil {
-		t.Fatalf("StartReview returned error: %v", err)
+	if _, reviewErr := client.StartReview(ctx, ReviewStartRequest{ThreadID: "thread-1", Target: map[string]any{"type": "uncommittedChanges"}, Delivery: "inline"}); reviewErr != nil {
+		t.Fatalf("StartReview returned error: %v", reviewErr)
 	}
 	modes, err := client.CollaborationModeList(ctx)
 	if err != nil || len(modes.Modes) != 2 || modes.Modes[0].ID != "default" {
@@ -80,12 +88,20 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if err != nil || len(status.Servers) != 1 || len(status.Servers[0].Tools) != 1 {
 		t.Fatalf("MCPServerStatusList = %#v err=%v", status, err)
 	}
-	if err := client.UnsubscribeThread(ctx, "thread-1"); err != nil {
-		t.Fatalf("UnsubscribeThread returned error: %v", err)
+	if unsubErr := client.UnsubscribeThread(ctx, "thread-1"); unsubErr != nil {
+		t.Fatalf("UnsubscribeThread returned error: %v", unsubErr)
 	}
-	if err := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: "thread-1"}); err != nil {
-		t.Fatalf("DeleteThread returned error: %v", err)
+	if deleteErr := client.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: "thread-1"}); deleteErr != nil {
+		t.Fatalf("DeleteThread returned error: %v", deleteErr)
 	}
+}
+
+func TestAppServerClientModelAndAccountMethods(t *testing.T) {
+	transport := newScriptTransport()
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	defer client.Close(context.Background())
+
+	ctx := context.Background()
 	models, err := client.ModelList(ctx)
 	if err != nil || len(models) != 2 || models[0].ID != "gpt-a" || models[0].Name != "GPT A" || models[0].Description != "A model" || models[0].DefaultReasoningEffort != "medium" || len(models[0].ReasoningEfforts) != 2 {
 		t.Fatalf("ModelList = %#v err=%v", models, err)
@@ -94,11 +110,11 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if err != nil || account.ID != "acct" || account.PlanType != "plus" {
 		t.Fatalf("AccountRead = %#v err=%v", account, err)
 	}
-	if err := client.LoginWithChatGPTTokens(ctx, ChatGPTAuthTokens{AccessToken: "a", RefreshToken: "r", AccountID: "acct", PlanType: "plus", ExpiresAtUnixSec: 123}); err != nil {
-		t.Fatalf("LoginWithChatGPTTokens returned error: %v", err)
+	if loginErr := client.LoginWithChatGPTTokens(ctx, ChatGPTAuthTokens{AccessToken: "a", RefreshToken: "r", AccountID: "acct", PlanType: "plus", ExpiresAtUnixSec: 123}); loginErr != nil {
+		t.Fatalf("LoginWithChatGPTTokens returned error: %v", loginErr)
 	}
-	if err := client.Logout(ctx); err != nil {
-		t.Fatalf("Logout returned error: %v", err)
+	if logoutErr := client.Logout(ctx); logoutErr != nil {
+		t.Fatalf("Logout returned error: %v", logoutErr)
 	}
 }
 
@@ -231,6 +247,9 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	if firstInt64(map[string]any{"fallback": float64(4)}, "missing", "fallback") != 4 || firstInt64(map[string]any{}, "missing") != 0 {
 		t.Fatal("firstInt64 fallback failed")
 	}
+}
+
+func TestAppServerItemMappingHelpers(t *testing.T) {
 	if completedItemEvent(Event{}, map[string]any{"item": map[string]any{"type": "agentMessage", "text": "done"}}).Kind != EventAgentMessageDelta {
 		t.Fatal("agent completed item did not map to agent delta")
 	}
@@ -271,6 +290,9 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	if locations := stringSliceValue([]string{"a.go"}); len(locations) != 1 || locations[0] != "a.go" {
 		t.Fatalf("string locations = %#v", locations)
 	}
+}
+
+func TestAppServerValueMappingHelpers(t *testing.T) {
 	if text := contentText([]any{"a", map[string]any{"content": []any{map[string]any{"summary_text": "b"}}}}); text != "ab" {
 		t.Fatalf("content text = %q", text)
 	}
@@ -359,6 +381,7 @@ func TestRPCConnCallsNotificationsAndRequests(t *testing.T) {
 	transport := newScriptTransport()
 	conn := newRPCConn(transport, func(_ context.Context, req ServerRequest) (any, error) {
 		handlerCalled <- req
+
 		return map[string]any{"ok": true}, nil
 	})
 	defer conn.Close()
@@ -479,10 +502,10 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := client.registerTurn(ctx, "thread-1"); err == nil {
+	if _, regErr := client.registerTurn(ctx, "thread-1"); regErr == nil {
 		t.Fatal("registerTurn accepted canceled context")
 	}
-	if _, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: "thread-1"}); err == nil {
+	if _, runErr := client.RunTurn(ctx, TurnStartRequest{ThreadID: "thread-1"}); runErr == nil {
 		t.Fatal("RunTurn accepted canceled context")
 	}
 	client.setTurnID(stream, "")
@@ -605,7 +628,9 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	if _, ok := <-openStream.out; ok {
 		t.Fatal("closeAllTurns did not close stream")
 	}
+}
 
+func TestAppServerEventPumpAccountAndClose(t *testing.T) {
 	updated := make(chan Event, 1)
 	accountClient := &AppServerClient{
 		options: Options{EventHandler: func(_ context.Context, event Event) { updated <- event }},
@@ -655,6 +680,7 @@ func (t *failingSendTransport) Send(context.Context, rpcMessage) error { return 
 
 func (t *failingSendTransport) Recv() (rpcMessage, string, error) {
 	<-t.done
+
 	return rpcMessage{}, "", errors.New("closed")
 }
 
@@ -664,6 +690,7 @@ func (t *failingSendTransport) Close() error {
 	default:
 		close(t.done)
 	}
+
 	return nil
 }
 
@@ -703,6 +730,7 @@ func (t *abruptCloseTransport) Recv() (rpcMessage, string, error) {
 		if err == nil {
 			err = errors.New("closed")
 		}
+
 		return rpcMessage{}, "", err
 	}
 }
@@ -717,6 +745,7 @@ func (t *abruptCloseTransport) CloseWithError(err error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
+
 		return
 	}
 	t.closed = true
@@ -736,6 +765,7 @@ func (t *scriptTransport) Send(_ context.Context, msg rpcMessage) error {
 	if len(msg.ID) > 0 {
 		if errResp := t.errs[msg.Method]; errResp != nil {
 			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Error: errResp}
+
 			return nil
 		}
 		t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Result: mustRaw(t.response(msg.Method))}
@@ -762,6 +792,7 @@ func (t *scriptTransport) Recv() (rpcMessage, string, error) {
 		return rpcMessage{}, "", errors.New("closed")
 	}
 	raw := string(mustRaw(msg))
+
 	return msg, raw, nil
 }
 
@@ -772,6 +803,7 @@ func (t *scriptTransport) Close() error {
 		t.closed = true
 		close(t.recv)
 	}
+
 	return nil
 }
 
@@ -785,8 +817,10 @@ func (t *scriptTransport) sentParams(method string) map[string]any {
 		}
 		var params map[string]any
 		_ = json.Unmarshal(msg.Params, &params)
+
 		return params
 	}
+
 	return nil
 }
 
@@ -848,6 +882,7 @@ func mustRaw(value any) json.RawMessage {
 	if err != nil {
 		panic(err)
 	}
+
 	return raw
 }
 
@@ -943,8 +978,8 @@ while read line; do :; done
 
 const (
 	envRunIntegration       = "ACP_GO_CODEX_RUN_INTEGRATION"
-	envIntegrationCodexPath = "ACP_GO_CODEX_CODEX_PATH"
-	envLiveTurn             = "ACP_GO_CODEX_LIVE_TURN"
+	envIntegrationCodexPath = "ACP_GO_CODEX_HARNESS_PATH"
+	envLiveTurn             = "ACP_GO_CODEX_RUN_LIVE_TOKENS"
 )
 
 func TestIntegrationAppServerSmoke(t *testing.T) {
@@ -967,8 +1002,8 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := client.Close(context.Background()); err != nil {
-			t.Fatalf("Close returned error: %v", err)
+		if closeErr := client.Close(context.Background()); closeErr != nil {
+			t.Fatalf("Close returned error: %v", closeErr)
 		}
 	})
 
@@ -979,11 +1014,11 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 	if len(models) == 0 {
 		t.Fatal("ModelList returned no models")
 	}
-	if _, err := client.CollaborationModeList(ctx); err != nil {
-		t.Fatalf("CollaborationModeList returned error: %v", err)
+	if _, collabErr := client.CollaborationModeList(ctx); collabErr != nil {
+		t.Fatalf("CollaborationModeList returned error: %v", collabErr)
 	}
-	if _, err := client.MCPServerStatusList(ctx); err != nil {
-		t.Fatalf("MCPServerStatusList returned error: %v", err)
+	if _, mcpErr := client.MCPServerStatusList(ctx); mcpErr != nil {
+		t.Fatalf("MCPServerStatusList returned error: %v", mcpErr)
 	}
 
 	thread, err := client.StartThread(ctx, ThreadStartRequest{
@@ -997,21 +1032,21 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 		t.Fatalf("thread missing ID: %#v", thread)
 	}
 	t.Cleanup(func() {
-		if err := client.UnsubscribeThread(context.Background(), thread.ID); err != nil {
-			t.Fatalf("UnsubscribeThread returned error: %v", err)
+		if unsubErr := client.UnsubscribeThread(context.Background(), thread.ID); unsubErr != nil {
+			t.Fatalf("UnsubscribeThread returned error: %v", unsubErr)
 		}
 	})
 
-	if _, err := client.ReadThread(ctx, ThreadReadRequest{ThreadID: thread.ID}); err != nil {
-		t.Fatalf("ReadThread returned error: %v", err)
+	if _, readErr := client.ReadThread(ctx, ThreadReadRequest{ThreadID: thread.ID}); readErr != nil {
+		t.Fatalf("ReadThread returned error: %v", readErr)
 	}
 	if os.Getenv(envLiveTurn) == "1" {
 		runLiveTurn(ctx, t, client, thread.ID)
-		if _, err := client.ListTurns(ctx, ThreadTurnsListRequest{ThreadID: thread.ID, Limit: 10}); err != nil {
-			t.Fatalf("ListTurns after live turn returned error: %v", err)
+		if _, listErr := client.ListTurns(ctx, ThreadTurnsListRequest{ThreadID: thread.ID, Limit: 10}); listErr != nil {
+			t.Fatalf("ListTurns after live turn returned error: %v", listErr)
 		}
-	} else if _, err := client.ListTurns(ctx, ThreadTurnsListRequest{ThreadID: thread.ID, Limit: 10}); err != nil && !strings.Contains(err.Error(), "not materialized yet") {
-		t.Fatalf("ListTurns before materialization returned unexpected error: %v", err)
+	} else if _, listErr := client.ListTurns(ctx, ThreadTurnsListRequest{ThreadID: thread.ID, Limit: 10}); listErr != nil && !strings.Contains(listErr.Error(), "not materialized yet") {
+		t.Fatalf("ListTurns before materialization returned unexpected error: %v", listErr)
 	}
 }
 

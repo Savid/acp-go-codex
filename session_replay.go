@@ -23,6 +23,7 @@ func rolloutNativeThreadID(entries []SessionStoreEntry) string {
 		if err != nil || row.Type != "session_meta" {
 			continue
 		}
+
 		if id := stringFromAny(row.Payload["id"]); id != "" {
 			return id
 		}
@@ -36,6 +37,7 @@ func (s *session) replayRollout(ctx context.Context, entries []SessionStoreEntry
 	if err != nil {
 		return err
 	}
+
 	for _, update := range updates {
 		if err := s.emitUpdates(ctx, update); err != nil {
 			return err
@@ -49,10 +51,12 @@ func (s *session) replayThreadHistory(ctx context.Context) error {
 	if s.client == nil || s.codexThreadID == "" {
 		return nil
 	}
+
 	history, err := s.client.ReadThread(ctx, codex.ThreadReadRequest{ThreadID: s.codexThreadID})
 	if err != nil {
 		return codexThreadACPError(err, s.accountMetaSnapshot(), codexThreadErrorData(s.id, s.codexThreadID))
 	}
+
 	for _, update := range threadHistoryReplayUpdates(history.Items) {
 		if err := s.emitUpdates(ctx, update); err != nil {
 			return err
@@ -65,33 +69,37 @@ func (s *session) replayThreadHistory(ctx context.Context) error {
 func threadHistoryReplayUpdates(items []map[string]any) []acp.SessionUpdate {
 	updates := make([]acp.SessionUpdate, 0, len(items))
 	for _, item := range items {
-		switch firstNonEmpty(stringFromAny(item["type"]), stringFromAny(item["kind"])) {
-		case "userMessage", "user_message", "user":
-			if text := firstNonEmpty(stringFromAny(item["text"]), stringFromAny(item["message"]), responseItemText(item)); text != "" {
+		switch firstNonEmpty(stringFromAny(item[jsonFieldType]), stringFromAny(item["kind"])) {
+		case "userMessage", eventUserMessage, roleUser:
+			if text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item[jsonFieldMessage]), responseItemText(item)); text != "" {
 				updates = append(updates, acp.UpdateUserMessageText(text))
 			}
-		case "agentMessage", "agent_message", "assistant", "message":
+		case "agentMessage", valueAgentMessage, roleAssistant, jsonFieldMessage:
 			role := stringFromAny(item["role"])
-			text := firstNonEmpty(stringFromAny(item["text"]), stringFromAny(item["message"]), responseItemText(item))
+
+			text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item[jsonFieldMessage]), responseItemText(item))
 			if text == "" {
 				continue
 			}
-			if role == "user" {
+
+			if role == roleUser {
 				updates = append(updates, acp.UpdateUserMessageText(text))
 			} else {
 				updates = append(updates, acp.UpdateAgentMessageText(text))
 			}
-		case "reasoning", "agentReasoning", "agent_reasoning":
-			if text := firstNonEmpty(stringFromAny(item["text"]), stringFromAny(item["summary"]), responseItemText(item)); text != "" {
+		case valueReasoning, "agentReasoning", valueAgentReasoning:
+			if text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item["summary"]), responseItemText(item)); text != "" {
 				updates = append(updates, acp.UpdateAgentThoughtText(text))
 			}
-		case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "function_call", "custom_tool_call":
-			title := firstNonEmpty(stringFromAny(item["title"]), stringFromAny(item["name"]), stringFromAny(item["type"]))
-			kind := toolKind(codex.ToolEvent{Kind: firstNonEmpty(stringFromAny(item["type"]), stringFromAny(item["kind"]))})
+		case toolKindCommandExecution, toolKindFileChange, toolKindMcpToolCall, "dynamicToolCall", "function_call", "custom_tool_call":
+			title := firstNonEmpty(stringFromAny(item[jsonFieldTitle]), stringFromAny(item[jsonFieldName]), stringFromAny(item[jsonFieldType]))
+			kind := toolKind(codex.ToolEvent{Kind: firstNonEmpty(stringFromAny(item[jsonFieldType]), stringFromAny(item["kind"]))})
+
 			update := replayToolStart(item, title, kind, acp.ToolCallStatusCompleted, item)
-			if text := firstNonEmpty(stringFromAny(item["output"]), stringFromAny(item["result"]), stringFromAny(item["message"])); text != "" && update.ToolCall != nil {
+			if text := firstNonEmpty(stringFromAny(item["output"]), stringFromAny(item["result"]), stringFromAny(item[jsonFieldMessage])); text != "" && update.ToolCall != nil {
 				update.ToolCall.Content = []acp.ToolCallContent{textToolContent(text)}
 			}
+
 			updates = append(updates, update)
 		}
 	}
@@ -110,24 +118,27 @@ func rolloutReplayUpdates(entries []SessionStoreEntry) ([]acp.SessionUpdate, err
 		if err != nil {
 			return nil, acp.NewInvalidParams(map[string]any{jsonFieldEntries: map[string]any{jsonFieldIndex: index, jsonFieldError: err.Error()}})
 		}
+
 		rows = append(rows, row)
-		if row.Type != "event_msg" {
+		if row.Type != valueEventMsg {
 			continue
 		}
-		switch stringFromAny(row.Payload["type"]) {
-		case "user_message":
+
+		switch stringFromAny(row.Payload[jsonFieldType]) {
+		case eventUserMessage:
 			hasEventUser = true
-		case "agent_message":
+		case valueAgentMessage:
 			hasEventAgent = true
-		case "agent_reasoning", "agent_reasoning_raw_content":
+		case valueAgentReasoning, "agent_reasoning_raw_content":
 			hasEventReasoning = true
 		}
 	}
 
 	var updates []acp.SessionUpdate
+
 	for _, row := range rows {
 		switch row.Type {
-		case "event_msg":
+		case valueEventMsg:
 			updates = append(updates, replayEventMsg(row.Payload)...)
 		case "response_item":
 			updates = append(updates, replayResponseItem(row.Payload, replayFallbacks{
@@ -136,7 +147,7 @@ func rolloutReplayUpdates(entries []SessionStoreEntry) ([]acp.SessionUpdate, err
 				messageReasoning: !hasEventReasoning,
 			})...)
 		case "compacted":
-			if text := firstNonEmpty(stringFromAny(row.Payload["message"]), "Context compacted"); text != "" {
+			if text := firstNonEmpty(stringFromAny(row.Payload[jsonFieldMessage]), "Context compacted"); text != "" {
 				updates = append(updates, acp.UpdateAgentThoughtText(text))
 			}
 		}
@@ -150,13 +161,16 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 	if len(trimmed) == 0 {
 		return rolloutRow{}, errors.New(validationRequired)
 	}
+
 	var row rolloutRow
 	if err := json.Unmarshal(trimmed, &row); err != nil {
 		return rolloutRow{}, err
 	}
+
 	if row.Type == "" {
 		return rolloutRow{}, fmt.Errorf("type is required")
 	}
+
 	if row.Payload == nil {
 		row.Payload = map[string]any{}
 	}
@@ -165,21 +179,21 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 }
 
 func replayEventMsg(payload map[string]any) []acp.SessionUpdate {
-	switch stringFromAny(payload["type"]) {
-	case "user_message":
-		if text := stringFromAny(payload["message"]); text != "" {
+	switch stringFromAny(payload[jsonFieldType]) {
+	case eventUserMessage:
+		if text := stringFromAny(payload[jsonFieldMessage]); text != "" {
 			return []acp.SessionUpdate{acp.UpdateUserMessageText(text)}
 		}
-	case "agent_message":
-		if text := stringFromAny(payload["message"]); text != "" {
+	case valueAgentMessage:
+		if text := stringFromAny(payload[jsonFieldMessage]); text != "" {
 			return []acp.SessionUpdate{acp.UpdateAgentMessageText(text)}
 		}
-	case "agent_reasoning", "agent_reasoning_raw_content":
-		if text := firstNonEmpty(stringFromAny(payload["text"]), stringFromAny(payload["message"])); text != "" {
+	case valueAgentReasoning, "agent_reasoning_raw_content":
+		if text := firstNonEmpty(stringFromAny(payload[jsonFieldText]), stringFromAny(payload[jsonFieldMessage])); text != "" {
 			return []acp.SessionUpdate{acp.UpdateAgentThoughtText(text)}
 		}
 	case "context_compacted":
-		if text := firstNonEmpty(stringFromAny(payload["message"]), "Context compacted"); text != "" {
+		if text := firstNonEmpty(stringFromAny(payload[jsonFieldMessage]), "Context compacted"); text != "" {
 			return []acp.SessionUpdate{acp.UpdateAgentThoughtText(text)}
 		}
 	}
@@ -194,48 +208,55 @@ type replayFallbacks struct {
 }
 
 func replayResponseItem(payload map[string]any, fallbacks replayFallbacks) []acp.SessionUpdate {
-	switch stringFromAny(payload["type"]) {
-	case "message":
+	switch stringFromAny(payload[jsonFieldType]) {
+	case jsonFieldMessage:
 		role := stringFromAny(payload["role"])
+
 		text := responseItemText(payload)
 		if text == "" {
 			return nil
 		}
+
 		switch role {
-		case "user":
+		case roleUser:
 			if fallbacks.messageUser {
 				return []acp.SessionUpdate{acp.UpdateUserMessageText(text)}
 			}
-		case "assistant", "agent":
+		case roleAssistant, roleAgent:
 			if fallbacks.messageAgent {
 				return []acp.SessionUpdate{acp.UpdateAgentMessageText(text)}
 			}
 		}
-	case "reasoning":
+	case valueReasoning:
 		if !fallbacks.messageReasoning {
 			return nil
 		}
+
 		if text := responseItemText(payload); text != "" {
 			return []acp.SessionUpdate{acp.UpdateAgentThoughtText(text)}
 		}
 	case "function_call":
-		return []acp.SessionUpdate{replayToolStart(payload, stringFromAny(payload["name"]), acp.ToolKindOther, acp.ToolCallStatusCompleted, payload["arguments"])}
+		return []acp.SessionUpdate{replayToolStart(payload, stringFromAny(payload[jsonFieldName]), acp.ToolKindOther, acp.ToolCallStatusCompleted, payload["arguments"])}
 	case "function_call_output":
 		return replayToolOutput(payload)
 	case "custom_tool_call":
-		name := stringFromAny(payload["name"])
+		name := stringFromAny(payload[jsonFieldName])
 		kind := acp.ToolKindOther
 		content := []acp.ToolCallContent(nil)
+
 		if name == "apply_patch" {
 			kind = acp.ToolKindEdit
+
 			if input := stringFromAny(payload["input"]); input != "" {
 				content = []acp.ToolCallContent{textToolContent(input)}
 			}
 		}
+
 		update := replayToolStart(payload, name, kind, acp.ToolCallStatusCompleted, payload["input"])
 		if len(content) > 0 && update.ToolCall != nil {
 			update.ToolCall.Content = content
 		}
+
 		return []acp.SessionUpdate{update}
 	case "custom_tool_call_output":
 		return replayToolOutput(payload)
@@ -248,6 +269,7 @@ func replayResponseItem(payload map[string]any, fallbacks replayFallbacks) []acp
 		if text := stringFromAny(payload["revised_prompt"]); text != "" && update.ToolCall != nil {
 			update.ToolCall.Content = []acp.ToolCallContent{textToolContent(text)}
 		}
+
 		return []acp.SessionUpdate{update}
 	}
 
@@ -257,7 +279,7 @@ func replayResponseItem(payload map[string]any, fallbacks replayFallbacks) []acp
 func replayToolStart(payload map[string]any, title string, kind acp.ToolKind, status acp.ToolCallStatus, rawInput any) acp.SessionUpdate {
 	id := firstNonEmpty(stringFromAny(payload["call_id"]), stringFromAny(payload["id"]), title, "codex-tool")
 	if title == "" {
-		title = firstNonEmpty(stringFromAny(payload["type"]), id)
+		title = firstNonEmpty(stringFromAny(payload[jsonFieldType]), id)
 	}
 
 	return acp.StartToolCall(
@@ -274,7 +296,9 @@ func replayToolOutput(payload map[string]any) []acp.SessionUpdate {
 	if id == "" {
 		return nil
 	}
+
 	output := firstNonNil(payload["output"], payload["result"])
+
 	opts := []acp.ToolCallUpdateOpt{
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
 		acp.WithUpdateRawOutput(output),
@@ -288,11 +312,13 @@ func replayToolOutput(payload map[string]any) []acp.SessionUpdate {
 
 func replayLocalShellCall(payload map[string]any) acp.SessionUpdate {
 	title := "Run command"
-	if action := mapFromAny(payload["action"]); action != nil {
+
+	if action := mapFromAny(payload[jsonFieldAction]); action != nil {
 		if exec := mapFromAny(action["exec"]); exec != nil {
-			title = firstNonEmpty(commandText(exec["command"]), title)
+			title = firstNonEmpty(commandText(exec[valueCommand]), title)
 		}
 	}
+
 	status := replayStatus(stringFromAny(payload["status"]))
 	if status == acp.ToolCallStatusInProgress {
 		status = acp.ToolCallStatusFailed
@@ -303,9 +329,9 @@ func replayLocalShellCall(payload map[string]any) acp.SessionUpdate {
 
 func replayStatus(status string) acp.ToolCallStatus {
 	switch strings.ToLower(status) {
-	case "completed", "complete", "done", "succeeded", "success":
+	case "completed", "complete", statusDone, "succeeded", "success":
 		return acp.ToolCallStatusCompleted
-	case "failed", "error", "errored":
+	case "failed", jsonFieldError, "errored":
 		return acp.ToolCallStatusFailed
 	case "pending":
 		return acp.ToolCallStatusPending
@@ -315,22 +341,25 @@ func replayStatus(status string) acp.ToolCallStatus {
 }
 
 func responseItemText(payload map[string]any) string {
-	if text := firstNonEmpty(stringFromAny(payload["text"]), stringFromAny(payload["message"]), stringFromAny(payload["summary"])); text != "" {
+	if text := firstNonEmpty(stringFromAny(payload[jsonFieldText]), stringFromAny(payload[jsonFieldMessage]), stringFromAny(payload["summary"])); text != "" {
 		return text
 	}
-	content, ok := payload["content"].([]any)
+
+	content, ok := payload[jsonFieldContent].([]any)
 	if !ok {
 		return ""
 	}
+
 	var text strings.Builder
+
 	for _, item := range content {
 		switch typed := item.(type) {
 		case string:
 			text.WriteString(typed)
 		case map[string]any:
 			text.WriteString(firstNonEmpty(
-				stringFromAny(typed["text"]),
-				stringFromAny(typed["content"]),
+				stringFromAny(typed[jsonFieldText]),
+				stringFromAny(typed[jsonFieldContent]),
 				stringFromAny(typed["summary_text"]),
 			))
 		}
@@ -350,6 +379,7 @@ func commandText(value any) string {
 				parts = append(parts, part)
 			}
 		}
+
 		return strings.Join(parts, " ")
 	case []string:
 		return strings.Join(typed, " ")
@@ -369,6 +399,7 @@ func textFromAny(value any) string {
 		if err != nil {
 			return fmt.Sprint(typed)
 		}
+
 		return string(raw)
 	}
 }
@@ -379,5 +410,6 @@ func firstNonNil(values ...any) any {
 			return value
 		}
 	}
+
 	return nil
 }

@@ -46,7 +46,7 @@ func (c *PlaceholderClient) StartThread(ctx context.Context, req ThreadStartRequ
 		SessionID: id,
 		Cwd:       req.Cwd,
 		Model:     firstNonEmpty(req.Model, c.options.DefaultModel),
-		Provider:  "placeholder",
+		Provider:  valuePlaceholder,
 		Title:     "Codex placeholder session",
 	}
 	c.threads[id] = thread
@@ -67,7 +67,7 @@ func (c *PlaceholderClient) ResumeThread(ctx context.Context, req ThreadResumeRe
 	}
 
 	id := firstNonEmpty(req.ThreadID, fmt.Sprintf("codex-thread-%d", c.nextID.Add(1)))
-	thread := Thread{ID: id, SessionID: id, Cwd: req.Cwd, Model: firstNonEmpty(c.options.DefaultModel, "default"), Provider: "placeholder", Title: "Codex placeholder session"}
+	thread := Thread{ID: id, SessionID: id, Cwd: req.Cwd, Model: firstNonEmpty(c.options.DefaultModel, valueDefault), Provider: valuePlaceholder, Title: "Codex placeholder session"}
 	c.threads[id] = thread
 
 	return thread, nil
@@ -81,6 +81,7 @@ func (c *PlaceholderClient) ForkThread(ctx context.Context, req ThreadForkReques
 	c.mu.Lock()
 	_, ok := c.threads[req.ThreadID]
 	c.mu.Unlock()
+
 	if !ok {
 		return Thread{}, ErrThreadNotFound
 	}
@@ -97,11 +98,12 @@ func (c *PlaceholderClient) ListThreads(ctx context.Context, req ThreadListReque
 	defer c.mu.Unlock()
 
 	out := make([]Thread, 0, len(c.threads))
-	for _, thread := range c.threads {
-		if req.Cwd != "" && thread.Cwd != req.Cwd {
+	for i := range c.threads {
+		if req.Cwd != "" && c.threads[i].Cwd != req.Cwd {
 			continue
 		}
-		out = append(out, thread)
+
+		out = append(out, c.threads[i])
 	}
 
 	return out, nil
@@ -115,6 +117,7 @@ func (c *PlaceholderClient) ReadThread(ctx context.Context, req ThreadReadReques
 	c.mu.Lock()
 	thread, ok := c.threads[req.ThreadID]
 	c.mu.Unlock()
+
 	if !ok {
 		return ThreadHistory{}, ErrThreadNotFound
 	}
@@ -130,11 +133,12 @@ func (c *PlaceholderClient) ListTurns(ctx context.Context, req ThreadTurnsListRe
 	c.mu.Lock()
 	_, ok := c.threads[req.ThreadID]
 	c.mu.Unlock()
+
 	if !ok {
 		return ThreadTurnsListResponse{}, ErrThreadNotFound
 	}
 
-	return ThreadTurnsListResponse{Turns: []map[string]any{{"id": "placeholder-turn"}}}, nil
+	return ThreadTurnsListResponse{Turns: []map[string]any{{fieldID: "placeholder-turn"}}}, nil
 }
 
 func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-chan Event, error) {
@@ -150,11 +154,13 @@ func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (
 	if closed {
 		return nil, errors.New("codex placeholder client is closed")
 	}
+
 	if !ok {
 		return nil, ErrThreadNotFound
 	}
 
 	events := make(chan Event)
+
 	go func() {
 		defer recoverCodexGoroutine(ctx, "Codex placeholder turn")
 		defer close(events)
@@ -164,6 +170,7 @@ func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (
 			if event.TurnID == "" {
 				event.TurnID = "placeholder-turn"
 			}
+
 			select {
 			case <-ctx.Done():
 				return false
@@ -178,12 +185,15 @@ func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (
 		}}) {
 			return
 		}
+
 		if !send(Event{Kind: EventReasoningDelta, Text: "Using placeholder Codex provider boundary.\n"}) {
 			return
 		}
+
 		if !send(Event{Kind: EventAgentMessageDelta, Text: "Codex ACP placeholder provider is running."}) {
 			return
 		}
+
 		send(Event{Kind: EventCompleted, StopReason: StopReasonEndTurn})
 	}()
 
@@ -198,6 +208,7 @@ func (c *PlaceholderClient) SteerTurn(ctx context.Context, req TurnSteerRequest)
 	c.mu.Lock()
 	_, ok := c.threads[req.ThreadID]
 	c.mu.Unlock()
+
 	if !ok {
 		return ErrThreadNotFound
 	}
@@ -215,11 +226,12 @@ func (c *PlaceholderClient) CompactThread(ctx context.Context, req ThreadCompact
 	c.mu.Lock()
 	_, ok := c.threads[req.ThreadID]
 	c.mu.Unlock()
+
 	if !ok {
 		return nil, ErrThreadNotFound
 	}
 
-	return map[string]any{"threadId": req.ThreadID, "status": "compacted"}, nil
+	return map[string]any{fieldThreadID: req.ThreadID, fieldStatus: "compacted"}, nil
 }
 
 func (c *PlaceholderClient) StartReview(ctx context.Context, req ReviewStartRequest) (map[string]any, error) {
@@ -230,25 +242,26 @@ func (c *PlaceholderClient) StartReview(ctx context.Context, req ReviewStartRequ
 	c.mu.Lock()
 	_, ok := c.threads[req.ThreadID]
 	c.mu.Unlock()
+
 	if !ok {
 		return nil, ErrThreadNotFound
 	}
 
-	return map[string]any{"threadId": req.ThreadID, "target": req.Target}, nil
+	return map[string]any{fieldThreadID: req.ThreadID, "target": req.Target}, nil
 }
 
 func (c *PlaceholderClient) CollaborationModeList(context.Context) (CollaborationModeListResponse, error) {
 	return CollaborationModeListResponse{
 		Modes: []CollaborationMode{
-			{ID: "default", Name: "Default"},
-			{ID: "plan", Name: "Plan"},
+			{ID: valueDefault, Name: "Default"},
+			{ID: valuePlan, Name: "Plan"},
 		},
-		Raw: map[string]any{"placeholder": true},
+		Raw: map[string]any{valuePlaceholder: true},
 	}, nil
 }
 
 func (c *PlaceholderClient) MCPServerStatusList(context.Context) (MCPServerStatusListResponse, error) {
-	return MCPServerStatusListResponse{Raw: map[string]any{"placeholder": true}}, nil
+	return MCPServerStatusListResponse{Raw: map[string]any{valuePlaceholder: true}}, nil
 }
 
 func (c *PlaceholderClient) UnsubscribeThread(context.Context, string) error { return nil }
@@ -257,23 +270,27 @@ func (c *PlaceholderClient) DeleteThread(_ context.Context, req ThreadDeleteRequ
 	if req.ThreadID == "" {
 		return nil
 	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if _, ok := c.threads[req.ThreadID]; !ok {
 		return ErrThreadNotFound
 	}
+
 	delete(c.threads, req.ThreadID)
+
 	return nil
 }
 
 func (c *PlaceholderClient) ModelList(context.Context) ([]Model, error) {
-	model := firstNonEmpty(c.options.DefaultModel, "default")
+	model := firstNonEmpty(c.options.DefaultModel, valueDefault)
 
 	return []Model{{ID: model, Name: model}}, nil
 }
 
 func (c *PlaceholderClient) AccountRead(context.Context) (Account, error) {
-	return Account{Raw: map[string]any{"type": "placeholder"}}, nil
+	return Account{Raw: map[string]any{fieldType: valuePlaceholder}}, nil
 }
 
 func (c *PlaceholderClient) LoginWithChatGPTTokens(context.Context, ChatGPTAuthTokens) error {

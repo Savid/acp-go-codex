@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: audit build clean coverage-check docs-audit fmt help lint modernize-check test test/cover test-cross-compile test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
 
 ## build: build all packages
 build:
@@ -19,7 +19,7 @@ test-integration-smoke:
 
 ## test-integration-live: run full live integration tests
 test-integration-live:
-	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_LIVE_TURN=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
+	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
 
 ## test-integration: alias for full live integration tests
 test-integration: test-integration-live
@@ -29,7 +29,7 @@ test-integration-cover:
 	rm -rf .tmp/integration-cover coverage-integration.out
 	mkdir -p .tmp/integration-cover/data
 	go build -cover -coverpkg=./... -o .tmp/integration-cover/acp-go-codex ./cmd/acp-go-codex
-	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_LIVE_TURN=1 ACP_GO_CODEX_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-codex GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
+	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_RUN_LIVE_TOKENS=1 ACP_GO_CODEX_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-codex GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
 	go tool covdata percent -i=.tmp/integration-cover/data
 	go tool covdata textfmt -i=.tmp/integration-cover/data -o coverage-integration.out
 
@@ -42,13 +42,19 @@ fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './.git/*')
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 fmt ./...
 
+## fmt-check: require gofmt-clean Go files
+fmt-check:
+	@test -z "$$(gofmt -l .)"
+
 ## tidy: verify module files are tidy
 tidy:
 	go mod tidy -diff
 
-## vuln: run govulncheck
+## vuln: run govulncheck from the go.mod tool directive
+# golang.org/x/vuln v1.4.0 panics in x/tools SSA on Go 1.26 generics;
+# keep the tool directive pinned at v1.5.0 or newer.
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go tool govulncheck ./...
 
 ## test-cross-compile: compile platform-specific test branches
 test-cross-compile:
@@ -69,7 +75,7 @@ docs-audit:
 	@! rg -n 'opencode acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp|^  "codex"\s*:' README.md doc.go docs.json docs examples cmd/acp-go-codex/*.go
 
 ## audit: run local checks
-audit: fmt lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
+audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
 	go mod verify
 
 ## clean: remove build artifacts

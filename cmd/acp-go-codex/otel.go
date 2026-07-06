@@ -42,11 +42,13 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 	}
 
 	var shutdowns []func(context.Context) error
+
 	if telemetrySignalEnabled("OTEL_TRACES_EXPORTER", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", true) {
 		exporter, err := autoexport.NewSpanExporter(ctx)
 		if err != nil {
 			return telemetryConfig{}, err
 		}
+
 		if !autoexport.IsNoneSpanExporter(exporter) {
 			provider := sdktrace.NewTracerProvider(
 				sdktrace.WithResource(res),
@@ -62,6 +64,7 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 		if err != nil {
 			return telemetryConfig{}, err
 		}
+
 		if !autoexport.IsNoneMetricReader(reader) {
 			provider := sdkmetric.NewMeterProvider(
 				sdkmetric.WithResource(res),
@@ -77,6 +80,7 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 		if err != nil {
 			return telemetryConfig{}, err
 		}
+
 		if !autoexport.IsNoneLogExporter(exporter) {
 			provider := sdklog.NewLoggerProvider(
 				sdklog.WithResource(res),
@@ -88,6 +92,7 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 				otelslog.WithVersion(version),
 			)
 			config.logger = slog.New(joinSlogHandlers(baseLogger.Handler(), handler))
+
 			shutdowns = append(shutdowns, provider.Shutdown)
 		}
 	}
@@ -121,9 +126,11 @@ func telemetrySignalEnabled(exporterEnv string, endpointEnv string, genericOTLP 
 	if value := os.Getenv(exporterEnv); value != "" {
 		return value != "none"
 	}
+
 	if os.Getenv(endpointEnv) != "" {
 		return true
 	}
+
 	if !genericOTLP {
 		return false
 	}
@@ -171,6 +178,7 @@ func (h joinedSlogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h joinedSlogHandler) Handle(ctx context.Context, record slog.Record) error {
 	var errs []error
+
 	for _, handler := range h.handlers {
 		if handler.Enabled(ctx, record.Level) {
 			errs = append(errs, handler.Handle(ctx, record))

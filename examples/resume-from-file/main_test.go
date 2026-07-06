@@ -76,8 +76,8 @@ func TestLoadSessionFileAndSeedStore(t *testing.T) {
 	}
 
 	store := codexacp.NewInMemorySessionStore()
-	if err := seedSessionStore(context.Background(), store, "stored", entries); err != nil {
-		t.Fatalf("seedSessionStore returned error: %v", err)
+	if seedErr := seedSessionStore(context.Background(), store, "stored", entries); seedErr != nil {
+		t.Fatalf("seedSessionStore returned error: %v", seedErr)
 	}
 	loaded, err := store.Load(context.Background(), codexacp.SessionKey{SessionID: "stored"})
 	if err != nil || len(loaded) != len(entries) {
@@ -159,20 +159,20 @@ func TestClientHelpers(t *testing.T) {
 	if err != nil || read.Content != "body" {
 		t.Fatalf("ReadTextFile = %#v err=%v", read, err)
 	}
-	if _, err := c.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: "relative"}); err == nil {
+	if _, readRelErr := c.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: "relative"}); readRelErr == nil {
 		t.Fatal("ReadTextFile accepted relative path")
 	}
-	if _, err := c.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: "relative"}); err == nil {
+	if _, writeRelErr := c.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: "relative"}); writeRelErr == nil {
 		t.Fatal("WriteTextFile accepted relative path")
 	}
-	if _, err := c.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: filepath.Join(dir, "missing.txt")}); err == nil {
+	if _, readMissingErr := c.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: filepath.Join(dir, "missing.txt")}); readMissingErr == nil {
 		t.Fatal("ReadTextFile missing file succeeded")
 	}
 	notDir := filepath.Join(dir, "not-dir")
-	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write not-dir: %v", err)
+	if writeNotDirErr := os.WriteFile(notDir, []byte("x"), 0o600); writeNotDirErr != nil {
+		t.Fatalf("write not-dir: %v", writeNotDirErr)
 	}
-	if _, err := c.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: filepath.Join(notDir, "child.txt"), Content: "body"}); err == nil {
+	if _, writeChildErr := c.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: filepath.Join(notDir, "child.txt"), Content: "body"}); writeChildErr == nil {
 		t.Fatal("WriteTextFile under file path succeeded")
 	}
 
@@ -380,6 +380,7 @@ func TestRunUsesFakeAgent(t *testing.T) {
 			close: func() { closed = true },
 			wait: func() error {
 				waited = true
+
 				return nil
 			},
 		}, nil
@@ -430,6 +431,7 @@ func TestRunErrorBranches(t *testing.T) {
 				if tc.name == "resume error" {
 					return &startedAgent{conn: &fakeAgentConnection{initErr: tc.startErr}}, nil
 				}
+
 				return nil, tc.startErr
 			}
 			getwd = func() (string, error) { return dir, nil }
@@ -470,6 +472,7 @@ func TestRunContextCanceled(t *testing.T) {
 	conn := &fakeAgentConnection{promptErr: context.Canceled}
 	startAgent = func(context.Context, io.Writer, io.Writer, codexacp.SessionStore) (*startedAgent, error) {
 		cancel()
+
 		return &startedAgent{conn: conn}, nil
 	}
 	getwd = func() (string, error) { return dir, nil }
@@ -554,6 +557,7 @@ func TestStartAgentProcessAndGate(t *testing.T) {
 	case err := <-func() <-chan error {
 		ch := make(chan error, 1)
 		go func() { ch <- agent.wait() }()
+
 		return ch
 	}():
 		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "closed") {
@@ -570,6 +574,7 @@ func TestStartAgentProcessAndGate(t *testing.T) {
 		n, err := gate.Read(buf)
 		if err != nil {
 			readDone <- err.Error()
+
 			return
 		}
 		readDone <- string(buf[:n])

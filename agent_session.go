@@ -21,13 +21,16 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	if err := a.ensureOpen(); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+
 	meta, err := sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.NewSessionResponse{}, lifecycleMetaError(err)
 	}
+
 	start := codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -39,11 +42,14 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+
 	id := acp.SessionId(idValue)
+
 	mcpServers, err := a.prepareMCPServers(ctx, id, params.McpServers)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+
 	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
@@ -60,16 +66,20 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	})
 	if err != nil {
 		_ = client.Close(context.Background())
+
 		return acp.NewSessionResponse{}, codexAuthRequiredError(err, nil)
 	}
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
 	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
+
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
+
 		return acp.NewSessionResponse{}, err
 	}
+
 	models := modelList(ctx, client)
 	snapshot := session.snapshot()
 
@@ -85,6 +95,7 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
+
 	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, session.currentModel())
 	defer func() { finish(promptResultForObserver(resp, err, session.currentModel())) }()
 
@@ -93,6 +104,7 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 		if a.removeSessionIf(params.SessionId, session) {
 			a.observe.AddActiveSession(ctx, -1)
 		}
+
 		_ = session.Close(context.Background())
 
 		return acp.PromptResponse{}, acp.NewInternalError(map[string]any{
@@ -109,7 +121,9 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 	if err != nil {
 		return err
 	}
+
 	session.cancelTurn()
+
 	cancelCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
 
@@ -125,6 +139,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
+
 	closeErr := session.Close(ctx)
 	if a.removeSessionIf(params.SessionId, session) {
 		a.observe.AddActiveSession(ctx, -1)
@@ -138,8 +153,10 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	if params.SessionId == "" {
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
+
 	storeCtx, cancel := a.sessionStoreContext(ctx)
 	defer cancel()
+
 	if err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
@@ -159,13 +176,17 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	if err := a.deleteNativeCodexSession(ctx, params.SessionId, threadID); err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
+
 	if session != nil {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
 		err := session.Close(closeCtx)
+
 		closeCancel()
+
 		if err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
+
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
@@ -180,41 +201,51 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	if err := a.ensureOpen(); err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
+
 	if err := validateOptionalAbsolutePath(jsonFieldCwd, params.Cwd); err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
+
 	a.mu.Lock()
 	active := make([]*session, 0, len(a.sessions))
 	activeThreadIDs := map[string]struct{}{}
+
 	for _, session := range a.sessions {
 		if params.Cwd != nil && session.cwd != *params.Cwd {
 			continue
 		}
+
 		active = append(active, session)
 		activeThreadIDs[session.codexThreadID] = struct{}{}
 	}
 	a.mu.Unlock()
 
 	sessions := make([]acp.SessionInfo, 0, len(active))
+
 	seen := map[acp.SessionId]struct{}{}
 	for _, session := range active {
 		addSessionInfo(&sessions, seen, session.info())
 	}
+
 	if params.Cwd != nil {
 		storeSessions, err := a.listStoredSessions(ctx, *params.Cwd, seen)
 		if err != nil {
 			return acp.ListSessionsResponse{}, err
 		}
+
 		for _, session := range storeSessions {
 			addSessionInfo(&sessions, seen, session)
 		}
 	}
+
 	a.retryDeletedNativeCodexSessions(ctx)
+
 	if a.nativeSessionFallbackEnabled() {
 		codexSessions, err := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
 		if err != nil {
 			return acp.ListSessionsResponse{}, err
 		}
+
 		for _, session := range codexSessions {
 			addSessionInfo(&sessions, seen, session)
 		}
@@ -230,10 +261,12 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsRequest, activeIDs map[acp.SessionId]struct{}, activeThreadIDs map[string]struct{}) ([]acp.SessionInfo, error) {
 	cwd := ""
+
 	if params.Cwd != nil {
 		if err := validateRequiredAbsolutePath(jsonFieldCwd, *params.Cwd); err != nil {
 			return nil, err
 		}
+
 		cwd = *params.Cwd
 	}
 
@@ -249,22 +282,29 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 	}
 
 	out := make([]acp.SessionInfo, 0, len(threads))
-	for _, thread := range threads {
+	for i := range threads {
+		thread := &threads[i]
+
 		id := acp.SessionId(firstNonEmpty(thread.SessionID, thread.ID))
 		if id == "" {
 			continue
 		}
+
 		if a.isDeleted(id) {
 			continue
 		}
+
 		if _, ok := activeIDs[id]; ok {
 			continue
 		}
+
 		if _, ok := activeThreadIDs[thread.ID]; ok {
 			continue
 		}
+
 		title := firstNonEmpty(thread.Title, "Codex session "+string(id))
 		updatedAt := thread.UpdatedAt
+
 		info := acp.SessionInfo{
 			SessionId: id,
 			Cwd:       firstNonEmpty(thread.Cwd, cwd),
@@ -273,15 +313,17 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 			Meta: map[string]any{
 				codexMetaKey: map[string]any{
 					codexThreadIDMetaKey: thread.ID,
-					"stored":             true,
-					"source":             "codex",
+					valueStored:          true,
+					jsonFieldSource:      "codex",
 				},
 			},
 		}
 		if thread.Model != "" {
-			codexMeta := info.Meta[codexMetaKey].(map[string]any)
-			codexMeta["model"] = thread.Model
+			if codexMeta, ok := info.Meta[codexMetaKey].(map[string]any); ok {
+				codexMeta["model"] = thread.Model
+			}
 		}
+
 		out = append(out, info)
 	}
 
@@ -291,7 +333,9 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 func (a *Agent) isDeleted(id acp.SessionId) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	_, ok := a.deleted[id]
+
 	return ok
 }
 
@@ -394,6 +438,7 @@ func addSessionInfo(sessions *[]acp.SessionInfo, seen map[acp.SessionId]struct{}
 	if session.SessionId == "" {
 		return
 	}
+
 	if _, ok := seen[session.SessionId]; ok {
 		return
 	}
@@ -407,6 +452,7 @@ func paginateSessionInfos(sessions []acp.SessionInfo, cursor *string) ([]acp.Ses
 	if err != nil {
 		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "invalid cursor"})
 	}
+
 	if offset > len(sessions) {
 		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "cursor is past end"})
 	}
@@ -415,6 +461,7 @@ func paginateSessionInfos(sessions []acp.SessionInfo, cursor *string) ([]acp.Ses
 	if end >= len(sessions) {
 		return sessions[offset:], nil, nil
 	}
+
 	next := encodeListCursor(end)
 
 	return sessions[offset:end], &next, nil
@@ -429,6 +476,7 @@ func decodeListCursor(cursor *string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	offset, err := strconv.Atoi(string(data))
 	if err != nil || offset < 0 {
 		return 0, strconv.ErrSyntax
@@ -446,18 +494,22 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err := a.ensureOpen(); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
 		return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
 	}
+
 	meta, err := sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
+
 	start := codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -479,9 +531,11 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if loadErr != nil {
 		return acp.ResumeSessionResponse{}, loadErr
 	}
+
 	if len(storeEntries) > 0 {
 		return a.resumeMaterializedSession(ctx, params, storeEntries)
 	}
+
 	if !a.nativeSessionFallbackEnabled() {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
@@ -492,16 +546,19 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID: string(params.SessionId),
 		Cwd:      params.Cwd,
 	})
 	if err != nil {
 		_ = client.Close(context.Background())
+
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, string(params.SessionId)))
 	}
 
@@ -509,10 +566,13 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
 	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
+
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
+
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	models := modelList(ctx, client)
 	snapshot := session.snapshot()
 
@@ -526,10 +586,12 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	if err := a.ensureOpen(); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	meta, err := sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
+
 	path, err := materializeRollout(entries)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
@@ -538,14 +600,19 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
 	if err != nil {
 		_ = removeMaterializedRollout(path)
+
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
 	if err != nil {
 		_ = removeMaterializedRollout(path)
+
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	threadID := firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))
+
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID: threadID,
 		Path:     path,
@@ -554,6 +621,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	if err != nil {
 		_ = client.Close(context.Background())
 		_ = removeMaterializedRollout(path)
+
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, threadID))
 	}
 
@@ -568,11 +636,14 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		MaterializedPath:      path,
 	})
 	session.setAccount(clientAccountMeta(ctx, client))
+
 	session.materializedPath = path
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
+
 		return acp.ResumeSessionResponse{}, err
 	}
+
 	models := modelList(ctx, client)
 	snapshot := session.snapshot()
 
@@ -587,18 +658,22 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if err := a.ensureOpen(); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
+
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
+
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
 		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
 	}
+
 	meta, err := sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
+
 	start := codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -612,16 +687,18 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		case loadErr != nil:
 			return acp.LoadSessionResponse{}, loadErr
 		case len(storeEntries) > 0:
-			if err := existing.replayRollout(ctx, storeEntries); err != nil {
-				return acp.LoadSessionResponse{}, err
+			if replayErr := existing.replayRollout(ctx, storeEntries); replayErr != nil {
+				return acp.LoadSessionResponse{}, replayErr
 			}
 		default:
-			if err := existing.replayThreadHistory(ctx); err != nil {
-				return acp.LoadSessionResponse{}, err
+			if replayErr := existing.replayThreadHistory(ctx); replayErr != nil {
+				return acp.LoadSessionResponse{}, replayErr
 			}
 		}
+
 		models := modelList(ctx, existing.client)
 		snapshot := existing.snapshot()
+
 		return acp.LoadSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
 			ConfigOptions: sessionConfigOptions(existing, models),
@@ -632,9 +709,11 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if loadErr != nil {
 		return acp.LoadSessionResponse{}, loadErr
 	}
+
 	if len(storeEntries) > 0 {
 		return a.loadMaterializedSession(ctx, params, storeEntries)
 	}
+
 	if !a.nativeSessionFallbackEnabled() {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
@@ -645,6 +724,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
+
 	if session, err := a.session(params.SessionId); err == nil {
 		if replayErr := session.replayThreadHistory(ctx); replayErr != nil {
 			return acp.LoadSessionResponse{}, replayErr
@@ -669,18 +749,22 @@ func (a *Agent) listStoredSessions(ctx context.Context, cwd string, activeIDs ma
 		if _, ok := activeIDs[id]; ok {
 			continue
 		}
+
 		if summary.Cwd != "" && summary.Cwd != cwd {
 			continue
 		}
+
 		updatedAt := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
 		title := firstNonEmpty(summary.Title, "Codex session "+summary.SessionID)
+
 		codexMeta := map[string]any{
-			"stored": true,
-			"source": "sessionStore",
+			valueStored:     true,
+			jsonFieldSource: "sessionStore",
 		}
 		for key, value := range summary.Meta {
 			codexMeta[key] = cloneAny(value)
 		}
+
 		out = append(out, acp.SessionInfo{
 			SessionId: id,
 			Cwd:       firstNonEmpty(summary.Cwd, cwd),
@@ -711,10 +795,12 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	if err := a.ensureOpen(); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
+
 	meta, err := sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
+
 	path, err := materializeRollout(entries)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
@@ -723,13 +809,17 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
 	if err != nil {
 		_ = removeMaterializedRollout(path)
+
 		return acp.LoadSessionResponse{}, err
 	}
+
 	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
 	if err != nil {
 		_ = removeMaterializedRollout(path)
+
 		return acp.LoadSessionResponse{}, err
 	}
+
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID: firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
 		Path:     path,
@@ -738,6 +828,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	if err != nil {
 		_ = client.Close(context.Background())
 		_ = removeMaterializedRollout(path)
+
 		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))))
 	}
 
@@ -752,16 +843,22 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		MaterializedPath:      path,
 	})
 	session.setAccount(clientAccountMeta(ctx, client))
+
 	session.materializedPath = path
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
+
 		return acp.LoadSessionResponse{}, err
 	}
+
 	if err := session.replayRollout(ctx, entries); err != nil {
 		a.removeSession(id)
+
 		_ = session.Close(context.Background())
+
 		return acp.LoadSessionResponse{}, err
 	}
+
 	models := modelList(ctx, client)
 	snapshot := session.snapshot()
 
@@ -786,6 +883,7 @@ func (a *Agent) nativeSessionFallbackEnabled() bool {
 
 func (a *Agent) retryDeletedNativeCodexSessions(ctx context.Context) {
 	a.mu.Lock()
+
 	ids := make([]acp.SessionId, 0, len(a.deleted))
 	for id := range a.deleted {
 		ids = append(ids, id)
@@ -814,6 +912,7 @@ func (a *Agent) deleteNativeCodexSession(ctx context.Context, sessionID acp.Sess
 	if knownThreadID != "" {
 		threadIDs[knownThreadID] = struct{}{}
 	}
+
 	if sessionID != "" {
 		threadIDs[string(sessionID)] = struct{}{}
 	}
@@ -822,21 +921,26 @@ func (a *Agent) deleteNativeCodexSession(ctx context.Context, sessionID acp.Sess
 	if err != nil {
 		return err
 	}
-	for _, thread := range threads {
+
+	for i := range threads {
+		thread := &threads[i]
 		if thread.ID == "" {
 			continue
 		}
+
 		if acp.SessionId(firstNonEmpty(thread.SessionID, thread.ID)) == sessionID || thread.ID == knownThreadID {
 			threadIDs[thread.ID] = struct{}{}
 		}
 	}
 
 	var cleanupErr error
+
 	for threadID := range threadIDs {
 		err := client.DeleteThread(ctx, codex.ThreadDeleteRequest{ThreadID: threadID})
 		if errors.Is(err, codex.ErrThreadNotFound) {
 			continue
 		}
+
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 
@@ -845,37 +949,47 @@ func (a *Agent) deleteNativeCodexSession(ctx context.Context, sessionID acp.Sess
 
 func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
 	ctx = a.observe.Extract(ctx, params.Meta)
+
 	parent, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
-	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
-		return acp.UnstableForkSessionResponse{}, err
+
+	if pathErr := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); pathErr != nil {
+		return acp.UnstableForkSessionResponse{}, pathErr
 	}
+
 	meta, err := sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, lifecycleMetaError(err)
 	}
+
 	idValue, err := newSessionID()
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
+
 	id := acp.SessionId(idValue)
+
 	mcpServers, err := a.prepareMCPServers(ctx, id, stableMCPServersFromUnstable(params.McpServers))
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
+
 	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
+
 	parentSnapshot := parent.snapshot()
+
 	thread, err := client.ForkThread(ctx, codex.ThreadForkRequest{
 		ThreadID: parentSnapshot.codexThreadID,
 		Cwd:      params.Cwd,
 	})
 	if err != nil {
 		_ = client.Close(context.Background())
+
 		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta, codexThreadErrorData(parent.id, parentSnapshot.codexThreadID))
 	}
 
@@ -888,10 +1002,13 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		ForkParentID:          parentSnapshot.codexThreadID,
 	})
 	session.setAccount(clientAccountMeta(ctx, client))
+
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
+
 		return acp.UnstableForkSessionResponse{}, err
 	}
+
 	models := modelList(ctx, client)
 	snapshot := session.snapshot()
 
@@ -907,7 +1024,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	case params.ValueId != nil:
 		return a.setSessionConfigValue(ctx, params.ValueId)
 	case params.Boolean != nil:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"configId": params.Boolean.ConfigId})
+		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.Boolean.ConfigId})
 	default:
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"config": validationRequired})
 	}
@@ -925,6 +1042,7 @@ func modelList(ctx context.Context, client codex.Client) []codex.Model {
 	if client == nil {
 		return nil
 	}
+
 	models, err := client.ModelList(ctx)
 	if err != nil {
 		return nil
@@ -947,8 +1065,10 @@ func (a *Agent) sessionByCodexThread(threadID string) *session {
 	if strings.TrimSpace(threadID) == "" {
 		return nil
 	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	for _, session := range a.sessions {
 		if session.codexThreadID == threadID {
 			return session
@@ -962,6 +1082,7 @@ func clientAccountMeta(ctx context.Context, client codex.Client) map[string]any 
 	if client == nil {
 		return nil
 	}
+
 	account, err := client.AccountRead(ctx)
 	if err != nil {
 		return nil
@@ -974,9 +1095,11 @@ func codexThreadACPError(err error, account map[string]any, data map[string]any)
 	if err == nil {
 		return nil
 	}
+
 	if isCodexAuthError(err) {
 		return codexAuthRequiredError(err, account)
 	}
+
 	if errors.Is(err, codex.ErrThreadNotFound) {
 		return newResourceNotFound(data)
 	}

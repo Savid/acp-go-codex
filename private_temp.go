@@ -17,14 +17,17 @@ func createPrivateTempFile(dirPrefix string, filePattern string) (*os.File, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := privateChmod(dir, 0o700); err != nil {
+
+	if err = privateChmod(dir, 0o700); err != nil {
 		_ = os.RemoveAll(dir)
+
 		return nil, err
 	}
 
 	file, err := privateCreateTemp(dir, filePattern)
 	if err != nil {
 		_ = os.RemoveAll(dir)
+
 		return nil, err
 	}
 
@@ -35,6 +38,7 @@ func removePrivateTempFile(path string, dirPrefix string, removeFile func(string
 	if path == "" {
 		return nil
 	}
+
 	if err := removeFile(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}

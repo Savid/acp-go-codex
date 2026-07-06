@@ -98,6 +98,7 @@ func (c *localAgentConnection) Done() <-chan struct{} {
 
 func (c *localAgentConnection) handle(ctx context.Context, method string, params json.RawMessage) (any, *acp.RequestError) {
 	ctx, finish := c.agent.observe.StartACPRequest(ctx, method)
+
 	var reqErr *acp.RequestError
 	defer func() {
 		if reqErr != nil {
@@ -112,19 +113,24 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 			jsonFieldMethod: method,
 			jsonFieldError:  "initialize must be called before other ACP methods",
 		})
+
 		return nil, reqErr
 	}
+
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
 		reqErr = requestError(err)
+
 		return result, reqErr
 	}
 
 	handler, ok := localAgentHandlers[method]
 	if !ok {
 		reqErr = acp.NewMethodNotFound(method)
+
 		return nil, reqErr
 	}
+
 	result, reqErr := handler(ctx, c.agent, params)
 	if method == acp.AgentMethodInitialize && reqErr == nil {
 		c.initialized.Store(true)
@@ -141,6 +147,7 @@ func localResponse[Req any, ReqPtr localAgentParams[Req], Resp any](
 		if reqErr != nil {
 			return nil, reqErr
 		}
+
 		resp, err := call(agent, ctx, value)
 		if err != nil {
 			return nil, requestError(err)
@@ -158,6 +165,7 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 		if reqErr != nil {
 			return nil, reqErr
 		}
+
 		if err := call(agent, ctx, value); err != nil {
 			return nil, requestError(err)
 		}
@@ -171,6 +179,7 @@ func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.R
 	if err := json.Unmarshal(params, &value); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
+
 	if err := ReqPtr(&value).Validate(); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
@@ -194,6 +203,7 @@ func (c *localAgentConnection) CreateElicitation(
 	if err != nil {
 		return acp.UnstableCreateElicitationResponse{}, err
 	}
+
 	release, err := c.agent.acquireClientCall(ctx)
 	if err != nil {
 		return acp.UnstableCreateElicitationResponse{}, err
@@ -230,6 +240,7 @@ func (c *localAgentConnection) NotifyExtension(ctx context.Context, method strin
 	if method == "" || !strings.HasPrefix(method, "_") {
 		return fmt.Errorf("extension method name must start with '_' (got %q)", method)
 	}
+
 	release, err := c.agent.acquireClientCall(ctx)
 	if err != nil {
 		return err
@@ -243,10 +254,12 @@ func requestError(err error) *acp.RequestError {
 	if err == nil {
 		return nil
 	}
+
 	var reqErr *acp.RequestError
 	if errors.As(err, &reqErr) {
 		return reqErr
 	}
+
 	if errors.Is(err, context.Canceled) {
 		return acp.NewRequestCancelled(map[string]any{jsonFieldError: err.Error()})
 	}
@@ -264,21 +277,21 @@ func scopedElicitationParams(
 	case params.Form != nil:
 		payload = map[string]any{
 			jsonFieldMessage:  params.Form.Message,
-			"mode":            "form",
+			jsonFieldMode:     valueForm,
 			"requestedSchema": params.Form.RequestedSchema,
 		}
 		if len(params.Form.Meta) > 0 {
-			payload["_meta"] = params.Form.Meta
+			payload[jsonFieldMeta] = params.Form.Meta
 		}
 	case params.Url != nil:
 		payload = map[string]any{
 			"elicitationId":  params.Url.ElicitationId,
 			jsonFieldMessage: params.Url.Message,
-			"mode":           "url",
-			"url":            params.Url.Url,
+			jsonFieldMode:    jsonFieldURL,
+			jsonFieldURL:     params.Url.Url,
 		}
 		if len(params.Url.Meta) > 0 {
-			payload["_meta"] = params.Url.Meta
+			payload[jsonFieldMeta] = params.Url.Meta
 		}
 	default:
 		return nil, errors.New("elicitation request must include form or url")
@@ -287,9 +300,11 @@ func scopedElicitationParams(
 	if scope.SessionID != "" {
 		payload[jsonFieldSessionID] = scope.SessionID
 	}
+
 	if scope.ToolCallID != "" {
 		payload["toolCallId"] = scope.ToolCallID
 	}
+
 	if scope.RequestID != nil {
 		payload["requestId"] = scope.RequestID
 	}

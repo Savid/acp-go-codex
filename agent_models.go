@@ -8,12 +8,24 @@ import (
 )
 
 var (
-	codexEffortValues = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
-	codexTierValues   = []string{"auto", "default", "flex", "priority"}
-	codexPersonality  = []string{"none", "friendly", "pragmatic"}
+	codexEffortValues = []string{effortValueNone, "minimal", effortValueLow, effortValueMedium, effortValueHigh, "xhigh"}
+	codexTierValues   = []string{"auto", valueDefault, tierValueFlex, tierValuePriority}
+	codexPersonality  = []string{effortValueNone, personalityFriendly, personalityPragmatic}
 )
 
-const configCategoryModelConfig acp.SessionConfigOptionCategory = "model_config"
+const (
+	configCategoryModelConfig acp.SessionConfigOptionCategory = "model_config"
+
+	effortValueHigh     = "high"
+	personalityFriendly = "friendly"
+
+	effortValueNone      = "none"
+	effortValueLow       = "low"
+	effortValueMedium    = "medium"
+	tierValueFlex        = "flex"
+	tierValuePriority    = "priority"
+	personalityPragmatic = "pragmatic"
+)
 
 func sessionConfigOptions(session *session, models []codex.Model) []acp.SessionConfigOption {
 	session.mu.Lock()
@@ -29,6 +41,7 @@ func sessionConfigOptions(session *session, models []codex.Model) []acp.SessionC
 
 func sessionUnstableConfigOptions(session *session, models []codex.Model) []acp.UnstableSessionConfigOption {
 	options := sessionConfigOptions(session, models)
+
 	out := make([]acp.UnstableSessionConfigOption, 0, len(options))
 	for _, option := range options {
 		out = append(out, unstableConfigOption(option))
@@ -39,9 +52,11 @@ func sessionUnstableConfigOptions(session *session, models []codex.Model) []acp.
 
 func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tier string, personality string, models []codex.Model) []acp.SessionConfigOption {
 	var options []acp.SessionConfigOption
+
 	if model == "" {
-		model = "default"
+		model = valueDefault
 	}
+
 	if mode == "" {
 		mode = modeDefault
 	}
@@ -49,6 +64,7 @@ func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tie
 	if values := modelConfigValues(model, models); len(values) > 0 {
 		options = append(options, selectConfigOption(configModel, "Model", acp.SessionConfigOptionCategoryModel, acp.SessionConfigValueId(model), values))
 	}
+
 	options = append(options, selectConfigOption(configMode, "Mode", acp.SessionConfigOptionCategoryMode, acp.SessionConfigValueId(mode), []acp.SessionConfigSelectOption{
 		{Name: "Default", Value: acp.SessionConfigValueId(modeDefault)},
 		{Name: "Plan", Value: acp.SessionConfigValueId(modePlan)},
@@ -56,9 +72,11 @@ func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tie
 	if currentEffort, values := effortConfigValues(model, effort, models); len(values) > 0 {
 		options = append(options, selectConfigOption(configEffort, "Effort", acp.SessionConfigOptionCategoryThoughtLevel, currentEffort, values))
 	}
+
 	if tier != "" {
 		options = append(options, selectConfigOption(configServiceTier, "Service Tier", configCategoryModelConfig, acp.SessionConfigValueId(tier), stringConfigValues(codexTierValues)))
 	}
+
 	if personality != "" {
 		options = append(options, selectConfigOption(configPersonality, "Personality", configCategoryModelConfig, acp.SessionConfigValueId(personality), stringConfigValues(codexPersonality)))
 	}
@@ -68,15 +86,18 @@ func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tie
 
 func modelConfigValues(current string, models []codex.Model) []acp.SessionConfigSelectOption {
 	seen := map[string]struct{}{}
+
 	values := make([]acp.SessionConfigSelectOption, 0, len(models)+1)
 	for _, model := range models {
 		id := firstNonEmpty(model.ID, model.Name)
 		if id == "" {
 			continue
 		}
+
 		if _, ok := seen[id]; ok {
 			continue
 		}
+
 		seen[id] = struct{}{}
 		values = append(values, acp.SessionConfigSelectOption{
 			Name:        firstNonEmpty(model.Name, id),
@@ -85,6 +106,7 @@ func modelConfigValues(current string, models []codex.Model) []acp.SessionConfig
 			Meta:        modelMeta(model, id),
 		})
 	}
+
 	if current != "" {
 		if _, ok := seen[current]; !ok {
 			values = append(values, acp.SessionConfigSelectOption{Name: current, Value: acp.SessionConfigValueId(current)})
@@ -99,16 +121,19 @@ func modelMeta(model codex.Model, id string) map[string]any {
 	if model.Context > 0 {
 		codexMeta["contextWindow"] = model.Context
 	}
+
 	efforts := make([]string, 0, len(model.ReasoningEfforts))
 	for _, effort := range model.ReasoningEfforts {
 		if effort.ID != "" {
 			efforts = append(efforts, effort.ID)
 		}
 	}
+
 	if len(efforts) > 0 {
 		codexMeta["supportedEffortLevels"] = efforts
-		codexMeta["capabilities"] = []string{"reasoning"}
+		codexMeta["capabilities"] = []string{valueReasoning}
 	}
+
 	if rawCapabilities, ok := model.Raw["capabilities"].([]any); ok {
 		capabilities := make([]string, 0, len(rawCapabilities))
 		for _, raw := range rawCapabilities {
@@ -116,6 +141,7 @@ func modelMeta(model codex.Model, id string) map[string]any {
 				capabilities = append(capabilities, value)
 			}
 		}
+
 		if len(capabilities) > 0 {
 			codexMeta["capabilities"] = capabilities
 		}
@@ -127,14 +153,17 @@ func modelMeta(model codex.Model, id string) map[string]any {
 func effortConfigValues(currentModel string, currentEffort string, models []codex.Model) (acp.SessionConfigValueId, []acp.SessionConfigSelectOption) {
 	if model := modelByID(currentModel, models); model != nil && len(model.ReasoningEfforts) > 0 {
 		seen := map[string]struct{}{}
+
 		values := make([]acp.SessionConfigSelectOption, 0, len(model.ReasoningEfforts)+1)
 		for _, effort := range model.ReasoningEfforts {
 			if effort.ID == "" {
 				continue
 			}
+
 			if _, ok := seen[effort.ID]; ok {
 				continue
 			}
+
 			seen[effort.ID] = struct{}{}
 			values = append(values, acp.SessionConfigSelectOption{
 				Name:        effort.ID,
@@ -153,6 +182,7 @@ func effortConfigValues(currentModel string, currentEffort string, models []code
 
 		return acp.SessionConfigValueId(selected), values
 	}
+
 	if currentEffort == "" {
 		return "", nil
 	}
@@ -189,6 +219,7 @@ func stringPtrIfNotEmpty(value string) *string {
 
 func selectConfigOption(id acp.SessionConfigId, name string, category acp.SessionConfigOptionCategory, current acp.SessionConfigValueId, values []acp.SessionConfigSelectOption) acp.SessionConfigOption {
 	ungrouped := acp.SessionConfigSelectOptionsUngrouped(values)
+
 	option := acp.SessionConfigOption{
 		Select: &acp.SessionConfigOptionSelect{
 			Id:           id,
@@ -210,10 +241,13 @@ func selectConfigOption(id acp.SessionConfigId, name string, category acp.Sessio
 func unstableConfigOption(option acp.SessionConfigOption) acp.UnstableSessionConfigOption {
 	if option.Select != nil {
 		value := acp.UnstableSessionConfigOptionSelect(*option.Select)
+
 		return acp.UnstableSessionConfigOption{Select: &value}
 	}
+
 	if option.Boolean != nil {
 		value := acp.UnstableSessionConfigOptionBoolean(*option.Boolean)
+
 		return acp.UnstableSessionConfigOption{Boolean: &value}
 	}
 
@@ -241,16 +275,18 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 	case configMode:
 		mode := acp.SessionModeId(params.Value)
 		if mode != modeDefault && mode != modePlan {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"configId": params.ConfigId, "value": params.Value})
+			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId, jsonFieldValue: params.Value})
 		}
+
 		session.mu.Lock()
 		session.mode = mode
 		session.updatedAt = nowRFC3339()
 		session.mu.Unlock()
 	case configEffort:
 		if !validReasoningEffort(string(params.Value)) {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"configId": params.ConfigId, "value": params.Value})
+			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId, jsonFieldValue: params.Value})
 		}
+
 		session.mu.Lock()
 		session.reasoningEffort = string(params.Value)
 		session.updatedAt = nowRFC3339()
@@ -262,17 +298,19 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.mu.Unlock()
 	case configPersonality:
 		if !validPersonality(string(params.Value)) {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"configId": params.ConfigId, "value": params.Value})
+			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId, jsonFieldValue: params.Value})
 		}
+
 		session.mu.Lock()
 		session.personality = string(params.Value)
 		session.updatedAt = nowRFC3339()
 		session.mu.Unlock()
 	default:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"configId": params.ConfigId})
+		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId})
 	}
 
 	models := modelList(ctx, session.client)
+
 	options := sessionConfigOptions(session, models)
 	if err := session.emitUpdates(ctx, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err

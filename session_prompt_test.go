@@ -158,7 +158,9 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	if update := completeToolUpdate(codex.ToolEvent{ID: "tool", Title: "Title", Content: "done"}); update.ToolCallUpdate == nil {
 		t.Fatalf("complete update with title/content = %#v", update)
 	}
+}
 
+func TestSessionPromptCancelAndAccountUpdate(t *testing.T) {
 	agent := NewAgent()
 	agent.setAgentClient(newRecordingAgentClient())
 	cancelSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread"}
@@ -193,13 +195,15 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
 		}},
 	}
-	if _, err := accountSession.Prompt(context.Background(), TextPromptRequest("acct", "hi")); err != nil {
-		t.Fatalf("account update prompt returned error: %v", err)
+	if _, acctErr := accountSession.Prompt(context.Background(), TextPromptRequest("acct", "hi")); acctErr != nil {
+		t.Fatalf("account update prompt returned error: %v", acctErr)
 	}
 	if accountSession.accountMeta["email"] != "new@example.com" || accountSession.accountMeta["accessToken"] != nil {
 		t.Fatalf("account update meta = %#v", accountSession.accountMeta)
 	}
+}
 
+func TestSessionPromptDedupesDeltas(t *testing.T) {
 	dedupeAgent := NewAgent()
 	dedupeConn := newRecordingAgentClient()
 	dedupeAgent.setAgentClient(dedupeConn)
@@ -237,7 +241,9 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	if event := dedupeCompletedAggregateTextEvent(codex.Event{Kind: codex.EventAgentMessageDelta, Text: "same", Completed: true}, "same"); event.Text != "" {
 		t.Fatalf("aggregate duplicate was not suppressed: %#v", event)
 	}
+}
 
+func TestSessionPromptUsageUpdates(t *testing.T) {
 	usageAgent := NewAgent()
 	usageConn := newRecordingAgentClient()
 	usageAgent.setAgentClient(usageConn)
@@ -313,7 +319,9 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	if len(completedUsageConn.updates) != 1 || completedUsageConn.updates[0].Update.UsageUpdate == nil {
 		t.Fatalf("completed usage updates = %#v", completedUsageConn.updates)
 	}
+}
 
+func TestSessionPromptRawRolloutTail(t *testing.T) {
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	if err := os.WriteFile(rollout, []byte("\n"+`{"type":"event_msg"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
@@ -600,6 +608,10 @@ func TestEventUpdateEmptyAndFallbackBranches(t *testing.T) {
 	if updateUsage[usageCachedWriteTokensKey] != 2 {
 		t.Fatalf("cached write usage meta = %#v", updateUsage)
 	}
+}
+
+func TestTokenUsageAndObserverBranches(t *testing.T) {
+	usage := usageFromCodex(codex.Usage{InputTokens: 1, CachedReadTokens: 2, CachedWriteTokens: 3, OutputTokens: 4, ReasoningOutputTokens: 5})
 	tokenUpdates := tokenUsageUpdateFromCodex(codex.TokenUsage{
 		Last:               codex.Usage{InputTokens: 1, OutputTokens: 2},
 		Total:              codex.Usage{InputTokens: 3, OutputTokens: 4},

@@ -16,18 +16,22 @@ const (
 	authMethodChatGPTAuthTokens   = "codex-chatgpt-auth-tokens" // #nosec G101 -- ACP auth method identifier, not a token.
 	authMetaCodexAuth             = "codexAuth"
 	authChatGPTAuthTokensMetaPath = "chatgptAuthTokens" // #nosec G101 -- metadata field name, not a token.
+	authMetaAuthKey               = "auth"
 )
 
 func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 	methods := []acp.AuthMethod{}
+
 	if params.ClientCapabilities.Auth.Terminal {
 		args := []string{"login", "-device-auth"}
 		if a.options.ExecutablePath != "" {
 			args = append(args, "-path", a.options.ExecutablePath)
 		}
+
 		if a.options.Home != "" {
 			args = append(args, "-home", a.options.Home)
 		}
+
 		method := acp.AuthMethodTerminalInline{
 			Id:          authMethodCodexLogin,
 			Name:        "Codex Login",
@@ -37,13 +41,14 @@ func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 		}
 		methods = append(methods, acp.AuthMethod{Terminal: &method})
 	}
+
 	methods = append(methods, acp.AuthMethod{
 		Agent: &acp.AuthMethodAgent{
 			Id:          authMethodChatGPTAuthTokens,
 			Name:        "Codex ChatGPT tokens",
 			Description: acp.Ptr("Provide external ChatGPT auth tokens for Codex"),
 			Meta: map[string]any{
-				authMetaCodexAuth: map[string]any{"type": authChatGPTAuthTokensMetaPath},
+				authMetaCodexAuth: map[string]any{jsonFieldType: authChatGPTAuthTokensMetaPath},
 			},
 		},
 	})
@@ -63,6 +68,7 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	if err := a.ensureOpen(); err != nil {
 		return acp.AuthenticateResponse{}, err
 	}
+
 	if params.MethodId != authMethodChatGPTAuthTokens {
 		return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 	}
@@ -73,14 +79,17 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	}
 
 	a.setExternalAuthTokens(tokens)
+
 	client, err := a.newClient(ctx, nil, nil, "")
 	if err != nil {
 		a.clearExternalAuthTokens()
+
 		return acp.AuthenticateResponse{}, err
 	}
 	defer client.Close(context.Background())
 
 	account, _ := client.AccountRead(ctx)
+
 	return acp.AuthenticateResponse{Meta: accountResponseMeta(account)}, nil
 }
 
@@ -88,14 +97,17 @@ func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResp
 	if err := a.ensureOpen(); err != nil {
 		return acp.LogoutResponse{}, err
 	}
+
 	if !a.options.AllowAccountLogout {
 		return acp.LogoutResponse{}, acp.NewInvalidRequest(map[string]any{
 			jsonFieldError: "Codex account logout is disabled; set WithCodexAllowAccountLogout for adapter-owned CODEX_HOME",
 		})
 	}
+
 	a.clearExternalAuthTokens()
 
 	a.mu.Lock()
+
 	sessions := make([]*session, 0, len(a.sessions))
 	for id, session := range a.sessions {
 		sessions = append(sessions, session)
@@ -113,6 +125,7 @@ func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResp
 		return acp.LogoutResponse{}, errors.Join(err, clientErr)
 	}
 	defer client.Close(context.Background())
+
 	err = errors.Join(err, client.Logout(ctx))
 
 	return acp.LogoutResponse{}, err
@@ -120,13 +133,15 @@ func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResp
 
 func parseChatGPTAuthTokens(meta map[string]any) (ChatGPTAuthTokens, error) {
 	codexMeta, _ := meta[codexMetaKey].(map[string]any)
-	authMeta, _ := codexMeta["auth"].(map[string]any)
+	authMeta, _ := codexMeta[authMetaAuthKey].(map[string]any)
+
 	raw, _ := authMeta[authChatGPTAuthTokensMetaPath].(map[string]any)
 	if raw == nil {
 		return ChatGPTAuthTokens{}, fmt.Errorf("_meta.codex.auth.chatgptAuthTokens is required")
 	}
+
 	tokens := ChatGPTAuthTokens{
-		AccessToken:  stringMeta(raw, "accessToken"),
+		AccessToken:  stringMeta(raw, jsonFieldAccessToken),
 		RefreshToken: stringMeta(raw, "refreshToken"),
 		AccountID:    firstNonEmpty(stringMeta(raw, "chatgptAccountId"), stringMeta(raw, "accountId")),
 		PlanType:     firstNonEmpty(stringMeta(raw, "chatgptPlanType"), stringMeta(raw, "planType")),
@@ -137,6 +152,7 @@ func parseChatGPTAuthTokens(meta map[string]any) (ChatGPTAuthTokens, error) {
 	case json.Number:
 		tokens.ExpiresAtUnixSec, _ = expires.Int64()
 	}
+
 	if tokens.AccessToken == "" {
 		return ChatGPTAuthTokens{}, fmt.Errorf("accessToken is required")
 	}
@@ -168,12 +184,15 @@ func redactedAccountMeta(account codex.Account) map[string]any {
 	if account.ID != "" {
 		out["id"] = account.ID
 	}
+
 	if account.Email != "" {
 		out["email"] = account.Email
 	}
+
 	if account.PlanType != "" {
 		out["planType"] = account.PlanType
 	}
+
 	return out
 }
 
@@ -181,11 +200,12 @@ func codexAuthRequiredError(err error, account map[string]any) error {
 	if err == nil || !isCodexAuthError(err) {
 		return err
 	}
+
 	data := map[string]any{
 		codexMetaKey: map[string]any{
-			"auth": map[string]any{
-				"reason":    "codex-auth-required",
-				"methodIds": []string{authMethodCodexLogin, authMethodChatGPTAuthTokens},
+			authMetaAuthKey: map[string]any{
+				jsonFieldReason: "codex-auth-required",
+				"methodIds":     []string{authMethodCodexLogin, authMethodChatGPTAuthTokens},
 			},
 		},
 	}

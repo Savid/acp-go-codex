@@ -13,18 +13,18 @@ func promptToCodex(blocks []acp.ContentBlock) ([]codex.UserInput, error) {
 	for _, block := range blocks {
 		switch {
 		case block.Text != nil:
-			input = append(input, codex.UserInput{"type": "text", "text": block.Text.Text})
+			input = append(input, codex.UserInput{jsonFieldType: jsonFieldText, jsonFieldText: block.Text.Text})
 		case block.Image != nil:
 			if block.Image.Uri != nil && *block.Image.Uri != "" {
 				if strings.HasPrefix(*block.Image.Uri, "file://") {
-					input = append(input, codex.UserInput{"type": "localImage", "path": strings.TrimPrefix(*block.Image.Uri, "file://")})
+					input = append(input, codex.UserInput{jsonFieldType: valueLocalImage, jsonFieldPath: strings.TrimPrefix(*block.Image.Uri, "file://")})
 				} else {
-					input = append(input, codex.UserInput{"type": "image", "url": *block.Image.Uri})
+					input = append(input, codex.UserInput{jsonFieldType: valueImage, jsonFieldURL: *block.Image.Uri})
 				}
 			} else {
 				input = append(input, codex.UserInput{
-					"type": "image",
-					"url":  imageDataURL(block.Image.MimeType, block.Image.Data),
+					jsonFieldType: valueImage,
+					jsonFieldURL:  imageDataURL(block.Image.MimeType, block.Image.Data),
 				})
 			}
 		case block.ResourceLink != nil:
@@ -49,22 +49,24 @@ func imageDataURL(mimeType string, data string) string {
 
 func resourceLinkInput(resource acp.ContentBlockResourceLink) codex.UserInput {
 	if strings.HasPrefix(resource.Uri, "file://") {
-		return codex.UserInput{"type": "mention", "name": firstNonEmpty(resource.Name, resource.Uri), "path": strings.TrimPrefix(resource.Uri, "file://")}
+		return codex.UserInput{jsonFieldType: "mention", jsonFieldName: firstNonEmpty(resource.Name, resource.Uri), jsonFieldPath: strings.TrimPrefix(resource.Uri, "file://")}
 	}
 
-	return codex.UserInput{"type": "text", "text": resource.Uri}
+	return codex.UserInput{jsonFieldType: jsonFieldText, jsonFieldText: resource.Uri}
 }
 
 func resourceInput(resource acp.EmbeddedResourceResource) codex.UserInput {
 	switch {
 	case resource.TextResourceContents != nil:
 		contents := resource.TextResourceContents
-		return codex.UserInput{"type": "text", "text": fmt.Sprintf("\n<context ref=%q>\n%s\n</context>", contents.Uri, contents.Text)}
+
+		return codex.UserInput{jsonFieldType: jsonFieldText, jsonFieldText: fmt.Sprintf("\n<context ref=%q>\n%s\n</context>", contents.Uri, contents.Text)}
 	case resource.BlobResourceContents != nil:
 		contents := resource.BlobResourceContents
-		return codex.UserInput{"type": "text", "text": fmt.Sprintf("[resource: %s]", contents.Uri)}
+
+		return codex.UserInput{jsonFieldType: jsonFieldText, jsonFieldText: fmt.Sprintf("[resource: %s]", contents.Uri)}
 	default:
-		return codex.UserInput{"type": "text", "text": "[resource]"}
+		return codex.UserInput{jsonFieldType: jsonFieldText, jsonFieldText: "[resource]"}
 	}
 }
 

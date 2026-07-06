@@ -28,7 +28,7 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 	if parsed.Model != "gpt" || parsed.ReasoningEffort != "medium" || parsed.OutputSchema == nil || parsed.MCPToolApprovalMode != "approve" {
 		t.Fatalf("parsed meta = %#v", parsed)
 	}
-	if parsed.Env["A"] != "B" || parsed.ApprovalPolicy != "never" || parsed.SandboxPolicy.(map[string]any)["type"] != "workspaceWrite" {
+	if parsed.Env["A"] != "B" || parsed.ApprovalPolicy != "never" || asType[map[string]any](t, parsed.SandboxPolicy)["type"] != "workspaceWrite" {
 		t.Fatalf("parsed Codex runtime options = %#v", parsed)
 	}
 	meta = map[string]any{codexMetaKey: map[string]any{"options": map[string]any{

@@ -312,6 +312,7 @@ func TestAgentNewClientMergesCodexOTELWithMCPAndEnv(t *testing.T) {
 		}),
 		withClientFactory(func(_ context.Context, options codex.Options) (codex.Client, error) {
 			gotOptions = options
+
 			return newSpyCodexClient(), nil
 		}),
 	)
@@ -348,6 +349,7 @@ func TestAgentNewClientReturnsCodexOTELError(t *testing.T) {
 		}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 			t.Fatal("client factory called after invalid Codex OTEL config")
+
 			return newSpyCodexClient(), nil
 		}),
 	)

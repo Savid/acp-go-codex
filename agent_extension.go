@@ -12,15 +12,18 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	if err := a.ensureOpen(); err != nil {
 		return nil, err
 	}
+
 	switch method {
 	case ForkSessionMethod:
 		var req acp.UnstableForkSessionRequest
 		if err := json.Unmarshal(params, &req); err != nil {
 			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 		}
+
 		if err := req.Validate(); err != nil {
 			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 		}
+
 		return a.forkSession(ctx, req)
 	default:
 		return nil, acp.NewMethodNotFound(method)

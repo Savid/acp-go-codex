@@ -320,7 +320,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	}
 
 	store := codexacp.NewInMemorySessionStore()
-	if err := seedSessionStore(ctx, store, cfg.sessionID, entries); err != nil {
+	if err = seedSessionStore(ctx, store, cfg.sessionID, entries); err != nil {
 		printError(stderr, err)
 
 		return 1
@@ -487,6 +487,7 @@ func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer, 
 	clientToAgentR, clientToAgentW := io.Pipe()
 	agentToClientR, agentToClientW := io.Pipe()
 	serveCtx, stopServe := context.WithCancel(ctx)
+
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- codexacp.Serve(serveCtx, clientToAgentR, agentToClientW, codexacp.WithSessionStore(store))
@@ -501,6 +502,7 @@ func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer, 
 		conn: conn,
 		close: func() {
 			stopServe()
+
 			_ = clientToAgentR.Close()
 			_ = clientToAgentW.Close()
 			_ = agentToClientR.Close()

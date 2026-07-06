@@ -30,14 +30,16 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := validateCodexVersion(ctx, path); err != nil {
-		return nil, nil, err
+
+	if versionErr := validateCodexVersion(ctx, path); versionErr != nil {
+		return nil, nil, versionErr
 	}
 
 	args := []string{"app-server", "--listen", "stdio://", "--disable", "plugins"}
 	for key, value := range options.Config {
 		args = append(args, "-c", fmt.Sprintf("%s=%s", key, shellValue(value)))
 	}
+
 	args = append(args, options.ExtraArgs...)
 
 	cmd := execCommandContext(procCtx, path, args...)
@@ -47,16 +49,20 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	if err != nil {
 		return nil, nil, err
 	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+
 		return nil, nil, err
 	}
+
 	cmd.Stderr = codexStderrWriter(options.Logger)
 
 	if err := startProcess(cmd); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
+
 		return nil, nil, err
 	}
 
@@ -103,14 +109,17 @@ func resolveCodexPath(path string) (string, error) {
 
 func validateCodexVersion(ctx context.Context, path string) error {
 	cmd := execCommandContext(ctx, path, "--version")
+
 	output, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("check codex CLI version: %w", err)
 	}
+
 	version := parseCodexVersion(string(output))
 	if version == "" {
 		return fmt.Errorf("check codex CLI version: could not parse %q", strings.TrimSpace(string(output)))
 	}
+
 	if compareSemver(version, minCodexVersion) < 0 {
 		return fmt.Errorf("codex CLI %s is too old; need >= %s", version, minCodexVersion)
 	}
@@ -125,9 +134,11 @@ func parseCodexVersion(output string) string {
 	if match == "" {
 		return ""
 	}
+
 	if cut, _, ok := strings.Cut(match, "-"); ok {
 		match = cut
 	}
+
 	if cut, _, ok := strings.Cut(match, "+"); ok {
 		match = cut
 	}
@@ -138,6 +149,7 @@ func parseCodexVersion(output string) string {
 func compareSemver(left string, right string) int {
 	leftParts := semverParts(left)
 	rightParts := semverParts(right)
+
 	for i := 0; i < len(leftParts); i++ {
 		switch {
 		case leftParts[i] < rightParts[i]:
@@ -152,6 +164,7 @@ func compareSemver(left string, right string) int {
 
 func semverParts(value string) [3]int {
 	var out [3]int
+
 	parts := strings.Split(value, ".")
 	for i := 0; i < len(out) && i < len(parts); i++ {
 		part := parts[i]
@@ -166,6 +179,7 @@ func mergedEnv(options Options) []string {
 	if options.CodexHome != "" {
 		env = upsertEnv(env, envCodexHome, options.CodexHome)
 	}
+
 	for key, value := range options.Env {
 		env = upsertEnv(env, key, value)
 	}
@@ -178,6 +192,7 @@ func upsertEnv(env []string, key string, value string) []string {
 	for i, entry := range env {
 		if strings.HasPrefix(entry, prefix) {
 			env[i] = prefix + value
+
 			return env
 		}
 	}
@@ -193,6 +208,7 @@ func shellValue(value any) string {
 		if typed {
 			return "true"
 		}
+
 		return "false"
 	default:
 		return fmt.Sprint(typed)
@@ -209,16 +225,20 @@ func (c processCloser) Close() error {
 	if c.stdin != nil {
 		_ = c.stdin.Close()
 	}
+
 	if c.stdout != nil {
 		_ = c.stdout.Close()
 	}
+
 	if c.cmd == nil || c.cmd.Process == nil {
 		return nil
 	}
 
 	done := make(chan error, 1)
+
 	go func() {
 		defer recoverCodexGoroutine(context.Background(), "Codex process waiter")
+
 		done <- c.cmd.Wait()
 	}()
 
@@ -242,7 +262,9 @@ func (c processCloser) Close() error {
 		if err := killProcess(c.cmd); err != nil {
 			return err
 		}
+
 		<-done
+
 		return nil
 	}
 }

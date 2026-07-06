@@ -35,6 +35,35 @@ const (
 	methodAccountLogout     = "account/logout"
 )
 
+const (
+	fieldName             = "name"
+	fieldThreadID         = "threadId"
+	fieldType             = "type"
+	fieldPath             = "path"
+	fieldID               = "id"
+	fieldStatus           = "status"
+	fieldChatGPTAccountID = "chatgptAccountId"
+	fieldChatGPTPlanType  = "chatgptPlanType"
+	fieldMessage          = "message"
+
+	notifyItemAgentMessageDelta = "item/agentMessage/delta"
+	notifyItemStarted           = "item/started"
+	notifyItemCompleted         = "item/completed"
+	notifyTurnCompleted         = "turn/completed"
+	notifyAccountUpdated        = "account/updated"
+
+	itemTypeAgentMessage     = "agentMessage"
+	itemTypeUserMessage      = "userMessage"
+	itemTypeCommandExecution = "commandExecution"
+	itemTypeMCPToolCall      = "mcpToolCall"
+
+	statusDone       = "done"
+	valuePlan        = "plan"
+	valueDefault     = "default"
+	valuePlaceholder = "placeholder"
+	valueTool        = "tool"
+)
+
 type AppServerClient struct {
 	options    Options
 	rpc        *rpcConn
@@ -66,6 +95,7 @@ type turnStream struct {
 
 func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient, error) {
 	launchCtx := ctx
+
 	var cancel context.CancelFunc
 	if options.LaunchTimeout > 0 {
 		launchCtx, cancel = context.WithTimeout(ctx, options.LaunchTimeout)
@@ -82,6 +112,7 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 	transport, cmd, err := launchAppServer(launchCtx, procCtx, options)
 	if err != nil {
 		procCancel()
+
 		return nil, err
 	}
 
@@ -95,6 +126,7 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 
 	if err := client.initialize(launchCtx); err != nil {
 		_ = client.Close(context.Background())
+
 		return nil, err
 	}
 
@@ -105,7 +137,7 @@ func (c *AppServerClient) initialize(ctx context.Context) error {
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodInitialize, map[string]any{
 		"clientInfo": map[string]any{
-			"name":    "acp-go-codex",
+			fieldName: "acp-go-codex",
 			"title":   "acp-go-codex",
 			"version": "0.1.0",
 		},
@@ -128,16 +160,21 @@ func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartReques
 	setNonEmpty(params, "developerInstructions", req.DeveloperInstructions)
 	setNonNil(params, "approvalPolicy", req.ApprovalPolicy)
 	setNonNil(params, "sandbox", req.Sandbox)
+
 	if len(req.AdditionalDirectories) > 0 {
 		params["permissions"] = permissionProfile(req.AdditionalDirectories)
 	}
+
 	setNonNil(params, "personality", req.Personality)
+
 	if req.Ephemeral != nil {
 		params["ephemeral"] = *req.Ephemeral
 	}
+
 	if len(req.Config) > 0 {
 		params["config"] = req.Config
 	}
+
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadStart, params, &resp); err != nil {
 		return Thread{}, err
@@ -148,9 +185,10 @@ func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartReques
 
 func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequest) (Thread, error) {
 	params := map[string]any{}
-	setNonEmpty(params, "threadId", req.ThreadID)
-	setNonEmpty(params, "path", req.Path)
+	setNonEmpty(params, fieldThreadID, req.ThreadID)
+	setNonEmpty(params, fieldPath, req.Path)
 	setNonEmpty(params, "cwd", req.Cwd)
+
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadResume, params, &resp); err != nil {
 		return Thread{}, normalizeThreadError(err)
@@ -160,12 +198,14 @@ func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequ
 	if thread.ID == "" {
 		thread.ID = req.ThreadID
 	}
+
 	return thread, nil
 }
 
 func (c *AppServerClient) ForkThread(ctx context.Context, req ThreadForkRequest) (Thread, error) {
-	params := map[string]any{"threadId": req.ThreadID}
+	params := map[string]any{fieldThreadID: req.ThreadID}
 	setNonEmpty(params, "cwd", req.Cwd)
+
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadFork, params, &resp); err != nil {
 		return Thread{}, normalizeThreadError(err)
@@ -188,7 +228,7 @@ func (c *AppServerClient) ListThreads(ctx context.Context, req ThreadListRequest
 
 func (c *AppServerClient) ReadThread(ctx context.Context, req ThreadReadRequest) (ThreadHistory, error) {
 	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodThreadRead, map[string]any{"threadId": req.ThreadID}, &resp); err != nil {
+	if err := c.rpc.Call(ctx, methodThreadRead, map[string]any{fieldThreadID: req.ThreadID}, &resp); err != nil {
 		return ThreadHistory{}, normalizeThreadError(err)
 	}
 
@@ -200,9 +240,10 @@ func (c *AppServerClient) ReadThread(ctx context.Context, req ThreadReadRequest)
 }
 
 func (c *AppServerClient) ListTurns(ctx context.Context, req ThreadTurnsListRequest) (ThreadTurnsListResponse, error) {
-	params := map[string]any{"threadId": req.ThreadID}
+	params := map[string]any{fieldThreadID: req.ThreadID}
 	setNonEmpty(params, "cursor", req.Cursor)
 	setNonEmpty(params, "sortDirection", req.SortDirection)
+
 	if req.Limit > 0 {
 		params["limit"] = req.Limit
 	}
@@ -221,14 +262,15 @@ func (c *AppServerClient) ListTurns(ctx context.Context, req ThreadTurnsListRequ
 
 func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-chan Event, error) {
 	c.ensureEventPump()
+
 	stream, err := c.registerTurn(ctx, req.ThreadID)
 	if err != nil {
 		return nil, err
 	}
 
 	params := map[string]any{
-		"threadId": req.ThreadID,
-		"input":    req.Prompt,
+		fieldThreadID: req.ThreadID,
+		"input":       req.Prompt,
 	}
 	setNonEmpty(params, "model", req.Model)
 	setNonEmpty(params, "serviceTier", req.ServiceTier)
@@ -242,13 +284,15 @@ func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodTurnStart, params, &resp); err != nil {
 		c.closeTurn(stream)
+
 		return nil, normalizeThreadError(err)
 	}
 
-	turnID := stringValue(mapValue(resp, "turn"), "id")
+	turnID := stringValue(mapValue(resp, "turn"), fieldID)
 	if turnID == "" {
 		turnID = stringValue(resp, "turnId")
 	}
+
 	c.setTurnID(stream, turnID)
 
 	return stream.out, nil
@@ -256,7 +300,7 @@ func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-
 
 func (c *AppServerClient) SteerTurn(ctx context.Context, req TurnSteerRequest) error {
 	params := map[string]any{
-		"threadId":       req.ThreadID,
+		fieldThreadID:    req.ThreadID,
 		"expectedTurnId": req.ExpectedTurnID,
 		"input":          req.Input,
 	}
@@ -265,14 +309,15 @@ func (c *AppServerClient) SteerTurn(ctx context.Context, req TurnSteerRequest) e
 }
 
 func (c *AppServerClient) CancelTurn(ctx context.Context, threadID string, turnID string) error {
-	params := map[string]any{"threadId": threadID}
+	params := map[string]any{fieldThreadID: threadID}
 	setNonEmpty(params, "turnId", turnID)
+
 	return normalizeThreadError(c.rpc.Call(ctx, methodTurnInterrupt, params, nil))
 }
 
 func (c *AppServerClient) CompactThread(ctx context.Context, req ThreadCompactRequest) (map[string]any, error) {
 	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodThreadCompact, map[string]any{"threadId": req.ThreadID}, &resp); err != nil {
+	if err := c.rpc.Call(ctx, methodThreadCompact, map[string]any{fieldThreadID: req.ThreadID}, &resp); err != nil {
 		return nil, normalizeThreadError(err)
 	}
 
@@ -281,8 +326,8 @@ func (c *AppServerClient) CompactThread(ctx context.Context, req ThreadCompactRe
 
 func (c *AppServerClient) StartReview(ctx context.Context, req ReviewStartRequest) (map[string]any, error) {
 	params := map[string]any{
-		"threadId": req.ThreadID,
-		"target":   req.Target,
+		fieldThreadID: req.ThreadID,
+		"target":      req.Target,
 	}
 	setNonEmpty(params, "delivery", req.Delivery)
 
@@ -301,15 +346,17 @@ func (c *AppServerClient) CollaborationModeList(ctx context.Context) (Collaborat
 	}
 
 	raw := mapSlice(resp, "modes", "items", "data")
+
 	modes := make([]CollaborationMode, 0, len(raw))
 	for _, item := range raw {
-		id := firstNonEmpty(stringValue(item, "id"), stringValue(item, "mode"), stringValue(item, "name"))
+		id := firstNonEmpty(stringValue(item, fieldID), stringValue(item, "mode"), stringValue(item, fieldName))
 		if id == "" {
 			continue
 		}
+
 		modes = append(modes, CollaborationMode{
 			ID:   id,
-			Name: firstNonEmpty(stringValue(item, "name"), id),
+			Name: firstNonEmpty(stringValue(item, fieldName), id),
 			Raw:  item,
 		})
 	}
@@ -324,12 +371,13 @@ func (c *AppServerClient) MCPServerStatusList(ctx context.Context) (MCPServerSta
 	}
 
 	raw := mapSlice(resp, "servers", "items", "data")
+
 	servers := make([]MCPServerStatus, 0, len(raw))
 	for _, item := range raw {
-		name := firstNonEmpty(stringValue(item, "name"), stringValue(item, "id"), stringValue(item, "server"))
+		name := firstNonEmpty(stringValue(item, fieldName), stringValue(item, fieldID), stringValue(item, "server"))
 		servers = append(servers, MCPServerStatus{
 			Name:      name,
-			Status:    firstNonEmpty(stringValue(item, "status"), stringValue(item, "state")),
+			Status:    firstNonEmpty(stringValue(item, fieldStatus), stringValue(item, "state")),
 			Tools:     mapSlice(item, "tools"),
 			Resources: mapSlice(item, "resources"),
 			Templates: firstNonEmptyMapSlice(item, "resourceTemplates", "templates"),
@@ -345,7 +393,7 @@ func (c *AppServerClient) UnsubscribeThread(ctx context.Context, threadID string
 		return nil
 	}
 
-	return normalizeThreadError(c.rpc.Call(ctx, methodThreadUnsubscribe, map[string]any{"threadId": threadID}, nil))
+	return normalizeThreadError(c.rpc.Call(ctx, methodThreadUnsubscribe, map[string]any{fieldThreadID: threadID}, nil))
 }
 
 func (c *AppServerClient) DeleteThread(ctx context.Context, req ThreadDeleteRequest) error {
@@ -353,7 +401,7 @@ func (c *AppServerClient) DeleteThread(ctx context.Context, req ThreadDeleteRequ
 		return nil
 	}
 
-	return normalizeThreadError(c.rpc.Call(ctx, methodThreadDelete, map[string]any{"threadId": req.ThreadID}, nil))
+	return normalizeThreadError(c.rpc.Call(ctx, methodThreadDelete, map[string]any{fieldThreadID: req.ThreadID}, nil))
 }
 
 func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {
@@ -363,15 +411,17 @@ func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {
 	}
 
 	raw := mapSlice(resp, "models", "items", "data")
+
 	models := make([]Model, 0, len(raw))
 	for _, item := range raw {
-		id := firstNonEmpty(stringValue(item, "id"), stringValue(item, "model"), stringValue(item, "name"))
+		id := firstNonEmpty(stringValue(item, fieldID), stringValue(item, "model"), stringValue(item, fieldName))
 		if id == "" {
 			continue
 		}
+
 		models = append(models, Model{
 			ID:                     id,
-			Name:                   firstNonEmpty(stringValue(item, "displayName"), stringValue(item, "name"), id),
+			Name:                   firstNonEmpty(stringValue(item, "displayName"), stringValue(item, fieldName), id),
 			Description:            stringValue(item, "description"),
 			Context:                int64Value(item, "contextWindow"),
 			DefaultReasoningEffort: stringValue(item, "defaultReasoningEffort"),
@@ -385,12 +435,14 @@ func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {
 
 func modelReasoningEfforts(model map[string]any) []ModelReasoningEffort {
 	raw := mapSlice(model, "supportedReasoningEfforts")
+
 	efforts := make([]ModelReasoningEffort, 0, len(raw))
 	for _, item := range raw {
 		id := stringValue(item, "reasoningEffort")
 		if id == "" {
 			continue
 		}
+
 		efforts = append(efforts, ModelReasoningEffort{
 			ID:          id,
 			Description: stringValue(item, "description"),
@@ -415,11 +467,11 @@ func (c *AppServerClient) AccountRead(ctx context.Context) (Account, error) {
 
 func (c *AppServerClient) LoginWithChatGPTTokens(ctx context.Context, tokens ChatGPTAuthTokens) error {
 	params := map[string]any{
-		"type":             "chatgptAuthTokens",
-		"accessToken":      tokens.AccessToken,
-		"refreshToken":     tokens.RefreshToken,
-		"chatgptAccountId": tokens.AccountID,
-		"chatgptPlanType":  tokens.PlanType,
+		fieldType:             "chatgptAuthTokens",
+		"accessToken":         tokens.AccessToken,
+		"refreshToken":        tokens.RefreshToken,
+		fieldChatGPTAccountID: tokens.AccountID,
+		fieldChatGPTPlanType:  tokens.PlanType,
 	}
 	if tokens.ExpiresAtUnixSec != 0 {
 		params["expiresAt"] = tokens.ExpiresAtUnixSec
@@ -436,8 +488,10 @@ func (c *AppServerClient) Close(context.Context) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+
 		return nil
 	}
+
 	c.closed = true
 	c.mu.Unlock()
 
@@ -447,6 +501,7 @@ func (c *AppServerClient) Close(context.Context) error {
 	} else {
 		c.closeAllTurns()
 	}
+
 	if c.procCancel != nil {
 		c.procCancel()
 	}
@@ -460,12 +515,14 @@ func (c *AppServerClient) ensureEventPump() {
 		if c.turns == nil {
 			c.turns = make(map[*turnStream]struct{})
 		}
+
 		c.eventDone = make(chan struct{})
 		done := c.eventDone
 		c.mu.Unlock()
 
 		go func() {
 			defer recoverCodexGoroutine(context.Background(), "Codex event pump")
+
 			c.runEventPump(done)
 		}()
 	})
@@ -485,6 +542,7 @@ func (c *AppServerClient) runEventPump(done chan<- struct{}) {
 	for notification := range c.rpc.Events() {
 		c.dispatchEvent(eventFromRPC(notification))
 	}
+
 	if err := c.rpc.closeError(); err != nil {
 		c.dispatchEvent(Event{Kind: EventError, Err: err})
 	}
@@ -493,6 +551,7 @@ func (c *AppServerClient) runEventPump(done chan<- struct{}) {
 func (c *AppServerClient) dispatchEvent(event Event) {
 	if event.Kind == EventAccountUpdated {
 		c.setAccount(event.Account)
+
 		if c.options.EventHandler != nil {
 			c.options.EventHandler(context.Background(), event)
 		}
@@ -502,6 +561,7 @@ func (c *AppServerClient) dispatchEvent(event Event) {
 	for _, stream := range streams {
 		if !stream.send(event) {
 			c.removeTurn(stream)
+
 			continue
 		}
 	}
@@ -511,6 +571,7 @@ func (c *AppServerClient) registerTurn(ctx context.Context, threadID string) (*t
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	turnCtx, cancel := context.WithCancel(ctx)
 	stream := &turnStream{
 		cancel:   cancel,
@@ -525,20 +586,25 @@ func (c *AppServerClient) registerTurn(ctx context.Context, threadID string) (*t
 	if c.closed {
 		c.mu.Unlock()
 		stream.abort()
+
 		return nil, errors.New("codex app-server client is closed")
 	}
+
 	if c.turns == nil {
 		c.turns = make(map[*turnStream]struct{})
 	}
+
 	c.turns[stream] = struct{}{}
 	c.mu.Unlock()
 
 	go func() {
 		defer recoverCodexGoroutine(ctx, "Codex turn stream forwarder")
+
 		stream.forward()
 	}()
 	go func() {
 		defer recoverCodexGoroutine(ctx, "Codex turn context watcher")
+
 		c.closeTurnOnContext(stream)
 	}()
 
@@ -554,6 +620,7 @@ func (c *AppServerClient) setTurnID(stream *turnStream, turnID string) {
 	if turnID == "" {
 		return
 	}
+
 	c.mu.Lock()
 	stream.turnID = turnID
 	c.mu.Unlock()
@@ -568,9 +635,11 @@ func (c *AppServerClient) matchingTurns(event Event) []*turnStream {
 		if event.ThreadID != "" && stream.threadID != "" && event.ThreadID != stream.threadID {
 			continue
 		}
+
 		if event.TurnID != "" && stream.turnID != "" && event.TurnID != stream.turnID {
 			continue
 		}
+
 		streams = append(streams, stream)
 	}
 
@@ -590,6 +659,7 @@ func (c *AppServerClient) removeTurn(stream *turnStream) {
 
 func (c *AppServerClient) closeAllTurns() {
 	c.mu.Lock()
+
 	streams := make([]*turnStream, 0, len(c.turns))
 	for stream := range c.turns {
 		delete(c.turns, stream)
@@ -606,6 +676,7 @@ func (c *AppServerClient) setAccount(account Account) {
 	if account.ID == "" && account.Email == "" && account.PlanType == "" && len(account.Raw) == 0 {
 		return
 	}
+
 	c.mu.Lock()
 	c.account = account
 	c.mu.Unlock()
@@ -645,14 +716,17 @@ func (s *turnStream) forward() {
 				if event.Kind == EventCompleted || event.Kind == EventError {
 					return
 				}
+
 				continue
 			default:
 			}
+
 			select {
 			case s.out <- event:
 			case <-s.done:
 				return
 			}
+
 			if event.Kind == EventCompleted || event.Kind == EventError {
 				return
 			}
@@ -677,12 +751,13 @@ func permissionProfile(additional []string) map[string]any {
 		if strings.TrimSpace(path) == "" {
 			continue
 		}
-		mods = append(mods, map[string]any{"type": "additionalWritableRoot", "path": path})
+
+		mods = append(mods, map[string]any{fieldType: "additionalWritableRoot", fieldPath: path})
 	}
 
 	return map[string]any{
-		"type":          "profile",
-		"id":            ":workspace",
+		fieldType:       "profile",
+		fieldID:         ":workspace",
 		"modifications": mods,
 	}
 }
@@ -694,14 +769,14 @@ func threadFromResponse(resp map[string]any) Thread {
 	}
 
 	return Thread{
-		ID:              firstNonEmpty(stringValue(rawThread, "id"), stringValue(resp, "threadId")),
-		SessionID:       firstNonEmpty(stringValue(rawThread, "sessionId"), stringValue(rawThread, "id"), stringValue(resp, "threadId")),
-		Path:            stringValue(rawThread, "path"),
+		ID:              firstNonEmpty(stringValue(rawThread, fieldID), stringValue(resp, fieldThreadID)),
+		SessionID:       firstNonEmpty(stringValue(rawThread, "sessionId"), stringValue(rawThread, fieldID), stringValue(resp, fieldThreadID)),
+		Path:            stringValue(rawThread, fieldPath),
 		Cwd:             firstNonEmpty(stringValue(resp, "cwd"), stringValue(rawThread, "cwd")),
 		Model:           firstNonEmpty(stringValue(resp, "model"), stringValue(rawThread, "model")),
 		Provider:        firstNonEmpty(stringValue(resp, "modelProvider"), stringValue(rawThread, "modelProvider")),
 		ReasoningEffort: firstNonEmpty(stringValue(resp, "reasoningEffort"), stringValue(rawThread, "reasoningEffort")),
-		Title:           firstNonEmpty(stringValue(rawThread, "name"), stringValue(rawThread, "title"), stringValue(rawThread, "preview")),
+		Title:           firstNonEmpty(stringValue(rawThread, fieldName), stringValue(rawThread, "title"), stringValue(rawThread, "preview")),
 		UpdatedAt:       firstNonEmpty(timestampValue(rawThread, "updatedAt"), timestampValue(rawThread, "mtime")),
 		Raw:             rawThread,
 	}
@@ -709,6 +784,7 @@ func threadFromResponse(resp map[string]any) Thread {
 
 func threadsFromResponse(resp map[string]any) []Thread {
 	raw := mapSlice(resp, "threads", "items", "data")
+
 	threads := make([]Thread, 0, len(raw))
 	for _, item := range raw {
 		threads = append(threads, threadFromResponse(item))
@@ -719,16 +795,18 @@ func threadsFromResponse(resp map[string]any) []Thread {
 
 func eventFromRPC(raw rpcEvent) Event {
 	event := Event{RawMethod: raw.Method, RawParams: append(json.RawMessage(nil), raw.Params...), RawJSON: raw.Raw}
+
 	var params map[string]any
 	if len(raw.Params) > 0 {
 		_ = json.Unmarshal(raw.Params, &params)
 	}
-	event.ThreadID = stringValue(params, "threadId")
-	event.TurnID = firstNonEmpty(stringValue(params, "turnId"), stringValue(mapValue(params, "turn"), "id"))
+
+	event.ThreadID = stringValue(params, fieldThreadID)
+	event.TurnID = firstNonEmpty(stringValue(params, "turnId"), stringValue(mapValue(params, "turn"), fieldID))
 	event.ItemID = stringValue(params, "itemId")
 
 	switch raw.Method {
-	case "item/agentMessage/delta":
+	case notifyItemAgentMessageDelta:
 		event.Kind = EventAgentMessageDelta
 		event.Text = stringValue(params, "delta")
 	case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
@@ -737,9 +815,9 @@ func eventFromRPC(raw rpcEvent) Event {
 	case "item/plan/delta", "turn/plan/updated":
 		event.Kind = EventPlanUpdated
 		event.Plan = planFromParams(params)
-	case "item/started":
+	case notifyItemStarted:
 		event = startedItemEvent(event, params)
-	case "item/completed":
+	case notifyItemCompleted:
 		event = completedItemEvent(event, params)
 	case "item/agentMessage/completed":
 		event.Kind = EventAgentMessageDelta
@@ -751,10 +829,10 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Completed = true
 	case "enteredReviewMode":
 		event.Kind = EventReasoningDelta
-		event.Text = firstNonEmpty(stringValue(params, "message"), stringValue(params, "text"), "Entered review mode")
+		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"), "Entered review mode")
 	case "exitedReviewMode":
 		event.Kind = EventReasoningDelta
-		event.Text = firstNonEmpty(stringValue(params, "message"), stringValue(params, "text"), "Exited review mode")
+		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"), "Exited review mode")
 	case "command/exec/outputDelta", "process/outputDelta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
 		event.Kind = EventToolDelta
 		event.Text = firstNonEmpty(stringValue(params, "delta"), stringValue(params, "text"))
@@ -766,17 +844,17 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Kind = EventUsageUpdated
 		event.TokenUsage = tokenUsageFromParams(params)
 		event.Usage = event.TokenUsage.Last
-	case "turn/completed":
+	case notifyTurnCompleted:
 		event.Kind = EventCompleted
 		event.StopReason = stopReasonFromTurn(mapValue(params, "turn"))
 		event.Usage = usageFromParams(params)
-	case "account/updated":
+	case notifyAccountUpdated:
 		event.Kind = EventAccountUpdated
 		event.Account = accountFromResponse(params)
 	case "warning", "guardianWarning", "deprecationNotice", "configWarning":
 		event.Kind = EventWarning
-		event.Text = firstNonEmpty(stringValue(params, "message"), stringValue(params, "text"))
-	case "error":
+		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"))
+	case string(EventError):
 		event.Kind = EventError
 		event.Text = errorEventText(params, raw.Params)
 		event.Err = errors.New(event.Text)
@@ -790,9 +868,10 @@ func eventFromRPC(raw rpcEvent) Event {
 }
 
 func errorEventText(params map[string]any, raw json.RawMessage) string {
-	if text := firstNonEmpty(stringValue(params, "message"), stringValue(params, "error")); text != "" {
+	if text := firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, string(EventError))); text != "" {
 		return text
 	}
+
 	if len(raw) > 0 && string(raw) != "null" {
 		return "Codex app-server error event: " + string(raw)
 	}
@@ -805,7 +884,8 @@ func startedItemEvent(event Event, params map[string]any) Event {
 	if item == nil {
 		item = params
 	}
-	if !toolLikeItemType(stringValue(item, "type")) {
+
+	if !toolLikeItemType(stringValue(item, fieldType)) {
 		event.Kind = EventRaw
 
 		return event
@@ -824,9 +904,9 @@ func accountFromResponse(resp map[string]any) Account {
 	}
 
 	return Account{
-		ID:       firstNonEmpty(stringValue(rawAccount, "chatgptAccountId"), stringValue(rawAccount, "id")),
+		ID:       firstNonEmpty(stringValue(rawAccount, fieldChatGPTAccountID), stringValue(rawAccount, fieldID)),
 		Email:    stringValue(rawAccount, "email"),
-		PlanType: firstNonEmpty(stringValue(rawAccount, "chatgptPlanType"), stringValue(rawAccount, "planType")),
+		PlanType: firstNonEmpty(stringValue(rawAccount, fieldChatGPTPlanType), stringValue(rawAccount, "planType")),
 		Raw:      rawAccount,
 	}
 }
@@ -836,18 +916,19 @@ func completedItemEvent(event Event, params map[string]any) Event {
 	if item == nil {
 		item = params
 	}
-	switch stringValue(item, "type") {
-	case "agentMessage", "agent_message", "message":
+
+	switch stringValue(item, fieldType) {
+	case itemTypeAgentMessage, "agent_message", fieldMessage:
 		event.Kind = EventAgentMessageDelta
-		event.Text = firstNonEmpty(stringValue(item, "text"), stringValue(item, "content"), stringValue(item, "message"), contentText(item["content"]))
+		event.Text = firstNonEmpty(stringValue(item, "text"), stringValue(item, "content"), stringValue(item, fieldMessage), contentText(item["content"]))
 		event.Completed = true
 	case "reasoning", "agentReasoning", "agent_reasoning":
 		event.Kind = EventReasoningDelta
 		event.Text = firstNonEmpty(stringValue(item, "text"), stringValue(item, "summary"), stringValue(item, "content"), contentText(item["content"]))
 		event.Completed = true
-	case "userMessage", "user_message", "user":
+	case itemTypeUserMessage, "user_message", "user":
 		event.Kind = EventRaw
-	case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "function_call", "custom_tool_call", "tool":
+	case itemTypeCommandExecution, "fileChange", itemTypeMCPToolCall, "dynamicToolCall", "function_call", "custom_tool_call", valueTool:
 		event.Kind = EventToolCompleted
 		event.Tool = toolEventFromItem(params, "completed")
 	default:
@@ -859,7 +940,7 @@ func completedItemEvent(event Event, params map[string]any) Event {
 
 func toolLikeItemType(itemType string) bool {
 	switch itemType {
-	case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "function_call", "custom_tool_call", "tool":
+	case itemTypeCommandExecution, "fileChange", itemTypeMCPToolCall, "dynamicToolCall", "function_call", "custom_tool_call", valueTool:
 		return true
 	default:
 		return false
@@ -867,7 +948,7 @@ func toolLikeItemType(itemType string) bool {
 }
 
 func planFromParams(params map[string]any) []PlanStep {
-	rawItems := mapSlice(params, "plan", "items", "entries")
+	rawItems := mapSlice(params, valuePlan, "items", "entries")
 	if len(rawItems) == 0 {
 		if text := stringValue(params, "delta"); text != "" {
 			return []PlanStep{{Text: text, Status: PlanStepInProgress}}
@@ -877,8 +958,8 @@ func planFromParams(params map[string]any) []PlanStep {
 	steps := make([]PlanStep, 0, len(rawItems))
 	for _, item := range rawItems {
 		steps = append(steps, PlanStep{
-			Text:   firstNonEmpty(stringValue(item, "text"), stringValue(item, "content"), stringValue(item, "message")),
-			Status: planStatusFromString(firstNonEmpty(stringValue(item, "status"), stringValue(item, "state"))),
+			Text:   firstNonEmpty(stringValue(item, "text"), stringValue(item, "content"), stringValue(item, fieldMessage)),
+			Status: planStatusFromString(firstNonEmpty(stringValue(item, fieldStatus), stringValue(item, "state"))),
 		})
 	}
 
@@ -890,19 +971,20 @@ func toolEventFromItem(params map[string]any, status string) ToolEvent {
 	if item == nil {
 		item = params
 	}
+
 	title := toolTitleFromItem(item)
-	id := firstNonEmpty(stringValue(item, "id"), stringValue(params, "itemId"))
+	id := firstNonEmpty(stringValue(item, fieldID), stringValue(params, "itemId"))
 
 	return ToolEvent{
 		ID:        id,
 		Title:     title,
-		Kind:      firstNonEmpty(stringValue(item, "type"), "tool"),
-		Status:    firstNonEmpty(stringValue(item, "status"), status),
+		Kind:      firstNonEmpty(stringValue(item, fieldType), valueTool),
+		Status:    firstNonEmpty(stringValue(item, fieldStatus), status),
 		Locations: itemLocations(item),
 		Content: firstNonEmpty(
 			stringValue(item, "output"),
 			stringValue(item, "result"),
-			stringValue(item, "message"),
+			stringValue(item, fieldMessage),
 			contentText(item["output"]),
 			contentText(item["result"]),
 			contentText(item["content"]),
@@ -912,23 +994,26 @@ func toolEventFromItem(params map[string]any, status string) ToolEvent {
 }
 
 func toolTitleFromItem(item map[string]any) string {
-	if title := firstNonEmpty(stringValue(item, "title"), stringValue(item, "name")); title != "" {
+	if title := firstNonEmpty(stringValue(item, "title"), stringValue(item, fieldName)); title != "" {
 		return title
 	}
-	if server, tool := stringValue(item, "server"), stringValue(item, "tool"); server != "" && tool != "" {
+
+	if server, tool := stringValue(item, "server"), stringValue(item, valueTool); server != "" && tool != "" {
 		return server + " " + tool
 	}
-	if tool := stringValue(item, "tool"); tool != "" {
+
+	if tool := stringValue(item, valueTool); tool != "" {
 		return tool
 	}
 
-	return stringValue(item, "type")
+	return stringValue(item, fieldType)
 }
 
 func itemLocations(item map[string]any) []string {
 	locations := stringSliceValue(item["locations"])
+
 	locations = append(locations, stringSliceValue(item["files"])...)
-	for _, key := range []string{"path", "filePath", "filename"} {
+	for _, key := range []string{fieldPath, "filePath", "filename"} {
 		if value := stringValue(item, key); value != "" {
 			locations = append(locations, value)
 		}
@@ -948,11 +1033,12 @@ func stringSliceValue(value any) []string {
 			case string:
 				out = append(out, value)
 			case map[string]any:
-				if path := firstNonEmpty(stringValue(value, "path"), stringValue(value, "filePath")); path != "" {
+				if path := firstNonEmpty(stringValue(value, fieldPath), stringValue(value, "filePath")); path != "" {
 					out = append(out, path)
 				}
 			}
 		}
+
 		return out
 	default:
 		return nil
@@ -968,6 +1054,7 @@ func contentText(value any) string {
 		for _, item := range typed {
 			text.WriteString(contentText(item))
 		}
+
 		return text.String()
 	case map[string]any:
 		if text := firstNonEmpty(
@@ -978,9 +1065,11 @@ func contentText(value any) string {
 		); text != "" {
 			return text
 		}
+
 		if nested := contentText(typed["content"]); nested != "" {
 			return nested
 		}
+
 		return contentText(typed["result"])
 	default:
 		return ""
@@ -988,11 +1077,11 @@ func contentText(value any) string {
 }
 
 func stopReasonFromTurn(turn map[string]any) StopReason {
-	status := strings.ToLower(firstNonEmpty(stringValue(turn, "status"), stringValue(turn, "stopReason")))
+	status := strings.ToLower(firstNonEmpty(stringValue(turn, fieldStatus), stringValue(turn, "stopReason")))
 	switch status {
 	case "interrupted", "cancelled", "canceled":
 		return StopReasonCancelled
-	case "failed", "errored", "error":
+	case "failed", "errored", string(EventError):
 		return StopReasonError
 	default:
 		return StopReasonEndTurn
@@ -1023,6 +1112,7 @@ func tokenUsageFromParams(params map[string]any) TokenUsage {
 	if isZeroUsage(usage.Last) {
 		usage.Last = usageFromMap(tokenUsage)
 	}
+
 	if isZeroUsage(usage.Total) {
 		usage.Total = usage.Last
 	}
@@ -1036,6 +1126,7 @@ func usageFromMap(usage map[string]any) Usage {
 	cachedRead := firstInt64(usage, "cachedReadTokens", "cacheReadInputTokens", "cachedInputTokens", "cache_read_input_tokens", "cached_input_tokens")
 	cachedWrite := firstInt64(usage, "cachedWriteTokens", "cacheCreationInputTokens", "cacheWriteInputTokens", "cache_creation_input_tokens", "cache_write_input_tokens")
 	reasoning := firstInt64(usage, "reasoningOutputTokens", "thoughtTokens", "reasoningTokens", "reasoning_output_tokens", "thought_tokens")
+
 	total := firstInt64(usage, "totalTokens", "total_tokens")
 	if total == 0 {
 		total = input + output
@@ -1064,7 +1155,7 @@ func planStatusFromString(status string) PlanStepStatus {
 	switch strings.ToLower(status) {
 	case "inprogress", "in_progress", "active", "running":
 		return PlanStepInProgress
-	case "completed", "complete", "done":
+	case "completed", "complete", statusDone:
 		return PlanStepCompleted
 	default:
 		return PlanStepPending
@@ -1081,6 +1172,7 @@ func setNonNil(values map[string]any, key string, value any) {
 	if text, ok := value.(string); ok && text == "" {
 		return
 	}
+
 	if value != nil {
 		values[key] = value
 	}
@@ -1090,7 +1182,9 @@ func mapValue(values map[string]any, key string) map[string]any {
 	if values == nil {
 		return nil
 	}
+
 	child, _ := values[key].(map[string]any)
+
 	return child
 }
 
@@ -1100,12 +1194,14 @@ func mapSlice(values map[string]any, keys ...string) []map[string]any {
 		if !ok {
 			continue
 		}
+
 		out := make([]map[string]any, 0, len(raw))
 		for _, item := range raw {
 			if obj, ok := item.(map[string]any); ok {
 				out = append(out, obj)
 			}
 		}
+
 		return out
 	}
 
@@ -1126,6 +1222,7 @@ func stringValue(values map[string]any, key string) string {
 	if values == nil {
 		return ""
 	}
+
 	switch value := values[key].(type) {
 	case string:
 		return value
@@ -1140,6 +1237,7 @@ func int64Value(values map[string]any, key string) int64 {
 	if values == nil {
 		return 0
 	}
+
 	switch value := values[key].(type) {
 	case float64:
 		return int64(value)
@@ -1156,6 +1254,7 @@ func timestampValue(values map[string]any, key string) string {
 	if value := stringValue(values, key); value != "" {
 		return value
 	}
+
 	seconds := int64Value(values, key)
 	if seconds == 0 {
 		return ""

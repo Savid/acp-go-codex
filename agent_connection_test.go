@@ -195,7 +195,11 @@ func TestLocalResponseAndNotificationHelpers(t *testing.T) {
 	if reqErr != nil {
 		t.Fatalf("localResponse returned request error: %v", reqErr)
 	}
-	if len(result.(acp.ListSessionsResponse).Sessions) != 1 {
+	listResult, ok := result.(acp.ListSessionsResponse)
+	if !ok {
+		t.Fatalf("localResponse result type = %T", result)
+	}
+	if len(listResult.Sessions) != 1 {
 		t.Fatalf("localResponse result = %#v", result)
 	}
 	responseErr := localResponse(func(*Agent, context.Context, acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {

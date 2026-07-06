@@ -28,21 +28,21 @@ func TestRequestBuilderClones(t *testing.T) {
 			WithCodexOutputSchema(map[string]any{"type": "object"}),
 		)),
 	)
-	meta["x"].([]any)[0].(map[string]any)["y"] = "changed"
+	asType[map[string]any](t, asType[[]any](t, meta["x"])[0])["y"] = "changed"
 	env["SECRET"] = "changed"
 	approvalPolicy["mode"] = "changed"
 	sandboxPolicy["type"] = "changed"
-	if req.Meta["x"].([]any)[0].(map[string]any)["y"] != "z" {
+	if asType[map[string]any](t, asType[[]any](t, req.Meta["x"])[0])["y"] != "z" {
 		t.Fatal("WithSessionMeta did not clone input")
 	}
-	options := req.Meta[codexMetaKey].(map[string]any)[metaOptionsKey].(map[string]any)
-	if options[metaEnvKey].(map[string]string)["SECRET"] != "value" {
+	options := asType[map[string]any](t, asType[map[string]any](t, req.Meta[codexMetaKey])[metaOptionsKey])
+	if asType[map[string]string](t, options[metaEnvKey])["SECRET"] != "value" {
 		t.Fatalf("Codex env was not cloned: %#v", options)
 	}
-	if options[metaApprovalPolicyKey].(map[string]any)["mode"] != "never" {
+	if asType[map[string]any](t, options[metaApprovalPolicyKey])["mode"] != "never" {
 		t.Fatalf("Codex approval policy was not cloned: %#v", options)
 	}
-	if options[metaSandboxPolicyKey].(map[string]any)["type"] != "workspaceWrite" {
+	if asType[map[string]any](t, options[metaSandboxPolicyKey])["type"] != "workspaceWrite" {
 		t.Fatalf("Codex sandbox policy was not cloned: %#v", options)
 	}
 	if len(LoadSessionRequest("s", "/repo").McpServers) != 0 || ResumeSessionRequest("s", "/repo").SessionId != "s" || ForkSessionRequest("s", "/repo").SessionId != "s" {
@@ -93,8 +93,8 @@ func TestRequestBuilderHelperBranches(t *testing.T) {
 
 	meta := map[string]any{codexMetaKey: map[string]any{"x": []any{"a"}}}
 	cloned := ensureMetaMap(meta, codexMetaKey)
-	cloned["x"].([]any)[0] = "b"
-	if meta[codexMetaKey].(map[string]any)["x"].([]any)[0] != "b" {
+	asType[[]any](t, cloned["x"])[0] = "b"
+	if asType[[]any](t, asType[map[string]any](t, meta[codexMetaKey])["x"])[0] != "b" {
 		t.Fatal("ensureMetaMap did not install cloned map")
 	}
 	if cloneMCPServers(nil) != nil || cloneMCPServerStdio(nil) != nil || cloneEnvVariables(nil) != nil || unstableMCPServersFromStable(nil) != nil {

@@ -66,6 +66,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		if agent.close != nil {
 			agent.close()
 		}
+
 		if agent.wait != nil {
 			_ = agent.wait()
 		}
@@ -231,6 +232,7 @@ func (c *client) SessionUpdate(_ context.Context, params acp.SessionNotification
 		if update.ToolCallUpdate.Status != nil {
 			status = *update.ToolCallUpdate.Status
 		}
+
 		fmt.Fprintf(output, "\n[tool] %s %v\n", update.ToolCallUpdate.ToolCallId, status)
 	}
 

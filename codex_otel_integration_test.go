@@ -14,7 +14,7 @@ import (
 
 const (
 	envIntegrationRun       = "ACP_GO_CODEX_RUN_INTEGRATION"
-	envIntegrationCodexPath = "ACP_GO_CODEX_CODEX_PATH"
+	envIntegrationCodexPath = "ACP_GO_CODEX_HARNESS_PATH"
 )
 
 func TestCodexOTELStrictConfigIntegration(t *testing.T) {

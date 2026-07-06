@@ -31,6 +31,50 @@ const (
 	jsonFieldSessionID = "sessionId"
 	validationRequired = "required"
 
+	jsonFieldSource        = "source"
+	jsonFieldSequence      = "sequence"
+	jsonFieldEvent         = "event"
+	jsonFieldScope         = "scope"
+	jsonFieldName          = "name"
+	jsonFieldText          = "text"
+	jsonFieldType          = "type"
+	jsonFieldURL           = "url"
+	jsonFieldMode          = "mode"
+	jsonFieldTitle         = "title"
+	jsonFieldMeta          = "_meta"
+	jsonFieldAction        = "action"
+	jsonFieldReason        = "reason"
+	jsonFieldPath          = "path"
+	jsonFieldConfigID      = "configId"
+	jsonFieldAccessToken   = "accessToken"
+	jsonFieldDecision      = "decision"
+	jsonFieldPermissions   = "permissions"
+	jsonFieldAnswers       = "answers"
+	jsonFieldNetworkAccess = "networkAccess"
+
+	valueBackpressure   = "backpressure"
+	valueSession        = "session"
+	valueForm           = "form"
+	valueReasoning      = "reasoning"
+	valueCommand        = "command"
+	valueAgentMessage   = "agent_message"
+	valueAgentReasoning = "agent_reasoning"
+	valueEventMsg       = "event_msg"
+	valueStored         = "stored"
+	valueLocalImage     = "localImage"
+	valueImage          = "image"
+	roleUser            = "user"
+	roleAgent           = "agent"
+	statusDone          = "done"
+	valueDefault        = "default"
+	valueTurn           = "turn"
+	roleAssistant       = "assistant"
+	eventUserMessage    = "user_message"
+
+	jsonFieldLimit   = "limit"
+	jsonFieldValue   = "value"
+	jsonFieldContent = "content"
+
 	modeDefault acp.SessionModeId = "default"
 	modePlan    acp.SessionModeId = "plan"
 
@@ -82,6 +126,7 @@ func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	options.ConcurrencyLimits = limits
+
 	clientCallLimit := limits.MaxConcurrentClientCalls
 	if clientCallLimit < 0 {
 		clientCallLimit = 0
@@ -139,21 +184,26 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 // Close cancels and closes all resources owned by the agent.
 func (a *Agent) Close() error {
 	a.mu.Lock()
+
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
 	}
+
 	a.sessions = make(map[acp.SessionId]*session)
 	a.closed = true
 	a.conn = nil
 	a.mu.Unlock()
 
 	var err error
+
 	for _, session := range sessions {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		err = errors.Join(err, session.Close(ctx))
+
 		cancel()
 	}
+
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 
 	return err
@@ -190,8 +240,10 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	if a.optionsErr != nil {
 		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
 	}
+
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
+
 	a.mu.Lock()
 	a.clientCapabilities = cloneClientCapabilities(params.ClientCapabilities)
 	a.positionEncoding = positionEncoding
@@ -205,9 +257,9 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			"response": "acp.UnstableForkSessionResponse JSON payload only",
 		},
 		"elicitation": map[string]any{
-			"unstable": true,
-			"scope":    "session",
-			"tracks":   "in-progress ACP elicitation RFD",
+			"unstable":     true,
+			jsonFieldScope: valueSession,
+			"tracks":       "in-progress ACP elicitation RFD",
 		},
 		rawEventCapabilityKey: map[string]any{
 			"method":         RawEventMethod,
@@ -217,7 +269,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		"sessionStore": map[string]any{
 			"format": SessionStoreFormat,
-			"key":    []string{"sessionId", "subpath"},
+			"key":    []string{jsonFieldSessionID, "subpath"},
 		},
 		structuredOutputCapabilityKey: map[string]any{
 			"config": "_meta.codex.options.outputSchema",
@@ -271,24 +323,30 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 	if err != nil {
 		return nil, err
 	}
+
 	otelConfig, err := a.codexOTELConfig(envOverlay)
 	if err != nil {
 		return nil, err
 	}
+
 	extraArgs = append(append([]string(nil), otelConfig.ExtraArgs...), extraArgs...)
 
 	a.observe.RecordCodexProcessStart(ctx)
 	eventSink := &codexClientEventSink{agent: a}
+
 	env := cloneStringMap(a.options.Env)
 	if env == nil && (len(envOverlay) > 0 || len(mcpEnv) > 0) {
 		env = map[string]string{}
 	}
+
 	for key, value := range envOverlay {
 		env[key] = value
 	}
+
 	for key, value := range mcpEnv {
 		env[key] = value
 	}
+
 	client, err := factory(ctx, codex.Options{
 		CLIPath:      a.options.ExecutablePath,
 		CodexHome:    a.options.Home,
@@ -305,10 +363,13 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 	if err != nil {
 		return nil, err
 	}
+
 	eventSink.SetClient(client)
+
 	if tokens, ok := a.externalAuthTokens(); ok {
 		if err := client.LoginWithChatGPTTokens(ctx, toCodexAuthTokens(tokens)); err != nil {
 			_ = client.Close(context.Background())
+
 			return nil, err
 		}
 	}
@@ -326,11 +387,14 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	default:
 		return
 	}
+
 	s.mu.Lock()
+
 	client := s.client
 	if client == nil {
 		s.pending = append(s.pending, event)
 		s.mu.Unlock()
+
 		return
 	}
 	s.mu.Unlock()
@@ -345,8 +409,8 @@ func (s *codexClientEventSink) SetClient(client codex.Client) {
 	s.pending = nil
 	s.mu.Unlock()
 
-	for _, event := range pending {
-		s.agent.applyCodexClientEvent(context.Background(), client, event)
+	for i := range pending {
+		s.agent.applyCodexClientEvent(context.Background(), client, pending[i])
 	}
 }
 
@@ -361,15 +425,19 @@ func (a *Agent) updateAccountForClient(client codex.Client, threadID string, acc
 	if len(meta) == 0 {
 		return
 	}
+
 	a.mu.Lock()
+
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		if session.client != client {
 			continue
 		}
+
 		if threadID != "" && session.codexThreadID != threadID {
 			continue
 		}
+
 		sessions = append(sessions, session)
 	}
 	a.mu.Unlock()
@@ -394,11 +462,12 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	if a.clientCalls == nil {
 		return func() {}, nil
 	}
+
 	select {
 	case a.clientCalls <- struct{}{}:
 		return func() { <-a.clientCalls }, nil
 	default:
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "client_calls"})
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "client_calls"})
 	}
 }
 
@@ -422,19 +491,25 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
+
 		if err := session.Close(context.Background()); err != nil {
 			a.log.DebugContext(context.Background(), "close rejected Codex session failed", slog.String(jsonFieldError, err.Error()))
 		}
+
 		return newAgentClosedError()
 	}
+
 	previous := a.sessions[session.id]
 	if previous == nil && len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
 		a.mu.Unlock()
+
 		if err := session.Close(context.Background()); err != nil {
 			a.log.DebugContext(context.Background(), "close backpressured Codex session failed", slog.String(jsonFieldError, err.Error()))
 		}
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "active_sessions"})
+
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "active_sessions"})
 	}
+
 	a.sessions[session.id] = session
 	a.mu.Unlock()
 
@@ -442,6 +517,7 @@ func (a *Agent) storeStartedSession(session *session) error {
 		if err := previous.Close(context.Background()); err != nil {
 			a.log.WarnContext(context.Background(), "close replaced Codex session failed", slog.String(jsonFieldError, err.Error()))
 		}
+
 		return nil
 	}
 
@@ -471,6 +547,7 @@ func (a *Agent) removeSessionIf(id acp.SessionId, session *session) bool {
 	if a.sessions[id] != session {
 		return false
 	}
+
 	delete(a.sessions, id)
 
 	return true
@@ -495,11 +572,13 @@ func (a *Agent) clientSupportsFormElicitation() bool {
 	if caps == nil {
 		return false
 	}
+
 	return caps.Form != nil || caps.Url == nil
 }
 
 func (a *Agent) clientSupportsURLElicitation() bool {
 	caps := a.clientElicitationCapabilities()
+
 	return caps != nil && caps.Url != nil
 }
 
@@ -516,8 +595,10 @@ func (a *Agent) sessionStore() SessionStore {
 	if a.options.SessionStore != nil {
 		return a.options.SessionStore
 	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	if a.options.SessionStore == nil {
 		a.options.SessionStore = NewInMemorySessionStore()
 	}
@@ -529,6 +610,7 @@ func selectPositionEncoding(encodings []acp.PositionEncodingKind) acp.PositionEn
 	if slices.Contains(encodings, acp.PositionEncodingKindUtf8) {
 		return acp.PositionEncodingKindUtf8
 	}
+
 	if slices.Contains(encodings, acp.PositionEncodingKindUtf16) {
 		return acp.PositionEncodingKindUtf16
 	}
@@ -540,18 +622,23 @@ func normalizeConcurrencyLimits(limits ConcurrencyLimits) (ConcurrencyLimits, er
 	if limits.MaxActiveSessions == 0 {
 		limits.MaxActiveSessions = defaultMaxActiveSessions
 	}
+
 	if limits.MaxConcurrentPrompts == 0 {
 		limits.MaxConcurrentPrompts = defaultMaxConcurrentPrompts
 	}
+
 	if limits.MaxConcurrentClientCalls == 0 {
 		limits.MaxConcurrentClientCalls = defaultMaxConcurrentClientCalls
 	}
+
 	if limits.MaxActiveSessions < 0 {
 		return limits, fmt.Errorf("ConcurrencyLimits.MaxActiveSessions must be non-negative")
 	}
+
 	if limits.MaxConcurrentPrompts < 0 {
 		return limits, fmt.Errorf("ConcurrencyLimits.MaxConcurrentPrompts must be non-negative")
 	}
+
 	if limits.MaxConcurrentClientCalls < 0 {
 		return limits, fmt.Errorf("ConcurrencyLimits.MaxConcurrentClientCalls must be non-negative")
 	}

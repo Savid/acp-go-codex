@@ -81,6 +81,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 	if title == "" {
 		title = "Codex session"
 	}
+
 	updatedAt := thread.UpdatedAt
 	if updatedAt == "" {
 		updatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -118,7 +119,7 @@ func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "session_prompt"})
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "session_prompt"})
 	}
 }
 
@@ -131,6 +132,7 @@ func (s *session) turnQueue() chan struct{} {
 		if s.agent != nil && s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts > 0 {
 			limit = s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts
 		}
+
 		s.turn = make(chan struct{}, limit)
 	}
 
@@ -163,6 +165,7 @@ func (s *session) finishTurn() {
 	if cancel != nil {
 		cancel()
 	}
+
 	for _, cancel := range interactions {
 		cancel()
 	}
@@ -233,16 +236,19 @@ func (s *session) closeState() (codex.Client, string, string) {
 
 func (s *session) cancelTurn() {
 	s.mu.Lock()
+
 	cancel := s.cancel
 	if cancel != nil {
 		s.turnCancelled = true
 	}
+
 	interactions := s.detachInteractionsLocked()
 	s.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
+
 	for _, cancel := range interactions {
 		cancel()
 	}
@@ -259,6 +265,7 @@ func (s *session) setAccount(meta map[string]any) {
 	if len(meta) == 0 {
 		return
 	}
+
 	s.mu.Lock()
 	s.accountMeta = cloneAnyMap(meta)
 	s.mu.Unlock()
@@ -273,18 +280,23 @@ func (s *session) beginInteraction(parent context.Context, key string) (context.
 	base := parent
 	turnDone := s.turnDone
 	ctx, cancel := context.WithCancel(base)
+
 	if s.interactions == nil {
 		s.interactions = make(map[string]*sessionInteraction)
 	}
+
 	if previous := s.interactions[key]; previous != nil {
 		previous.cancel()
 	}
+
 	interaction := &sessionInteraction{cancel: cancel}
 	s.interactions[key] = interaction
 	s.mu.Unlock()
+
 	if turnDone != nil {
 		go func() {
 			defer recoverAgentGoroutine(parent, agentLogger(s.agent), "Codex interaction watcher")
+
 			select {
 			case <-turnDone:
 				cancel()
@@ -309,9 +321,11 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 	if len(s.interactions) == 0 {
 		return nil
 	}
+
 	cancels := make([]context.CancelFunc, 0, len(s.interactions))
 	for key, interaction := range s.interactions {
 		cancels = append(cancels, interaction.cancel)
+
 		delete(s.interactions, key)
 	}
 
@@ -321,13 +335,17 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 func (s *session) Close(ctx context.Context) error {
 	s.cancelTurn()
 	client, codexThreadID, materializedPath := s.closeState()
+
 	var err error
+
 	if client != nil && codexThreadID != "" {
 		_ = client.UnsubscribeThread(ctx, codexThreadID)
 	}
+
 	if client != nil {
 		err = client.Close(ctx)
 	}
+
 	if materializedPath != "" {
 		err = errors.Join(err, removeMaterializedRollout(materializedPath))
 	}

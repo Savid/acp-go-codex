@@ -39,6 +39,7 @@ func (e *rpcError) Error() string {
 	if e == nil {
 		return ""
 	}
+
 	if len(e.Data) == 0 {
 		return e.Message
 	}
@@ -63,16 +64,19 @@ func (t *lineTransport) Send(ctx context.Context, msg rpcMessage) error {
 	}
 
 	msg.JSONRPC = jsonRPCVersion
+
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
+
 	payload = append(payload, '\n')
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	_, err = t.w.Write(payload)
+
 	return err
 }
 
@@ -142,8 +146,10 @@ func newRPCConn(transport rpcTransport, handler RequestHandler) *rpcConn {
 		pending:   make(map[string]pendingCall),
 		requests:  make(map[string]*pendingRequest),
 	}
+
 	go func() {
 		defer recoverCodexGoroutine(context.Background(), "Codex JSON-RPC read loop")
+
 		conn.readLoop()
 	}()
 
@@ -169,8 +175,10 @@ func (c *rpcConn) Call(ctx context.Context, method string, params any, result an
 			err = ErrConnectionClosed
 		}
 		c.mu.Unlock()
+
 		return err
 	}
+
 	c.pending[key] = call
 	c.mu.Unlock()
 
@@ -183,31 +191,38 @@ func (c *rpcConn) Call(ctx context.Context, method string, params any, result an
 	paramsRaw, err := marshalRaw(params)
 	if err != nil {
 		cleanup()
+
 		return err
 	}
 
 	if err := c.transport.Send(ctx, rpcMessage{ID: idRaw, Method: method, Params: paramsRaw}); err != nil {
 		cleanup()
+
 		return err
 	}
 
 	select {
 	case <-ctx.Done():
 		cleanup()
+
 		return ctx.Err()
 	case <-c.done:
 		cleanup()
+
 		return c.err()
 	case msg, ok := <-call.result:
 		if !ok {
 			return c.err()
 		}
+
 		if msg.Error != nil {
 			return msg.Error
 		}
+
 		if result == nil || len(msg.Result) == 0 {
 			return nil
 		}
+
 		return json.Unmarshal(msg.Result, result)
 	}
 }
@@ -234,13 +249,16 @@ func (c *rpcConn) Close() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+
 		return nil
 	}
+
 	c.closed = true
 	for key, call := range c.pending {
 		delete(c.pending, key)
 		close(call.result)
 	}
+
 	for key, request := range c.requests {
 		delete(c.requests, key)
 		request.cancel()
@@ -262,6 +280,7 @@ func (c *rpcConn) readLoop() {
 				delete(c.pending, key)
 				close(call.result)
 			}
+
 			for key, request := range c.requests {
 				delete(c.requests, key)
 				request.cancel()
@@ -275,6 +294,7 @@ func (c *rpcConn) readLoop() {
 		msg, raw, err := c.transport.Recv()
 		if err != nil {
 			c.recordCloseError(err)
+
 			return
 		}
 
@@ -284,6 +304,7 @@ func (c *rpcConn) readLoop() {
 		case len(msg.ID) > 0 && msg.Method != "":
 			go func() {
 				defer recoverCodexGoroutine(context.Background(), "Codex server request")
+
 				c.handleRequest(msg)
 			}()
 		case msg.Method != "":
@@ -299,15 +320,18 @@ func (c *rpcConn) recordCloseError(err error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.closed || c.closeErr != nil {
 		return
 	}
+
 	c.closeErr = fmt.Errorf("%w: %w", ErrConnectionClosed, err)
 }
 
 func (c *rpcConn) err() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.closeErr != nil {
 		return c.closeErr
 	}
@@ -331,6 +355,7 @@ func (c *rpcConn) closeDone() {
 
 func (c *rpcConn) deliverResponse(msg rpcMessage) {
 	c.mu.Lock()
+
 	call, ok := c.pending[string(msg.ID)]
 	if ok {
 		delete(c.pending, string(msg.ID))
@@ -353,6 +378,7 @@ func (c *rpcConn) deliverNotification(msg rpcMessage, raw string) {
 func (c *rpcConn) handleRequest(msg rpcMessage) {
 	if c.handler == nil {
 		_ = c.Respond(context.Background(), msg.ID, nil, &rpcError{Code: -32601, Message: "method not found"})
+
 		return
 	}
 
@@ -370,8 +396,10 @@ func (c *rpcConn) handleRequest(msg rpcMessage) {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 		return
 	}
+
 	if err != nil {
 		_ = c.Respond(ctx, msg.ID, nil, &rpcError{Code: -32000, Message: err.Error()})
+
 		return
 	}
 
@@ -386,8 +414,10 @@ func (c *rpcConn) beginRequest(key string) (context.Context, func(), bool) {
 	if c.closed {
 		c.mu.Unlock()
 		cancel()
+
 		return nil, nil, false
 	}
+
 	c.requests[key] = request
 	c.mu.Unlock()
 
@@ -407,6 +437,7 @@ func marshalRaw(value any) (json.RawMessage, error) {
 	if value == nil {
 		return nil, nil
 	}
+
 	if raw, ok := value.(json.RawMessage); ok {
 		return raw, nil
 	}

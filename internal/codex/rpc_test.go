@@ -137,6 +137,7 @@ func TestRPCConnServerRequestCancellationSuppressesResponse(t *testing.T) {
 		started <- ctx
 		<-ctx.Done()
 		close(done)
+
 		return map[string]any{"late": true}, nil
 	})
 
@@ -209,6 +210,7 @@ type recordingCloser struct{ closed bool }
 
 func (c *recordingCloser) Close() error {
 	c.closed = true
+
 	return nil
 }
 
@@ -223,6 +225,7 @@ func (t *manualTransport) Send(_ context.Context, msg rpcMessage) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sent = append(t.sent, msg)
+
 	return nil
 }
 
@@ -231,6 +234,7 @@ func (t *manualTransport) Recv() (rpcMessage, string, error) {
 	if !ok {
 		return rpcMessage{}, "", errors.New("closed")
 	}
+
 	return msg, string(mustRaw(msg)), nil
 }
 
@@ -241,12 +245,14 @@ func (t *manualTransport) Close() error {
 		t.done = true
 		close(t.recv)
 	}
+
 	return nil
 }
 
 func (t *manualTransport) sentMessages() []rpcMessage {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	return append([]rpcMessage(nil), t.sent...)
 }
 
@@ -332,9 +338,13 @@ func TestRPCTransportAndPendingCallErrors(t *testing.T) {
 	requestConn := newRPCConn(&rawManualTransport{recv: make(chan recvItem, 4)}, func(context.Context, ServerRequest) (any, error) {
 		return nil, errors.New("handler failed")
 	})
-	requestConn.transport.(*rawManualTransport).recv <- recvItem{msg: rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("7"), Method: "server/request"}}
+	requestTransport, ok := requestConn.transport.(*rawManualTransport)
+	if !ok {
+		t.Fatalf("requestConn transport type = %T", requestConn.transport)
+	}
+	requestTransport.recv <- recvItem{msg: rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("7"), Method: "server/request"}}
 	time.Sleep(10 * time.Millisecond)
-	if requestConn.transport.(*rawManualTransport).sentCount() == 0 {
+	if requestTransport.sentCount() == 0 {
 		t.Fatal("handler error did not send response")
 	}
 	_ = requestConn.Close()
@@ -432,6 +442,7 @@ func (t *responseTransport) Send(_ context.Context, msg rpcMessage) error {
 	if len(msg.ID) > 0 {
 		t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Result: mustRaw(t.responses[msg.Method])}
 	}
+
 	return nil
 }
 
@@ -446,6 +457,7 @@ func (t *responseTransport) Recv() (rpcMessage, string, error) {
 	if !ok {
 		return rpcMessage{}, "", errors.New("closed")
 	}
+
 	return msg, string(mustRaw(msg)), nil
 }
 
@@ -458,6 +470,7 @@ func (t *responseTransport) Close() error {
 			close(t.recv)
 		}
 	}
+
 	return nil
 }
 
@@ -476,6 +489,7 @@ func (t *recordingTransport) Send(_ context.Context, msg rpcMessage) error {
 	t.mu.Lock()
 	t.sent = append(t.sent, msg)
 	t.mu.Unlock()
+
 	return nil
 }
 
@@ -488,6 +502,7 @@ func (t *recordingTransport) Recv() (rpcMessage, string, error) {
 	t.mu.Unlock()
 
 	<-done
+
 	return rpcMessage{}, "", errors.New("closed")
 }
 
@@ -501,12 +516,14 @@ func (t *recordingTransport) Close() error {
 		t.closed = true
 		close(t.done)
 	}
+
 	return nil
 }
 
 func (t *recordingTransport) sentCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	return len(t.sent)
 }
 
@@ -526,6 +543,7 @@ func (t *rawManualTransport) Send(_ context.Context, msg rpcMessage) error {
 	t.mu.Lock()
 	t.sent = append(t.sent, msg)
 	t.mu.Unlock()
+
 	return nil
 }
 
@@ -537,17 +555,20 @@ func (t *rawManualTransport) Recv() (rpcMessage, string, error) {
 	if item.err != nil {
 		return rpcMessage{}, "", item.err
 	}
+
 	return item.msg, item.raw, nil
 }
 
 func (t *rawManualTransport) Close() error {
 	close(t.recv)
+
 	return nil
 }
 
 func (t *rawManualTransport) sentCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	return len(t.sent)
 }
 
@@ -561,5 +582,6 @@ func (t *rawManualTransport) respondFirst(result json.RawMessage, reqErr *rpcErr
 func canceledContextForCodexTest() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	return ctx
 }

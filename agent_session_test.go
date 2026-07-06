@@ -97,15 +97,15 @@ func TestDeleteSessionTombstonesStoreAndBlocksLoadResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	if err := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
+	if seedErr := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(resp.SessionId)},
 		Entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)},
-	}}); err != nil {
-		t.Fatalf("seed store: %v", err)
+	}}); seedErr != nil {
+		t.Fatalf("seed store: %v", seedErr)
 	}
 
-	if _, err := agent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: resp.SessionId}); err != nil {
-		t.Fatalf("DeleteSession returned error: %v", err)
+	if _, delErr := agent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: resp.SessionId}); delErr != nil {
+		t.Fatalf("DeleteSession returned error: %v", delErr)
 	}
 	if !containsString(client.deletedThreadSnapshot(), "thread-1") {
 		t.Fatalf("native thread was not deleted: %#v", client.deletedThreadSnapshot())
@@ -143,15 +143,15 @@ func TestDeleteSessionSurfacesNativeCleanupErrorAfterTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	if err := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
+	if seedErr := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(resp.SessionId)},
 		Entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)},
-	}}); err != nil {
-		t.Fatalf("seed store: %v", err)
+	}}); seedErr != nil {
+		t.Fatalf("seed store: %v", seedErr)
 	}
 
-	if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(resp.SessionId)); !errors.Is(err, cleanupErr) {
-		t.Fatalf("DeleteSession error = %v, want cleanup error", err)
+	if _, delErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(resp.SessionId)); !errors.Is(delErr, cleanupErr) {
+		t.Fatalf("DeleteSession error = %v, want cleanup error", delErr)
 	}
 	entries, err := store.Load(ctx, SessionKey{SessionID: string(resp.SessionId)})
 	if err != nil {
@@ -222,6 +222,7 @@ func containsString(values []string, want string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -337,22 +338,22 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 
-	if _, err := agent.Prompt(ctx, TextPromptRequest("missing", "hello")); err == nil {
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest("missing", "hello")); promptErr == nil {
 		t.Fatal("Prompt missing session succeeded")
 	}
-	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}); err == nil {
+	if cancelErr := agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}); cancelErr == nil {
 		t.Fatal("Cancel missing session succeeded")
 	}
-	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"}); err == nil {
+	if _, closeMissingErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"}); closeMissingErr == nil {
 		t.Fatal("CloseSession missing session succeeded")
 	}
-	if _, err := agent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{}); err == nil {
+	if _, deleteMissingErr := agent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{}); deleteMissingErr == nil {
 		t.Fatal("DeleteSession missing id succeeded")
 	}
 	deleteStoreErr := errors.New("store delete failed")
 	deleteStoreAgent := NewAgent(WithSessionStore(&configurableStore{deleteErr: deleteStoreErr}))
-	if _, err := deleteStoreAgent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: "session-1"}); !errors.Is(err, deleteStoreErr) {
-		t.Fatalf("DeleteSession store error = %v", err)
+	if _, storeDelErr := deleteStoreAgent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: "session-1"}); !errors.Is(storeDelErr, deleteStoreErr) {
+		t.Fatalf("DeleteSession store error = %v", storeDelErr)
 	}
 	deleteCloseErr := errors.New("delete close failed")
 	deleteCloseClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: deleteCloseErr}
@@ -364,8 +365,8 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete close NewSession returned error: %v", err)
 	}
-	if _, err := deleteCloseAgent.UnstableDeleteSession(ctx, DeleteSessionRequest(deleteCloseResp.SessionId)); !errors.Is(err, deleteCloseErr) {
-		t.Fatalf("DeleteSession close error = %v", err)
+	if _, closeDelErr := deleteCloseAgent.UnstableDeleteSession(ctx, DeleteSessionRequest(deleteCloseResp.SessionId)); !errors.Is(closeDelErr, deleteCloseErr) {
+		t.Fatalf("DeleteSession close error = %v", closeDelErr)
 	}
 
 	cancelErr := codex.ErrThreadNotFound
@@ -375,7 +376,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel NewSession returned error: %v", err)
 	}
-	if err := cancelAgent.Cancel(ctx, acp.CancelNotification{SessionId: cancelResp.SessionId}); err == nil {
+	if cancelCodexErr := cancelAgent.Cancel(ctx, acp.CancelNotification{SessionId: cancelResp.SessionId}); cancelCodexErr == nil {
 		t.Fatal("Cancel ignored Codex error")
 	}
 
@@ -385,10 +386,10 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fatal NewSession returned error: %v", err)
 	}
-	if _, err := fatalAgent.Prompt(ctx, TextPromptRequest(fatalResp.SessionId, "hello")); err == nil {
+	if _, fatalPromptErr := fatalAgent.Prompt(ctx, TextPromptRequest(fatalResp.SessionId, "hello")); fatalPromptErr == nil {
 		t.Fatal("Prompt fatal process error succeeded")
 	}
-	if _, err := fatalAgent.session(fatalResp.SessionId); err == nil {
+	if _, sessionErr := fatalAgent.session(fatalResp.SessionId); sessionErr == nil {
 		t.Fatal("fatal Prompt did not remove session")
 	}
 
@@ -457,34 +458,34 @@ func TestListAndNativeSessionBranches(t *testing.T) {
 	if len(native) != 2 {
 		t.Fatalf("native sessions = %#v", native)
 	}
-	if _, err := nativeAgent.listCodexThreads(ctx, acp.ListSessionsRequest{}, nil, nil); err != nil {
-		t.Fatalf("listCodexThreads without cwd returned error: %v", err)
+	if _, noCwdErr := nativeAgent.listCodexThreads(ctx, acp.ListSessionsRequest{}, nil, nil); noCwdErr != nil {
+		t.Fatalf("listCodexThreads without cwd returned error: %v", noCwdErr)
 	}
 	badCwd := "relative"
-	if _, err := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &badCwd}); err == nil {
+	if _, badCwdErr := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &badCwd}); badCwdErr == nil {
 		t.Fatal("ListSessions accepted relative cwd")
 	}
-	if _, err := nativeAgent.listCodexThreads(ctx, acp.ListSessionsRequest{Cwd: &badCwd}, nil, nil); err == nil {
+	if _, badCwdThreadsErr := nativeAgent.listCodexThreads(ctx, acp.ListSessionsRequest{Cwd: &badCwd}, nil, nil); badCwdThreadsErr == nil {
 		t.Fatal("listCodexThreads accepted relative cwd")
 	}
 	badCursor := "%%%"
-	if _, err := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cursor: &badCursor}); err == nil {
+	if _, badCursorErr := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cursor: &badCursor}); badCursorErr == nil {
 		t.Fatal("ListSessions accepted invalid cursor")
 	}
 	factoryErrNative := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return nil, errors.New("factory failed")
 	}))
-	if _, err := factoryErrNative.listCodexThreads(ctx, acp.ListSessionsRequest{}, nil, nil); err == nil {
+	if _, factoryErr := factoryErrNative.listCodexThreads(ctx, acp.ListSessionsRequest{}, nil, nil); factoryErr == nil {
 		t.Fatal("listCodexThreads ignored factory error")
 	}
 	listErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), listErr: errors.New("list failed")}, nil
 	}))
-	if _, err := listErrAgent.ListSessions(ctx, acp.ListSessionsRequest{}); err == nil {
+	if _, listErr := listErrAgent.ListSessions(ctx, acp.ListSessionsRequest{}); listErr == nil {
 		t.Fatal("ListSessions ignored native list error")
 	}
 	storeErrAgent := NewAgent(WithSessionStore(&configurableStore{listErr: errors.New("store list")}))
-	if _, err := storeErrAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd}); err == nil {
+	if _, storeListErr := storeErrAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd}); storeListErr == nil {
 		t.Fatal("ListSessions ignored store list error")
 	}
 
@@ -579,6 +580,10 @@ func TestResumeLoadAndMaterializedBranches(t *testing.T) {
 	if _, err := resumeLimitAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/tmp/project")); err == nil {
 		t.Fatal("ResumeSession ignored store backpressure")
 	}
+}
+
+func TestResumeLoadActiveSessionBranches(t *testing.T) {
+	ctx := context.Background()
 
 	activeClient := newSpyCodexClient()
 	activeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return activeClient, nil }))
@@ -640,6 +645,14 @@ func TestResumeLoadAndMaterializedBranches(t *testing.T) {
 	if _, err := loadReplayErrAgent.LoadSession(ctx, LoadSessionRequest("thread-1", "/tmp/project")); err == nil {
 		t.Fatal("LoadSession ignored post-resume replay error")
 	}
+}
+
+func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
+	ctx := context.Background()
+	store := &configurableStore{}
+	agent := NewAgent(WithSessionStore(store), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return newSpyCodexClient(), nil
+	}))
 
 	materializedEntries := []SessionStoreEntry{SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"agent"}]}}`)}
 	store.entries = materializedEntries
@@ -957,6 +970,7 @@ func mapsEqual(got any, want map[string]any) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -976,6 +990,7 @@ func (s *configurableStore) Load(context.Context, SessionKey) ([]SessionStoreEnt
 	if s.loadErr != nil {
 		return nil, s.loadErr
 	}
+
 	return cloneStoreEntries(s.entries), nil
 }
 
@@ -991,6 +1006,7 @@ func (s *configurableStore) ListSessions(context.Context) ([]SessionSummary, err
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
+
 	return append([]SessionSummary(nil), s.summaries...), nil
 }
 

@@ -16,6 +16,18 @@ import (
 	"go.uber.org/goleak"
 )
 
+// asType performs a checked type assertion, failing the test if v is not a T.
+func asType[T any](t *testing.T, v any) T {
+	t.Helper()
+
+	typed, ok := v.(T)
+	if !ok {
+		t.Fatalf("unexpected type %T, want %T", v, typed)
+	}
+
+	return typed
+}
+
 func TestInitializeAdvertisesCodexCapabilities(t *testing.T) {
 	agent := NewAgent(
 		WithAgentName("codex-test"),
@@ -52,7 +64,7 @@ func TestInitializeAdvertisesCodexCapabilities(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing Codex meta: %#v", resp.AgentCapabilities.Meta)
 	}
-	if rawMeta, ok := meta[rawEventCapabilityKey].(map[string]any); !ok || rawMeta["method"] != RawEventMethod {
+	if rawMeta, rawOK := meta[rawEventCapabilityKey].(map[string]any); !rawOK || rawMeta["method"] != RawEventMethod {
 		t.Fatalf("missing raw event capability: %#v", meta)
 	}
 	outputSchemaMeta, ok := meta[structuredOutputCapabilityKey].(map[string]any)
@@ -283,6 +295,7 @@ func (c *recordingClient) UnstableCreateElicitation(_ context.Context, request a
 	c.elicitations = append(c.elicitations, request)
 	resp := acp.NewUnstableCreateElicitationResponseAccept()
 	resp.Accept.Content = map[string]any{"ok": true}
+
 	return resp, nil
 }
 
@@ -295,6 +308,7 @@ func (c *recordingClient) HandleExtensionMethod(_ context.Context, method string
 	defer c.mu.Unlock()
 
 	c.extensions = append(c.extensions, extensionNotification{method: method, params: append(json.RawMessage(nil), params...)})
+
 	return map[string]any{"ok": true}, nil
 }
 
@@ -331,6 +345,7 @@ func (a *Agent) sessionMust(id acp.SessionId) *session {
 	if err != nil {
 		panic(err)
 	}
+
 	return session
 }
 
@@ -399,6 +414,7 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	var gotOptions codex.Options
 	envAgent := NewAgent(withClientFactory(func(_ context.Context, options codex.Options) (codex.Client, error) {
 		gotOptions = options
+
 		return newSpyCodexClient(), nil
 	}))
 	if _, err := envAgent.newClient(ctx, []acp.McpServer{
@@ -506,6 +522,7 @@ func (c *spyCodexClient) StartThread(ctx context.Context, req codex.ThreadStartR
 	thread := c.thread
 	thread.Cwd = req.Cwd
 	thread.Model = firstNonEmpty(req.Model, thread.Model)
+
 	return thread, nil
 }
 
@@ -519,6 +536,7 @@ func (c *spyCodexClient) ResumeThread(ctx context.Context, req codex.ThreadResum
 	thread := c.thread
 	thread.ID = firstNonEmpty(req.ThreadID, thread.ID)
 	thread.Cwd = req.Cwd
+
 	return thread, nil
 }
 
@@ -529,6 +547,7 @@ func (c *spyCodexClient) ForkThread(ctx context.Context, req codex.ThreadForkReq
 	thread := c.thread
 	thread.ID = "fork-thread"
 	thread.Cwd = req.Cwd
+
 	return thread, nil
 }
 
@@ -544,6 +563,7 @@ func (c *spyCodexClient) ListTurns(_ context.Context, req codex.ThreadTurnsListR
 	c.mu.Lock()
 	c.turns = req
 	c.mu.Unlock()
+
 	return codex.ThreadTurnsListResponse{Turns: []map[string]any{{"id": "turn-1"}}}, nil
 }
 
@@ -557,6 +577,7 @@ func (c *spyCodexClient) RunTurn(ctx context.Context, req codex.TurnStartRequest
 		out <- codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: req.ThreadID, TurnID: "turn-1", Text: `{"ok":true}`}
 		out <- codex.Event{Kind: codex.EventCompleted, ThreadID: req.ThreadID, TurnID: "turn-1", StopReason: codex.StopReasonEndTurn, Usage: codex.Usage{InputTokens: 1, OutputTokens: 2}}
 	}()
+
 	return out, nil
 }
 
@@ -564,6 +585,7 @@ func (c *spyCodexClient) SteerTurn(_ context.Context, req codex.TurnSteerRequest
 	c.mu.Lock()
 	c.steer = req
 	c.mu.Unlock()
+
 	return nil
 }
 
@@ -573,6 +595,7 @@ func (c *spyCodexClient) CompactThread(_ context.Context, req codex.ThreadCompac
 	c.mu.Lock()
 	c.compact = req
 	c.mu.Unlock()
+
 	return map[string]any{"status": "ok"}, nil
 }
 
@@ -580,6 +603,7 @@ func (c *spyCodexClient) StartReview(_ context.Context, req codex.ReviewStartReq
 	c.mu.Lock()
 	c.review = req
 	c.mu.Unlock()
+
 	return map[string]any{"status": "reviewing"}, nil
 }
 
@@ -595,6 +619,7 @@ func (c *spyCodexClient) UnsubscribeThread(_ context.Context, threadID string) e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.unsubscribed = append(c.unsubscribed, threadID)
+
 	return nil
 }
 
@@ -602,12 +627,14 @@ func (c *spyCodexClient) DeleteThread(_ context.Context, req codex.ThreadDeleteR
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.deletedThreads = append(c.deletedThreads, req.ThreadID)
+
 	return nil
 }
 
 func (c *spyCodexClient) deletedThreadSnapshot() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return append([]string(nil), c.deletedThreads...)
 }
 
@@ -621,16 +648,19 @@ func (c *spyCodexClient) AccountRead(context.Context) (codex.Account, error) {
 
 func (c *spyCodexClient) LoginWithChatGPTTokens(_ context.Context, tokens codex.ChatGPTAuthTokens) error {
 	c.login = tokens
+
 	return nil
 }
 
 func (c *spyCodexClient) Logout(context.Context) error {
 	c.loggedOut = true
+
 	return nil
 }
 
 func (c *spyCodexClient) Close(context.Context) error {
 	c.closed = true
+
 	return nil
 }
 
@@ -667,6 +697,7 @@ func (c *recordingAgentClient) CreateElicitation(_ context.Context, request acp.
 	if c.elicitation.Accept != nil || c.elicitation.Decline != nil || c.elicitation.Cancel != nil {
 		return c.elicitation, nil
 	}
+
 	return acp.NewUnstableCreateElicitationResponseCancel(), nil
 }
 
@@ -680,16 +711,19 @@ func (c *recordingAgentClient) UnstableDisconnectMcp(context.Context, acp.Unstab
 
 func (c *recordingAgentClient) RequestPermission(_ context.Context, request acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	c.permissions = append(c.permissions, request)
+
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(c.permission)}, nil
 }
 
 func (c *recordingAgentClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
 	c.updates = append(c.updates, notification)
+
 	return nil
 }
 
 func (c *recordingAgentClient) NotifyExtension(_ context.Context, method string, params any) error {
 	c.extensions = append(c.extensions, extensionNotification{method: method, params: params})
+
 	return nil
 }
 
@@ -736,6 +770,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	var gotOptions codex.Options
 	requestAgent := NewAgent(withClientFactory(func(_ context.Context, options codex.Options) (codex.Client, error) {
 		gotOptions = options
+
 		return newSpyCodexClient(), nil
 	}))
 	if _, err := requestAgent.newClient(context.Background(), nil, nil, ""); err != nil {
@@ -749,6 +784,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 func canceledContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	return ctx
 }
 
@@ -784,6 +820,7 @@ func (c *errorCodexClient) StartThread(ctx context.Context, req codex.ThreadStar
 	if c.startErr != nil {
 		return codex.Thread{}, c.startErr
 	}
+
 	return c.spyCodexClient.StartThread(ctx, req)
 }
 
@@ -791,6 +828,7 @@ func (c *errorCodexClient) ResumeThread(ctx context.Context, req codex.ThreadRes
 	if c.resumeErr != nil {
 		return codex.Thread{}, c.resumeErr
 	}
+
 	return c.spyCodexClient.ResumeThread(ctx, req)
 }
 
@@ -798,6 +836,7 @@ func (c *errorCodexClient) ForkThread(ctx context.Context, req codex.ThreadForkR
 	if c.forkErr != nil {
 		return codex.Thread{}, c.forkErr
 	}
+
 	return c.spyCodexClient.ForkThread(ctx, req)
 }
 
@@ -808,6 +847,7 @@ func (c *errorCodexClient) ListThreads(ctx context.Context, req codex.ThreadList
 	if c.listThreads != nil {
 		return append([]codex.Thread(nil), c.listThreads...), nil
 	}
+
 	return c.spyCodexClient.ListThreads(ctx, req)
 }
 
@@ -815,6 +855,7 @@ func (c *errorCodexClient) ReadThread(ctx context.Context, req codex.ThreadReadR
 	if c.readErr != nil {
 		return codex.ThreadHistory{}, c.readErr
 	}
+
 	return c.spyCodexClient.ReadThread(ctx, req)
 }
 
@@ -822,6 +863,7 @@ func (c *errorCodexClient) ListTurns(ctx context.Context, req codex.ThreadTurnsL
 	if c.turnsErr != nil {
 		return codex.ThreadTurnsListResponse{}, c.turnsErr
 	}
+
 	return c.spyCodexClient.ListTurns(ctx, req)
 }
 
@@ -829,6 +871,7 @@ func (c *errorCodexClient) SteerTurn(ctx context.Context, req codex.TurnSteerReq
 	if c.steerErr != nil {
 		return c.steerErr
 	}
+
 	return c.spyCodexClient.SteerTurn(ctx, req)
 }
 
@@ -836,6 +879,7 @@ func (c *errorCodexClient) CompactThread(ctx context.Context, req codex.ThreadCo
 	if c.compactErr != nil {
 		return nil, c.compactErr
 	}
+
 	return c.spyCodexClient.CompactThread(ctx, req)
 }
 
@@ -843,6 +887,7 @@ func (c *errorCodexClient) StartReview(ctx context.Context, req codex.ReviewStar
 	if c.reviewErr != nil {
 		return nil, c.reviewErr
 	}
+
 	return c.spyCodexClient.StartReview(ctx, req)
 }
 
@@ -850,6 +895,7 @@ func (c *errorCodexClient) CollaborationModeList(ctx context.Context) (codex.Col
 	if c.collaborationErr != nil {
 		return codex.CollaborationModeListResponse{}, c.collaborationErr
 	}
+
 	return c.spyCodexClient.CollaborationModeList(ctx)
 }
 
@@ -857,6 +903,7 @@ func (c *errorCodexClient) MCPServerStatusList(ctx context.Context) (codex.MCPSe
 	if c.mcpStatusErr != nil {
 		return codex.MCPServerStatusListResponse{}, c.mcpStatusErr
 	}
+
 	return c.spyCodexClient.MCPServerStatusList(ctx)
 }
 
@@ -864,6 +911,7 @@ func (c *errorCodexClient) ModelList(ctx context.Context) ([]codex.Model, error)
 	if c.modelErr != nil {
 		return nil, c.modelErr
 	}
+
 	return c.spyCodexClient.ModelList(ctx)
 }
 
@@ -871,6 +919,7 @@ func (c *errorCodexClient) AccountRead(ctx context.Context) (codex.Account, erro
 	if c.accountErr != nil {
 		return codex.Account{}, c.accountErr
 	}
+
 	return c.spyCodexClient.AccountRead(ctx)
 }
 
@@ -878,6 +927,7 @@ func (c *errorCodexClient) LoginWithChatGPTTokens(ctx context.Context, tokens co
 	if c.loginErr != nil {
 		return c.loginErr
 	}
+
 	return c.spyCodexClient.LoginWithChatGPTTokens(ctx, tokens)
 }
 
@@ -885,6 +935,7 @@ func (c *errorCodexClient) Logout(ctx context.Context) error {
 	if c.logoutErr != nil {
 		return c.logoutErr
 	}
+
 	return c.spyCodexClient.Logout(ctx)
 }
 
@@ -892,6 +943,7 @@ func (c *errorCodexClient) UnsubscribeThread(ctx context.Context, threadID strin
 	if c.unsubscribeErr != nil {
 		return c.unsubscribeErr
 	}
+
 	return c.spyCodexClient.UnsubscribeThread(ctx, threadID)
 }
 
@@ -899,6 +951,7 @@ func (c *errorCodexClient) DeleteThread(ctx context.Context, req codex.ThreadDel
 	if c.deleteErr != nil {
 		return c.deleteErr
 	}
+
 	return c.spyCodexClient.DeleteThread(ctx, req)
 }
 
@@ -906,6 +959,7 @@ func (c *errorCodexClient) Close(ctx context.Context) error {
 	if c.closeErr != nil {
 		return c.closeErr
 	}
+
 	return c.spyCodexClient.Close(ctx)
 }
 
@@ -918,6 +972,7 @@ func (c *errorAgentClient) SessionUpdate(ctx context.Context, notification acp.S
 	if c.updateErr != nil {
 		return c.updateErr
 	}
+
 	return c.recordingAgentClient.SessionUpdate(ctx, notification)
 }
 
@@ -948,6 +1003,7 @@ type blockingPermissionAgentClient struct {
 func (c *blockingPermissionAgentClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	close(c.started)
 	<-c.release
+
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionAccept)}, nil
 }
 
@@ -1008,6 +1064,7 @@ func (c *acceptElicitationClient) CreateElicitation(_ context.Context, request a
 	resp := acp.NewUnstableCreateElicitationResponseAccept()
 	resp.Accept.Content = map[string]any{"name": "Ada"}
 	resp.Accept.Meta = map[string]any{"ok": true}
+
 	return resp, nil
 }
 
@@ -1028,6 +1085,7 @@ func (c *runEventsClient) RunTurn(context.Context, codex.TurnStartRequest) (<-ch
 			out <- event
 		}
 	}()
+
 	return out, nil
 }
 
@@ -1075,6 +1133,7 @@ func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest)
 		c.session.cancelTurn()
 		out <- codex.Event{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("canceled")}
 	}()
+
 	return out, nil
 }
 

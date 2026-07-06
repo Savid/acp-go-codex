@@ -15,6 +15,8 @@ const (
 	mcpApprovalModeAuto    = "auto"
 	mcpApprovalModePrompt  = "prompt"
 	mcpApprovalModeApprove = "approve"
+	codexConfigFlag        = "-c"
+	mcpServersKey          = "mcpServers"
 )
 
 var mcpNamePartRE = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
@@ -28,11 +30,11 @@ func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []
 		case server.Stdio != nil, server.Http != nil:
 			continue
 		case server.Sse != nil:
-			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": map[string]any{"index": index, "name": mcpServerName(server), "error": "SSE MCP is not supported"}})
+			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: map[string]any{"index": index, jsonFieldName: mcpServerName(server), jsonFieldError: "SSE MCP is not supported"}})
 		case server.Acp != nil:
-			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": map[string]any{"index": index, "name": mcpServerName(server), "error": "ACP MCP transport is not supported"}})
+			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: map[string]any{"index": index, jsonFieldName: mcpServerName(server), jsonFieldError: "ACP MCP transport is not supported"}})
 		default:
-			return nil, acp.NewInvalidParams(map[string]any{"mcpServers": fmt.Sprintf("server %d has no transport", index)})
+			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: fmt.Sprintf("server %d has no transport", index)})
 		}
 	}
 
@@ -56,6 +58,7 @@ func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer, defaultApprovalMode
 			if len(server.Stdio.Args) > 0 {
 				args = append(args, codexConfigArg("mcp_servers."+name+".args", tomlLiteral(tomlStringArray(server.Stdio.Args)))...)
 			}
+
 			if len(server.Stdio.Env) > 0 {
 				args = append(args, codexConfigArg("mcp_servers."+name+".env", tomlLiteral(tomlEnvTable(server.Stdio.Env)))...)
 			}
@@ -68,16 +71,18 @@ func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer, defaultApprovalMode
 				}
 			}
 		case server.Acp != nil:
-			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": "ACP MCP transport is not supported"})
+			return nil, nil, acp.NewInvalidParams(map[string]any{mcpServersKey: "ACP MCP transport is not supported"})
 		case server.Sse != nil:
-			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": "SSE MCP is not supported by Codex"})
+			return nil, nil, acp.NewInvalidParams(map[string]any{mcpServersKey: "SSE MCP is not supported by Codex"})
 		default:
-			return nil, nil, acp.NewInvalidParams(map[string]any{"mcpServers": fmt.Sprintf("server %d has no transport", index)})
+			return nil, nil, acp.NewInvalidParams(map[string]any{mcpServersKey: fmt.Sprintf("server %d has no transport", index)})
 		}
+
 		approvalArgs, err := mcpApprovalConfigArgs(name, defaultApprovalMode)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		args = append(args, approvalArgs...)
 	}
 
@@ -86,6 +91,7 @@ func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer, defaultApprovalMode
 
 func mcpServerConfigName(server acp.McpServer, index int, seen map[string]int) string {
 	name := ""
+
 	switch {
 	case server.Stdio != nil:
 		name = server.Stdio.Name
@@ -96,6 +102,7 @@ func mcpServerConfigName(server acp.McpServer, index int, seen map[string]int) s
 	case server.Sse != nil:
 		name = server.Sse.Name
 	}
+
 	if strings.TrimSpace(name) == "" {
 		name = fmt.Sprintf("server_%d", index+1)
 	}
@@ -106,6 +113,7 @@ func mcpServerConfigName(server acp.McpServer, index int, seen map[string]int) s
 	}
 
 	count := seen[name]
+
 	seen[name] = count + 1
 	if count > 0 {
 		name = fmt.Sprintf("%s_%d", name, count+1)
@@ -118,8 +126,9 @@ func mcpApprovalConfigArgs(serverConfigName string, defaultMode string) ([]strin
 	if defaultMode == "" {
 		return nil, nil
 	}
+
 	if !validMCPApprovalMode(defaultMode) {
-		return nil, acp.NewInvalidParams(map[string]any{"mcpServers": "_meta.codex.options.mcpToolApprovalMode must be one of auto, prompt, approve"})
+		return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: "_meta.codex.options.mcpToolApprovalMode must be one of auto, prompt, approve"})
 	}
 
 	return codexConfigArg("mcp_servers."+serverConfigName+".default_tools_approval_mode", defaultMode), nil
@@ -137,11 +146,11 @@ func validMCPApprovalMode(mode string) bool {
 func codexConfigArg(key string, value any) []string {
 	switch typed := value.(type) {
 	case tomlLiteral:
-		return []string{"-c", key + "=" + string(typed)}
+		return []string{codexConfigFlag, key + "=" + string(typed)}
 	case string:
-		return []string{"-c", key + "=" + tomlString(typed)}
+		return []string{codexConfigFlag, key + "=" + tomlString(typed)}
 	default:
-		return []string{"-c", key + "=" + fmt.Sprint(typed)}
+		return []string{codexConfigFlag, key + "=" + fmt.Sprint(typed)}
 	}
 }
 
@@ -164,6 +173,7 @@ func tomlEnvTable(env []acp.EnvVariable) string {
 		if variable.Name == "" {
 			continue
 		}
+
 		items = append(items, variable.Name+" = "+tomlString(variable.Value))
 	}
 
@@ -173,10 +183,12 @@ func tomlEnvTable(env []acp.EnvVariable) string {
 func mcpHeaderEnvTable(serverName string, headers []acp.HttpHeader, env map[string]string) string {
 	items := make([]string, 0, len(headers))
 	seen := map[string]int{}
+
 	for index, header := range headers {
 		if header.Name == "" {
 			continue
 		}
+
 		envName := mcpHeaderEnvName(serverName, header.Name, index, seen)
 		env[envName] = header.Value
 		items = append(items, tomlString(header.Name)+" = "+tomlString(envName))
@@ -194,8 +206,10 @@ func mcpHeaderEnvName(serverName string, headerName string, index int, seen map[
 	if base == "" {
 		base = fmt.Sprintf("SERVER_%d_HEADER", index+1)
 	}
+
 	name := mcpHeaderEnvPrefix + "_" + base
 	count := seen[name]
+
 	seen[name] = count + 1
 	if count > 0 {
 		name = fmt.Sprintf("%s_%d", name, count+1)
@@ -208,6 +222,7 @@ func stableMCPServersFromUnstable(servers []acp.UnstableMcpServer) []acp.McpServ
 	if servers == nil {
 		return nil
 	}
+
 	out := make([]acp.McpServer, 0, len(servers))
 	for _, server := range servers {
 		switch {

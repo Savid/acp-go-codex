@@ -20,6 +20,17 @@ const (
 	usageOutputTokensKey      = "outputTokens"
 	usageReasoningOutputKey   = "reasoningOutputTokens"
 	usageTotalTokensKey       = "totalTokens"
+
+	sandboxModeWorkspaceWrite   = "workspace-write"
+	sandboxModeReadOnly         = "read-only"
+	sandboxModeDangerFullAccess = "danger-full-access"
+	toolKindCommandExecution    = "commandExecution"
+	toolKindFileChange          = "fileChange"
+	toolKindMcpToolCall         = "mcpToolCall"
+
+	sandboxTypeDangerFullAccess = "dangerFullAccess"
+	sandboxTypeReadOnly         = "readOnly"
+	sandboxTypeWorkspaceWrite   = "workspaceWrite"
 )
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -40,6 +51,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	snapshot := s.snapshot()
 	model, effort, tier, personality, collaborationMode := s.turnSettings()
 	s.prepareRolloutLiveCursors()
+
 	events, err := s.client.RunTurn(turnCtx, codex.TurnStartRequest{
 		ThreadID:          snapshot.codexThreadID,
 		Prompt:            input,
@@ -62,6 +74,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	rolloutCompleted := make(chan struct{}, 1)
 	rolloutEvents := make(chan codex.Event, 128)
 	stopTail, tailDone := s.startRolloutTail(turnCtx, rolloutCompleted, rolloutEvents)
+
 	tailStopped := false
 	defer func() {
 		if !tailStopped {
@@ -69,70 +82,30 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			<-tailDone
 		}
 	}()
-	stopReason := acp.StopReasonEndTurn
-	var usage *acp.Usage
-	var streamedUsage codex.Usage
-	var streamedThreadUsage codex.Usage
-	var streamedUsageContextWindow int64
+
 	var agentText strings.Builder
-	agentDeltaItems := map[string]struct{}{}
-	reasoningDeltaItems := map[string]struct{}{}
-	var completionTimer *time.Timer
-	var completionFallback <-chan time.Time
+
+	state := &promptEventState{
+		snapshot:            snapshot,
+		agentDeltaItems:     map[string]struct{}{},
+		reasoningDeltaItems: map[string]struct{}{},
+		agentText:           &agentText,
+		stopReason:          acp.StopReasonEndTurn,
+	}
+
+	var (
+		completionTimer    *time.Timer
+		completionFallback <-chan time.Time
+	)
+
 	defer func() {
 		if completionTimer != nil {
 			completionTimer.Stop()
 		}
 	}()
-	completed := false
-	handleEvent := func(event codex.Event) error {
-		if event.TurnID != "" {
-			s.setTurnID(event.TurnID)
-		}
-		if event.Kind == codex.EventAccountUpdated {
-			s.setAccount(redactedAccountMeta(event.Account))
-		}
-		if err := s.emitRawCodexEvent(turnCtx, event); err != nil {
-			return err
-		}
-		visibleEvent := dedupeCompletedTextEvent(event, agentDeltaItems, reasoningDeltaItems)
-		if visibleEvent.Kind == codex.EventAgentMessageDelta {
-			visibleEvent = dedupeCompletedAggregateTextEvent(visibleEvent, agentText.String())
-		}
-		for _, update := range eventUpdates(visibleEvent) {
-			if err := s.emitUpdates(turnCtx, update); err != nil {
-				return err
-			}
-		}
-		for _, update := range usageUpdatesForEvent(event, &streamedUsage, &streamedThreadUsage, &streamedUsageContextWindow) {
-			if err := s.emitUpdates(turnCtx, update); err != nil {
-				return err
-			}
-		}
-		if event.Kind == codex.EventUsageUpdated {
-			if tokenUsage := usageFromCodex(event.TokenUsage.Last); tokenUsage != nil {
-				usage = tokenUsage
-			}
-		}
-		if event.Kind == codex.EventCompleted {
-			completed = true
-			stopReason = stopReasonFromCodex(event.StopReason)
-			if completedUsage := usageFromCodex(event.Usage); completedUsage != nil {
-				usage = completedUsage
-			}
-		}
-		if visibleEvent.Kind == codex.EventAgentMessageDelta && visibleEvent.Text != "" {
-			agentText.WriteString(visibleEvent.Text)
-		}
-		if event.Kind == codex.EventError && event.Err != nil && !s.wasTurnCancelled() {
-			return codexThreadACPError(
-				event.Err,
-				s.accountMetaSnapshot(),
-				codexThreadErrorData(s.id, firstNonEmpty(event.ThreadID, snapshot.codexThreadID)),
-			)
-		}
 
-		return nil
+	handleEvent := func(event codex.Event) error {
+		return s.handlePromptEvent(turnCtx, event, state)
 	}
 
 	eventsOpen := true
@@ -141,8 +114,10 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		case event, ok := <-events:
 			if !ok {
 				eventsOpen = false
+
 				continue
 			}
+
 			if err := handleEvent(event); err != nil {
 				return acp.PromptResponse{}, err
 			}
@@ -151,12 +126,15 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				return acp.PromptResponse{}, err
 			}
 		case <-rolloutCompleted:
-			completed = true
+			state.completed = true
+
 			if completionTimer == nil {
 				if sessionRolloutCompletionFallback <= 0 {
 					eventsOpen = false
+
 					continue
 				}
+
 				completionTimer = time.NewTimer(sessionRolloutCompletionFallback)
 				completionFallback = completionTimer.C
 			}
@@ -164,30 +142,121 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			eventsOpen = false
 		}
 	}
+
 	stopTail()
 	<-tailDone
+
 	tailStopped = true
 
 	if turnCtx.Err() != nil || s.wasTurnCancelled() {
-		stopReason = acp.StopReasonCancelled
+		state.stopReason = acp.StopReasonCancelled
 	}
-	if !completed && stopReason != acp.StopReasonCancelled {
+
+	if !state.completed && state.stopReason != acp.StopReasonCancelled {
 		return acp.PromptResponse{}, codexThreadACPError(
 			codex.ErrConnectionClosed,
 			s.accountMetaSnapshot(),
 			codexThreadErrorData(s.id, snapshot.codexThreadID),
 		)
 	}
+
 	if err := s.mirrorAndEmitRollout(context.WithoutCancel(ctx)); err != nil {
 		return acp.PromptResponse{}, err
 	}
 
 	return acp.PromptResponse{
-		StopReason:    stopReason,
-		Usage:         usage,
+		StopReason:    state.stopReason,
+		Usage:         state.usage,
 		UserMessageId: params.MessageId,
 		Meta:          structuredOutputMeta(agentText.String(), snapshot.outputSchema),
 	}, nil
+}
+
+type promptEventState struct {
+	snapshot            sessionSnapshot
+	agentDeltaItems     map[string]struct{}
+	reasoningDeltaItems map[string]struct{}
+	agentText           *strings.Builder
+
+	streamedUsage              codex.Usage
+	streamedThreadUsage        codex.Usage
+	streamedUsageContextWindow int64
+
+	usage      *acp.Usage
+	stopReason acp.StopReason
+	completed  bool
+}
+
+func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, state *promptEventState) error {
+	if event.TurnID != "" {
+		s.setTurnID(event.TurnID)
+	}
+
+	if event.Kind == codex.EventAccountUpdated {
+		s.setAccount(redactedAccountMeta(event.Account))
+	}
+
+	if err := s.emitRawCodexEvent(turnCtx, event); err != nil {
+		return err
+	}
+
+	visibleEvent := dedupeCompletedTextEvent(event, state.agentDeltaItems, state.reasoningDeltaItems)
+	if visibleEvent.Kind == codex.EventAgentMessageDelta {
+		visibleEvent = dedupeCompletedAggregateTextEvent(visibleEvent, state.agentText.String())
+	}
+
+	if err := s.emitPromptUpdates(turnCtx, event, visibleEvent, state); err != nil {
+		return err
+	}
+
+	s.applyPromptUsage(event, state)
+
+	if visibleEvent.Kind == codex.EventAgentMessageDelta && visibleEvent.Text != "" {
+		state.agentText.WriteString(visibleEvent.Text)
+	}
+
+	if event.Kind == codex.EventError && event.Err != nil && !s.wasTurnCancelled() {
+		return codexThreadACPError(
+			event.Err,
+			s.accountMetaSnapshot(),
+			codexThreadErrorData(s.id, firstNonEmpty(event.ThreadID, state.snapshot.codexThreadID)),
+		)
+	}
+
+	return nil
+}
+
+func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, visibleEvent codex.Event, state *promptEventState) error {
+	for _, update := range eventUpdates(visibleEvent) {
+		if err := s.emitUpdates(turnCtx, update); err != nil {
+			return err
+		}
+	}
+
+	for _, update := range usageUpdatesForEvent(event, &state.streamedUsage, &state.streamedThreadUsage, &state.streamedUsageContextWindow) {
+		if err := s.emitUpdates(turnCtx, update); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *session) applyPromptUsage(event codex.Event, state *promptEventState) {
+	if event.Kind == codex.EventUsageUpdated {
+		if tokenUsage := usageFromCodex(event.TokenUsage.Last); tokenUsage != nil {
+			state.usage = tokenUsage
+		}
+	}
+
+	if event.Kind == codex.EventCompleted {
+		state.completed = true
+
+		state.stopReason = stopReasonFromCodex(event.StopReason)
+		if completedUsage := usageFromCodex(event.Usage); completedUsage != nil {
+			state.usage = completedUsage
+		}
+	}
 }
 
 func dedupeCompletedTextEvent(event codex.Event, agentDeltaItems map[string]struct{}, reasoningDeltaItems map[string]struct{}) codex.Event {
@@ -205,12 +274,15 @@ func dedupeCompletedTextKind(event codex.Event, deltaItems map[string]struct{}) 
 	if event.ItemID == "" {
 		return event
 	}
+
 	if event.Completed {
 		if _, ok := deltaItems[event.ItemID]; ok {
 			event.Text = ""
 		}
+
 		return event
 	}
+
 	if event.Text != "" {
 		deltaItems[event.ItemID] = struct{}{}
 	}
@@ -222,6 +294,7 @@ func dedupeCompletedAggregateTextEvent(event codex.Event, priorText string) code
 	if !event.Completed || event.ItemID != "" || event.Text == "" {
 		return event
 	}
+
 	if event.Text == priorText {
 		event.Text = ""
 	}
@@ -241,11 +314,12 @@ func (s *session) turnSettings() (model string, effort string, serviceTier strin
 	if personalityValue != "" {
 		personality = personalityValue
 	}
+
 	if mode == modePlan {
 		collaborationMode = map[string]any{
-			"mode": string(modePlan),
+			jsonFieldMode: string(modePlan),
 			"settings": map[string]any{
-				"model":                  firstNonEmpty(model, "default"),
+				"model":                  firstNonEmpty(model, valueDefault),
 				"developer_instructions": nil,
 				"reasoning_effort":       nullableString(effort),
 			},
@@ -267,6 +341,7 @@ func (s *session) emitUpdates(ctx context.Context, updates ...acp.SessionUpdate)
 	if len(updates) > 0 {
 		s.agent.observe.ObserveFirstPromptUpdate(ctx)
 	}
+
 	for _, update := range updates {
 		if err := s.agent.emitUpdate(ctx, s.id, update); err != nil {
 			return err
@@ -280,13 +355,16 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 	if s.rolloutPath != "" {
 		return nil
 	}
+
 	if !s.rawMessages.Enabled() || len(event.RawParams) == 0 {
 		return nil
 	}
+
 	raw := decodedRawEvent(event.RawParams)
 	if !s.rawMessages.ShouldEmit(raw) {
 		return nil
 	}
+
 	raw["method"] = event.RawMethod
 
 	conn := s.agent.connection()
@@ -295,10 +373,10 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 	}
 
 	payload := map[string]any{
-		"sessionId": s.id,
-		"sequence":  s.nextRawEventSequence(),
-		"source":    "codex-app-server",
-		"event":     raw,
+		jsonFieldSessionID: s.id,
+		jsonFieldSequence:  s.nextRawEventSequence(),
+		jsonFieldSource:    "codex-app-server",
+		jsonFieldEvent:     raw,
 	}
 	if event.RawJSON != "" {
 		payload["rawJSON"] = event.RawJSON
@@ -313,11 +391,13 @@ func eventUpdates(event codex.Event) []acp.SessionUpdate {
 		if event.Text == "" {
 			return nil
 		}
+
 		return []acp.SessionUpdate{acp.UpdateAgentMessageText(event.Text)}
 	case codex.EventReasoningDelta:
 		if event.Text == "" {
 			return nil
 		}
+
 		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(event.Text)}
 	case codex.EventPlanUpdated:
 		return planUpdate(event.Plan)
@@ -331,11 +411,13 @@ func eventUpdates(event codex.Event) []acp.SessionUpdate {
 		if event.Diff == "" {
 			return nil
 		}
+
 		return []acp.SessionUpdate{acp.UpdateToolCall(acp.ToolCallId("codex-diff"), acp.WithUpdateContent([]acp.ToolCallContent{diffContent("", event.Diff)}))}
 	case codex.EventWarning:
 		if event.Text == "" {
 			return nil
 		}
+
 		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(event.Text)}
 	default:
 		return nil
@@ -355,6 +437,7 @@ func usageUpdatesForEvent(
 			event.TokenUsage.ModelContextWindow == *streamedUsageContextWindow {
 			return nil
 		}
+
 		updates := tokenUsageUpdateFromCodex(event.TokenUsage)
 		if len(updates) > 0 {
 			*streamedUsage = event.TokenUsage.Last
@@ -367,6 +450,7 @@ func usageUpdatesForEvent(
 		if event.Usage == *streamedUsage {
 			return nil
 		}
+
 		updates := usageUpdateFromCodex(event.Usage)
 		if len(updates) > 0 {
 			*streamedUsage = event.Usage
@@ -384,6 +468,7 @@ func planUpdate(steps []codex.PlanStep) []acp.SessionUpdate {
 	if len(steps) == 0 {
 		return nil
 	}
+
 	entries := make([]acp.PlanEntry, 0, len(steps))
 	for _, step := range steps {
 		entries = append(entries, acp.PlanEntry{
@@ -413,9 +498,11 @@ func toolDeltaUpdate(tool codex.ToolEvent, text string) []acp.SessionUpdate {
 	if text == "" {
 		text = tool.Content
 	}
+
 	if text == "" {
 		return nil
 	}
+
 	id := acp.ToolCallId(firstNonEmpty(tool.ID, "codex-tool"))
 
 	return []acp.SessionUpdate{acp.UpdateToolCall(id, acp.WithUpdateContent([]acp.ToolCallContent{textToolContent(text)}))}
@@ -423,6 +510,7 @@ func toolDeltaUpdate(tool codex.ToolEvent, text string) []acp.SessionUpdate {
 
 func completeToolUpdate(tool codex.ToolEvent) acp.SessionUpdate {
 	id := acp.ToolCallId(firstNonEmpty(tool.ID, "codex-tool"))
+
 	opts := []acp.ToolCallUpdateOpt{
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
 		acp.WithUpdateKind(toolKind(tool)),
@@ -431,6 +519,7 @@ func completeToolUpdate(tool codex.ToolEvent) acp.SessionUpdate {
 	if tool.Title != "" {
 		opts = append(opts, acp.WithUpdateTitle(tool.Title))
 	}
+
 	if tool.Content != "" {
 		opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{textToolContent(tool.Content)}))
 	}
@@ -457,11 +546,11 @@ func diffContent(path string, diff string) acp.ToolCallContent {
 
 func toolKind(tool codex.ToolEvent) acp.ToolKind {
 	switch tool.Kind {
-	case "commandExecution", "command", "exec", "shell":
+	case toolKindCommandExecution, valueCommand, "exec", "shell":
 		return acp.ToolKindExecute
-	case "fileChange", "edit", "patch":
+	case toolKindFileChange, "edit", "patch":
 		return acp.ToolKindEdit
-	case "mcpToolCall", "dynamicToolCall":
+	case toolKindMcpToolCall, "dynamicToolCall":
 		return acp.ToolKindOther
 	default:
 		return acp.ToolKindOther
@@ -501,13 +590,13 @@ func sandboxMode(policy any) any {
 	case string:
 		return p
 	case map[string]any:
-		switch p["type"] {
-		case "dangerFullAccess", "danger-full-access", "fullAccess":
-			return "danger-full-access"
-		case "readOnly", "read-only":
-			return "read-only"
-		case "workspaceWrite", "workspace-write":
-			return "workspace-write"
+		switch p[jsonFieldType] {
+		case sandboxTypeDangerFullAccess, sandboxModeDangerFullAccess, "fullAccess":
+			return sandboxModeDangerFullAccess
+		case sandboxTypeReadOnly, sandboxModeReadOnly:
+			return sandboxModeReadOnly
+		case sandboxTypeWorkspaceWrite, sandboxModeWorkspaceWrite:
+			return sandboxModeWorkspaceWrite
 		}
 	}
 
@@ -518,14 +607,14 @@ func sandboxPolicy(policy any) any {
 	switch p := policy.(type) {
 	case string:
 		switch p {
-		case "danger-full-access":
-			return map[string]any{"type": "dangerFullAccess"}
-		case "read-only":
+		case sandboxModeDangerFullAccess:
+			return map[string]any{jsonFieldType: sandboxTypeDangerFullAccess}
+		case sandboxModeReadOnly:
 			return map[string]any{
-				"type":          "readOnly",
-				"networkAccess": false,
+				jsonFieldType:          sandboxTypeReadOnly,
+				jsonFieldNetworkAccess: false,
 			}
-		case "workspace-write":
+		case sandboxModeWorkspaceWrite:
 			return workspaceWriteSandboxPolicy(nil)
 		default:
 			return p
@@ -535,17 +624,21 @@ func sandboxPolicy(policy any) any {
 		if cloned == nil {
 			return p
 		}
-		if cloned["type"] == "workspaceWrite" || cloned["type"] == "workspace-write" {
-			cloned["type"] = "workspaceWrite"
+
+		if cloned[jsonFieldType] == sandboxTypeWorkspaceWrite || cloned[jsonFieldType] == sandboxModeWorkspaceWrite {
+			cloned[jsonFieldType] = sandboxTypeWorkspaceWrite
 			if _, ok := cloned["writableRoots"]; !ok {
 				cloned["writableRoots"] = []string{}
 			}
-			if _, ok := cloned["networkAccess"]; !ok {
-				cloned["networkAccess"] = false
+
+			if _, ok := cloned[jsonFieldNetworkAccess]; !ok {
+				cloned[jsonFieldNetworkAccess] = false
 			}
+
 			if _, ok := cloned["excludeTmpdirEnvVar"]; !ok {
 				cloned["excludeTmpdirEnvVar"] = false
 			}
+
 			if _, ok := cloned["excludeSlashTmp"]; !ok {
 				cloned["excludeSlashTmp"] = false
 			}
@@ -559,11 +652,11 @@ func sandboxPolicy(policy any) any {
 
 func workspaceWriteSandboxPolicy(dirs []string) map[string]any {
 	return map[string]any{
-		"type":                "workspaceWrite",
-		"writableRoots":       append([]string{}, dirs...),
-		"networkAccess":       false,
-		"excludeTmpdirEnvVar": false,
-		"excludeSlashTmp":     false,
+		jsonFieldType:          sandboxTypeWorkspaceWrite,
+		"writableRoots":        append([]string{}, dirs...),
+		jsonFieldNetworkAccess: false,
+		"excludeTmpdirEnvVar":  false,
+		"excludeSlashTmp":      false,
 	}
 }
 
@@ -585,12 +678,15 @@ func usageFromCodex(usage codex.Usage) *acp.Usage {
 	if result.TotalTokens == 0 {
 		result.TotalTokens = result.InputTokens + result.OutputTokens
 	}
+
 	if usage.CachedReadTokens > 0 {
 		result.CachedReadTokens = acp.Ptr(int(usage.CachedReadTokens))
 	}
+
 	if usage.CachedWriteTokens > 0 {
 		result.CachedWriteTokens = acp.Ptr(int(usage.CachedWriteTokens))
 	}
+
 	if usage.ReasoningOutputTokens > 0 {
 		result.ThoughtTokens = acp.Ptr(int(usage.ReasoningOutputTokens))
 	}
@@ -616,6 +712,7 @@ func usageUpdateFromCodexContext(usage codex.Usage, threadUsage codex.Usage, con
 	meta := map[string]any{
 		codexUsageMetaKey: usageMetaFromCodex(acpUsage),
 	}
+
 	if threadACPUsage := usageFromCodex(threadUsage); threadACPUsage != nil {
 		used = threadACPUsage.TotalTokens
 		meta[codexThreadUsageMetaKey] = usageMetaFromCodex(threadACPUsage)
@@ -644,9 +741,11 @@ func usageMetaFromCodex(usage *acp.Usage) map[string]any {
 	if usage.CachedReadTokens != nil {
 		meta[usageCachedReadTokensKey] = *usage.CachedReadTokens
 	}
+
 	if usage.CachedWriteTokens != nil {
 		meta[usageCachedWriteTokensKey] = *usage.CachedWriteTokens
 	}
+
 	if usage.ThoughtTokens != nil {
 		meta[usageReasoningOutputKey] = *usage.ThoughtTokens
 	}
@@ -666,13 +765,16 @@ func promptResultForObserver(resp acp.PromptResponse, err error, model string) o
 
 	result.InputTokens = resp.Usage.InputTokens
 	result.OutputTokens = resp.Usage.OutputTokens
+
 	result.TotalTokens = resp.Usage.TotalTokens
 	if resp.Usage.CachedReadTokens != nil {
 		result.CachedReadTokens = *resp.Usage.CachedReadTokens
 	}
+
 	if resp.Usage.CachedWriteTokens != nil {
 		result.CachedWriteTokens = *resp.Usage.CachedWriteTokens
 	}
+
 	if resp.Usage.ThoughtTokens != nil {
 		result.ThoughtTokens = *resp.Usage.ThoughtTokens
 	}

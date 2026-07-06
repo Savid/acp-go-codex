@@ -88,6 +88,7 @@ func (f *fakeRolloutFile) Write([]byte) (int, error) {
 	if f.failWriteAt == f.writes {
 		return 0, errors.New("write failed")
 	}
+
 	return 1, nil
 }
 func (f *fakeRolloutFile) Close() error { return f.closeErr }

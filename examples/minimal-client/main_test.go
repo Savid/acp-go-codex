@@ -56,7 +56,11 @@ func TestRunUsesInjectedAgent(t *testing.T) {
 		return &startedAgent{
 			conn:  conn,
 			close: func() { conn.closedStarter = true },
-			wait:  func() error { conn.waited = true; return nil },
+			wait: func() error {
+				conn.waited = true
+
+				return nil
+			},
 		}, nil
 	}
 	getwd = func() (string, error) { return "/repo", nil }
@@ -134,8 +138,8 @@ func TestClientHelpers(t *testing.T) {
 
 	dir := t.TempDir()
 	file := filepath.Join(dir, "nested", "file.txt")
-	if _, err := c.WriteTextFile(context.Background(), acp.WriteTextFileRequest{Path: file, Content: "body"}); err != nil {
-		t.Fatalf("WriteTextFile returned error: %v", err)
+	if _, writeErr := c.WriteTextFile(context.Background(), acp.WriteTextFileRequest{Path: file, Content: "body"}); writeErr != nil {
+		t.Fatalf("WriteTextFile returned error: %v", writeErr)
 	}
 	read, err := c.ReadTextFile(context.Background(), acp.ReadTextFileRequest{Path: file})
 	if err != nil || read.Content != "body" {
@@ -170,6 +174,11 @@ func TestClientHelpers(t *testing.T) {
 	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{Update: acp.UpdateToolCall("tool", acp.WithUpdateStatus(acp.ToolCallStatusCompleted))}); err != nil {
 		t.Fatalf("tool update with status returned error: %v", err)
 	}
+}
+
+func TestClientTerminalAndDisplay(t *testing.T) {
+	var out bytes.Buffer
+	c := &client{output: &out}
 	if terminal, err := c.CreateTerminal(context.Background(), acp.CreateTerminalRequest{}); err != nil || terminal.TerminalId == "" {
 		t.Fatalf("CreateTerminal = %#v err=%v", terminal, err)
 	}
@@ -224,6 +233,7 @@ func TestStartAgentProcess(t *testing.T) {
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, script)
 		cmd.Stdin = strings.NewReader("")
+
 		return cmd
 	}
 	if _, err := startAgentProcess(context.Background(), io.Discard, io.Discard); err == nil {
@@ -232,6 +242,7 @@ func TestStartAgentProcess(t *testing.T) {
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, script)
 		cmd.Stdout = io.Discard
+
 		return cmd
 	}
 	if _, err := startAgentProcess(context.Background(), io.Discard, io.Discard); err == nil {
@@ -261,6 +272,7 @@ func (c *fakeAgentConnection) Initialize(context.Context, acp.InitializeRequest)
 		return acp.InitializeResponse{}, c.initErr
 	}
 	c.initialized = true
+
 	return acp.InitializeResponse{}, nil
 }
 
@@ -268,6 +280,7 @@ func (c *fakeAgentConnection) NewSession(context.Context, acp.NewSessionRequest)
 	if c.newErr != nil {
 		return acp.NewSessionResponse{}, c.newErr
 	}
+
 	return acp.NewSessionResponse{SessionId: "s"}, nil
 }
 
@@ -278,10 +291,12 @@ func (c *fakeAgentConnection) Prompt(_ context.Context, params acp.PromptRequest
 	if len(params.Prompt) > 0 && params.Prompt[0].Text != nil {
 		c.prompt = params.Prompt[0].Text.Text
 	}
+
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 
 func (c *fakeAgentConnection) CloseSession(context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
 	c.closed = true
+
 	return acp.CloseSessionResponse{}, nil
 }

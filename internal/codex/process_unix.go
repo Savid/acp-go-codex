@@ -16,6 +16,7 @@ var (
 
 func startProcess(cmd *exec.Cmd) error {
 	configureProcess(cmd)
+
 	return cmd.Start()
 }
 
@@ -36,6 +37,7 @@ func signalProcess(cmd *exec.Cmd, signal syscall.Signal) error {
 		if err := killProcessID(-pgid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
+
 		return nil
 	}
 
@@ -43,6 +45,7 @@ func signalProcess(cmd *exec.Cmd, signal syscall.Signal) error {
 	if errors.Is(err, os.ErrProcessDone) {
 		return nil
 	}
+
 	return err
 }
 
@@ -50,6 +53,7 @@ func processCloseError(err error) error {
 	if err == nil {
 		return nil
 	}
+
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {

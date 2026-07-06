@@ -83,14 +83,14 @@ func TestSessionSnapshotConcurrentAccountUpdates(t *testing.T) {
 	}()
 	for range 1000 {
 		meta := sessionResponseMeta(session.snapshot())
-		codexMeta := meta[codexMetaKey].(map[string]any)
+		codexMeta := asType[map[string]any](t, meta[codexMetaKey])
 		if _, ok := meta["github.com/savid/acp-go-codex"]; ok {
 			t.Fatal("deleted package-path meta was emitted")
 		}
-		codexMeta[codexAccountMetaKey].(map[string]any)["id"] = "changed"
+		asType[map[string]any](t, codexMeta[codexAccountMetaKey])["id"] = "changed"
 		nextMeta := sessionResponseMeta(session.snapshot())
-		nextCodexMeta := nextMeta[codexMetaKey].(map[string]any)
-		if nextCodexMeta[codexAccountMetaKey].(map[string]any)["id"] == "changed" {
+		nextCodexMeta := asType[map[string]any](t, nextMeta[codexMetaKey])
+		if asType[map[string]any](t, nextCodexMeta[codexAccountMetaKey])["id"] == "changed" {
 			t.Fatal("session account meta aliases response meta")
 		}
 		_ = codexAuthRequiredError(errors.New("not logged in"), session.accountMetaSnapshot())

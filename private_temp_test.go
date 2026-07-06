@@ -27,6 +27,7 @@ func TestCreatePrivateTempFileErrors(t *testing.T) {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return "", err
 		}
+
 		return dir, nil
 	}
 	privateChmod = func(string, os.FileMode) error {
@@ -42,6 +43,7 @@ func TestCreatePrivateTempFileErrors(t *testing.T) {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return "", err
 		}
+
 		return dir, nil
 	}
 	privateCreateTemp = func(string, string) (*os.File, error) {
@@ -59,22 +61,22 @@ func TestPrivateTempFileModesAndCleanup(t *testing.T) {
 	}
 	name := file.Name()
 	parent := filepath.Dir(name)
-	if err := file.Close(); err != nil {
-		t.Fatalf("close private temp file: %v", err)
+	if closeErr := file.Close(); closeErr != nil {
+		t.Fatalf("close private temp file: %v", closeErr)
 	}
-	if info, err := os.Stat(parent); err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("private temp parent mode info=%v err=%v", info, err)
+	if info, statErr := os.Stat(parent); statErr != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("private temp parent mode info=%v err=%v", info, statErr)
 	}
-	if info, err := os.Stat(name); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("private temp file mode info=%v err=%v", info, err)
+	if info, statErr := os.Stat(name); statErr != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("private temp file mode info=%v err=%v", info, statErr)
 	}
-	if err := removePrivateTempFile(name, "acp-go-codex-test-", os.Remove); err != nil {
-		t.Fatalf("removePrivateTempFile returned error: %v", err)
+	if removeErr := removePrivateTempFile(name, "acp-go-codex-test-", os.Remove); removeErr != nil {
+		t.Fatalf("removePrivateTempFile returned error: %v", removeErr)
 	}
-	if _, err := os.Stat(parent); !os.IsNotExist(err) {
-		t.Fatalf("private temp parent still exists: %v", err)
+	if _, statErr := os.Stat(parent); !os.IsNotExist(statErr) {
+		t.Fatalf("private temp parent still exists: %v", statErr)
 	}
-	if _, err := createPrivateTempFile("acp-go-codex-test-", "bad/path"); err == nil {
+	if _, createErr := createPrivateTempFile("acp-go-codex-test-", "bad/path"); createErr == nil {
 		t.Fatal("createPrivateTempFile accepted invalid pattern")
 	}
 

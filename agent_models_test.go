@@ -77,7 +77,7 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 	}
 	for _, update := range conn.updates {
 		if update.Update.CurrentModeUpdate != nil {
-			t.Fatalf("legacy mode update emitted: %#v", update.Update.CurrentModeUpdate)
+			t.Fatalf("removed mode update emitted: %#v", update.Update.CurrentModeUpdate)
 		}
 	}
 }
@@ -288,9 +288,9 @@ func requireNoTopLevelConfigState(t *testing.T, response any) {
 		t.Fatalf("response missing configOptions: %s", string(encoded))
 	}
 	if _, ok := object["models"]; ok {
-		t.Fatalf("response contains legacy models: %s", string(encoded))
+		t.Fatalf("response contains removed models: %s", string(encoded))
 	}
 	if _, ok := object["modes"]; ok {
-		t.Fatalf("response contains legacy modes: %s", string(encoded))
+		t.Fatalf("response contains removed modes: %s", string(encoded))
 	}
 }
