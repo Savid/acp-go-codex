@@ -238,11 +238,6 @@ func TestLifecycleMetaRejectsDeletedNamespaces(t *testing.T) {
 		field string
 	}{
 		{
-			name:  "package path",
-			meta:  map[string]any{"github.com/savid/acp-go-codex": map[string]any{}},
-			field: "_meta.github.com/savid/acp-go-codex",
-		},
-		{
 			name:  "mode option",
 			meta:  map[string]any{codexMetaKey: map[string]any{"options": map[string]any{"mode": "plan"}}},
 			field: "_meta.codex.options.mode",
@@ -267,6 +262,13 @@ func TestLifecycleMetaRejectsDeletedNamespaces(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("foreign module path ignored", func(t *testing.T) {
+		meta := map[string]any{"github.com/savid/acp-go-codex": map[string]any{"anything": true}}
+		if _, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionMeta(meta))); err != nil {
+			t.Fatalf("NewSession rejected foreign module-path _meta namespace instead of ignoring it: %v", err)
+		}
+	})
 }
 
 func TestAgentLifecycleErrorBranches(t *testing.T) {

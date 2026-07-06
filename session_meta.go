@@ -130,10 +130,6 @@ func validateLifecycleMeta(meta map[string]any) error {
 		return nil
 	}
 
-	if _, ok := meta["github.com/savid/acp-go-codex"]; ok {
-		return unsupportedField("_meta.github.com/savid/acp-go-codex")
-	}
-
 	codexMeta, ok := meta[codexMetaKey].(map[string]any)
 	if !ok {
 		if _, exists := meta[codexMetaKey]; exists {

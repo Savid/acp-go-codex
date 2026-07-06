@@ -150,8 +150,33 @@ func TestInMemorySessionStoreEdgeBranches(t *testing.T) {
 	if err != nil || string(loadedAgain[0]) != `{"x":1}` {
 		t.Fatalf("Load did not clone entries: %q err=%v", loadedAgain, err)
 	}
+}
+
+// TestInMemorySessionStoreReplaceEmptyEntrySurvives pins the docs/04 rule that
+// a listed key whose Entries are empty stays LIVE after Replace (exactly the
+// listed keys survive), and that Delete is the tombstone path that cascades to
+// subpaths.
+func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	key := SessionKey{SessionID: "s"}
+
+	if err := store.Append(ctx, key, []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
 	if err := store.Replace(ctx, key, []SessionStoreReplacement{{Key: key}}); err != nil {
-		t.Fatalf("Replace tombstone returned error: %v", err)
+		t.Fatalf("Replace empty entries returned error: %v", err)
+	}
+	if got, err := store.Load(ctx, key); err != nil || len(got) != 0 {
+		t.Fatalf("Load empty-entry key = %q err=%v", got, err)
+	}
+	if summaries, err := store.ListSessions(ctx); err != nil || len(summaries) != 1 || summaries[0].SessionID != "s" {
+		t.Fatalf("empty-entry key did not survive Replace: %#v err=%v", summaries, err)
+	}
+
+	if err := store.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
 	}
 	if got, err := store.Load(ctx, key); err != nil || got != nil {
 		t.Fatalf("Load tombstoned = %q err=%v", got, err)

@@ -9,6 +9,10 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 		t.Fatalf("unrelated lifecycle meta returned error: %v", err)
 	}
 
+	if err := validateLifecycleMeta(map[string]any{"github.com/savid/acp-go-codex": map[string]any{}}); err != nil {
+		t.Fatalf("foreign module-path _meta namespace returned error instead of being ignored: %v", err)
+	}
+
 	schema := map[string]any{"type": "object"}
 	meta := CodexOptions{
 		Model:               "gpt",
@@ -45,7 +49,6 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 	}
 
 	cases := []map[string]any{
-		{"github.com/savid/acp-go-codex": map[string]any{}},
 		{codexMetaKey: "bad"},
 		{codexMetaKey: map[string]any{"options": "bad"}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"old": true}}},
