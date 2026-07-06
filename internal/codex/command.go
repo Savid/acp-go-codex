@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,14 +36,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, versionErr
 	}
 
-	args := []string{"app-server", "--listen", "stdio://", "--disable", "plugins"}
-	for key, value := range options.Config {
-		args = append(args, "-c", fmt.Sprintf("%s=%s", key, shellValue(value)))
-	}
-
-	args = append(args, options.ExtraArgs...)
-
-	cmd := execCommandContext(procCtx, path, args...)
+	cmd := execCommandContext(procCtx, path, appServerArgs(options)...)
 	cmd.Env = mergedEnv(options)
 
 	stdin, err := cmd.StdinPipe()
@@ -67,6 +61,26 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	}
 
 	return newLineTransport(stdout, stdin, processCloser{cmd: cmd, stdin: stdin, stdout: stdout}), cmd, nil
+}
+
+// appServerArgs builds the codex app-server argument list: the base launch
+// flags, per-key -c config overrides (emitted in sorted key order for
+// deterministic args), and any caller-supplied extra args.
+func appServerArgs(options Options) []string {
+	args := []string{"app-server", "--listen", "stdio://", "--disable", "plugins"}
+
+	keys := make([]string, 0, len(options.Config))
+	for key := range options.Config {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		args = append(args, "-c", fmt.Sprintf("%s=%s", key, shellValue(options.Config[key])))
+	}
+
+	return append(args, options.ExtraArgs...)
 }
 
 type processStderrWriter struct {

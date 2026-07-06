@@ -35,3 +35,68 @@ ACP config categories are:
 | `personality` | `model_config` |
 
 Change mode after session start with `session/set_config_option`.
+
+## Seed files
+
+`WithSeedFiles` (CLI `-seed-file <relpath>=<hostpath>`) writes config files into
+the resolved `CODEX_HOME` before each Codex process launches, so Codex reads
+them as its own config — for example to point it at a
+[LiteLLM](https://docs.litellm.ai/) gateway.
+
+Seed files require an explicit home (`WithHome` / `-home`). If seed files are set
+but no home is configured, session start fails closed with the uniform invalid
+error — seeding never writes into the operator's default `~/.codex`. Paths are
+relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
+keys are rejected.
+
+Seed writes go through an ownership manifest (`.wagie-seed-manifest.json` in the
+seed root). A seeded file the adapter already owns is overwritten in place (the
+prior bytes are kept in a `<relpath>.wagie.bak` sidecar when the content
+changes), but if a seed target already exists and the adapter did not create it,
+the write fails closed and touches nothing — an operator-authored `config.toml`
+is never clobbered.
+
+Keep secrets out of the seeded file: set the API key with `WithEnv` (or the
+process environment) and reference it from the config with `env_key`.
+
+## Config overrides
+
+`WithCodexConfigOverrides` (CLI `-config <key>=<value>`, repeatable) passes TOML
+config overrides to `codex app-server` as `-c key=value`. Keys may be dotted
+paths that set nested config, string values are TOML-quoted automatically, and
+**nothing is written to disk** — so it is non-destructive and safe against a real
+`~/.codex`. This is the config mechanism for the app-server, which has no
+config-file overlay flag.
+
+Point Codex at a [LiteLLM](https://docs.litellm.ai/) gateway entirely through
+overrides:
+
+```go
+codexacp.WithEnv(map[string]string{"LITELLM_API_KEY": "sk-..."})
+codexacp.WithCodexConfigOverrides(map[string]any{
+    "model":                            "gpt-5.5",
+    "model_provider":                   "litellm",
+    "model_providers.litellm.name":     "LiteLLM",
+    "model_providers.litellm.base_url": "https://litellm.example/v1",
+    "model_providers.litellm.env_key":  "LITELLM_API_KEY",
+    "model_providers.litellm.wire_api": "responses",
+})
+```
+
+```sh
+acp-go-codex \
+  -config model=gpt-5.5 \
+  -config model_provider=litellm \
+  -config model_providers.litellm.name=LiteLLM \
+  -config model_providers.litellm.base_url=https://litellm.example/v1 \
+  -config model_providers.litellm.env_key=LITELLM_API_KEY \
+  -config model_providers.litellm.wire_api=responses
+```
+
+The overrides point Codex at a LiteLLM gateway: `base_url` ends in `/v1`,
+`env_key` names the environment variable holding the key, and
+`wire_api = "responses"` selects the OpenAI Responses wire protocol. Because the
+values route through app-server config flags rather than a file, `home` can point
+at the operator's real Codex dir and its `config.toml` and auth stay untouched.
+Keep the API key out of the overrides: set it with `WithEnv` (or the process
+environment) and reference it with `env_key`.

@@ -105,6 +105,189 @@ func TestRunErrorPathsAndVersion(t *testing.T) {
 	}
 }
 
+func TestRunPassesSeedFiles(t *testing.T) {
+	originalServe := serve
+	originalAgentVersion := agentVersion
+	originalShutdown := shutdownOpenTelemetry
+	t.Cleanup(func() {
+		serve = originalServe
+		agentVersion = originalAgentVersion
+		shutdownOpenTelemetry = originalShutdown
+	})
+
+	hostConfig := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[model_providers.litellm]\nbase_url = \"https://litellm.example/v1\"\n"
+	if err := os.WriteFile(hostConfig, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write host seed file: %v", err)
+	}
+
+	var got codexacp.Options
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...codexacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+	agentVersion = func() string { return "v0.0.0" }
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
+
+	code := run(
+		context.Background(),
+		[]string{"-home", "/tmp/codex", "-seed-file", "config.toml=" + hostConfig},
+		bytes.NewBuffer(nil),
+		bytes.NewBuffer(nil),
+		bytes.NewBuffer(nil),
+	)
+
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
+	}
+	if got.SeedFiles["config.toml"] != contents {
+		t.Fatalf("seed files = %#v", got.SeedFiles)
+	}
+}
+
+func TestRunPassesConfigOverrides(t *testing.T) {
+	originalServe := serve
+	originalAgentVersion := agentVersion
+	originalShutdown := shutdownOpenTelemetry
+	t.Cleanup(func() {
+		serve = originalServe
+		agentVersion = originalAgentVersion
+		shutdownOpenTelemetry = originalShutdown
+	})
+
+	var got codexacp.Options
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...codexacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+	agentVersion = func() string { return "v0.0.0" }
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
+
+	code := run(
+		context.Background(),
+		[]string{"-config", "model_provider=litellm", "-config", "model_providers.litellm.base_url=https://litellm.example/v1"},
+		bytes.NewBuffer(nil),
+		bytes.NewBuffer(nil),
+		bytes.NewBuffer(nil),
+	)
+
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
+	}
+	if got.Config["model_provider"] != "litellm" {
+		t.Fatalf("config model_provider = %v, want litellm", got.Config["model_provider"])
+	}
+	if got.Config["model_providers.litellm.base_url"] != "https://litellm.example/v1" {
+		t.Fatalf("config base_url = %v", got.Config["model_providers.litellm.base_url"])
+	}
+}
+
+func TestConfigOverrideFlagSet(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "missing separator", value: "model_provider", wantErr: true},
+		{name: "empty key", value: "=litellm", wantErr: true},
+		{name: "valid", value: "model_provider=litellm", wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flag := &configOverrideFlag{}
+			err := flag.Set(tt.value)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Set(%q) = nil, want error", tt.value)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Set(%q) = %v, want nil", tt.value, err)
+			}
+			if flag.String() != "" {
+				t.Fatalf("String() = %q, want empty", flag.String())
+			}
+			if flag.overrides["model_provider"] != "litellm" {
+				t.Fatalf("overrides = %#v", flag.overrides)
+			}
+		})
+	}
+}
+
+func TestSeedFileFlagSet(t *testing.T) {
+	hostConfig := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(hostConfig, []byte("model = \"gpt-5.5\"\n"), 0o600); err != nil {
+		t.Fatalf("write host seed file: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "missing separator", value: "config.toml", wantErr: true},
+		{name: "empty relative path", value: "=" + hostConfig, wantErr: true},
+		{name: "empty host path", value: "config.toml=", wantErr: true},
+		{name: "missing host file", value: "config.toml=/definitely/missing.toml", wantErr: true},
+		{name: "valid", value: "config.toml=" + hostConfig, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flag := &seedFileFlag{}
+			err := flag.Set(tt.value)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Set(%q) = nil, want error", tt.value)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Set(%q) = %v, want nil", tt.value, err)
+			}
+			if flag.String() != "" {
+				t.Fatalf("String() = %q, want empty", flag.String())
+			}
+			if flag.files["config.toml"] != "model = \"gpt-5.5\"\n" {
+				t.Fatalf("files = %#v", flag.files)
+			}
+		})
+	}
+}
+
+func TestRunRejectsBadSeedFileFlag(t *testing.T) {
+	originalShutdown := shutdownOpenTelemetry
+	t.Cleanup(func() { shutdownOpenTelemetry = originalShutdown })
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
+
+	var stderr bytes.Buffer
+	code := run(
+		context.Background(),
+		[]string{"-seed-file", "config.toml=/definitely/missing/seed.toml"},
+		bytes.NewBuffer(nil),
+		bytes.NewBuffer(nil),
+		&stderr,
+	)
+
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2", code)
+	}
+}
+
 func TestRunReturnsPendingSignalCode(t *testing.T) {
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry

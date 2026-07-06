@@ -940,6 +940,18 @@ func TestDeleteRetryAndConfigBranches(t *testing.T) {
 	if err := lifecycleMetaError(acp.NewInvalidParams(map[string]any{"x": "y"})); err == nil {
 		t.Fatal("lifecycleMetaError returned nil")
 	}
+	if got := NewAgent().codexConfig(); got != nil {
+		t.Fatalf("codexConfig with no overrides = %#v, want nil", got)
+	}
+	overrideAgent := NewAgent(WithCodexConfigOverrides(map[string]any{"model_provider": "litellm"}))
+	config := overrideAgent.codexConfig()
+	if config["model_provider"] != "litellm" {
+		t.Fatalf("codexConfig = %#v", config)
+	}
+	config["model_provider"] = "mutated"
+	if overrideAgent.options.Config["model_provider"] != "litellm" {
+		t.Fatalf("codexConfig did not return independent clone: %#v", overrideAgent.options.Config)
+	}
 }
 
 func requireUnsupportedFieldError(t *testing.T, err error, field string) {

@@ -58,6 +58,14 @@ type Options struct {
 	SessionStoreLoadTimeout time.Duration
 	// ConcurrencyLimits bounds active sessions, prompts, and server-to-client calls.
 	ConcurrencyLimits ConcurrencyLimits
+	// SeedFiles maps relative paths to file contents written into the resolved
+	// CODEX_HOME before each Codex process launches, so Codex reads them as its
+	// own config (e.g. config.toml). Paths are confined to CODEX_HOME.
+	SeedFiles map[string]string
+	// Config holds TOML config overrides passed to `codex app-server` as
+	// `-c key=value`. Keys may be dotted paths for nested values; string values
+	// are TOML-quoted automatically. Nothing is written to disk.
+	Config map[string]any
 	// ChatGPTAuthTokenRefresher handles Codex external-auth refresh callbacks
 	// from the app-server.
 	ChatGPTAuthTokenRefresher func(context.Context) (ChatGPTAuthTokens, error)
@@ -176,6 +184,34 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithSeedFiles writes relative-path files into the resolved CODEX_HOME before
+// each Codex process launches, so Codex reads them as its own config (e.g.
+// config.toml). Paths are confined to CODEX_HOME: absolute paths, ".." escapes,
+// and empty keys fail closed at session start. Secrets belong in WithEnv and are
+// referenced from seeded files by env-var indirection (Codex env_key).
+func WithSeedFiles(files map[string]string) Option {
+	return func(options *Options) {
+		options.SeedFiles = make(map[string]string, len(files))
+		for path, contents := range files {
+			options.SeedFiles[path] = contents
+		}
+	}
+}
+
+// WithCodexConfigOverrides sets TOML config overrides passed to `codex
+// app-server` as `-c key=value`. Keys may be dotted paths for nested values
+// (e.g. model_providers.litellm.base_url); string values are TOML-quoted
+// automatically. Nothing is written to disk, so it is non-destructive and safe
+// against a real ~/.codex. The input map is cloned.
+func WithCodexConfigOverrides(overrides map[string]any) Option {
+	return func(options *Options) {
+		options.Config = make(map[string]any, len(overrides))
+		for key, value := range overrides {
+			options.Config[key] = value
+		}
 	}
 }
 

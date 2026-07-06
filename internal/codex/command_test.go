@@ -15,6 +15,58 @@ import (
 	"time"
 )
 
+func TestAppServerArgs(t *testing.T) {
+	base := []string{"app-server", "--listen", "stdio://", "--disable", "plugins"}
+
+	tests := []struct {
+		name    string
+		options Options
+		want    []string
+	}{
+		{
+			name:    "no config",
+			options: Options{},
+			want:    base,
+		},
+		{
+			name: "config emitted in sorted key order",
+			options: Options{Config: map[string]any{
+				"model_provider":                   "litellm",
+				"model_providers.litellm.base_url": "https://litellm.example/v1",
+				"model_providers.litellm.wire_api": "responses",
+			}},
+			want: append(append([]string(nil), base...),
+				"-c", `model_provider="litellm"`,
+				"-c", `model_providers.litellm.base_url="https://litellm.example/v1"`,
+				"-c", `model_providers.litellm.wire_api="responses"`,
+			),
+		},
+		{
+			name: "config before extra args",
+			options: Options{
+				Config:    map[string]any{"model_provider": "litellm"},
+				ExtraArgs: []string{"--extra"},
+			},
+			want: append(append([]string(nil), base...),
+				"-c", `model_provider="litellm"`, "--extra"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := appServerArgs(tt.options)
+			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
+				t.Fatalf("appServerArgs = %q, want %q", got, tt.want)
+			}
+			for _, arg := range got {
+				if arg == "--profile" {
+					t.Fatalf("appServerArgs emitted --profile: %q", got)
+				}
+			}
+		})
+	}
+}
+
 func TestCommandHelpers(t *testing.T) {
 	path, err := resolveCodexPath("/custom/codex")
 	if err != nil || path != "/custom/codex" {

@@ -319,6 +319,10 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 		}
 	}
 
+	if err := writeSeedFiles(a.options.Home, a.options.SeedFiles); err != nil {
+		return nil, err
+	}
+
 	extraArgs, mcpEnv, err := a.mcpServerConfigArgs(mcpServers, mcpToolApprovalMode)
 	if err != nil {
 		return nil, err
@@ -378,7 +382,16 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 }
 
 func (a *Agent) codexConfig() map[string]any {
-	return nil
+	if a.options.Config == nil {
+		return nil
+	}
+
+	config := make(map[string]any, len(a.options.Config))
+	for key, value := range a.options.Config {
+		config[key] = value
+	}
+
+	return config
 }
 
 func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {

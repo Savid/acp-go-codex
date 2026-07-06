@@ -21,8 +21,41 @@ Agent options include:
 | `WithDefaultModel(model)` | Default model preference. |
 | `WithSessionStore(store)` | Durable Codex rollout JSONL store. |
 | `WithConcurrencyLimits(limits)` | Bounds sessions, prompts, and client calls. |
+| `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
+| `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk. |
 | `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh. |
 | `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout. |
+
+`WithSeedFiles` writes config files into the resolved `CODEX_HOME` before each
+Codex process launches, so Codex reads them as its own config. Paths are
+relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
+keys fail closed at session start. `WithHome` must be set explicitly — seeding
+never writes into the operator's default `~/.codex`. Writes are tracked in a
+`.wagie-seed-manifest.json` ownership manifest: a managed file is overwritten in
+place (prior bytes kept in a `<relpath>.wagie.bak` sidecar when content changes),
+while an existing file the adapter does not own fails closed and is never
+clobbered. Keep secrets in `WithEnv` and reference them from seeded files by
+Codex `env_key` indirection.
+
+`WithCodexConfigOverrides` reaches a LiteLLM gateway with no file on disk: dotted
+keys set nested config, string values are TOML-quoted automatically, and nothing
+is written to disk, so `WithHome` can point at the operator's real Codex dir and
+its `config.toml` and auth stay untouched. `codex app-server` has no config-file
+overlay flag, so this is the config mechanism for the app-server.
+
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+    codexacp.WithEnv(map[string]string{"LITELLM_API_KEY": "sk-..."}),
+    codexacp.WithCodexConfigOverrides(map[string]any{
+        "model":                            "gpt-5.5",
+        "model_provider":                   "litellm",
+        "model_providers.litellm.name":     "LiteLLM",
+        "model_providers.litellm.base_url": "https://litellm.example/v1",
+        "model_providers.litellm.env_key":  "LITELLM_API_KEY",
+        "model_providers.litellm.wire_api": "responses",
+    }),
+)
+```
 
 Session helpers:
 
