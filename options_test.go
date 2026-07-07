@@ -26,7 +26,7 @@ func TestOptionsSetters(t *testing.T) {
 		WithEnv(map[string]string{"A": "B"}),
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
-		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentPrompts: 2, MaxConcurrentClientCalls: 3}),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 3}),
 		WithSeedFiles(map[string]string{"config.toml": "model = \"gpt-5.5\"\n"}),
 		WithCodexConfigOverrides(map[string]any{"model_provider": "litellm"}),
 		WithTracerProvider(tracerProvider),
@@ -41,7 +41,6 @@ func TestOptionsSetters(t *testing.T) {
 		options.SessionStore != store ||
 		options.SessionStoreLoadTimeout != time.Second ||
 		options.ConcurrencyLimits.MaxActiveSessions != 1 ||
-		options.ConcurrencyLimits.MaxConcurrentPrompts != 2 ||
 		options.ConcurrencyLimits.MaxConcurrentClientCalls != 3 ||
 		options.SeedFiles["config.toml"] != "model = \"gpt-5.5\"\n" ||
 		options.Config["model_provider"] != "litellm" ||

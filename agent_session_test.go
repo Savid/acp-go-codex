@@ -24,6 +24,24 @@ func requireRequestError(t *testing.T, err error, code int, message string) {
 	}
 }
 
+func requireUnknownSession(t *testing.T, err error) {
+	t.Helper()
+	reqErr, ok := err.(*acp.RequestError)
+	if !ok {
+		t.Fatalf("error = %T %v, want ACP request error", err, err)
+	}
+	if reqErr.Code != -32602 {
+		t.Fatalf("request error = %#v, want code=-32602", reqErr)
+	}
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("request error data = %#v, want map", reqErr.Data)
+	}
+	if data["error"] != "unknown session" || data["field"] != "sessionId" {
+		t.Fatalf("request error data = %#v, want {error:unknown session, field:sessionId}", data)
+	}
+}
+
 func TestForkIsExtensionOnly(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
@@ -120,12 +138,12 @@ func TestDeleteSessionTombstonesStoreAndBlocksLoadResume(t *testing.T) {
 	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, "/tmp/project")); err == nil {
 		t.Fatal("ResumeSession after delete succeeded")
 	} else {
-		requireRequestError(t, err, -32002, "Resource not found")
+		requireUnknownSession(t, err)
 	}
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, "/tmp/project")); err == nil {
 		t.Fatal("LoadSession after delete succeeded")
 	} else {
-		requireRequestError(t, err, -32002, "Resource not found")
+		requireUnknownSession(t, err)
 	}
 }
 
@@ -163,7 +181,7 @@ func TestDeleteSessionSurfacesNativeCleanupErrorAfterTombstone(t *testing.T) {
 	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, "/tmp/project")); err == nil {
 		t.Fatal("ResumeSession after failed cleanup succeeded")
 	} else {
-		requireRequestError(t, err, -32002, "Resource not found")
+		requireUnknownSession(t, err)
 	}
 }
 
@@ -203,7 +221,7 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, "/tmp/project")); err == nil {
 		t.Fatal("LoadSession returned nil error")
 	} else {
-		requireRequestError(t, err, -32002, "Resource not found")
+		requireUnknownSession(t, err)
 	}
 	if !containsString(nativeClient.deletedThreadSnapshot(), "thread-native") {
 		t.Fatalf("LoadSession did not retry native cleanup: %#v", nativeClient.deletedThreadSnapshot())
@@ -212,7 +230,7 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, "/tmp/project")); err == nil {
 		t.Fatal("ResumeSession returned nil error")
 	} else {
-		requireRequestError(t, err, -32002, "Resource not found")
+		requireUnknownSession(t, err)
 	}
 }
 
@@ -320,7 +338,7 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 	}
 
 	limitAgent := NewAgent(
-		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentPrompts: 1, MaxConcurrentClientCalls: 1}),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
 	)
 	if _, err := limitAgent.NewSession(ctx, NewSessionRequest("/tmp/project")); err != nil {
@@ -329,6 +347,28 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 	if _, err := limitAgent.NewSession(ctx, NewSessionRequest("/tmp/other")); err == nil {
 		t.Fatal("NewSession ignored active session limit")
 	}
+}
+
+func TestUnknownSessionUniformInvalidParams(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent(
+		WithSessionStore(NewInMemorySessionStore()),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+			return newSpyCodexClient(), nil
+		}),
+	)
+
+	_, promptErr := agent.Prompt(ctx, TextPromptRequest("missing", "hello"))
+	requireUnknownSession(t, promptErr)
+	requireUnknownSession(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}))
+	_, configErr := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("missing", configModel, "gpt"))
+	requireUnknownSession(t, configErr)
+	_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"})
+	requireUnknownSession(t, closeErr)
+	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest("missing", "/tmp/project"))
+	requireUnknownSession(t, resumeErr)
+	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest("missing", "/tmp/project"))
+	requireUnknownSession(t, loadErr)
 }
 
 func TestAgentSessionOperationErrorBranches(t *testing.T) {
@@ -927,17 +967,11 @@ func TestDeleteRetryAndConfigBranches(t *testing.T) {
 	if got := clientAccountMeta(ctx, &errorCodexClient{spyCodexClient: newSpyCodexClient(), accountErr: errors.New("account")}); got != nil {
 		t.Fatalf("clientAccountMeta error = %#v", got)
 	}
-	if err := codexThreadACPError(nil, nil, nil); err != nil {
+	if err := codexThreadACPError(nil, nil); err != nil {
 		t.Fatalf("nil codexThreadACPError = %v", err)
 	}
 	if !fatalCodexProcessError(codex.ErrConnectionClosed) {
 		t.Fatal("fatalCodexProcessError missed connection closed")
-	}
-	if data := codexThreadErrorData("s", "thread"); data["threadId"] != "thread" {
-		t.Fatalf("thread error data = %#v", data)
-	}
-	if data := codexThreadErrorData("s", ""); data["threadId"] != nil {
-		t.Fatalf("empty thread error data = %#v", data)
 	}
 	if err := lifecycleMetaError(acp.NewInvalidParams(map[string]any{"x": "y"})); err == nil {
 		t.Fatal("lifecycleMetaError returned nil")

@@ -181,7 +181,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 func unsupportedField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: "unsupported",
-		"field":        path,
+		jsonFieldField: path,
 	})
 }
 

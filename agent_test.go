@@ -398,7 +398,6 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 
 	invalidLimits := []ConcurrencyLimits{
 		{MaxActiveSessions: -1},
-		{MaxConcurrentPrompts: -1},
 		{MaxConcurrentClientCalls: -1},
 	}
 	for _, limits := range invalidLimits {
@@ -409,6 +408,12 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	}
 	if got := selectPositionEncoding([]acp.PositionEncodingKind{acp.PositionEncodingKindUtf16}); got != acp.PositionEncodingKindUtf16 {
 		t.Fatalf("selectPositionEncoding = %q", got)
+	}
+	if got := selectPositionEncoding([]acp.PositionEncodingKind{"bad", acp.PositionEncodingKindUtf32}); got != acp.PositionEncodingKindUtf16 {
+		t.Fatalf("selectPositionEncoding never selects utf32 = %q", got)
+	}
+	if got := selectPositionEncoding(nil); got != acp.PositionEncodingKindUtf16 {
+		t.Fatalf("selectPositionEncoding default = %q", got)
 	}
 
 	var gotOptions codex.Options

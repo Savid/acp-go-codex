@@ -54,7 +54,7 @@ func (s *session) replayThreadHistory(ctx context.Context) error {
 
 	history, err := s.client.ReadThread(ctx, codex.ThreadReadRequest{ThreadID: s.codexThreadID})
 	if err != nil {
-		return codexThreadACPError(err, s.accountMetaSnapshot(), codexThreadErrorData(s.id, s.codexThreadID))
+		return codexThreadACPError(err, s.accountMetaSnapshot())
 	}
 
 	for _, update := range threadHistoryReplayUpdates(history.Items) {

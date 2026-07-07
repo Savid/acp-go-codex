@@ -68,7 +68,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		OutputSchema: snapshot.outputSchema,
 	})
 	if err != nil {
-		return acp.PromptResponse{}, codexThreadACPError(err, s.accountMetaSnapshot(), codexThreadErrorData(s.id, snapshot.codexThreadID))
+		return acp.PromptResponse{}, codexThreadACPError(err, s.accountMetaSnapshot())
 	}
 
 	rolloutCompleted := make(chan struct{}, 1)
@@ -156,7 +156,6 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, codexThreadACPError(
 			codex.ErrConnectionClosed,
 			s.accountMetaSnapshot(),
-			codexThreadErrorData(s.id, snapshot.codexThreadID),
 		)
 	}
 
@@ -219,7 +218,6 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 		return codexThreadACPError(
 			event.Err,
 			s.accountMetaSnapshot(),
-			codexThreadErrorData(s.id, firstNonEmpty(event.ThreadID, state.snapshot.codexThreadID)),
 		)
 	}
 

@@ -128,12 +128,7 @@ func (s *session) turnQueue() chan struct{} {
 	defer s.mu.Unlock()
 
 	if s.turn == nil {
-		limit := defaultMaxConcurrentPrompts
-		if s.agent != nil && s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts > 0 {
-			limit = s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts
-		}
-
-		s.turn = make(chan struct{}, limit)
+		s.turn = make(chan struct{}, maxConcurrentPromptsPerSession)
 	}
 
 	return s.turn

@@ -130,7 +130,6 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 	return codexThreadACPError(
 		session.client.CancelTurn(cancelCtx, session.codexThreadID, session.activeTurnID()),
 		session.accountMetaSnapshot(),
-		codexThreadErrorData(session.id, session.codexThreadID),
 	)
 }
 
@@ -502,7 +501,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
-		return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
+		return acp.ResumeSessionResponse{}, newUnknownSession()
 	}
 
 	meta, err := sessionMetaFromLifecycle(params.Meta)
@@ -539,7 +538,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if !a.nativeSessionFallbackEnabled() {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
-		return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
+		return acp.ResumeSessionResponse{}, newUnknownSession()
 	}
 
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
@@ -559,7 +558,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err != nil {
 		_ = client.Close(context.Background())
 
-		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, string(params.SessionId)))
+		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
 	}
 
 	id := params.SessionId
@@ -622,7 +621,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		_ = client.Close(context.Background())
 		_ = removeMaterializedRollout(path)
 
-		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, threadID))
+		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
 	}
 
 	id := params.SessionId
@@ -666,7 +665,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
-		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
+		return acp.LoadSessionResponse{}, newUnknownSession()
 	}
 
 	meta, err := sessionMetaFromLifecycle(params.Meta)
@@ -717,7 +716,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if !a.nativeSessionFallbackEnabled() {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
-		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{jsonFieldSessionID: params.SessionId})
+		return acp.LoadSessionResponse{}, newUnknownSession()
 	}
 
 	resp, err := a.ResumeSession(ctx, acp.ResumeSessionRequest(params))
@@ -829,7 +828,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		_ = client.Close(context.Background())
 		_ = removeMaterializedRollout(path)
 
-		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil, codexThreadErrorData(params.SessionId, firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))))
+		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil)
 	}
 
 	id := params.SessionId
@@ -990,7 +989,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	if err != nil {
 		_ = client.Close(context.Background())
 
-		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta, codexThreadErrorData(parent.id, parentSnapshot.codexThreadID))
+		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)
 	}
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
@@ -1091,7 +1090,7 @@ func clientAccountMeta(ctx context.Context, client codex.Client) map[string]any 
 	return redactedAccountMeta(account)
 }
 
-func codexThreadACPError(err error, account map[string]any, data map[string]any) error {
+func codexThreadACPError(err error, account map[string]any) error {
 	if err == nil {
 		return nil
 	}
@@ -1101,7 +1100,7 @@ func codexThreadACPError(err error, account map[string]any, data map[string]any)
 	}
 
 	if errors.Is(err, codex.ErrThreadNotFound) {
-		return newResourceNotFound(data)
+		return newUnknownSession()
 	}
 
 	return err
@@ -1111,8 +1110,8 @@ func fatalCodexProcessError(err error) bool {
 	return errors.Is(err, codex.ErrConnectionClosed)
 }
 
-func newResourceNotFound(data any) *acp.RequestError {
-	return &acp.RequestError{Code: -32002, Message: "Resource not found", Data: data}
+func newUnknownSession() *acp.RequestError {
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: "unknown session", jsonFieldField: jsonFieldSessionID})
 }
 
 func lifecycleMetaError(err error) error {
@@ -1122,13 +1121,4 @@ func lifecycleMetaError(err error) error {
 	}
 
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
-}
-
-func codexThreadErrorData(sessionID acp.SessionId, threadID string) map[string]any {
-	data := map[string]any{jsonFieldSessionID: sessionID}
-	if threadID != "" {
-		data["threadId"] = threadID
-	}
-
-	return data
 }

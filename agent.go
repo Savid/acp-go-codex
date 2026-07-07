@@ -19,7 +19,7 @@ import (
 const (
 	listSessionsPageSize            = 50
 	defaultMaxActiveSessions        = 32
-	defaultMaxConcurrentPrompts     = 1
+	maxConcurrentPromptsPerSession  = 1
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
 
@@ -29,6 +29,7 @@ const (
 	jsonFieldEntries   = "entries"
 	jsonFieldIndex     = "index"
 	jsonFieldSessionID = "sessionId"
+	jsonFieldField     = "field"
 	validationRequired = "required"
 
 	jsonFieldSource        = "source"
@@ -494,7 +495,7 @@ func (a *Agent) session(id acp.SessionId) (*session, error) {
 
 	session, ok := a.sessions[id]
 	if !ok {
-		return nil, newResourceNotFound(map[string]any{jsonFieldSessionID: id})
+		return nil, newUnknownSession()
 	}
 
 	return session, nil
@@ -636,20 +637,12 @@ func normalizeConcurrencyLimits(limits ConcurrencyLimits) (ConcurrencyLimits, er
 		limits.MaxActiveSessions = defaultMaxActiveSessions
 	}
 
-	if limits.MaxConcurrentPrompts == 0 {
-		limits.MaxConcurrentPrompts = defaultMaxConcurrentPrompts
-	}
-
 	if limits.MaxConcurrentClientCalls == 0 {
 		limits.MaxConcurrentClientCalls = defaultMaxConcurrentClientCalls
 	}
 
 	if limits.MaxActiveSessions < 0 {
 		return limits, fmt.Errorf("ConcurrencyLimits.MaxActiveSessions must be non-negative")
-	}
-
-	if limits.MaxConcurrentPrompts < 0 {
-		return limits, fmt.Errorf("ConcurrencyLimits.MaxConcurrentPrompts must be non-negative")
 	}
 
 	if limits.MaxConcurrentClientCalls < 0 {
