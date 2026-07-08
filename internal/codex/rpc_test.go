@@ -16,7 +16,7 @@ import (
 func TestLineTransportSendRecvAndClose(t *testing.T) {
 	var out bytes.Buffer
 	closer := &recordingCloser{}
-	transport := newLineTransport(strings.NewReader(`{"jsonrpc":"2.0","method":"note","params":{"x":1}}`+"\n"), &out, closer)
+	transport := newLineTransport(strings.NewReader(`{"jsonrpc":"2.0","method":"note","params":{"x":1}}`+"\n"), &out, &process{stdin: closer, stdout: closer})
 
 	if err := transport.Send(context.Background(), rpcMessage{ID: json.RawMessage("1"), Method: "call", Params: json.RawMessage(`{"a":true}`)}); err != nil {
 		t.Fatalf("Send returned error: %v", err)
@@ -245,6 +245,10 @@ func (c *recordingCloser) Close() error {
 
 	return nil
 }
+
+func (c *recordingCloser) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (c *recordingCloser) Write(p []byte) (int, error) { return len(p), nil }
 
 type manualTransport struct {
 	mu   sync.Mutex

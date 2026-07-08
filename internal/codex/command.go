@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,7 +52,8 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, err
 	}
 
-	cmd.Stderr = codexStderrWriter(options.Logger)
+	stderr := codexStderrWriter(options.Logger)
+	cmd.Stderr = stderr
 
 	if err := startProcess(cmd); err != nil {
 		_ = stdin.Close()
@@ -60,7 +62,9 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, err
 	}
 
-	return newLineTransport(stdout, stdin, processCloser{cmd: cmd, stdin: stdin, stdout: stdout}), cmd, nil
+	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}
+
+	return newLineTransport(stdout, stdin, proc), cmd, nil
 }
 
 // appServerArgs builds the codex app-server argument list: the base launch
@@ -83,19 +87,28 @@ func appServerArgs(options Options) []string {
 	return append(args, options.ExtraArgs...)
 }
 
-type processStderrWriter struct {
+// stderrTailLimit bounds the retained app-server stderr so a mid-turn crash can
+// surface the tail of the process diagnostics without unbounded buffering.
+const stderrTailLimit = 4096
+
+// stderrTail logs every app-server stderr chunk and retains a bounded tail so a
+// process-death failure can name the real cause instead of a bare transport EOF.
+type stderrTail struct {
 	logger *slog.Logger
+
+	mu  sync.Mutex
+	buf []byte
 }
 
-func codexStderrWriter(logger *slog.Logger) io.Writer {
+func codexStderrWriter(logger *slog.Logger) *stderrTail {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	return processStderrWriter{logger: logger}
+	return &stderrTail{logger: logger}
 }
 
-func (w processStderrWriter) Write(p []byte) (int, error) {
+func (w *stderrTail) Write(p []byte) (int, error) {
 	text := strings.TrimSpace(string(p))
 	if text != "" {
 		w.logger.DebugContext(
@@ -105,7 +118,27 @@ func (w processStderrWriter) Write(p []byte) (int, error) {
 		)
 	}
 
+	w.mu.Lock()
+	w.buf = append(w.buf, p...)
+
+	if len(w.buf) > stderrTailLimit {
+		w.buf = append([]byte(nil), w.buf[len(w.buf)-stderrTailLimit:]...)
+	}
+	w.mu.Unlock()
+
 	return len(p), nil
+}
+
+// tail returns the retained stderr tail with surrounding whitespace trimmed.
+func (w *stderrTail) tail() string {
+	if w == nil {
+		return ""
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return strings.TrimSpace(string(w.buf))
 }
 
 func resolveCodexPath(path string) (string, error) {
@@ -229,56 +262,112 @@ func shellValue(value any) string {
 	}
 }
 
-type processCloser struct {
+// processExitGrace bounds how long the transport waits for the app-server
+// process to be reaped after its stdout stream ends, so a mid-turn stream EOF
+// can be attributed to the real process exit status instead of a bare transport
+// fault. Transport death while the process is still running exceeds the grace
+// and stays cause:"transport".
+var processExitGrace = 2 * time.Second
+
+// process owns the codex app-server child process: its stdio, its bounded
+// stderr tail, and the single cmd.Wait reaper shared by the transport
+// process-death detection and the deliberate Close escalation.
+type process struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
+	stderr *stderrTail
+
+	waitOnce sync.Once
+	waitErr  error
+	waitDone chan struct{}
 }
 
-func (c processCloser) Close() error {
-	if c.stdin != nil {
-		_ = c.stdin.Close()
+// beginWait reaps the process exactly once in the background. Callers gate on
+// waitDone before reading waitErr.
+func (p *process) beginWait() {
+	p.waitOnce.Do(func() {
+		p.waitDone = make(chan struct{})
+
+		if p.cmd == nil || p.cmd.Process == nil {
+			close(p.waitDone)
+
+			return
+		}
+
+		go func() {
+			defer recoverCodexGoroutine(context.Background(), "Codex process waiter")
+
+			p.waitErr = p.cmd.Wait()
+			close(p.waitDone)
+		}()
+	})
+}
+
+// exited reports the process exit status and its stderr tail when the process
+// terminates within grace. It returns ok=false while the process is still
+// running, so a live transport fault is not misattributed to a process exit.
+func (p *process) exited(grace time.Duration) (status string, stderrTail string, ok bool) {
+	p.beginWait()
+
+	select {
+	case <-p.waitDone:
+		return exitStatus(p.waitErr), p.stderr.tail(), true
+	case <-time.After(grace):
+		return "", "", false
+	}
+}
+
+func (p *process) Close() error {
+	if p.stdin != nil {
+		_ = p.stdin.Close()
 	}
 
-	if c.stdout != nil {
-		_ = c.stdout.Close()
+	if p.stdout != nil {
+		_ = p.stdout.Close()
 	}
 
-	if c.cmd == nil || c.cmd.Process == nil {
+	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
 
-	done := make(chan error, 1)
-
-	go func() {
-		defer recoverCodexGoroutine(context.Background(), "Codex process waiter")
-
-		done <- c.cmd.Wait()
-	}()
+	p.beginWait()
 
 	// Escalate: stdin EOF → SIGTERM → SIGKILL. The first grace window lets
 	// the app-server exit on its own after stdin closes so in-flight cleanup
 	// (e.g. MCP session termination) completes instead of being cut short.
 	select {
-	case err := <-done:
-		return processCloseError(err)
+	case <-p.waitDone:
+		return processCloseError(p.waitErr)
 	case <-time.After(processCloseGrace):
 	}
 
-	if err := terminateProcess(c.cmd); err != nil {
+	if err := terminateProcess(p.cmd); err != nil {
 		return err
 	}
 
 	select {
-	case err := <-done:
-		return processCloseError(err)
+	case <-p.waitDone:
+		return processCloseError(p.waitErr)
 	case <-time.After(processCloseGrace):
-		if err := killProcess(c.cmd); err != nil {
+		if err := killProcess(p.cmd); err != nil {
 			return err
 		}
 
-		<-done
+		<-p.waitDone
 
 		return nil
 	}
+}
+
+// exitStatusZero is the rendered status for a process that exited cleanly.
+const exitStatusZero = "exit status 0"
+
+// exitStatus renders a process wait result as a human-readable exit status.
+func exitStatus(err error) string {
+	if err == nil {
+		return exitStatusZero
+	}
+
+	return err.Error()
 }

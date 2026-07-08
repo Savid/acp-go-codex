@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1021,7 +1023,57 @@ func (c readErrorClient) ReadThread(context.Context, codex.ThreadReadRequest) (c
 }
 
 func TestMain(m *testing.M) {
+	// When the process-death test relaunches this binary as the codex CLI, act
+	// as a fake app-server instead of running the suite.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version":
+			fmt.Println("codex-cli 0.141.0")
+			os.Exit(0)
+		case "app-server":
+			runFakeCodexAppServer()
+			os.Exit(0)
+		}
+	}
+
 	goleak.VerifyTestMain(m)
+}
+
+// fakeCodexStderrTail is emitted on the fake app-server's stderr so a mid-turn
+// process death surfaces a real diagnostic tail rather than a bare EOF.
+const fakeCodexStderrTail = "codex app-server: fatal: killed (out of memory)"
+
+// runFakeCodexAppServer speaks just enough of the codex app-server JSON-RPC
+// protocol to complete the launch handshake, then dies mid-turn on turn/start so
+// the transport observes a real process exit (exit status 1 + stderr tail).
+func runFakeCodexAppServer() {
+	fmt.Fprintln(os.Stderr, fakeCodexStderrTail)
+
+	writeReply := func(id any, result map[string]any) {
+		payload, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+		payload = append(payload, '\n')
+		_, _ = os.Stdout.Write(payload)
+	}
+
+	decoder := json.NewDecoder(os.Stdin)
+	for {
+		var msg map[string]any
+		if err := decoder.Decode(&msg); err != nil {
+			return
+		}
+
+		id, hasID := msg["id"]
+		if !hasID {
+			continue
+		}
+
+		if method, _ := msg["method"].(string); method == "turn/start" {
+			writeReply(id, map[string]any{"turn": map[string]any{"id": "turn-1"}})
+			os.Exit(1)
+		}
+
+		writeReply(id, map[string]any{})
+	}
 }
 
 type appendErrorStore struct{}

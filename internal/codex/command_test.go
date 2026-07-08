@@ -139,7 +139,7 @@ func TestValidateCodexVersion(t *testing.T) {
 }
 
 func TestProcessCloserNil(t *testing.T) {
-	if err := (processCloser{}).Close(); err != nil {
+	if err := (&process{}).Close(); err != nil {
 		t.Fatalf("nil process closer returned error: %v", err)
 	}
 	if err := killProcess(nil); err != nil {
@@ -303,7 +303,7 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	if err := startProcess(signaled); err != nil {
 		t.Fatalf("start signaled process: %v", err)
 	}
-	if err := (processCloser{cmd: signaled}).Close(); err != nil {
+	if err := (&process{cmd: signaled}).Close(); err != nil {
 		t.Fatalf("signaled process close returned error: %v", err)
 	}
 	getProcessGroupID = func(int) (int, error) { return 123, nil }
@@ -321,7 +321,7 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	killProcessID = func(int, syscall.Signal) error { return errors.New("kill failed") }
 	origGrace := processCloseGrace
 	processCloseGrace = 0
-	if err := (processCloser{cmd: killFail}).Close(); err == nil {
+	if err := (&process{cmd: killFail}).Close(); err == nil {
 		t.Fatal("processCloser ignored kill error")
 	}
 	getProcessGroupID = origGetPGID
@@ -344,7 +344,7 @@ func TestCommandProcessKillBranches(t *testing.T) {
 		return errors.New("final kill failed")
 	}
 	processCloseGrace = 0
-	if err := (processCloser{cmd: finalKillFail}).Close(); err == nil {
+	if err := (&process{cmd: finalKillFail}).Close(); err == nil {
 		t.Fatal("processCloser ignored final kill error")
 	}
 	getProcessGroupID = origGetPGID
@@ -358,7 +358,7 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	}
 	processCloseGrace = 0
 	t.Cleanup(func() { processCloseGrace = origGrace })
-	if err := (processCloser{cmd: stubborn}).Close(); err != nil {
+	if err := (&process{cmd: stubborn}).Close(); err != nil {
 		t.Fatalf("processCloser timeout kill returned error: %v", err)
 	}
 	processCloseGrace = origGrace
@@ -398,7 +398,7 @@ while :; do :; done
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	if err := (processCloser{cmd: cmd}).Close(); err != nil {
+	if err := (&process{cmd: cmd}).Close(); err != nil {
 		t.Fatalf("close trap process: %v", err)
 	}
 

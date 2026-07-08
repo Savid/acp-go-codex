@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -171,50 +172,78 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	}
 }
 
-// T3 — a process death mid-turn leaves the session addressable; the follow-up
-// prompt relaunches the app-server lazily.
-func TestTurnFailureProcessDeathThenRelaunch(t *testing.T) {
+// T3 — a real app-server process death mid-turn surfaces cause:"process_exit"
+// with the true exit status and stderr tail (never a bare EOF) and marks the
+// session for lazy relaunch. The fake app-server is this test binary re-execed
+// via TestMain; it dies on turn/start.
+func TestTurnFailureProcessDeath(t *testing.T) {
 	ctx := context.Background()
 
-	dead := &runEventsClient{spyCodexClient: newSpyCodexClient(), events: []codex.Event{{
-		Kind:     codex.EventError,
-		ThreadID: "thread-1",
-		TurnID:   "turn-1",
-		Err:      &codex.TurnFailedError{Cause: codex.CauseProcessExit, Message: "codex app-server exited: exit status 1: killed (OOM)"},
-	}}}
-	relaunched := newSpyCodexClient()
-
-	agent := NewAgent(withClientFactory(sequencedClientFactory(dead, relaunched)))
-	agent.setAgentClient(newRecordingAgentClient())
-
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	client, err := codex.NewAppServerClient(ctx, codex.Options{CLIPath: os.Args[0]})
 	if err != nil {
-		t.Fatalf("NewSession returned error: %v", err)
+		t.Fatalf("launch fake app-server: %v", err)
 	}
 
-	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "hi"))
+	s := &session{agent: NewAgent(), id: "death", cwd: "/tmp/project", codexThreadID: "thread-1"}
+	s.agent.setAgentClient(newRecordingAgentClient())
+	s.client = client
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+
+	resp, promptErr := s.Prompt(ctx, TextPromptRequest("death", "hi"))
+	if resp.StopReason == acp.StopReasonEndTurn {
+		t.Fatal("process death reported end_turn")
+	}
 	if !isTurnFailure(promptErr, codex.CauseProcessExit) {
-		t.Fatalf("prompt error = %v, want process_exit failure", promptErr)
+		t.Fatalf("prompt error = %v, want -32603 process_exit failure", promptErr)
 	}
 
 	data := turnFailureData(t, promptErr)
-	if msg, _ := data[jsonFieldMessage].(string); !strings.Contains(msg, "OOM") {
-		t.Fatalf("message = %v, want exit/stderr cause", data[jsonFieldMessage])
+	msg, _ := data[jsonFieldMessage].(string)
+	if !strings.Contains(msg, "exit status 1") {
+		t.Fatalf("message = %q, want the real exit status", msg)
+	}
+	if !strings.Contains(msg, "out of memory") {
+		t.Fatalf("message = %q, want the stderr tail", msg)
+	}
+	if msg == "EOF" {
+		t.Fatal("process-death message is a bare EOF")
 	}
 
-	if _, sessionErr := agent.session(resp.SessionId); sessionErr != nil {
-		t.Fatalf("session not addressable after process death: %v", sessionErr)
+	if !s.clientDead {
+		t.Fatal("process death did not mark the session for lazy relaunch")
 	}
+}
 
-	followResp, followErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "again"))
-	if followErr != nil {
-		t.Fatalf("follow-up prompt after relaunch returned error: %v", followErr)
+// A dead session relaunches the app-server lazily on the next prompt and resumes
+// the native thread, so the turn succeeds.
+func TestPromptRelaunchesDeadClient(t *testing.T) {
+	ctx := context.Background()
+
+	relaunched := newSpyCodexClient()
+	s := &session{
+		agent: NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+			return relaunched, nil
+		})),
+		id:            "relaunch-ok",
+		cwd:           "/tmp/project",
+		codexThreadID: "thread-1",
+		clientDead:    true,
 	}
-	if followResp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("relaunched prompt stop reason = %v", followResp.StopReason)
+	s.agent.setAgentClient(newRecordingAgentClient())
+	s.client = newSpyCodexClient()
+
+	resp, err := s.Prompt(ctx, TextPromptRequest("relaunch-ok", "again"))
+	if err != nil {
+		t.Fatalf("relaunched prompt returned error: %v", err)
 	}
-	if relaunched.resume.ThreadID == "" {
-		t.Fatal("relaunch did not resume the native thread")
+	if resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("relaunched prompt stop reason = %v, want end_turn", resp.StopReason)
+	}
+	if relaunched.resume.ThreadID != "thread-1" {
+		t.Fatalf("relaunch resumed thread %q, want thread-1", relaunched.resume.ThreadID)
+	}
+	if s.clientDead {
+		t.Fatal("successful relaunch left the session marked dead")
 	}
 }
 
@@ -231,6 +260,62 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 	if resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("stop reason = %v, want cancelled", resp.StopReason)
 	}
+}
+
+// R5-2 — a user cancel coincident with turn-timeout expiry resolves to
+// cancelled, never a timeout failure. The cancel guard runs before all failure
+// mapping, and the timeout abort never fires (no double-send).
+func TestTurnCancelWinsOnTimeoutCoincidence(t *testing.T) {
+	coincideSession := &session{
+		agent:         NewAgent(WithTurnTimeout(time.Nanosecond)),
+		id:            "coincide",
+		cwd:           "/tmp/project",
+		codexThreadID: "thread",
+	}
+	coincideSession.agent.setAgentClient(newRecordingAgentClient())
+	client := &cancelAtTurnStartClient{spyCodexClient: newSpyCodexClient(), session: coincideSession}
+	coincideSession.client = client
+
+	resp, err := coincideSession.Prompt(context.Background(), TextPromptRequest("coincide", "hi"))
+	if err != nil {
+		t.Fatalf("coincident cancel+timeout returned error: %v", err)
+	}
+	if resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("stop reason = %v, want cancelled", resp.StopReason)
+	}
+	if client.interrupted() {
+		t.Fatal("timeout abort fired even though the cancel won (double-send)")
+	}
+}
+
+// cancelAtTurnStartClient fires a user cancel as the turn begins, coincident with
+// an expiring turn timeout, and records whether the timeout abort (turn/interrupt)
+// was subsequently invoked.
+type cancelAtTurnStartClient struct {
+	*spyCodexClient
+	session   *session
+	cancelled bool
+}
+
+func (c *cancelAtTurnStartClient) RunTurn(context.Context, codex.TurnStartRequest) (<-chan codex.Event, error) {
+	c.session.cancelTurn()
+
+	return make(chan codex.Event), nil
+}
+
+func (c *cancelAtTurnStartClient) CancelTurn(context.Context, string, string) error {
+	c.mu.Lock()
+	c.cancelled = true
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *cancelAtTurnStartClient) interrupted() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.cancelled
 }
 
 // T6 — a turn that exceeds WithTurnTimeout fails with cause timeout, not cancel.

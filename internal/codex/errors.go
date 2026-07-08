@@ -11,6 +11,48 @@ var (
 	ErrThreadNotFound   = errors.New("codex thread not found")
 )
 
+// ProcessExitError reports that the codex app-server process terminated. It
+// carries the process exit status and a bounded tail of the process stderr so a
+// mid-turn transport death caused by the process exiting is classified as
+// cause:"process_exit" with the real exit/stderr detail instead of a bare EOF.
+// Transport death while the process is still alive is not a ProcessExitError and
+// stays cause:"transport".
+type ProcessExitError struct {
+	Status     string
+	StderrTail string
+	Err        error
+}
+
+func (e *ProcessExitError) Error() string {
+	if e == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("codex app-server process exited")
+
+	if e.Status != "" {
+		b.WriteString(" (")
+		b.WriteString(e.Status)
+		b.WriteString(")")
+	}
+
+	if e.StderrTail != "" {
+		b.WriteString(": ")
+		b.WriteString(e.StderrTail)
+	}
+
+	return b.String()
+}
+
+func (e *ProcessExitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+
+	return e.Err
+}
+
 // Failure cause vocabulary for a native turn failure. These map directly onto
 // the ACP failure-error `cause` field.
 const (

@@ -53,14 +53,14 @@ func (e *rpcError) Error() string {
 }
 
 type lineTransport struct {
-	r      *bufio.Reader
-	w      io.Writer
-	closer io.Closer
-	mu     sync.Mutex
+	r    *bufio.Reader
+	w    io.Writer
+	proc *process
+	mu   sync.Mutex
 }
 
-func newLineTransport(r io.Reader, w io.Writer, closer io.Closer) *lineTransport {
-	return &lineTransport{r: bufio.NewReaderSize(r, 1024*1024), w: w, closer: closer}
+func newLineTransport(r io.Reader, w io.Writer, proc *process) *lineTransport {
+	return &lineTransport{r: bufio.NewReaderSize(r, 1024*1024), w: w, proc: proc}
 }
 
 func (t *lineTransport) Send(ctx context.Context, msg rpcMessage) error {
@@ -88,7 +88,7 @@ func (t *lineTransport) Send(ctx context.Context, msg rpcMessage) error {
 func (t *lineTransport) Recv() (rpcMessage, string, error) {
 	line, err := t.r.ReadBytes('\n')
 	if err != nil {
-		return rpcMessage{}, "", err
+		return rpcMessage{}, "", t.readError(err)
 	}
 
 	raw := string(bytes.TrimRight(line, "\r\n"))
@@ -104,12 +104,30 @@ func (t *lineTransport) Recv() (rpcMessage, string, error) {
 	return msg, raw, nil
 }
 
+// readError classifies a stdout read failure. When the stream ends because the
+// app-server process exited, it returns a *ProcessExitError carrying the real
+// exit status and stderr tail so the failure surfaces as cause:"process_exit"
+// instead of a bare transport EOF. A read failure with the process still alive
+// is returned unchanged and stays cause:"transport".
+func (t *lineTransport) readError(err error) error {
+	if t.proc == nil {
+		return err
+	}
+
+	status, stderrTail, ok := t.proc.exited(processExitGrace)
+	if !ok {
+		return err
+	}
+
+	return &ProcessExitError{Status: status, StderrTail: stderrTail, Err: err}
+}
+
 func (t *lineTransport) Close() error {
-	if t.closer == nil {
+	if t.proc == nil {
 		return nil
 	}
 
-	return t.closer.Close()
+	return t.proc.Close()
 }
 
 type pendingCall struct {
