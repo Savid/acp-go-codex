@@ -1,17 +1,22 @@
 .DEFAULT_GOAL := help
+
+GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
 .PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
 
 ## build: build all packages
 build:
 	go build ./...
 
-## test: run tests with race detector and coverage
+## test: run unit tests with race detector and shuffled order
 test:
-	go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+	go test -race -shuffle=on ./...
 
-## coverage-check: require 100% statement coverage
-coverage-check: test
-	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } } END { if (!found) { print "missing total coverage line"; exit 1 } }'
+## coverage-check: require 100% statement coverage with race instrumentation
+coverage-check:
+	go test -race -coverprofile=coverage.out -covermode=atomic ./...
+	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
 ## test-integration-smoke: run live integration tests that do not spend model tokens
 test-integration-smoke:
@@ -33,14 +38,14 @@ test-integration-cover:
 	go tool covdata percent -i=.tmp/integration-cover/data
 	go tool covdata textfmt -i=.tmp/integration-cover/data -o coverage-integration.out
 
-## lint: run golangci-lint
+## lint: run pinned golangci-lint
 lint:
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
+	$(GOLANGCI_LINT) run ./...
 
 ## fmt: format code with golangci-lint
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './.git/*')
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 fmt ./...
+	$(GOLANGCI_LINT) fmt ./...
 
 ## fmt-check: require gofmt-clean Go files
 fmt-check:
@@ -83,7 +88,7 @@ clean:
 	rm -rf .tmp coverage.out coverage-integration.out coverage-summary.txt
 
 ## test/cover: open HTML coverage report
-test/cover: test
+test/cover: coverage-check
 	go tool cover -html=coverage.out
 
 ## help: show this help
