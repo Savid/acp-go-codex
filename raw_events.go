@@ -2,7 +2,6 @@ package codexacp
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 const (
@@ -16,6 +15,13 @@ const (
 	rawEventEnabledByPath         = "_meta.codex.rawEvent.enabled"
 	rawEventMaxBytes              = 64 * 1024
 	structuredOutputCapabilityKey = "structuredOutput"
+
+	rawMarkerTruncated            = "truncated"
+	rawMarkerReason               = "reason"
+	rawMarkerMaxBytes             = "maxBytes"
+	rawMarkerSizeBytes            = "sizeBytes"
+	rawMarkerReasonOversize       = "oversize"
+	rawMarkerReasonUnserializable = "unserializable"
 	outputSchemaConfigPath        = "_meta.codex.options.outputSchema"
 	outputSchemaResultPath        = "session/prompt.result._meta.codex.structuredOutput"
 	structuredOutputMetaKey       = "structuredOutput"
@@ -75,14 +81,25 @@ func capRawEventPayload(payload map[string]any) map[string]any {
 		return payload
 	}
 
+	marker := map[string]any{
+		rawMarkerTruncated: true,
+		rawMarkerReason:    rawMarkerReasonOversize,
+		rawMarkerMaxBytes:  rawEventMaxBytes,
+		rawMarkerSizeBytes: len(encoded),
+	}
+	if err != nil {
+		marker = map[string]any{
+			rawMarkerTruncated: true,
+			rawMarkerReason:    rawMarkerReasonUnserializable,
+			rawMarkerMaxBytes:  rawEventMaxBytes,
+		}
+	}
+
 	return map[string]any{
 		jsonFieldSessionID: payload[jsonFieldSessionID],
 		jsonFieldSequence:  payload[jsonFieldSequence],
 		jsonFieldSource:    payload[jsonFieldSource],
-		jsonFieldEvent: map[string]any{
-			"truncated":    true,
-			jsonFieldError: fmt.Sprintf("raw event exceeded %d bytes", rawEventMaxBytes),
-		},
+		jsonFieldEvent:     marker,
 	}
 }
 

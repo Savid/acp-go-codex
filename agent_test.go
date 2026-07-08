@@ -353,9 +353,9 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	agent := NewAgent()
 	client := newSpyCodexClient()
 	otherClient := newSpyCodexClient()
-	matching := newSession(agent, "matching", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, client, sessionMeta{})
-	sameClientOtherThread := newSession(agent, "other-thread", "/tmp/project", nil, codex.Thread{ID: "thread-2"}, client, sessionMeta{})
-	other := newSession(agent, "other-client", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, otherClient, sessionMeta{})
+	matching := newSession(agent, "matching", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, client, sessionMeta{}, nil)
+	sameClientOtherThread := newSession(agent, "other-thread", "/tmp/project", nil, codex.Thread{ID: "thread-2"}, client, sessionMeta{}, nil)
+	other := newSession(agent, "other-client", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, otherClient, sessionMeta{}, nil)
 	if err := agent.storeStartedSession(matching); err != nil {
 		t.Fatalf("store matching session: %v", err)
 	}
@@ -455,27 +455,27 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	if err := closedForStore.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
-	closedSession := newSession(closedForStore, "closed", "/tmp/project", nil, codex.Thread{ID: "closed"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{})
+	closedSession := newSession(closedForStore, "closed", "/tmp/project", nil, codex.Thread{ID: "closed"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
 	if err := closedForStore.storeStartedSession(closedSession); err == nil {
 		t.Fatal("storeStartedSession on closed agent succeeded")
 	}
 
 	limited := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
-	first := newSession(limited, "first", "/tmp/project", nil, codex.Thread{ID: "first"}, newSpyCodexClient(), sessionMeta{})
+	first := newSession(limited, "first", "/tmp/project", nil, codex.Thread{ID: "first"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := limited.storeStartedSession(first); err != nil {
 		t.Fatalf("store first session: %v", err)
 	}
-	second := newSession(limited, "second", "/tmp/project", nil, codex.Thread{ID: "second"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{})
+	second := newSession(limited, "second", "/tmp/project", nil, codex.Thread{ID: "second"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
 	if err := limited.storeStartedSession(second); err == nil {
 		t.Fatal("storeStartedSession ignored active session limit")
 	}
 
 	replacing := NewAgent()
-	old := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{})
+	old := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
 	if err := replacing.storeStartedSession(old); err != nil {
 		t.Fatalf("store old session: %v", err)
 	}
-	newer := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{})
+	newer := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := replacing.storeStartedSession(newer); err != nil {
 		t.Fatalf("replace session: %v", err)
 	}

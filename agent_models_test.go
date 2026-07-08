@@ -263,7 +263,7 @@ func TestSetSessionConfigOptionErrorBranches(t *testing.T) {
 	updateErr := errors.New("update failed")
 	agent = NewAgent()
 	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
-	session := newSession(agent, "session-1", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, newSpyCodexClient(), sessionMeta{})
+	session := newSession(agent, "session-1", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := agent.storeStartedSession(session); err != nil {
 		t.Fatalf("store session: %v", err)
 	}

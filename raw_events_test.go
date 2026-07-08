@@ -32,8 +32,25 @@ func TestRawMessageConfigFromMeta(t *testing.T) {
 	payload := map[string]any{"sessionId": "s", "sequence": int64(1), "source": "codex", "event": strings.Repeat("x", rawEventMaxBytes)}
 	capped := capRawEventPayload(payload)
 	event := asType[map[string]any](t, capped["event"])
-	if event["truncated"] != true {
-		t.Fatalf("capped raw event = %#v", capped)
+	if event[rawMarkerTruncated] != true || event[rawMarkerReason] != rawMarkerReasonOversize ||
+		event[rawMarkerMaxBytes] != rawEventMaxBytes {
+		t.Fatalf("oversize marker = %#v", capped)
+	}
+	if size, ok := event[rawMarkerSizeBytes].(int); !ok || size <= rawEventMaxBytes {
+		t.Fatalf("oversize marker sizeBytes = %#v", event[rawMarkerSizeBytes])
+	}
+	if capped["sessionId"] != "s" || capped["sequence"] != int64(1) || capped["source"] != codexMetaKey {
+		t.Fatalf("oversize marker envelope = %#v", capped)
+	}
+
+	unserializable := map[string]any{"sessionId": "s", "sequence": int64(2), "source": codexMetaKey, "event": map[string]any{"bad": make(chan int)}}
+	badCapped := capRawEventPayload(unserializable)
+	badEvent := asType[map[string]any](t, badCapped["event"])
+	if badEvent[rawMarkerTruncated] != true || badEvent[rawMarkerReason] != rawMarkerReasonUnserializable {
+		t.Fatalf("unserializable marker = %#v", badCapped)
+	}
+	if _, ok := badEvent[rawMarkerSizeBytes]; ok {
+		t.Fatalf("unserializable marker must omit sizeBytes: %#v", badEvent)
 	}
 }
 
@@ -63,7 +80,7 @@ func TestEmitRawCodexEventBranches(t *testing.T) {
 	if err := liveSession.emitRawCodexEvent(context.Background(), event); err != nil {
 		t.Fatalf("rollout raw event returned error: %v", err)
 	}
-	if len(conn.extensions) != 1 {
-		t.Fatal("rollout-backed raw event should not emit live duplicate")
+	if len(conn.extensions) != 2 {
+		t.Fatalf("rollout-backed session must still emit live raw events, extensions=%#v", conn.extensions)
 	}
 }

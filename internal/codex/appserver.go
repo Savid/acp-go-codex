@@ -58,6 +58,8 @@ const (
 	itemTypeMCPToolCall      = "mcpToolCall"
 
 	statusDone       = "done"
+	statusFailed     = "failed"
+	statusErrored    = "errored"
 	valuePlan        = "plan"
 	valueDefault     = "default"
 	valuePlaceholder = "placeholder"
@@ -846,8 +848,13 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Usage = event.TokenUsage.Last
 	case notifyTurnCompleted:
 		event.Kind = EventCompleted
-		event.StopReason = stopReasonFromTurn(mapValue(params, "turn"))
+		turn := mapValue(params, "turn")
+		event.StopReason = stopReasonFromTurn(turn)
 		event.Usage = usageFromParams(params)
+
+		if event.StopReason == StopReasonError {
+			event.Err = turnFailureFromCompleted(turn, params)
+		}
 	case notifyAccountUpdated:
 		event.Kind = EventAccountUpdated
 		event.Account = accountFromResponse(params)
@@ -1081,10 +1088,40 @@ func stopReasonFromTurn(turn map[string]any) StopReason {
 	switch status {
 	case "interrupted", "cancelled", "canceled":
 		return StopReasonCancelled
-	case "failed", "errored", string(EventError):
+	case statusFailed, statusErrored, string(EventError):
 		return StopReasonError
 	default:
 		return StopReasonEndTurn
+	}
+}
+
+func turnFailureFromCompleted(turn map[string]any, params map[string]any) *TurnFailedError {
+	errInfo := mapValue(turn, "error")
+	if errInfo == nil {
+		errInfo = mapValue(params, "error")
+	}
+
+	codexErrorInfo := mapValue(errInfo, "codexErrorInfo")
+
+	message := firstNonEmpty(
+		stringValue(errInfo, fieldMessage),
+		stringValue(codexErrorInfo, fieldMessage),
+		stringValue(turn, "error"),
+		stringValue(params, "error"),
+	)
+	if message == "" {
+		message = "Codex turn failed"
+	}
+
+	return &TurnFailedError{
+		Cause:      CauseProvider,
+		Message:    message,
+		StatusCode: int(int64Value(codexErrorInfo, "httpStatusCode")),
+		ProviderCode: firstNonEmpty(
+			stringValue(codexErrorInfo, "code"),
+			stringValue(codexErrorInfo, "type"),
+			stringValue(errInfo, "code"),
+		),
 	}
 }
 

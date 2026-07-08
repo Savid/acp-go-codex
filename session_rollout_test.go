@@ -13,38 +13,10 @@ import (
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
-func TestRawRolloutMirrorsAndEmits(t *testing.T) {
-	client := newSpyCodexClient()
-	agent := NewAgent(
-		WithSessionStore(NewInMemorySessionStore()),
-		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
-	)
-	conn := newRecordingAgentClient()
-	agent.setAgentClient(conn)
-	ctx := context.Background()
-
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, []byte("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}\n"), 0o600); err != nil {
-		t.Fatalf("write rollout: %v", err)
-	}
-	client.thread.Path = rollout
-
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionRawEvents(true)))
-	if err != nil {
-		t.Fatalf("NewSession returned error: %v", err)
-	}
-	if err := agent.sessionMust(resp.SessionId).mirrorAndEmitRollout(ctx); err != nil {
-		t.Fatalf("mirror returned error: %v", err)
-	}
-	if len(conn.extensions) != 1 || conn.extensions[0].method != RawEventMethod {
-		t.Fatalf("extensions = %#v", conn.extensions)
-	}
-}
-
-func TestRolloutMirrorDoesNotDuplicateDurableRowsWhenRawFails(t *testing.T) {
+func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := NewAgent(WithSessionStore(store))
-	agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
+	agent.setAgentClient(newRecordingAgentClient())
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	if err := os.WriteFile(rollout, []byte("{\"type\":\"one\"}\n{\"type\":\"two\"}\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
@@ -55,51 +27,52 @@ func TestRolloutMirrorDoesNotDuplicateDurableRowsWhenRawFails(t *testing.T) {
 		cwd:           "/tmp/project",
 		codexThreadID: "thread",
 		rolloutPath:   rollout,
-		rawMessages:   rawMessageConfig{enabled: true},
 	}
 
 	if err := session.mirrorAndEmitRollout(context.Background()); err != nil {
-		t.Fatalf("mirror with raw failure returned error: %v", err)
+		t.Fatalf("first mirror returned error: %v", err)
 	}
 	entries, err := store.Load(context.Background(), SessionKey{SessionID: "session"})
 	if err != nil || len(entries) != 2 {
-		t.Fatalf("durable entries after raw failure len=%d err=%v", len(entries), err)
+		t.Fatalf("durable entries after first mirror len=%d err=%v", len(entries), err)
 	}
-	if session.mirroredRows != 2 || session.emittedRawRows != 0 {
-		t.Fatalf("cursors after raw failure mirrored=%d raw=%d", session.mirroredRows, session.emittedRawRows)
+	if session.mirroredRows != 2 {
+		t.Fatalf("mirrored cursor after first mirror = %d", session.mirroredRows)
 	}
 
-	conn := newRecordingAgentClient()
-	agent.setAgentClient(conn)
 	if mirrorErr := session.mirrorAndEmitRollout(context.Background()); mirrorErr != nil {
-		t.Fatalf("mirror after raw recovery returned error: %v", mirrorErr)
+		t.Fatalf("second mirror returned error: %v", mirrorErr)
 	}
 	entries, err = store.Load(context.Background(), SessionKey{SessionID: "session"})
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("durable entries were duplicated len=%d err=%v", len(entries), err)
 	}
-	if len(conn.extensions) != 2 || session.emittedRawRows != 2 {
-		t.Fatalf("raw recovery extensions=%#v rawCursor=%d", conn.extensions, session.emittedRawRows)
-	}
 }
 
-func TestEmitRawRolloutRowsSkipsAlreadyEmittedRows(t *testing.T) {
-	agent := NewAgent()
-	conn := newRecordingAgentClient()
-	agent.setAgentClient(conn)
+func TestRolloutMirrorKeepsDurableCursorWhenRowsAlreadyMirrored(t *testing.T) {
+	store := NewInMemorySessionStore()
+	agent := NewAgent(WithSessionStore(store))
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, []byte("{\"type\":\"one\"}\n\n{\"type\":\"two\"}\n"), 0o600); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
 	session := &session{
-		agent:          agent,
-		id:             "session",
-		rawMessages:    rawMessageConfig{enabled: true},
-		emittedRawRows: 1,
+		agent:        agent,
+		id:           "session",
+		rolloutPath:  rollout,
+		mirroredRows: 2,
+		visibleRows:  0,
 	}
 
-	session.emitRawRolloutRows(context.Background(), []rolloutMirrorRow{
-		{index: 0, entry: SessionStoreEntry(`{"type":"already"}`)},
-		{index: 1, entry: SessionStoreEntry(`{"type":"new"}`)},
-	})
-	if len(conn.extensions) != 1 || session.emittedRawRows != 2 {
-		t.Fatalf("raw rollout skip extensions=%#v cursor=%d", conn.extensions, session.emittedRawRows)
+	events := make(chan codex.Event, 4)
+	if err := session.mirrorAndEmitRolloutWithCompletion(context.Background(), nil, events); err != nil {
+		t.Fatalf("mirror with lagging events cursor returned error: %v", err)
+	}
+	if session.mirroredRows != 2 {
+		t.Fatalf("durable cursor advanced past already-mirrored rows: %d", session.mirroredRows)
+	}
+	if session.visibleRows != 2 {
+		t.Fatalf("events cursor = %d, want 2", session.visibleRows)
 	}
 }
 

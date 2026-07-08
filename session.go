@@ -35,6 +35,9 @@ type session struct {
 	outputSchema          any
 	accountMeta           map[string]any
 
+	mcpServers      []acp.McpServer
+	mcpApprovalMode string
+
 	client codex.Client
 
 	turn             chan struct{}
@@ -43,10 +46,11 @@ type session struct {
 	turnDone         <-chan struct{}
 	turnID           string
 	turnCancelled    bool
+	clientDead       bool
+	rawEmitFailures  int64
 	interactions     map[string]*sessionInteraction
 	mirrorMu         sync.Mutex
 	mirroredRows     int
-	emittedRawRows   int
 	rawEventSequence int64
 	completionRows   int
 	visibleRows      int
@@ -76,7 +80,7 @@ type sessionSnapshot struct {
 	accountMeta           map[string]any
 }
 
-func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, thread codex.Thread, client codex.Client, meta sessionMeta) *session {
+func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, thread codex.Thread, client codex.Client, meta sessionMeta, mcpServers []acp.McpServer) *session {
 	title := thread.Title
 	if title == "" {
 		title = "Codex session"
@@ -107,8 +111,65 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		sandboxPolicy:         cloneAny(meta.SandboxPolicy),
 		rawMessages:           meta.RawMessages,
 		outputSchema:          meta.OutputSchema,
+		mcpServers:            append([]acp.McpServer(nil), mcpServers...),
+		mcpApprovalMode:       meta.MCPToolApprovalMode,
 		client:                client,
 	}
+}
+
+// markClientDead records that the session's Codex app-server connection is gone
+// so the next prompt relaunches it lazily. The session stays addressable.
+func (s *session) markClientDead() {
+	s.mu.Lock()
+	s.clientDead = true
+	s.mu.Unlock()
+}
+
+// ensureLiveClient relaunches the Codex app-server and reattaches to the thread
+// when the previous connection died mid-turn. The session is never removed on a
+// transport/process failure, so a follow-up prompt re-drives the turn.
+func (s *session) ensureLiveClient(ctx context.Context) error {
+	s.mu.Lock()
+	if !s.clientDead {
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	mcpServers := append([]acp.McpServer(nil), s.mcpServers...)
+	approvalMode := s.mcpApprovalMode
+	env := cloneStringMap(s.env)
+	threadID := s.codexThreadID
+	cwd := s.cwd
+	materializedPath := s.materializedPath
+	s.mu.Unlock()
+
+	client, err := s.agent.newClient(ctx, mcpServers, env, approvalMode)
+	if err != nil {
+		return err
+	}
+
+	if _, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: threadID,
+		Path:     materializedPath,
+		Cwd:      cwd,
+	}); err != nil {
+		_ = client.Close(context.Background())
+
+		return err
+	}
+
+	s.mu.Lock()
+	old := s.client
+	s.client = client
+	s.clientDead = false
+	s.mu.Unlock()
+
+	if old != nil {
+		_ = old.Close(context.Background())
+	}
+
+	return nil
 }
 
 func (s *session) acquireTurn(ctx context.Context) (func(), error) {
@@ -128,7 +189,7 @@ func (s *session) turnQueue() chan struct{} {
 	defer s.mu.Unlock()
 
 	if s.turn == nil {
-		s.turn = make(chan struct{}, maxConcurrentPromptsPerSession)
+		s.turn = make(chan struct{}, sessionTurnCapacity)
 	}
 
 	return s.turn

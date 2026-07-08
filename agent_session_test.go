@@ -428,11 +428,11 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fatal NewSession returned error: %v", err)
 	}
-	if _, fatalPromptErr := fatalAgent.Prompt(ctx, TextPromptRequest(fatalResp.SessionId, "hello")); fatalPromptErr == nil {
-		t.Fatal("Prompt fatal process error succeeded")
+	if _, fatalPromptErr := fatalAgent.Prompt(ctx, TextPromptRequest(fatalResp.SessionId, "hello")); !isTurnFailure(fatalPromptErr, codex.CauseTransport) {
+		t.Fatalf("Prompt fatal process error = %v, want codex_turn_failed transport", fatalPromptErr)
 	}
-	if _, sessionErr := fatalAgent.session(fatalResp.SessionId); sessionErr == nil {
-		t.Fatal("fatal Prompt did not remove session")
+	if _, sessionErr := fatalAgent.session(fatalResp.SessionId); sessionErr != nil {
+		t.Fatalf("fatal Prompt must leave session addressable: %v", sessionErr)
 	}
 
 	closeErr := errors.New("close failed")
@@ -473,11 +473,11 @@ func TestListAndNativeSessionBranches(t *testing.T) {
 		WithSessionStore(store),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
-	active := newSession(agent, "active", "/tmp/project", nil, codex.Thread{ID: "active-thread", Title: "Active"}, client, sessionMeta{})
+	active := newSession(agent, "active", "/tmp/project", nil, codex.Thread{ID: "active-thread", Title: "Active"}, client, sessionMeta{}, nil)
 	if err := agent.storeStartedSession(active); err != nil {
 		t.Fatalf("store active: %v", err)
 	}
-	activeOther := newSession(agent, "active-other", "/tmp/other", nil, codex.Thread{ID: "active-other-thread", Title: "Other"}, client, sessionMeta{})
+	activeOther := newSession(agent, "active-other", "/tmp/other", nil, codex.Thread{ID: "active-other-thread", Title: "Other"}, client, sessionMeta{}, nil)
 	if err := agent.storeStartedSession(activeOther); err != nil {
 		t.Fatalf("store other active: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestResumeLoadAndMaterializedBranches(t *testing.T) {
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
 	)
-	occupied := newSession(resumeLimitAgent, "occupied", "/tmp/project", nil, codex.Thread{ID: "occupied"}, newSpyCodexClient(), sessionMeta{})
+	occupied := newSession(resumeLimitAgent, "occupied", "/tmp/project", nil, codex.Thread{ID: "occupied"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := resumeLimitAgent.storeStartedSession(occupied); err != nil {
 		t.Fatalf("store occupied: %v", err)
 	}
@@ -631,7 +631,7 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	activeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return activeClient, nil }))
 	activeID := acp.SessionId("active")
 	activeStart := codexSessionStart{Cwd: "/tmp/project", ResumeID: string(activeID)}
-	activeSession := newSession(activeAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{})
+	activeSession := newSession(activeAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{}, nil)
 	activeSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeAgent.storeStartedSession(activeSession); err != nil {
 		t.Fatalf("store active session: %v", err)
@@ -644,7 +644,7 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}
 
 	activeLoadErrAgent := NewAgent(WithSessionStore(&configurableStore{loadErr: errors.New("active load failed")}))
-	activeLoadSession := newSession(activeLoadErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{})
+	activeLoadSession := newSession(activeLoadErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{}, nil)
 	activeLoadSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeLoadErrAgent.storeStartedSession(activeLoadSession); err != nil {
 		t.Fatalf("store active load err session: %v", err)
@@ -656,7 +656,7 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	activeReplayErrStore := &configurableStore{entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)}}
 	activeReplayErrAgent := NewAgent(WithSessionStore(activeReplayErrStore))
 	activeReplayErrAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
-	activeReplayErrSession := newSession(activeReplayErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{})
+	activeReplayErrSession := newSession(activeReplayErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{}, nil)
 	activeReplayErrSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeReplayErrAgent.storeStartedSession(activeReplayErrSession); err != nil {
 		t.Fatalf("store active replay err session: %v", err)
@@ -666,7 +666,7 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}
 
 	activeHistoryErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return activeClient, nil }))
-	activeHistoryErrSession := newSession(activeHistoryErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, readErrorClient{Client: activeClient}, sessionMeta{})
+	activeHistoryErrSession := newSession(activeHistoryErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, readErrorClient{Client: activeClient}, sessionMeta{}, nil)
 	activeHistoryErrSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeHistoryErrAgent.storeStartedSession(activeHistoryErrSession); err != nil {
 		t.Fatalf("store active history err session: %v", err)
@@ -770,7 +770,7 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
 	)
-	limitSession := newSession(materializedLimitAgent, "limit", "/tmp/project", nil, codex.Thread{ID: "limit"}, newSpyCodexClient(), sessionMeta{})
+	limitSession := newSession(materializedLimitAgent, "limit", "/tmp/project", nil, codex.Thread{ID: "limit"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := materializedLimitAgent.storeStartedSession(limitSession); err != nil {
 		t.Fatalf("store materialized limit session: %v", err)
 	}
@@ -809,7 +809,7 @@ func TestForkSessionErrorBranches(t *testing.T) {
 	factoryErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return nil, errors.New("fork factory failed")
 	}))
-	factoryParent := newSession(factoryErrAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{})
+	factoryParent := newSession(factoryErrAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := factoryErrAgent.storeStartedSession(factoryParent); err != nil {
 		t.Fatalf("store factory parent: %v", err)
 	}
@@ -820,7 +820,7 @@ func TestForkSessionErrorBranches(t *testing.T) {
 	forkErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), forkErr: codex.ErrThreadNotFound}, nil
 	}))
-	forkParent := newSession(forkErrAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{})
+	forkParent := newSession(forkErrAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := forkErrAgent.storeStartedSession(forkParent); err != nil {
 		t.Fatalf("store fork parent: %v", err)
 	}
@@ -832,7 +832,7 @@ func TestForkSessionErrorBranches(t *testing.T) {
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
 	)
-	limitParent := newSession(limitAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{})
+	limitParent := newSession(limitAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := limitAgent.storeStartedSession(limitParent); err != nil {
 		t.Fatalf("store limit parent: %v", err)
 	}
@@ -969,9 +969,6 @@ func TestDeleteRetryAndConfigBranches(t *testing.T) {
 	}
 	if err := codexThreadACPError(nil, nil); err != nil {
 		t.Fatalf("nil codexThreadACPError = %v", err)
-	}
-	if !fatalCodexProcessError(codex.ErrConnectionClosed) {
-		t.Fatal("fatalCodexProcessError missed connection closed")
 	}
 	if err := lifecycleMetaError(acp.NewInvalidParams(map[string]any{"x": "y"})); err == nil {
 		t.Fatal("lifecycleMetaError returned nil")

@@ -192,7 +192,7 @@ func TestAuthErrorBranches(t *testing.T) {
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return logoutClient, nil }),
 	)
 	closeErr := errors.New("logout close failed")
-	logoutSession := newSession(logoutAgent, "logout-session", "/tmp/project", nil, codex.Thread{ID: "logout-thread"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}, sessionMeta{})
+	logoutSession := newSession(logoutAgent, "logout-session", "/tmp/project", nil, codex.Thread{ID: "logout-thread"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}, sessionMeta{}, nil)
 	if err := logoutAgent.storeStartedSession(logoutSession); err != nil {
 		t.Fatalf("store logout session: %v", err)
 	}

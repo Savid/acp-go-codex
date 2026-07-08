@@ -57,6 +57,11 @@ type Options struct {
 	SessionStoreLoadTimeout time.Duration
 	// ConcurrencyLimits bounds active sessions, prompts, and server-to-client calls.
 	ConcurrencyLimits ConcurrencyLimits
+	// TurnTimeout bounds a single session/prompt turn. When a turn exceeds it,
+	// the native Codex turn is aborted and session/prompt fails with the
+	// codex_turn_failed error (cause "timeout"). The default of 0 disables the
+	// deadline.
+	TurnTimeout time.Duration
 	// SeedFiles maps relative paths to file contents written into the resolved
 	// CODEX_HOME before each Codex process launches, so Codex reads them as its
 	// own config (e.g. config.toml). Paths are confined to CODEX_HOME.
@@ -183,6 +188,16 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithTurnTimeout bounds a single session/prompt turn. On expiry the native
+// Codex turn is aborted and session/prompt fails with the codex_turn_failed
+// error (cause "timeout"), not a cancellation. The default of 0 disables the
+// deadline.
+func WithTurnTimeout(timeout time.Duration) Option {
+	return func(options *Options) {
+		options.TurnTimeout = timeout
 	}
 }
 

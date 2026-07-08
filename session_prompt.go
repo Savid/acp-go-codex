@@ -3,6 +3,9 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -45,6 +48,10 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, err
 	}
 
+	if relaunchErr := s.ensureLiveClient(ctx); relaunchErr != nil {
+		return acp.PromptResponse{}, s.mapTurnFailure(fmt.Errorf("%w: %w", codex.ErrConnectionClosed, relaunchErr))
+	}
+
 	turnCtx := s.beginTurn(ctx)
 	defer s.finishTurn()
 
@@ -68,7 +75,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		OutputSchema: snapshot.outputSchema,
 	})
 	if err != nil {
-		return acp.PromptResponse{}, codexThreadACPError(err, s.accountMetaSnapshot())
+		return acp.PromptResponse{}, s.mapTurnFailure(err)
 	}
 
 	rolloutCompleted := make(chan struct{}, 1)
@@ -108,6 +115,17 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return s.handlePromptEvent(turnCtx, event, state)
 	}
 
+	var turnDeadline <-chan time.Time
+
+	if timeout := s.agent.options.TurnTimeout; timeout > 0 {
+		deadlineTimer := time.NewTimer(timeout)
+		defer deadlineTimer.Stop()
+
+		turnDeadline = deadlineTimer.C
+	}
+
+	timedOut := false
+
 	eventsOpen := true
 	for eventsOpen {
 		select {
@@ -140,6 +158,11 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			}
 		case <-completionFallback:
 			eventsOpen = false
+		case <-turnCtx.Done():
+			eventsOpen = false
+		case <-turnDeadline:
+			timedOut = true
+			eventsOpen = false
 		}
 	}
 
@@ -152,11 +175,17 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		state.stopReason = acp.StopReasonCancelled
 	}
 
+	if timedOut && state.stopReason != acp.StopReasonCancelled {
+		s.abortTurnAfterTimeout(ctx)
+
+		return acp.PromptResponse{}, s.mapTurnFailure(&codex.TurnFailedError{
+			Cause:   codex.CauseTimeout,
+			Message: fmt.Sprintf("codex turn exceeded %s deadline", s.agent.options.TurnTimeout),
+		})
+	}
+
 	if !state.completed && state.stopReason != acp.StopReasonCancelled {
-		return acp.PromptResponse{}, codexThreadACPError(
-			codex.ErrConnectionClosed,
-			s.accountMetaSnapshot(),
-		)
+		return acp.PromptResponse{}, s.mapTurnFailure(codex.ErrConnectionClosed)
 	}
 
 	if err := s.mirrorAndEmitRollout(context.WithoutCancel(ctx)); err != nil {
@@ -196,7 +225,7 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 	}
 
 	if err := s.emitRawCodexEvent(turnCtx, event); err != nil {
-		return err
+		s.recordRawEmitFailure(turnCtx, err)
 	}
 
 	visibleEvent := dedupeCompletedTextEvent(event, state.agentDeltaItems, state.reasoningDeltaItems)
@@ -214,14 +243,91 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 		state.agentText.WriteString(visibleEvent.Text)
 	}
 
-	if event.Kind == codex.EventError && event.Err != nil && !s.wasTurnCancelled() {
-		return codexThreadACPError(
-			event.Err,
-			s.accountMetaSnapshot(),
-		)
+	if failErr := turnFailureFromEvent(event); failErr != nil && !s.wasTurnCancelled() {
+		return s.mapTurnFailure(failErr)
 	}
 
 	return nil
+}
+
+// turnFailureFromEvent extracts the native failure cause from a terminal event:
+// a codex `error` event, or a `turn/completed` whose status is failed/errored.
+func turnFailureFromEvent(event codex.Event) error {
+	switch event.Kind {
+	case codex.EventError, codex.EventCompleted:
+		return event.Err
+	default:
+		return nil
+	}
+}
+
+// mapTurnFailure translates a native turn failure into the uniform ACP wire
+// error. A dead app-server connection marks the session for lazy relaunch but
+// leaves it addressable; a native thread-id drift is a wrapper-invariant break
+// and surfaces as the unknown-session error.
+func (s *session) mapTurnFailure(err error) error {
+	if errors.Is(err, codex.ErrThreadNotFound) {
+		return newUnknownSession()
+	}
+
+	if isCodexAuthError(err) {
+		return codexAuthRequiredError(err, s.accountMetaSnapshot())
+	}
+
+	data := map[string]any{
+		jsonFieldError:   valueTurnFailed,
+		jsonFieldCause:   codex.CauseProvider,
+		jsonFieldMessage: err.Error(),
+	}
+
+	var tf *codex.TurnFailedError
+	switch {
+	case errors.As(err, &tf):
+		data[jsonFieldCause] = tf.Cause
+		data[jsonFieldMessage] = tf.Message
+
+		if tf.StatusCode > 0 {
+			data[jsonFieldStatusCode] = tf.StatusCode
+		}
+
+		if tf.ProviderCode != "" {
+			data[jsonFieldProviderCode] = tf.ProviderCode
+		}
+
+		if tf.Cause == codex.CauseProcessExit || tf.Cause == codex.CauseTransport {
+			s.markClientDead()
+		}
+	case errors.Is(err, codex.ErrConnectionClosed):
+		data[jsonFieldCause] = codex.CauseTransport
+
+		s.markClientDead()
+	}
+
+	return acp.NewInternalError(data)
+}
+
+// abortTurnAfterTimeout interrupts the in-flight native Codex turn after the
+// turn deadline expires. The app-server connection stays alive, so the session
+// remains retriable.
+func (s *session) abortTurnAfterTimeout(ctx context.Context) {
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+
+	_ = s.client.CancelTurn(abortCtx, s.codexThreadID, s.activeTurnID())
+}
+
+func (s *session) recordRawEmitFailure(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.rawEmitFailures++
+	s.mu.Unlock()
+
+	if logger := agentLogger(s.agent); logger != nil {
+		logger.WarnContext(ctx, "codex raw event emit failed", slog.String(jsonFieldError, err.Error()))
+	}
 }
 
 func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, visibleEvent codex.Event, state *promptEventState) error {
@@ -350,10 +456,6 @@ func (s *session) emitUpdates(ctx context.Context, updates ...acp.SessionUpdate)
 }
 
 func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) error {
-	if s.rolloutPath != "" {
-		return nil
-	}
-
 	if !s.rawMessages.Enabled() || len(event.RawParams) == 0 {
 		return nil
 	}

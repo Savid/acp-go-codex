@@ -23,7 +23,7 @@ func TestSessionIDErrors(t *testing.T) {
 		t.Fatal("NewSession ignored session id generation failure")
 	}
 	forkIDAgent := NewAgent()
-	if err := forkIDAgent.storeStartedSession(newSession(forkIDAgent, "parent-id", "/tmp/project", nil, codex.Thread{ID: "parent-thread"}, newSpyCodexClient(), sessionMeta{})); err != nil {
+	if err := forkIDAgent.storeStartedSession(newSession(forkIDAgent, "parent-id", "/tmp/project", nil, codex.Thread{ID: "parent-thread"}, newSpyCodexClient(), sessionMeta{}, nil)); err != nil {
 		t.Fatalf("store fork id parent: %v", err)
 	}
 	raw, err := json.Marshal(ForkSessionRequest("parent-id", "/tmp/project"))

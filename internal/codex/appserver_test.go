@@ -12,6 +12,54 @@ import (
 	"time"
 )
 
+func assertTurnFailureParse(t *testing.T) {
+	t.Helper()
+
+	failed := eventFromRPC(rpcEvent{Method: "turn/completed", Params: mustRaw(map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"status": "failed",
+			"error": map[string]any{
+				"message": "provider rate limited",
+				"codexErrorInfo": map[string]any{
+					"httpStatusCode": float64(429),
+					"code":           "rate_limit",
+				},
+			},
+		},
+	})})
+	if failed.Kind != EventCompleted || failed.StopReason != StopReasonError {
+		t.Fatalf("failed turn kind=%v stop=%v", failed.Kind, failed.StopReason)
+	}
+
+	var tf *TurnFailedError
+	if !errors.As(failed.Err, &tf) {
+		t.Fatalf("failed turn err = %v, want TurnFailedError", failed.Err)
+	}
+	if tf.Cause != CauseProvider || tf.StatusCode != 429 || tf.ProviderCode != "rate_limit" || tf.Message != "provider rate limited" {
+		t.Fatalf("turn failure = %#v", tf)
+	}
+	if tf.Error() != "provider rate limited" || (*TurnFailedError)(nil).Error() != "" {
+		t.Fatalf("TurnFailedError.Error mismatch: %q", tf.Error())
+	}
+
+	bare := eventFromRPC(rpcEvent{Method: "turn/completed", Params: mustRaw(map[string]any{
+		"turn": map[string]any{"status": "errored"},
+	})})
+	var bareErr *TurnFailedError
+	if !errors.As(bare.Err, &bareErr) || bareErr.Message != "Codex turn failed" || bareErr.StatusCode != 0 {
+		t.Fatalf("bare turn failure = %#v", bare.Err)
+	}
+
+	ok := eventFromRPC(rpcEvent{Method: "turn/completed", Params: mustRaw(map[string]any{
+		"turn": map[string]any{"status": statusDone},
+	})})
+	if ok.Err != nil {
+		t.Fatalf("successful turn carried error: %v", ok.Err)
+	}
+}
+
 func TestAppServerClientMethodsAndParams(t *testing.T) {
 	transport := newScriptTransport()
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
@@ -222,6 +270,8 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	if stopReasonFromTurn(map[string]any{"status": "cancelled"}) != StopReasonCancelled || stopReasonFromTurn(map[string]any{"status": "failed"}) != StopReasonError {
 		t.Fatal("stop reason mapping failed")
 	}
+
+	assertTurnFailureParse(t)
 	usage := usageFromParams(map[string]any{"usage": map[string]any{
 		"inputTokens":              float64(1),
 		"completionTokens":         float64(2),

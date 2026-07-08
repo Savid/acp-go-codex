@@ -19,7 +19,7 @@ import (
 const (
 	listSessionsPageSize            = 50
 	defaultMaxActiveSessions        = 32
-	maxConcurrentPromptsPerSession  = 1
+	sessionTurnCapacity             = 1
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
 
@@ -72,9 +72,14 @@ const (
 	roleAssistant       = "assistant"
 	eventUserMessage    = "user_message"
 
-	jsonFieldLimit   = "limit"
-	jsonFieldValue   = "value"
-	jsonFieldContent = "content"
+	jsonFieldLimit        = "limit"
+	jsonFieldValue        = "value"
+	jsonFieldContent      = "content"
+	jsonFieldCause        = "cause"
+	jsonFieldStatusCode   = "statusCode"
+	jsonFieldProviderCode = "providerCode"
+
+	valueTurnFailed = "codex_turn_failed"
 
 	modeDefault acp.SessionModeId = "default"
 	modePlan    acp.SessionModeId = "plan"

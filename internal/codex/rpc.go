@@ -14,6 +14,11 @@ import (
 
 const jsonRPCVersion = "2.0"
 
+// errSkippableLine marks a native stdout line that is malformed or empty but
+// does not indicate a dead connection. The read loop skips and counts these
+// lines rather than tearing down the whole session.
+var errSkippableLine = errors.New("skippable JSON-RPC line")
+
 type rpcTransport interface {
 	Send(context.Context, rpcMessage) error
 	Recv() (rpcMessage, string, error)
@@ -88,12 +93,12 @@ func (t *lineTransport) Recv() (rpcMessage, string, error) {
 
 	raw := string(bytes.TrimRight(line, "\r\n"))
 	if raw == "" {
-		return rpcMessage{}, raw, errors.New("empty JSON-RPC line")
+		return rpcMessage{}, raw, fmt.Errorf("%w: empty line", errSkippableLine)
 	}
 
 	var msg rpcMessage
 	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-		return rpcMessage{}, raw, err
+		return rpcMessage{}, raw, fmt.Errorf("%w: %w", errSkippableLine, err)
 	}
 
 	return msg, raw, nil
@@ -122,7 +127,8 @@ type rpcConn struct {
 	done      chan struct{}
 	doneOnce  sync.Once
 
-	nextID atomic.Int64
+	nextID         atomic.Int64
+	malformedLines atomic.Int64
 
 	mu       sync.Mutex
 	pending  map[string]pendingCall
@@ -157,6 +163,10 @@ func newRPCConn(transport rpcTransport, handler RequestHandler) *rpcConn {
 }
 
 func (c *rpcConn) Events() <-chan rpcEvent { return c.events }
+
+// MalformedLines reports how many malformed or empty native lines were skipped
+// without tearing down the connection.
+func (c *rpcConn) MalformedLines() int64 { return c.malformedLines.Load() }
 
 func (c *rpcConn) Call(ctx context.Context, method string, params any, result any) error {
 	if err := ctx.Err(); err != nil {
@@ -293,6 +303,12 @@ func (c *rpcConn) readLoop() {
 	for {
 		msg, raw, err := c.transport.Recv()
 		if err != nil {
+			if errors.Is(err, errSkippableLine) {
+				c.malformedLines.Add(1)
+
+				continue
+			}
+
 			c.recordCloseError(err)
 
 			return

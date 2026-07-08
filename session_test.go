@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 func TestSessionInteractionCancellationBranches(t *testing.T) {
@@ -13,8 +15,22 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireTurn returned error: %v", err)
 	}
-	if _, err := session.acquireTurn(context.Background()); err == nil {
+	backpressureErr := func() error {
+		_, err := session.acquireTurn(context.Background())
+
+		return err
+	}()
+	if backpressureErr == nil {
 		t.Fatal("acquireTurn ignored prompt backpressure")
+	}
+
+	var reqErr *acp.RequestError
+	if !errors.As(backpressureErr, &reqErr) || reqErr.Code != -32600 {
+		t.Fatalf("backpressure error = %v, want -32600 invalid request", backpressureErr)
+	}
+	backpressureData, ok := reqErr.Data.(map[string]any)
+	if !ok || backpressureData[jsonFieldError] != valueBackpressure || backpressureData[jsonFieldLimit] != "session_prompt" {
+		t.Fatalf("backpressure payload = %#v, want {error:backpressure, limit:session_prompt}", reqErr.Data)
 	}
 	release()
 

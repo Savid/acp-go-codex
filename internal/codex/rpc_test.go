@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -170,6 +171,37 @@ func TestRPCConnServerRequestContextCanceledErrorSuppressesResponse(t *testing.T
 	time.Sleep(10 * time.Millisecond)
 	if sent := transport.sentMessages(); len(sent) != 0 {
 		t.Fatalf("context canceled request sent response: %#v", sent)
+	}
+}
+
+func TestRPCConnReadLoopSkipsMalformedLines(t *testing.T) {
+	transport := &rawManualTransport{recv: make(chan recvItem, 4)}
+	conn := newRPCConn(transport, nil)
+	defer conn.Close()
+
+	transport.recv <- recvItem{err: fmt.Errorf("%w: empty line", errSkippableLine)}
+	transport.recv <- recvItem{err: fmt.Errorf("%w: invalid character", errSkippableLine)}
+	transport.recv <- recvItem{msg: rpcMessage{JSONRPC: jsonRPCVersion, Method: "note", Params: json.RawMessage(`{"ok":true}`)}, raw: `{"method":"note"}`}
+
+	select {
+	case event := <-conn.Events():
+		if event.Method != "note" {
+			t.Fatalf("event after malformed lines = %#v", event)
+		}
+	case <-conn.done:
+		t.Fatal("connection closed on malformed line")
+	case <-time.After(time.Second):
+		t.Fatal("valid notification not delivered after malformed lines")
+	}
+
+	if got := conn.MalformedLines(); got != 2 {
+		t.Fatalf("MalformedLines = %d, want 2", got)
+	}
+
+	select {
+	case <-conn.done:
+		t.Fatal("connection closed despite only malformed lines")
+	default:
 	}
 }
 

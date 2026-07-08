@@ -86,12 +86,11 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 
 	store := s.agent.options.SessionStore
 
-	rawEnabled := s.rawMessages.Enabled()
-	if s.rolloutPath == "" || (store == nil && !rawEnabled && completed == nil && events == nil) {
+	if s.rolloutPath == "" || (store == nil && completed == nil && events == nil) {
 		return nil
 	}
 
-	startRow := s.rolloutStartRow(store != nil, rawEnabled, completed != nil, events != nil)
+	startRow := s.rolloutStartRow(store != nil, completed != nil, events != nil)
 
 	file, err := os.Open(s.rolloutPath)
 	if err != nil {
@@ -147,10 +146,6 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 		}
 	}
 
-	if rawEnabled {
-		s.emitRawRolloutRows(ctx, rows)
-	}
-
 	if events != nil {
 		s.emitRolloutEvents(rows, events)
 	}
@@ -178,7 +173,6 @@ func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEn
 
 func (s *session) rolloutStartRow(
 	storeEnabled bool,
-	rawEnabled bool,
 	completionEnabled bool,
 	eventsEnabled bool,
 ) int {
@@ -190,7 +184,6 @@ func (s *session) rolloutStartRow(
 		row     int
 	}{
 		{storeEnabled, s.mirroredRows},
-		{rawEnabled, s.emittedRawRows},
 		{completionEnabled, s.completionRows},
 		{eventsEnabled, s.visibleRows},
 	} {
@@ -257,20 +250,6 @@ func (s *session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStore
 	}
 
 	return entries, nextRow
-}
-
-func (s *session) emitRawRolloutRows(ctx context.Context, rows []rolloutMirrorRow) {
-	for _, row := range rows {
-		if row.index < s.emittedRawRows {
-			continue
-		}
-
-		if err := s.emitRawRolloutRow(ctx, row.entry); err != nil {
-			return
-		}
-
-		s.emittedRawRows = row.index + 1
-	}
 }
 
 func (s *session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan<- struct{}) {
@@ -385,24 +364,4 @@ func (s *session) startRolloutTail(
 	}()
 
 	return cancel, done
-}
-
-func (s *session) emitRawRolloutRow(ctx context.Context, entry SessionStoreEntry) error {
-	message := decodedRawEvent(entry)
-	if !s.rawMessages.ShouldEmit(message) {
-		return nil
-	}
-
-	conn := s.agent.connection()
-	if conn == nil {
-		return nil
-	}
-
-	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(map[string]any{
-		jsonFieldSessionID: s.id,
-		jsonFieldSequence:  s.nextRawEventSequence(),
-		jsonFieldSource:    "codex-rollout",
-		jsonFieldEvent:     message,
-		"rawJSON":          string(entry),
-	}))
 }

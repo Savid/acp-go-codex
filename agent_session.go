@@ -70,7 +70,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, codexAuthRequiredError(err, nil)
 	}
 
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
 
@@ -100,18 +100,6 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	defer func() { finish(promptResultForObserver(resp, err, session.currentModel())) }()
 
 	resp, err = session.Prompt(ctx, params)
-	if err != nil && fatalCodexProcessError(err) {
-		if a.removeSessionIf(params.SessionId, session) {
-			a.observe.AddActiveSession(ctx, -1)
-		}
-
-		_ = session.Close(context.Background())
-
-		return acp.PromptResponse{}, acp.NewInternalError(map[string]any{
-			jsonFieldError:   err.Error(),
-			jsonFieldMessage: "The Codex app-server process exited unexpectedly. Please start a new session.",
-		})
-	}
 
 	return resp, err
 }
@@ -562,7 +550,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 
 	id := params.SessionId
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
 
@@ -625,7 +613,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	}
 
 	id := params.SessionId
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -832,7 +820,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	}
 
 	id := params.SessionId
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -992,7 +980,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)
 	}
 
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta)
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1104,10 +1092,6 @@ func codexThreadACPError(err error, account map[string]any) error {
 	}
 
 	return err
-}
-
-func fatalCodexProcessError(err error) bool {
-	return errors.Is(err, codex.ErrConnectionClosed)
 }
 
 func newUnknownSession() *acp.RequestError {

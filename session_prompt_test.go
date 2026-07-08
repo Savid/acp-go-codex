@@ -60,17 +60,22 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 
 	agent.setAgentClient(newRecordingAgentClient())
 	promptSession.rawMessages = rawMessageConfig{}
+	promptSession.clientDead = false
 	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("boom")}}}
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
 		t.Fatal("Prompt ignored event error")
 	}
 
+	promptSession.clientDead = false
 	promptSession.client = &runEventsClient{}
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); !errors.Is(err, codex.ErrConnectionClosed) {
-		t.Fatalf("Prompt with closed event stream err=%v, want connection closed", err)
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); !isTurnFailure(err, codex.CauseTransport) {
+		t.Fatalf("Prompt with closed event stream err=%v, want codex_turn_failed transport", err)
 	}
 
 	promptSession.rawMessages = rawMessageConfig{enabled: true}
+	promptSession.clientDead = false
+	promptSession.agent = NewAgent(WithSessionStore(NewInMemorySessionStore()))
+	promptSession.agent.setAgentClient(newRecordingAgentClient())
 	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"}}}
 	promptSession.rolloutPath = filepath.Join(t.TempDir(), "missing.jsonl")
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
@@ -119,15 +124,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	promptSession.agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
 	promptSession.rawMessages = rawMessageConfig{enabled: true}
 	if err := promptSession.mirrorAndEmitRollout(ctx); err != nil {
-		t.Fatalf("raw rollout extension error was fatal: %v", err)
-	}
-	if promptSession.emittedRawRows != 0 {
-		t.Fatal("failed raw rollout emission advanced cursor")
-	}
-
-	promptSession.rawMessages = rawMessageConfig{}
-	if err := promptSession.emitRawRolloutRow(ctx, SessionStoreEntry(`{"type":"event_msg"}`)); err != nil {
-		t.Fatalf("disabled raw rollout row returned error: %v", err)
+		t.Fatalf("mirror returned error: %v", err)
 	}
 }
 
@@ -329,9 +326,6 @@ func TestSessionPromptRawRolloutTail(t *testing.T) {
 	rawSession := &session{agent: NewAgent(), id: "raw", cwd: "/tmp/project", rolloutPath: rollout, rawMessages: rawMessageConfig{enabled: true}}
 	if err := rawSession.mirrorAndEmitRollout(context.Background()); err != nil {
 		t.Fatalf("mirror blank+valid rollout returned error: %v", err)
-	}
-	if err := rawSession.emitRawRolloutRow(context.Background(), SessionStoreEntry(`{"type":"event_msg"}`)); err != nil {
-		t.Fatalf("raw rollout row without conn returned error: %v", err)
 	}
 	stop, done := rawSession.startRolloutTail(context.Background(), nil, nil)
 	time.Sleep(150 * time.Millisecond)
