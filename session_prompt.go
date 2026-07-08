@@ -297,10 +297,6 @@ func (s *session) mapTurnFailure(err error) error {
 		if tf.ProviderCode != "" {
 			data[jsonFieldProviderCode] = tf.ProviderCode
 		}
-
-		if tf.Cause == codex.CauseProcessExit || tf.Cause == codex.CauseTransport {
-			s.markClientDead()
-		}
 	case errors.As(err, &procExit):
 		// The app-server process died mid-turn: name the real exit status and
 		// stderr tail instead of a bare transport EOF.

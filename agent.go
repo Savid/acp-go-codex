@@ -23,14 +23,15 @@ const (
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
 
-	jsonFieldError     = "error"
-	jsonFieldMessage   = "message"
-	jsonFieldCwd       = "cwd"
-	jsonFieldEntries   = "entries"
-	jsonFieldIndex     = "index"
-	jsonFieldSessionID = "sessionId"
-	jsonFieldField     = "field"
-	validationRequired = "required"
+	jsonFieldError      = "error"
+	jsonFieldMessage    = "message"
+	jsonFieldCwd        = "cwd"
+	jsonFieldEntries    = "entries"
+	jsonFieldIndex      = "index"
+	jsonFieldSessionID  = "sessionId"
+	jsonFieldField      = "field"
+	validationRequired  = "required"
+	validationDuplicate = "duplicate"
 
 	jsonFieldSource        = "source"
 	jsonFieldSequence      = "sequence"

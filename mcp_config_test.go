@@ -3,15 +3,17 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMCPConfigArgs(t *testing.T) {
 	agent := NewAgent()
 	args, env, err := agent.mcpServerConfigArgs([]acp.McpServer{
-		{Stdio: &acp.McpServerStdio{Name: "Local Tool", Command: "tool", Args: []string{"--one"}, Env: []acp.EnvVariable{{Name: "A", Value: "B"}}}},
+		{Stdio: &acp.McpServerStdio{Name: "local", Command: "tool", Args: []string{"--one"}, Env: []acp.EnvVariable{{Name: "A", Value: "B"}}}},
 		{Http: &acp.McpServerHttpInline{
 			Name:    "HTTP",
 			Url:     "https://example.com/mcp",
@@ -22,11 +24,11 @@ func TestMCPConfigArgs(t *testing.T) {
 		t.Fatalf("mcpServerConfigArgs returned error: %v", err)
 	}
 	joined := jsonString(args)
-	if !containsAll(joined, "mcp_servers.Local_Tool.command", "mcp_servers.HTTP.url", "env_http_headers", "Authorization", "default_tools_approval_mode") {
+	if !containsAll(joined, "mcp_servers.local.command", "mcp_servers.HTTP.url", "env_http_headers", "Authorization", "default_tools_approval_mode") {
 		t.Fatalf("args = %v", args)
 	}
-	if !containsArg(args, `mcp_servers.Local_Tool.args=["--one"]`) ||
-		!containsArg(args, `mcp_servers.Local_Tool.env={ A = "B" }`) {
+	if !containsArg(args, `mcp_servers.local.args=["--one"]`) ||
+		!containsArg(args, `mcp_servers.local.env={ A = "B" }`) {
 		t.Fatalf("TOML literals were quoted as strings: %v", args)
 	}
 	if env["CODEX_MCP_HEADER_HTTP_AUTHORIZATION"] != "Bearer x" {
@@ -45,6 +47,20 @@ func TestMCPConfigArgs(t *testing.T) {
 	if err == nil {
 		t.Fatal("SSE MCP config succeeded")
 	}
+}
+
+// TestMCPConfigForwardsNameVerbatim proves accepted server names are forwarded
+// unchanged into the Codex config key: a bare-key-safe name is emitted as-is,
+// and a name with characters that are not valid in a TOML bare key is quoted
+// (never rewritten, deduplicated, or fabricated).
+func TestMCPConfigForwardsNameVerbatim(t *testing.T) {
+	agent := NewAgent()
+	args, _, err := agent.mcpServerConfigArgs([]acp.McpServer{
+		{Stdio: &acp.McpServerStdio{Name: "Local Tool", Command: "tool", Args: []string{"--one"}}},
+	}, "")
+	require.NoError(t, err)
+	require.True(t, containsArg(args, `mcp_servers."Local Tool".command="tool"`), "args = %v", args)
+	require.True(t, containsArg(args, `mcp_servers."Local Tool".args=["--one"]`), "args = %v", args)
 }
 
 func TestTOMLEnvTableSkipsEmptyNames(t *testing.T) {
@@ -117,7 +133,7 @@ func containsArg(args []string, needle string) bool {
 	return false
 }
 
-func TestMCPConfigRejectsMissingTransportAndSanitizesName(t *testing.T) {
+func TestMCPConfigRejectsMissingTransport(t *testing.T) {
 	agent := NewAgent()
 	ctx := context.Background()
 	if servers, err := agent.prepareMCPServers(ctx, "s", []acp.McpServer{
@@ -138,22 +154,70 @@ func TestMCPConfigRejectsMissingTransportAndSanitizesName(t *testing.T) {
 	if _, _, err := NewAgent().mcpServerConfigArgs([]acp.McpServer{{}}, ""); err == nil {
 		t.Fatal("MCP config accepted server without transport")
 	}
-	seen := map[string]int{}
-	if name := mcpServerConfigName(acp.McpServer{Stdio: &acp.McpServerStdio{Name: "Same"}}, 0, seen); name != "Same" {
-		t.Fatalf("first duplicate name = %q", name)
+}
+
+// TestMCPServerNameRequired pins R6-1: an accepted (stdio or http) MCP server
+// with an empty name is rejected with invalid params (-32602) whose data is
+// exactly {"mcpServers[<i>].name": "required"}.
+func TestMCPServerNameRequired(t *testing.T) {
+	agent := NewAgent()
+	ctx := context.Background()
+
+	tests := map[string]struct {
+		servers []acp.McpServer
+		index   int
+	}{
+		"stdio empty at 0": {
+			servers: []acp.McpServer{{Stdio: &acp.McpServerStdio{Name: "", Command: "cmd"}}},
+			index:   0,
+		},
+		"http empty after valid stdio": {
+			servers: []acp.McpServer{
+				{Stdio: &acp.McpServerStdio{Name: "ok", Command: "cmd"}},
+				{Http: &acp.McpServerHttpInline{Name: "", Url: "https://example.com"}},
+			},
+			index: 1,
+		},
 	}
-	if name := mcpServerConfigName(acp.McpServer{Http: &acp.McpServerHttpInline{Name: "Same"}}, 1, seen); name != "Same_2" {
-		t.Fatalf("second duplicate name = %q", name)
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := agent.prepareMCPServers(ctx, "s", test.servers)
+
+			var reqErr *acp.RequestError
+			require.ErrorAs(t, err, &reqErr)
+			require.Equal(t, -32602, reqErr.Code)
+			require.Equal(t, map[string]any{
+				fmtIndex("mcpServers[%d].name", test.index): "required",
+			}, reqErr.Data)
+		})
 	}
-	if name := mcpServerConfigName(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "Client"}}, 2, map[string]int{}); name != "Client" {
-		t.Fatalf("ACP name = %q", name)
-	}
-	if name := mcpServerConfigName(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "Events"}}, 3, map[string]int{}); name != "Events" {
-		t.Fatalf("SSE name = %q", name)
-	}
-	if name := mcpServerConfigName(acp.McpServer{Stdio: &acp.McpServerStdio{Name: "!!!"}}, 4, map[string]int{}); name != "server_5" {
-		t.Fatalf("sanitized empty MCP name = %q", name)
-	}
+}
+
+// TestMCPServerNameDuplicate pins R6-1: a duplicate name is rejected with
+// invalid params (-32602) whose data is exactly
+// {"mcpServers[<i>].name": "duplicate"}, where <i> is the index of the LATER
+// (offending) entry.
+func TestMCPServerNameDuplicate(t *testing.T) {
+	agent := NewAgent()
+	ctx := context.Background()
+
+	_, err := agent.prepareMCPServers(ctx, "s", []acp.McpServer{
+		{Stdio: &acp.McpServerStdio{Name: "dup", Command: "cmd"}},
+		{Http: &acp.McpServerHttpInline{Name: "unique", Url: "https://example.com"}},
+		{Http: &acp.McpServerHttpInline{Name: "dup", Url: "https://example.com"}},
+	})
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32602, reqErr.Code)
+	require.Equal(t, map[string]any{
+		"mcpServers[2].name": "duplicate",
+	}, reqErr.Data)
+}
+
+func fmtIndex(format string, index int) string {
+	return fmt.Sprintf(format, index)
 }
 
 func TestMCPHeaderEnvTable(t *testing.T) {

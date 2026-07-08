@@ -17,18 +17,30 @@ const (
 	mcpApprovalModeApprove = "approve"
 	codexConfigFlag        = "-c"
 	mcpServersKey          = "mcpServers"
+	codexMCPServersPrefix  = "mcp_servers"
 )
 
-var mcpNamePartRE = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+var mcpBareKeyRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 var mcpEnvPartRE = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
 type tomlLiteral string
 
 func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []acp.McpServer) ([]acp.McpServer, error) {
+	seen := make(map[string]struct{}, len(servers))
+
 	for index, server := range servers {
 		switch {
 		case server.Stdio != nil, server.Http != nil:
-			continue
+			name := mcpServerName(server)
+			if name == "" {
+				return nil, acp.NewInvalidParams(map[string]any{fmt.Sprintf("mcpServers[%d].name", index): validationRequired})
+			}
+
+			if _, duplicate := seen[name]; duplicate {
+				return nil, acp.NewInvalidParams(map[string]any{fmt.Sprintf("mcpServers[%d].name", index): validationDuplicate})
+			}
+
+			seen[name] = struct{}{}
 		case server.Sse != nil:
 			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: map[string]any{"index": index, jsonFieldName: mcpServerName(server), jsonFieldError: "SSE MCP is not supported"}})
 		case server.Acp != nil:
@@ -48,26 +60,25 @@ func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer, defaultApprovalMode
 
 	args := make([]string, 0, len(servers)*8)
 	env := map[string]string{}
-	seen := map[string]int{}
 
 	for index, server := range servers {
-		name := mcpServerConfigName(server, index, seen)
+		name := mcpServerName(server)
 		switch {
 		case server.Stdio != nil:
-			args = append(args, codexConfigArg("mcp_servers."+name+".command", server.Stdio.Command)...)
+			args = append(args, codexConfigArg(mcpServerConfigKey(name, "command"), server.Stdio.Command)...)
 			if len(server.Stdio.Args) > 0 {
-				args = append(args, codexConfigArg("mcp_servers."+name+".args", tomlLiteral(tomlStringArray(server.Stdio.Args)))...)
+				args = append(args, codexConfigArg(mcpServerConfigKey(name, "args"), tomlLiteral(tomlStringArray(server.Stdio.Args)))...)
 			}
 
 			if len(server.Stdio.Env) > 0 {
-				args = append(args, codexConfigArg("mcp_servers."+name+".env", tomlLiteral(tomlEnvTable(server.Stdio.Env)))...)
+				args = append(args, codexConfigArg(mcpServerConfigKey(name, "env"), tomlLiteral(tomlEnvTable(server.Stdio.Env)))...)
 			}
 		case server.Http != nil:
-			args = append(args, codexConfigArg("mcp_servers."+name+".url", server.Http.Url)...)
+			args = append(args, codexConfigArg(mcpServerConfigKey(name, "url"), server.Http.Url)...)
 			if len(server.Http.Headers) > 0 {
 				headerEnv := mcpHeaderEnvTable(name, server.Http.Headers, env)
 				if headerEnv != "" {
-					args = append(args, codexConfigArg("mcp_servers."+name+".env_http_headers", tomlLiteral(headerEnv))...)
+					args = append(args, codexConfigArg(mcpServerConfigKey(name, "env_http_headers"), tomlLiteral(headerEnv))...)
 				}
 			}
 		case server.Acp != nil:
@@ -89,40 +100,23 @@ func (a *Agent) mcpServerConfigArgs(servers []acp.McpServer, defaultApprovalMode
 	return args, env, nil
 }
 
-func mcpServerConfigName(server acp.McpServer, index int, seen map[string]int) string {
-	name := ""
-
-	switch {
-	case server.Stdio != nil:
-		name = server.Stdio.Name
-	case server.Http != nil:
-		name = server.Http.Name
-	case server.Acp != nil:
-		name = server.Acp.Name
-	case server.Sse != nil:
-		name = server.Sse.Name
-	}
-
-	if strings.TrimSpace(name) == "" {
-		name = fmt.Sprintf("server_%d", index+1)
-	}
-
-	name = strings.Trim(mcpNamePartRE.ReplaceAllString(name, "_"), "_")
-	if name == "" {
-		name = fmt.Sprintf("server_%d", index+1)
-	}
-
-	count := seen[name]
-
-	seen[name] = count + 1
-	if count > 0 {
-		name = fmt.Sprintf("%s_%d", name, count+1)
-	}
-
-	return name
+// mcpServerConfigKey builds a Codex `-c` dotted TOML key for an MCP server,
+// forwarding the ACP server name verbatim. The name is quoted as a TOML basic
+// string when it is not a valid bare key so any accepted (non-empty, unique)
+// name maps to a well-formed config path without being rewritten.
+func mcpServerConfigKey(name string, suffix string) string {
+	return codexMCPServersPrefix + "." + tomlKeySegment(name) + "." + suffix
 }
 
-func mcpApprovalConfigArgs(serverConfigName string, defaultMode string) ([]string, error) {
+func tomlKeySegment(segment string) string {
+	if mcpBareKeyRE.MatchString(segment) {
+		return segment
+	}
+
+	return tomlString(segment)
+}
+
+func mcpApprovalConfigArgs(serverName string, defaultMode string) ([]string, error) {
 	if defaultMode == "" {
 		return nil, nil
 	}
@@ -131,7 +125,7 @@ func mcpApprovalConfigArgs(serverConfigName string, defaultMode string) ([]strin
 		return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: "_meta.codex.options.mcpToolApprovalMode must be one of auto, prompt, approve"})
 	}
 
-	return codexConfigArg("mcp_servers."+serverConfigName+".default_tools_approval_mode", defaultMode), nil
+	return codexConfigArg(mcpServerConfigKey(serverName, "default_tools_approval_mode"), defaultMode), nil
 }
 
 func validMCPApprovalMode(mode string) bool {
