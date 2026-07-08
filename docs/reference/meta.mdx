@@ -1,6 +1,6 @@
 ---
 title: "Metadata"
-description: "_meta.codex vocabulary."
+description: "The _meta.codex vocabulary for session options, initialize capabilities, and the rules that gate it."
 ---
 
 The adapter reserves the `_meta.codex` namespace for its extension vocabulary.
@@ -49,8 +49,5 @@ Accepted initialize capability metadata under `_meta.codex`:
 Unknown keys in the adapter-owned namespace fail closed with invalid params.
 There is no command capability or command metadata under `_meta.codex`.
 
-Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are NOT commands
-and must not be projected as `AvailableCommand` entries absent a documented
-native command projection. Re-entry criteria: documented `commands/list`+execute,
-or documented server-side `/x` parsing in `turn/start`, or documented
-skill→command projection.
+Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are not commands
+and are not projected as `AvailableCommand` entries.

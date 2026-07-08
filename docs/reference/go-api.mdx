@@ -16,10 +16,10 @@ options below.
 
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
-    codexacp.WithExecutablePath("/usr/local/bin/codex"),
-    codexacp.WithHome("/tmp/codex-home"),
-    codexacp.WithDefaultModel("gpt-5.5"),
-    codexacp.WithLogger(logger),
+	codexacp.WithExecutablePath("/usr/local/bin/codex"),
+	codexacp.WithHome("/tmp/codex-home"),
+	codexacp.WithDefaultModel("gpt-5.5"),
+	codexacp.WithLogger(logger),
 )
 ```
 
@@ -64,15 +64,15 @@ overlay flag, so this is the config mechanism for the app-server.
 
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
-    codexacp.WithEnv(map[string]string{"LITELLM_API_KEY": "sk-..."}),
-    codexacp.WithCodexConfigOverrides(map[string]any{
-        "model":                            "gpt-5.5",
-        "model_provider":                   "litellm",
-        "model_providers.litellm.name":     "LiteLLM",
-        "model_providers.litellm.base_url": "https://litellm.example/v1",
-        "model_providers.litellm.env_key":  "LITELLM_API_KEY",
-        "model_providers.litellm.wire_api": "responses",
-    }),
+	codexacp.WithEnv(map[string]string{"LITELLM_API_KEY": "sk-..."}),
+	codexacp.WithCodexConfigOverrides(map[string]any{
+		"model":                            "gpt-5.5",
+		"model_provider":                   "litellm",
+		"model_providers.litellm.name":     "LiteLLM",
+		"model_providers.litellm.base_url": "https://litellm.example/v1",
+		"model_providers.litellm.env_key":  "LITELLM_API_KEY",
+		"model_providers.litellm.wire_api": "responses",
+	}),
 )
 ```
 

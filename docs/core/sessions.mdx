@@ -43,7 +43,7 @@ error carrying `cause: "timeout"`. The default of `0` disables the deadline.
 
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
-    codexacp.WithTurnTimeout(2*time.Minute),
+	codexacp.WithTurnTimeout(2*time.Minute),
 )
 ```
 

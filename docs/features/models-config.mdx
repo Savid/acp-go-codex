@@ -3,6 +3,8 @@ title: "Models and Config"
 description: "Model, mode, thought level, and model config options."
 ---
 
+## Model and mode options
+
 Set a default model for new sessions:
 
 ```sh
@@ -17,10 +19,10 @@ Session metadata can set Codex-specific options:
 
 ```go
 codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
-    codexacp.WithCodexModel("gpt-5.5"),
-    codexacp.WithCodexEffort("high"),
-    codexacp.WithCodexServiceTier("flex"),
-    codexacp.WithCodexPersonality("pragmatic"),
+	codexacp.WithCodexModel("gpt-5.5"),
+	codexacp.WithCodexEffort("high"),
+	codexacp.WithCodexServiceTier("flex"),
+	codexacp.WithCodexPersonality("pragmatic"),
 ))
 ```
 
@@ -74,12 +76,12 @@ overrides:
 ```go
 codexacp.WithEnv(map[string]string{"LITELLM_API_KEY": "sk-..."})
 codexacp.WithCodexConfigOverrides(map[string]any{
-    "model":                            "gpt-5.5",
-    "model_provider":                   "litellm",
-    "model_providers.litellm.name":     "LiteLLM",
-    "model_providers.litellm.base_url": "https://litellm.example/v1",
-    "model_providers.litellm.env_key":  "LITELLM_API_KEY",
-    "model_providers.litellm.wire_api": "responses",
+	"model":                            "gpt-5.5",
+	"model_provider":                   "litellm",
+	"model_providers.litellm.name":     "LiteLLM",
+	"model_providers.litellm.base_url": "https://litellm.example/v1",
+	"model_providers.litellm.env_key":  "LITELLM_API_KEY",
+	"model_providers.litellm.wire_api": "responses",
 })
 ```
 

@@ -22,8 +22,8 @@ store-backed load and list operations with `WithSessionStoreLoadTimeout`:
 
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
-    codexacp.WithSessionStore(store),
-    codexacp.WithSessionStoreLoadTimeout(15*time.Second),
+	codexacp.WithSessionStore(store),
+	codexacp.WithSessionStoreLoadTimeout(15*time.Second),
 )
 ```
 
@@ -39,17 +39,17 @@ const SessionStoreMainSubpath = ""
 const SessionStoreFormat = "codex-rollout-jsonl-v1"
 
 type SessionKey struct {
-    SessionID string
-    Subpath   string
+	SessionID string
+	Subpath   string
 }
 
 type SessionStore interface {
-    Append(context.Context, SessionKey, []SessionStoreEntry) error
-    Load(context.Context, SessionKey) ([]SessionStoreEntry, error)
-    Replace(context.Context, SessionKey, []SessionStoreReplacement) error
-    Delete(context.Context, SessionKey) error
-    ListSessions(context.Context) ([]SessionSummary, error)
-    ListSubkeys(context.Context, SessionKey) ([]string, error)
+	Append(context.Context, SessionKey, []SessionStoreEntry) error
+	Load(context.Context, SessionKey) ([]SessionStoreEntry, error)
+	Replace(context.Context, SessionKey, []SessionStoreReplacement) error
+	Delete(context.Context, SessionKey) error
+	ListSessions(context.Context) ([]SessionSummary, error)
+	ListSubkeys(context.Context, SessionKey) ([]string, error)
 }
 ```
 

@@ -28,9 +28,9 @@ app-server refreshes auth without a terminal login:
 
 ```go
 agent := codexacp.NewAgent(
-    codexacp.WithCodexChatGPTAuthTokenRefresher(func(ctx context.Context) (codexacp.ChatGPTAuthTokens, error) {
-        return codexacp.ChatGPTAuthTokens{AccessToken: "token"}, nil
-    }),
+	codexacp.WithCodexChatGPTAuthTokenRefresher(func(ctx context.Context) (codexacp.ChatGPTAuthTokens, error) {
+		return codexacp.ChatGPTAuthTokens{AccessToken: "token"}, nil
+	}),
 )
 ```
 

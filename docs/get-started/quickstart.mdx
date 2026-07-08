@@ -1,103 +1,63 @@
 ---
 title: "Quickstart"
-description: "Run the ACP agent and send a first prompt"
+description: "Go from a fresh checkout to your first successful ACP turn against Codex."
 ---
+
+This tutorial takes you from a fresh checkout to one completed ACP prompt turn
+against Codex, driven by the bundled `minimal-client` example. The example
+programs are repo-relative, so you run them from a checkout.
 
 ## Prerequisites
 
 - A Go toolchain satisfying the `go` directive in this repo's `go.mod`.
 - A local `codex` CLI, version `0.141.0` or newer, installed and
-  [authenticated](/docs/features/authentication). Older Codex CLIs fail fast
-  at session start.
+  [authenticated](/docs/features/authentication). Older Codex CLIs fail fast at
+  session start.
 - An [ACP client](https://agentclientprotocol.com/overview/clients) or one of
   the [examples](/docs/get-started/examples) in this repo.
 
-The example commands below run from a checkout of this repository, so clone it
-first:
-
-```bash
-git clone https://github.com/savid/acp-go-codex && cd acp-go-codex
-```
-
-## Option A: standalone CLI
+## Steps
 
 <Steps>
-  <Step title="Build or run the agent">
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/savid/acp-go-codex && cd acp-go-codex
+    ```
+  </Step>
+  <Step title="Confirm the Codex CLI is reachable">
+    The adapter launches whatever `codex` binary it is pointed at:
 
     ```bash
-    go run ./cmd/acp-go-codex
+    codex --version
     ```
-
-    The process speaks ACP over stdin/stdout using the ACP
-    [stdio transport](https://agentclientprotocol.com/protocol/transports). In
-    normal use, an editor or host launches it as a subprocess.
   </Step>
-
-  <Step title="Try the minimal client">
+  <Step title="Run a single prompt">
+    The `minimal-client` example starts the agent, initializes ACP, creates a
+    session in the current directory, sends one prompt, prints streamed
+    text/tool updates, and closes the session:
 
     ```bash
     go run ./examples/minimal-client "Reply with hello from ACP"
     ```
-
-    The example starts the agent, initializes ACP, creates a session in the
-    current directory, sends a prompt, prints streamed text/tool updates, and
-    closes the session.
-  </Step>
-
-  <Step title="Try interactive chat">
-
-    ```bash
-    go run ./examples/interactive-chat
-    ```
-
-    This example demonstrates [prompt streaming](/docs/core/prompt-streaming),
-    queued input, cancellation, usage updates, tool calls, permissions, and
-    elicitation callbacks.
   </Step>
 </Steps>
 
-## Option B: embedded Go
+## Verify
 
-Use [`Serve`](/docs/reference/go-api#serve-and-embed) when your Go app owns the ACP
-streams:
+The example prints the streamed reply to stdout and exits `0`. A greeting
+derived from your prompt confirms the full path worked: session creation, the
+`codex app-server` launch, the prompt turn, and streaming back through ACP.
 
-```go
-package main
+If you instead launch the raw adapter for an ACP host to drive, it blocks on
+stdin waiting for JSON-RPC frames (Ctrl-C to exit). stdout carries ACP JSON-RPC
+only; add `-debug` to send diagnostics to stderr:
 
-import (
-    "context"
-    "log"
-    "os"
-
-    codexacp "github.com/savid/acp-go-codex"
-)
-
-func main() {
-    err := codexacp.Serve(context.Background(), os.Stdin, os.Stdout,
-        codexacp.WithDefaultModel("gpt-5.5"),
-    )
-    if err != nil {
-        log.Fatal(err)
-    }
-}
+```bash
+go run ./cmd/acp-go-codex -debug
 ```
 
-This has the same wire behavior as the standalone CLI: ACP JSON-RPC on the
-provided streams, with [Codex sessions](/docs/core/sessions) launched on
-demand. Use [CLI reference](/docs/reference/cli) for flags and
-[Go API](/docs/reference/go-api) for embedding options.
+## Next steps
 
-## Expected host flow
-
-1. Start `acp-go-codex` as a subprocess.
-2. Call ACP [`initialize`](https://agentclientprotocol.com/protocol/initialization).
-3. Create or resume a session with an absolute `cwd`.
-4. Send [`session/prompt`](https://agentclientprotocol.com/protocol/prompt-turn).
-5. Handle streamed [`session/update`](/docs/reference/updates) notifications.
-6. Close sessions and the process when done.
-
-<Tip>
-  ACP client callbacks such as permissions, elicitations, and MCP messages are
-  part of the [ACP method surface](/docs/reference/acp-methods). Codex-native
-  request details stay inside the adapter's app-server boundary.
-</Tip>
+- [Run modes](/docs/get-started/run-modes) — standalone binary versus embedded `Serve`.
+- [Examples](/docs/get-started/examples) — the interactive-chat and resume clients.
+- [Sessions](/docs/core/sessions) — the lifecycle behind that first turn.

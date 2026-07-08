@@ -30,7 +30,7 @@ From embedded Go:
 
 ```go
 req := codexacp.NewSessionRequest("/workspace/project",
-    codexacp.WithSessionRawEvents(true),
+	codexacp.WithSessionRawEvents(true),
 )
 ```
 
@@ -46,8 +46,9 @@ Each notification carries:
 | `event` | The raw Codex event object. |
 
 <Warning>
-  Raw events contain unredacted Codex rollout JSON. Payloads are capped at
-  64 KiB — oversized payloads are replaced with a compact truncation marker — but
-  the contents can still include prompt and tool data, so enable this only when
-  the host is prepared to receive and protect it.
+  Raw events contain unredacted Codex rollout JSON. The `event` field is capped
+  at 64 KiB — when it exceeds that, only `event` is swapped for a compact
+  truncation marker while `sessionId`, `sequence`, and `source` are preserved —
+  but the contents can still include prompt and tool data, so enable this only
+  when the host is prepared to receive and protect it.
 </Warning>

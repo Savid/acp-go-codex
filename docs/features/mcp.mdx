@@ -15,15 +15,15 @@ streamable-HTTP endpoint:
 
 ```go
 req := codexacp.NewSessionRequest("/workspace/project",
-    codexacp.WithSessionMCPServers(
-        codexacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
-        codexacp.HTTPMCPServer("remote", "https://mcp.example/v1", map[string]string{
-            "Authorization": "Bearer token",
-        }),
-    ),
-    codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
-        codexacp.WithCodexMCPToolApprovalMode("approve"),
-    )),
+	codexacp.WithSessionMCPServers(
+		codexacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
+		codexacp.HTTPMCPServer("remote", "https://mcp.example/v1", map[string]string{
+			"Authorization": "Bearer token",
+		}),
+	),
+	codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+		codexacp.WithCodexMCPToolApprovalMode("approve"),
+	)),
 )
 ```
 
