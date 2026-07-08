@@ -32,7 +32,7 @@ func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []
 		switch {
 		case server.Stdio != nil, server.Http != nil:
 			name := mcpServerName(server)
-			if name == "" {
+			if strings.TrimSpace(name) == "" {
 				return nil, acp.NewInvalidParams(map[string]any{fmt.Sprintf("mcpServers[%d].name", index): validationRequired})
 			}
 

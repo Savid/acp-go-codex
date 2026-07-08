@@ -157,8 +157,8 @@ func TestMCPConfigRejectsMissingTransport(t *testing.T) {
 }
 
 // TestMCPServerNameRequired pins R6-1: an accepted (stdio or http) MCP server
-// with an empty name is rejected with invalid params (-32602) whose data is
-// exactly {"mcpServers[<i>].name": "required"}.
+// with an empty or whitespace-only name is rejected with invalid params
+// (-32602) whose data is exactly {"mcpServers[<i>].name": "required"}.
 func TestMCPServerNameRequired(t *testing.T) {
 	agent := NewAgent()
 	ctx := context.Background()
@@ -177,6 +177,10 @@ func TestMCPServerNameRequired(t *testing.T) {
 				{Http: &acp.McpServerHttpInline{Name: "", Url: "https://example.com"}},
 			},
 			index: 1,
+		},
+		"stdio whitespace-only at 0": {
+			servers: []acp.McpServer{{Stdio: &acp.McpServerStdio{Name: "   ", Command: "cmd"}}},
+			index:   0,
 		},
 	}
 
