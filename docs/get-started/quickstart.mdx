@@ -1,15 +1,23 @@
 ---
 title: "Quickstart"
 description: "Run the ACP agent and send a first prompt"
-icon: "rocket"
 ---
 
 ## Prerequisites
 
-- Go 1.25 or newer. This repo is developed with toolchain Go 1.26.3.
-- A local `codex` CLI installed and authenticated.
+- A Go toolchain satisfying the `go` directive in this repo's `go.mod`.
+- A local `codex` CLI, version `0.141.0` or newer, installed and
+  [authenticated](/docs/features/authentication). Older Codex CLIs fail fast
+  at session start.
 - An [ACP client](https://agentclientprotocol.com/overview/clients) or one of
   the [examples](/docs/get-started/examples) in this repo.
+
+The example commands below run from a checkout of this repository, so clone it
+first:
+
+```bash
+git clone https://github.com/savid/acp-go-codex && cd acp-go-codex
+```
 
 ## Option A: standalone CLI
 
@@ -50,7 +58,7 @@ icon: "rocket"
 
 ## Option B: embedded Go
 
-Use [`Serve`](/docs/reference/go-api#serve) when your Go app owns the ACP
+Use [`Serve`](/docs/reference/go-api#serve-and-embed) when your Go app owns the ACP
 streams:
 
 ```go

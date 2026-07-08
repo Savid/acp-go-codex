@@ -1,9 +1,14 @@
 ---
 title: "Prompt Streaming"
-description: "How Codex turn events become ACP updates."
+description: "How Codex turn events become ACP updates and how a turn fails."
 ---
 
-During `session/prompt`, the adapter streams:
+A `session/prompt` call opens a Codex turn and streams its progress back to the
+host as ACP `session/update` notifications. The adapter translates each native
+Codex event into the closest ACP update, and completes the call when the turn
+ends — successfully, by cancellation, or with a failure.
+
+## From Codex events to ACP updates
 
 | Codex event | ACP update |
 | --- | --- |
@@ -14,4 +19,21 @@ During `session/prompt`, the adapter streams:
 | usage | usage update |
 | account change | session metadata update |
 
-Raw diagnostics require `_codex/rawEvent` opt-in.
+Raw, unmapped rollout rows are never placed on the ACP wire; they are available
+only through the [`_codex/rawEvent`](/docs/features/raw-events) opt-in.
+
+## When a turn fails
+
+A turn that cannot complete resolves the `session/prompt` call with the uniform
+[`codex_turn_failed`](/docs/reference/updates#turn-failure) wire error rather
+than a partial success. The error's `cause` field classifies why:
+
+| `cause` | Meaning |
+| --- | --- |
+| `provider` | The model provider rejected or failed the turn (may carry `statusCode` / `providerCode`). |
+| `timeout` | The turn exceeded [`WithTurnTimeout`](/docs/core/sessions#turn-deadlines) and was aborted. |
+| `process_exit` | The Codex `app-server` process died mid-turn; the message names the exit status. |
+| `transport` | The app-server connection closed unexpectedly. |
+
+A `process_exit` or `transport` failure marks the session for lazy relaunch, so
+the next prompt starts a fresh Codex process on the same session.

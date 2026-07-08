@@ -3,6 +3,11 @@ title: "Metadata"
 description: "_meta.codex vocabulary."
 ---
 
+The adapter reserves the `_meta.codex` namespace for its extension vocabulary.
+This page lists what the adapter reads.
+
+## Session options
+
 Accepted session lifecycle metadata:
 
 ```json
@@ -27,6 +32,8 @@ Accepted session lifecycle metadata:
 }
 ```
 
+## Initialize capabilities
+
 Accepted initialize capability metadata under `_meta.codex`:
 
 | Key | Purpose |
@@ -36,6 +43,8 @@ Accepted initialize capability metadata under `_meta.codex`:
 | `rawEvent` | `_codex/rawEvent` notification opt-in details. |
 | `sessionStore` | Store format and key shape. |
 | `structuredOutput` | JSON Schema request and response paths. |
+
+## Rules
 
 Unknown keys in the adapter-owned namespace fail closed with invalid params.
 There is no command capability or command metadata under `_meta.codex`.

@@ -1,12 +1,18 @@
 ---
 title: "Raw Events"
-description: "Opt-in raw Codex event notifications."
+description: "Opt into raw Codex event notifications for debugging and observation."
 ---
 
-Raw events are emitted as extension notifications named `_codex/rawEvent`.
-They are disabled by default.
+Raw events expose the underlying Codex `app-server` rollout rows as ACP
+extension notifications. They are meant for debugging and deep observation of a
+session, and they are off unless a session opts in.
 
-Enable them for a session with metadata:
+## Enable raw events
+
+Raw events are emitted as the extension notification `_codex/rawEvent` and are
+disabled by default. Enable them per session.
+
+In session metadata:
 
 ```json
 {
@@ -20,7 +26,7 @@ Enable them for a session with metadata:
 }
 ```
 
-Embedded Go callers can use:
+From embedded Go:
 
 ```go
 req := codexacp.NewSessionRequest("/workspace/project",
@@ -28,6 +34,20 @@ req := codexacp.NewSessionRequest("/workspace/project",
 )
 ```
 
-Each notification includes `sessionId`, monotonic `sequence`, `source`, and an
-`event` object. Payloads are capped at 64 KiB; oversized payloads are replaced
-with a compact truncation marker.
+## Payload shape
+
+Each notification carries:
+
+| Field | Meaning |
+| --- | --- |
+| `sessionId` | The session the event belongs to. |
+| `sequence` | Monotonic per-session sequence number. |
+| `source` | Origin of the event. |
+| `event` | The raw Codex event object. |
+
+<Warning>
+  Raw events contain unredacted Codex rollout JSON. Payloads are capped at
+  64 KiB — oversized payloads are replaced with a compact truncation marker — but
+  the contents can still include prompt and tool data, so enable this only when
+  the host is prepared to receive and protect it.
+</Warning>

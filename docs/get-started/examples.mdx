@@ -3,6 +3,13 @@ title: "Examples"
 description: "Runnable examples included in the repository."
 ---
 
+The example programs live in this repository and run from a checkout of it, so
+clone it first:
+
+```sh
+git clone https://github.com/savid/acp-go-codex && cd acp-go-codex
+```
+
 ## Minimal Client
 
 ```sh
@@ -24,7 +31,7 @@ terminal.
 ## Resume From File
 
 ```sh
-go run ./examples/resume-from-file -session-file ./examples/resume-from-file/session.jsonl
+go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl
 ```
 
 This example seeds an in-process `SessionStore` with Codex rollout JSONL and

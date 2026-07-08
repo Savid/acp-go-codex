@@ -1,13 +1,30 @@
 ---
 title: "Elicitation"
-description: "Codex request_user_input handling."
+description: "Forward Codex user-input requests to ACP clients that support them."
 ---
 
-Codex server requests that require user input are forwarded to ACP elicitation
-only when the client advertised the required capability at initialize time.
+Some Codex server requests need free-form input from the user mid-turn. The
+adapter forwards these to the host as ACP elicitation requests — but only when
+the client is able to answer them.
 
-If the client did not advertise support, the adapter rejects the server request
-instead of attempting an unsupported client call.
+## When elicitation fires
 
-Raw diagnostics for these requests are available through `_codex/rawEvent` when
-the session opts in.
+During a turn, a Codex `app-server` request that requires user input is mapped
+onto an ACP elicitation call to the client. The client's response is passed back
+to Codex so the turn can continue.
+
+## Capability gating
+
+Elicitation is gated on the capability the client advertised at initialize:
+
+- If the client advertised elicitation support, the request is forwarded and the
+  client's answer is returned to Codex.
+- If the client did **not** advertise support, the adapter rejects the Codex
+  server request outright rather than issuing an unsupported client call.
+
+<Note>
+  Because elicitation is capability-gated, a client that omits the elicitation
+  capability will see affected Codex requests fail fast instead of hanging.
+  Raw diagnostics for these requests are available through
+  [`_codex/rawEvent`](/docs/features/raw-events) when the session opts in.
+</Note>

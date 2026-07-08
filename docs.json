@@ -21,9 +21,9 @@
             "icon": "rocket",
             "pages": [
               "docs/overview",
-              "docs/get-started/run-modes",
               "docs/get-started/quickstart",
               "docs/get-started/install",
+              "docs/get-started/run-modes",
               "docs/get-started/examples"
             ]
           },

@@ -1,16 +1,40 @@
 ---
 title: "Security"
-description: "Security boundaries for acp-go-codex."
+description: "Trust boundaries an operator controls, and how common failures surface."
 ---
 
-`-home` and `WithHome` choose the Codex home used by launched Codex processes.
-Use an adapter-owned directory when enabling logout.
+The adapter is a thin boundary between an ACP client and the local Codex CLI.
+The controls below decide how much of the operator's Codex install a client can
+reach, and how failures are surfaced.
 
-ACP logout is disabled by default. Enable it only with
-`-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`.
+## Home and account boundary
 
-The adapter accepts stdio and streamable HTTP MCP servers. Other MCP transports
-are rejected.
+`-home` and `WithHome` choose the `CODEX_HOME` used by launched Codex processes.
+Point it at an adapter-owned directory whenever you enable logout, so a client
+can never clear the credentials of the operator's normal Codex install.
 
-Raw events can contain Codex rollout JSON. Enable `_codex/rawEvent` only when
-the host is prepared to receive and protect that data.
+ACP logout is disabled by default and is refused unless the adapter is started
+with `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. See
+[Authentication](/docs/features/authentication) for the full flow.
+
+## MCP and raw-event data
+
+The adapter accepts only stdio and streamable-HTTP
+[MCP servers](/docs/features/mcp); any other transport is rejected with invalid
+params.
+
+[Raw events](/docs/features/raw-events) can contain unredacted Codex rollout
+JSON. Enable `_codex/rawEvent` only when the host is prepared to receive and
+protect that data. Telemetry never carries rollout rows, prompt text, or tool
+payloads by default; see [Observability](/docs/operations/observability) for the
+privacy defaults.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Session start fails with "codex CLI ... is too old; need >= 0.141.0" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
+| `session/prompt` fails with `codex_turn_failed` `cause: "timeout"` | The turn exceeded [`WithTurnTimeout`](/docs/core/sessions#turn-deadlines). Raise or clear the timeout; the session stays usable. |
+| `session/prompt` fails with authentication-required (`-32000`) | Codex credentials are missing or expired. Run `acp-go-codex login` or supply a token refresher. |
+| ACP logout is refused | Logout is gated. Start with `-codex-allow-account-logout` for an adapter-owned `CODEX_HOME`. |
+| `codex_turn_failed` `cause: "process_exit"` / `"transport"` | The Codex process or its connection dropped. The session relaunches lazily; retry the prompt. |

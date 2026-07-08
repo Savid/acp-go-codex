@@ -3,6 +3,17 @@ title: "Go API"
 description: "Public Go API for embedding acp-go-codex."
 ---
 
+The full, authoritative API — every type, signature, and doc comment — is
+indexed on
+[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-codex). This page is a
+map of the surface, not a copy of the godoc.
+
+## Serve and embed
+
+`Serve` runs the ACP agent on caller-owned streams; `NewAgent` builds the agent
+for hosts that drive the ACP connection themselves. Both take the process
+options below.
+
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
     codexacp.WithExecutablePath("/usr/local/bin/codex"),
@@ -12,19 +23,27 @@ err := codexacp.Serve(ctx, stdin, stdout,
 )
 ```
 
-Agent options include:
+## Agent options
 
 | Option | Purpose |
 | --- | --- |
-| `WithExecutablePath(path)` | Codex CLI executable path. |
+| `WithExecutablePath(path)` | Codex CLI executable path (defaults to `codex` on `PATH`). |
 | `WithHome(path)` | `CODEX_HOME` for launched Codex processes. |
-| `WithDefaultModel(model)` | Default model preference. |
+| `WithDefaultModel(model)` | Default model preference for new sessions. |
+| `WithEnv(env)` | Environment variables merged into launched Codex processes. |
+| `WithLogger(logger)` | `*slog.Logger` for structured adapter diagnostics. |
 | `WithSessionStore(store)` | Durable Codex rollout JSONL store. |
-| `WithConcurrencyLimits(limits)` | Bounds sessions, prompts, and client calls. |
+| `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |
+| `WithConcurrencyLimits(limits)` | Bounds active sessions, prompts, and client calls. |
+| `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
 | `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk. |
-| `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh. |
-| `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout. |
+| `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh callback. |
+| `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout to mutate adapter-owned Codex auth. |
+| `WithAgentName(name)` | Protocol identifier advertised at initialize. |
+| `WithAgentTitle(title)` | Human-readable agent name advertised at initialize. |
+| `WithAgentVersion(version)` | Agent version advertised at initialize. |
+| `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | Caller-owned OpenTelemetry providers (see [Observability](/docs/operations/observability)). |
 
 `WithSeedFiles` writes config files into the resolved `CODEX_HOME` before each
 Codex process launches, so Codex reads them as its own config. Paths are
@@ -57,7 +76,7 @@ err := codexacp.Serve(ctx, stdin, stdout,
 )
 ```
 
-Session helpers:
+## Session helpers
 
 | Helper | Purpose |
 | --- | --- |
@@ -66,11 +85,14 @@ Session helpers:
 | `ResumeSessionRequest` | Build `session/resume`. |
 | `ForkSessionRequest` | Build `_codex/session/fork` params. |
 | `CallForkSession` | Call `_codex/session/fork`. |
+| `StdioMCPServer` | Construct a stdio MCP server. |
+| `HTTPMCPServer` | Construct a streamable-HTTP MCP server. |
+| `WithSessionMCPServers` | Attach MCP servers to a session. |
 | `WithSessionRawEvents` | Enable `_codex/rawEvent`. |
 | `WithSessionOutputSchema` | Configure structured output. |
 | `WithSessionCodexOptions` | Merge `_meta.codex.options`. |
 
-Store constants:
+## Store constants
 
 ```go
 const SessionStoreFormat = "codex-rollout-jsonl-v1"

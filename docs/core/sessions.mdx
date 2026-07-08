@@ -1,16 +1,57 @@
 ---
 title: "Sessions"
-description: "ACP session lifecycle behavior."
+description: "How ACP sessions map onto Codex threads, turns, and rollout state."
 ---
 
-`session/new` starts a Codex thread. `session/prompt` starts a Codex turn and
-streams ACP updates until Codex completes, cancels, or errors.
+An ACP session is a thin handle over a Codex thread. The adapter owns the
+mapping in both directions: ACP session methods drive Codex thread and turn
+operations, and Codex thread state is what a session resolves back to when a
+host reconnects.
 
-`session/load` and `session/resume` first check active sessions, then the
-configured `SessionStore`, then native Codex thread state.
+## Session lifecycle
 
-`session/delete` writes a store tombstone first, closes any active session, and
-hides the session from list, load, and resume.
+`session/new` starts a Codex thread rooted at an absolute `cwd`. `session/prompt`
+starts a Codex turn on that thread and streams
+[ACP updates](/docs/core/prompt-streaming) until Codex completes, the turn is
+cancelled, or it fails. `session/cancel` aborts the in-flight turn; `session/close`
+releases the session and the Codex process backing it.
 
-Forking is a Codex extension method named `_codex/session/fork`; the stable ACP
-`session/fork` method is not routed.
+Codex `app-server` processes are launched on demand and are owned by the
+adapter. A process that dies mid-turn is marked for lazy relaunch, so the
+session stays addressable and the next prompt starts a fresh process rather
+than surfacing a dead handle.
+
+## Load, resume, and fork
+
+`session/load` and `session/resume` resolve a session in a fixed order: active
+in-memory sessions first, then the configured
+[`SessionStore`](/docs/features/session-store), then native Codex thread state.
+This lets a host restore a session whose local Codex thread state is gone as
+long as the rollout rows were mirrored to a store.
+
+Forking is exposed as the Codex extension method `_codex/session/fork`; the
+stable ACP `session/fork` method is intentionally not routed. See
+[ACP methods](/docs/reference/acp-methods) for the full routing table.
+
+## Turn deadlines
+
+By default a prompt turn runs without an adapter-imposed deadline. Set
+`WithTurnTimeout` (a process option) to bound a single `session/prompt`. When a
+turn exceeds the deadline the native Codex turn is aborted and `session/prompt`
+fails with the [`codex_turn_failed`](/docs/reference/updates#turn-failure)
+error carrying `cause: "timeout"`. The default of `0` disables the deadline.
+
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+    codexacp.WithTurnTimeout(2*time.Minute),
+)
+```
+
+The timeout bounds one turn, not the session: the session remains usable and
+the host can send another prompt after a timed-out turn returns.
+
+## Deletion
+
+`session/delete` writes a store tombstone first, then closes any active session,
+and hides the session from list, load, and resume. Deleting the main subpath
+cascades to every subpath of that session.

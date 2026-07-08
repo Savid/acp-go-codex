@@ -3,11 +3,15 @@ title: "Install"
 description: "Install the ACP adapter and point it at Codex CLI."
 ---
 
+## Install the CLI
+
+Install the standalone ACP agent binary:
+
 ```sh
 go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
 ```
 
-For embedded use:
+For embedded use, add the package to your module:
 
 ```sh
 go get github.com/savid/acp-go-codex
@@ -20,15 +24,30 @@ err := codexacp.Serve(ctx, stdin, stdout,
 )
 ```
 
-Use `-path` or `WithExecutablePath` to select a Codex executable. Use `-home`
-or `WithHome` to set `CODEX_HOME` for launched Codex processes.
+## Point at Codex
 
-Login helpers delegate to Codex:
+The adapter launches the local `codex` CLI on demand. Select which executable
+and home it uses:
+
+| Setting | CLI flag | Go option |
+| --- | --- | --- |
+| Codex executable | `-path` | `WithExecutablePath` |
+| Codex home (`CODEX_HOME`) | `-home` | `WithHome` |
+
+When `-path` is unset the adapter resolves `codex` from `PATH`. When `-home` is
+unset each launched Codex process uses the operator's default Codex home.
+
+## Authenticate
+
+Authentication is owned by Codex, not the adapter. Log in through the terminal
+helpers, which delegate to `codex`:
 
 ```sh
 acp-go-codex login -device-auth
 acp-go-codex logout
 ```
 
-ACP logout is disabled unless the adapter is started with
-`-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`.
+ACP logout is refused unless the adapter is started with
+`-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`, so a
+misbehaving client can never clear the credentials of an operator-owned Codex
+home. See [Authentication](/docs/features/authentication) for the full flow.

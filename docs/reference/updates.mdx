@@ -1,10 +1,43 @@
 ---
 title: "Updates"
-description: "Codex events mapped to ACP updates."
+description: "The ACP session updates and turn-failure error the adapter emits."
 ---
 
-Codex app-server events are mapped to ACP session updates for agent messages,
-reasoning, plans, tool calls, diffs, usage, and account metadata.
+During a prompt turn the adapter emits ACP `session/update` notifications and,
+on completion, resolves `session/prompt` with either a result or a failure
+error. For the mental model behind the mapping, see
+[Prompt streaming](/docs/core/prompt-streaming).
 
-Raw rollout rows are emitted only through `_codex/rawEvent` when a session opts
-in with `_meta.codex.rawEvent.enabled`.
+## Session updates
+
+Codex `app-server` events are mapped to ACP session updates:
+
+| Update category | Source |
+| --- | --- |
+| `agent_message_chunk` | assistant text |
+| `agent_thought_chunk` | reasoning text |
+| `plan` | plan changes |
+| tool call updates | tool start / output / complete, including diffs |
+| usage update | usage events |
+| session metadata update | account changes |
+
+Raw, unmapped rollout rows are emitted only through
+[`_codex/rawEvent`](/docs/features/raw-events) when a session opts in with
+`_meta.codex.rawEvent.enabled`.
+
+## Turn failure
+
+A turn that cannot complete resolves `session/prompt` with a JSON-RPC internal
+error (code `-32603`) whose `data` object carries the uniform
+`codex_turn_failed` contract:
+
+| Field | Description |
+| --- | --- |
+| `error` | Always `codex_turn_failed`. |
+| `cause` | One of `provider`, `timeout`, `process_exit`, `transport`. |
+| `message` | Human-readable failure detail. |
+| `statusCode` | Provider HTTP status, when the cause is `provider`. |
+| `providerCode` | Provider error code, when present. |
+
+An auth failure instead resolves with the ACP authentication-required error
+(code `-32000`) rather than `codex_turn_failed`.

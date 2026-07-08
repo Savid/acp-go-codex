@@ -7,6 +7,10 @@ description: "acp-go-codex command-line reference."
 acp-go-codex [flags]
 ```
 
+Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
+
+## Serve flags
+
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-path` | `codex` on `PATH` | Codex CLI executable path. |
@@ -17,6 +21,8 @@ acp-go-codex [flags]
 | `-codex-allow-account-logout` | `false` | Permit ACP logout to call Codex logout. |
 | `-seed-file` | unset | Seed file as `<relpath>=<hostpath>`, repeatable. Host file contents are written under `CODEX_HOME` before codex launches. Requires `-home`. |
 | `-config` | unset | Codex config override as `<key>=<value>`, repeatable. Passed to `codex app-server` as `-c key=value`; dotted keys set nested config and nothing is written to disk. |
+
+## Codex config
 
 Override Codex config directly on the app-server (repeat `-config` per key).
 Dotted keys set nested config, string values are TOML-quoted automatically, and
@@ -37,7 +43,9 @@ Seed Codex config from host files (repeat `-seed-file` per file). Each host
 file's contents are written to the relative path under `CODEX_HOME`, so requires
 an explicit `-home`.
 
-Login helpers:
+## Subcommands
+
+Login helpers delegate to the Codex CLI:
 
 ```sh
 acp-go-codex login [-path PATH] [-home DIR] [-device-auth]

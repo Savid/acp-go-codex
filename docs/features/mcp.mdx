@@ -1,27 +1,46 @@
 ---
 title: "MCP"
-description: "MCP server configuration supported by Codex."
+description: "Attach MCP servers to a session and set their tool trust level."
 ---
 
-`acp-go-codex` accepts stdio and streamable HTTP MCP servers and converts them
-to Codex app-server configuration.
+The adapter accepts MCP servers on a session and converts them into `codex
+app-server` MCP configuration. Two transports are supported: stdio and
+streamable HTTP.
+
+## Configure MCP servers
+
+Attach one or more servers when you build the session request. Use
+`StdioMCPServer` for a locally launched process and `HTTPMCPServer` for a
+streamable-HTTP endpoint:
 
 ```go
 req := codexacp.NewSessionRequest("/workspace/project",
-    codexacp.WithSessionMCPServers(codexacp.StdioMCPServer(
-        "tools",
-        "node",
-        []string{"server.js"},
-        nil,
-    )),
+    codexacp.WithSessionMCPServers(
+        codexacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
+        codexacp.HTTPMCPServer("remote", "https://mcp.example/v1", map[string]string{
+            "Authorization": "Bearer token",
+        }),
+    ),
     codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
         codexacp.WithCodexMCPToolApprovalMode("approve"),
     )),
 )
 ```
 
-`mcpToolApprovalMode` accepts `auto`, `prompt`, or `approve` and applies to all
-configured MCP servers for that session.
+| Constructor | Transport | Arguments |
+| --- | --- | --- |
+| `StdioMCPServer` | stdio | name, command, args, env |
+| `HTTPMCPServer` | streamable HTTP | name, url, headers |
 
-MCP transports other than stdio and streamable HTTP are rejected with invalid
-params.
+## Tool approval
+
+`mcpToolApprovalMode` sets the trust level applied to every MCP server in the
+session. It accepts exactly `auto`, `prompt`, or `approve`, and maps to Codex's
+`default_tools_approval_mode` config for each server — Codex owns what each value
+does. Any other value is rejected with invalid params.
+
+<Note>
+  MCP server names must be non-empty, unique, and non-whitespace, and only stdio
+  and streamable-HTTP transports are accepted. Any other transport is rejected
+  with an invalid-params error at session start.
+</Note>

@@ -1,7 +1,6 @@
 ---
 title: "Overview"
 description: "ACP agent for Codex CLI, written in Go and backed by the local Codex app-server"
-icon: "sparkles"
 ---
 
 `acp-go-codex` exposes the local `codex` CLI as an
@@ -14,6 +13,20 @@ callbacks into Codex app-server requests, and streams
 
 Use it when you want a Codex agent that speaks ACP while keeping Codex protocol
 details behind a small Go adapter boundary.
+
+## What it owns
+
+The adapter owns the ACP surface and the lifecycle of the Codex processes it
+launches: it translates ACP methods into `codex app-server` requests, streams
+the resulting events back as ACP updates, and bridges client callbacks
+(permissions, elicitation, MCP) across the boundary. It does **not** own Codex
+itself — authentication, model availability, MCP behavior, native telemetry,
+and rollout persistence are governed by the installed `codex` CLI version and
+the user's Codex configuration. Codex protocol details stay inside the adapter
+and never leak onto the ACP wire except through the documented `_codex/*`
+extension namespace.
+
+## Where to go next
 
 <CardGroup cols={2}>
   <Card title="Two integration modes" icon="route" href="/docs/get-started/run-modes">

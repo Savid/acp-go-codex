@@ -1,9 +1,15 @@
 ---
 title: "Authentication"
-description: "Codex login, external ChatGPT tokens, and logout."
+description: "Log in through Codex, refresh external ChatGPT tokens, and gate logout."
 ---
 
-Terminal login helpers:
+Authentication is owned by the Codex CLI. The adapter never manages Codex
+credentials on its own — it advertises the auth methods a client can use and,
+optionally, refreshes external ChatGPT tokens on the app-server's behalf.
+
+## Terminal login
+
+The `login` and `logout` subcommands delegate to `codex`:
 
 ```sh
 acp-go-codex login
@@ -11,11 +17,14 @@ acp-go-codex login -device-auth
 acp-go-codex logout
 ```
 
-During ACP initialize, terminal auth is advertised only when the client
-declares terminal auth support. Agent auth always advertises the stable method
-`codex-chatgpt-auth-tokens`.
+During ACP initialize, the terminal auth method is advertised only when the
+client declares terminal auth support. The agent auth method
+`codex-chatgpt-auth-tokens` is always advertised.
 
-Embedded token refresh:
+## Embedded token refresh
+
+An embedded host can supply external ChatGPT tokens on demand, so the
+app-server refreshes auth without a terminal login:
 
 ```go
 agent := codexacp.NewAgent(
@@ -25,5 +34,12 @@ agent := codexacp.NewAgent(
 )
 ```
 
-ACP logout is disabled unless explicitly enabled with
-`WithCodexAllowAccountLogout(true)` or `-codex-allow-account-logout`.
+## Logout boundary
+
+<Warning>
+  ACP logout is refused unless the adapter is started with
+  `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. Enable it
+  only for an adapter-owned `CODEX_HOME`; otherwise a client could clear the
+  credentials of the operator's normal Codex install. When enabled, ACP logout
+  clears only adapter-owned session state and the Codex account.
+</Warning>

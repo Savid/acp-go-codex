@@ -1,10 +1,38 @@
 ---
 title: "Session Store"
-description: "Durable Codex rollout JSONL storage."
+description: "Mirror Codex rollout rows so sessions survive loss of local thread state."
 ---
 
-`SessionStore` lets a host mirror Codex rollout rows and later load or resume a
-session when local Codex thread state is absent.
+A `SessionStore` lets a host mirror Codex rollout rows to durable storage and
+later [load or resume](/docs/core/sessions#load-resume-and-fork) a session even
+when the local Codex thread state is gone. Without a store, sessions live only
+as long as their native Codex thread.
+
+## When to wire a store
+
+Provide a store when sessions must outlive a single process or move between
+hosts — for example a remote service that restores a user's session on a fresh
+machine. If you leave it unset, the adapter uses an in-process store and
+restore is limited to native Codex thread state.
+
+## Host wiring
+
+Pass your implementation with `WithSessionStore`, and optionally bound
+store-backed load and list operations with `WithSessionStoreLoadTimeout`:
+
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+    codexacp.WithSessionStore(store),
+    codexacp.WithSessionStoreLoadTimeout(15*time.Second),
+)
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `WithSessionStore` | in-process store | Durable mirror of Codex rollout JSONL rows. |
+| `WithSessionStoreLoadTimeout` | `10s` | Deadline for store-backed load and list operations; values ≤ 0 use the default. |
+
+## The interface
 
 ```go
 const SessionStoreMainSubpath = ""
@@ -14,11 +42,7 @@ type SessionKey struct {
     SessionID string
     Subpath   string
 }
-```
 
-The store API is:
-
-```go
 type SessionStore interface {
     Append(context.Context, SessionKey, []SessionStoreEntry) error
     Load(context.Context, SessionKey) ([]SessionStoreEntry, error)
@@ -29,8 +53,13 @@ type SessionStore interface {
 }
 ```
 
-`Replace` writes one complete committed generation for a session. The main key
-must be present exactly once, and unlisted subpaths are hidden atomically.
+Rows are stored in the `codex-rollout-jsonl-v1` format. The main session lives
+at the empty subpath (`SessionStoreMainSubpath`); additional subpaths hold
+related generations.
 
-`Delete` writes a tombstone first. Deleting the main subpath cascades to all
-subpaths and hides the session from list, load, and resume.
+## Generations and deletion
+
+`Replace` writes one complete committed generation for a session: the main key
+must be present exactly once, and unlisted subpaths are hidden atomically.
+`Delete` writes a tombstone first; deleting the main subpath cascades to every
+subpath and hides the session from list, load, and resume.
