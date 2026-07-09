@@ -25,6 +25,12 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 		}
 
 		return a.forkSession(ctx, req)
+	case RateLimitsMethod:
+		if err := decodeRateLimitsParams(params); err != nil {
+			return nil, err
+		}
+
+		return a.rateLimits(ctx), nil
 	default:
 		return nil, acp.NewMethodNotFound(method)
 	}

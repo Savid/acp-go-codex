@@ -85,6 +85,9 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `ResumeSessionRequest` | Build `session/resume`. |
 | `ForkSessionRequest` | Build `_codex/session/fork` params. |
 | `CallForkSession` | Call `_codex/session/fork`. |
+| `RateLimitsMethod` | Method name for `_codex/rateLimits`. |
+| `RateLimitsResponse` | Decode the `_codex/rateLimits` reply (`Windows`, `PlanType`). |
+| `RateLimitWindow` | One rate-limit window (`ID`, `UsedPercent`, `ResetsAt`). |
 | `StdioMCPServer` | Construct a stdio MCP server. |
 | `HTTPMCPServer` | Construct a streamable-HTTP MCP server. |
 | `WithSessionMCPServers` | Attach MCP servers to a session. |

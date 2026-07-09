@@ -12,27 +12,28 @@ import (
 )
 
 const (
-	methodInitialize        = "initialize"
-	methodInitialized       = "initialized"
-	methodThreadStart       = "thread/start"
-	methodThreadResume      = "thread/resume"
-	methodThreadFork        = "thread/fork"
-	methodThreadList        = "thread/list"
-	methodThreadRead        = "thread/read"
-	methodThreadTurnsList   = "thread/turns/list"
-	methodThreadDelete      = "thread/delete"
-	methodThreadUnsubscribe = "thread/unsubscribe"
-	methodThreadCompact     = "thread/compact/start"
-	methodTurnStart         = "turn/start"
-	methodTurnSteer         = "turn/steer"
-	methodTurnInterrupt     = "turn/interrupt"
-	methodReviewStart       = "review/start"
-	methodCollaborationList = "collaborationMode/list"
-	methodMCPStatusList     = "mcpServerStatus/list"
-	methodModelList         = "model/list"
-	methodAccountRead       = "account/read"
-	methodAccountLoginStart = "account/login/start"
-	methodAccountLogout     = "account/logout"
+	methodInitialize            = "initialize"
+	methodInitialized           = "initialized"
+	methodThreadStart           = "thread/start"
+	methodThreadResume          = "thread/resume"
+	methodThreadFork            = "thread/fork"
+	methodThreadList            = "thread/list"
+	methodThreadRead            = "thread/read"
+	methodThreadTurnsList       = "thread/turns/list"
+	methodThreadDelete          = "thread/delete"
+	methodThreadUnsubscribe     = "thread/unsubscribe"
+	methodThreadCompact         = "thread/compact/start"
+	methodTurnStart             = "turn/start"
+	methodTurnSteer             = "turn/steer"
+	methodTurnInterrupt         = "turn/interrupt"
+	methodReviewStart           = "review/start"
+	methodCollaborationList     = "collaborationMode/list"
+	methodMCPStatusList         = "mcpServerStatus/list"
+	methodModelList             = "model/list"
+	methodAccountRead           = "account/read"
+	methodAccountLoginStart     = "account/login/start"
+	methodAccountLogout         = "account/logout"
+	methodAccountRateLimitsRead = "account/rateLimits/read"
 )
 
 const (
@@ -51,6 +52,7 @@ const (
 	notifyItemCompleted         = "item/completed"
 	notifyTurnCompleted         = "turn/completed"
 	notifyAccountUpdated        = "account/updated"
+	notifyRateLimitsUpdated     = "account/rateLimits/updated"
 
 	itemTypeAgentMessage     = "agentMessage"
 	itemTypeUserMessage      = "userMessage"
@@ -67,10 +69,11 @@ const (
 )
 
 type AppServerClient struct {
-	options    Options
-	rpc        *rpcConn
-	cmd        *exec.Cmd
-	procCancel context.CancelFunc
+	options       Options
+	rpc           *rpcConn
+	cmd           *exec.Cmd
+	procCancel    context.CancelFunc
+	nativeVersion string
 
 	eventPumpOnce sync.Once
 	eventDone     chan struct{}
@@ -111,7 +114,7 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 	// (version check and initialize) below.
 	procCtx, procCancel := context.WithCancel(context.Background())
 
-	transport, cmd, err := launchAppServer(launchCtx, procCtx, options)
+	transport, cmd, version, err := launchAppServer(launchCtx, procCtx, options)
 	if err != nil {
 		procCancel()
 
@@ -119,10 +122,11 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 	}
 
 	client := &AppServerClient{
-		options:    options,
-		rpc:        newRPCConn(transport, options.RequestHandler),
-		cmd:        cmd,
-		procCancel: procCancel,
+		options:       options,
+		rpc:           newRPCConn(transport, options.RequestHandler),
+		cmd:           cmd,
+		procCancel:    procCancel,
+		nativeVersion: version,
 	}
 	client.ensureEventPump()
 
@@ -467,6 +471,25 @@ func (c *AppServerClient) AccountRead(ctx context.Context) (Account, error) {
 	return account, nil
 }
 
+// RateLimitsSupported reports whether the probed native codex version exposes
+// the account/rateLimits/read request. Older app-servers never carried it, so
+// the fresh-query path is skipped and callers fall back to the cached snapshot.
+func (c *AppServerClient) RateLimitsSupported() bool {
+	return compareSemver(c.nativeVersion, rateLimitsMinVersion) >= 0
+}
+
+// ReadRateLimits performs a fresh account/rateLimits/read request and decodes
+// the returned snapshot. An absent snapshot is not an error: it decodes to an
+// empty snapshot whose HasData reports false.
+func (c *AppServerClient) ReadRateLimits(ctx context.Context) (RateLimitSnapshot, error) {
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodAccountRateLimitsRead, map[string]any{}, &resp); err != nil {
+		return RateLimitSnapshot{}, err
+	}
+
+	return rateLimitSnapshotFromMap(rateLimitSnapshotPayload(resp)), nil
+}
+
 func (c *AppServerClient) LoginWithChatGPTTokens(ctx context.Context, tokens ChatGPTAuthTokens) error {
 	params := map[string]any{
 		fieldType:             "chatgptAuthTokens",
@@ -551,9 +574,14 @@ func (c *AppServerClient) runEventPump(done chan<- struct{}) {
 }
 
 func (c *AppServerClient) dispatchEvent(event Event) {
-	if event.Kind == EventAccountUpdated {
+	switch event.Kind {
+	case EventAccountUpdated:
 		c.setAccount(event.Account)
 
+		if c.options.EventHandler != nil {
+			c.options.EventHandler(context.Background(), event)
+		}
+	case EventRateLimitsUpdated:
 		if c.options.EventHandler != nil {
 			c.options.EventHandler(context.Background(), event)
 		}
@@ -858,6 +886,10 @@ func eventFromRPC(raw rpcEvent) Event {
 	case notifyAccountUpdated:
 		event.Kind = EventAccountUpdated
 		event.Account = accountFromResponse(params)
+	case notifyRateLimitsUpdated:
+		event.Kind = EventRateLimitsUpdated
+		snapshot := rateLimitSnapshotFromMap(rateLimitSnapshotPayload(params))
+		event.RateLimits = &snapshot
 	case "warning", "guardianWarning", "deprecationNotice", "configWarning":
 		event.Kind = EventWarning
 		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"))
@@ -1282,6 +1314,23 @@ func int64Value(values map[string]any, key string) int64 {
 		return value
 	case int:
 		return int64(value)
+	default:
+		return 0
+	}
+}
+
+func float64Value(values map[string]any, key string) float64 {
+	if values == nil {
+		return 0
+	}
+
+	switch value := values[key].(type) {
+	case float64:
+		return value
+	case int64:
+		return float64(value)
+	case int:
+		return float64(value)
 	default:
 		return 0
 	}

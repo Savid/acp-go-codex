@@ -503,6 +503,11 @@ type spyCodexClient struct {
 	login          codex.ChatGPTAuthTokens
 	unsubscribed   []string
 	deletedThreads []string
+
+	rateLimitsSupported bool
+	rateLimits          codex.RateLimitSnapshot
+	rateLimitsErr       error
+	rateLimitsReads     int
 }
 
 func newSpyCodexClient() *spyCodexClient {
@@ -651,6 +656,25 @@ func (c *spyCodexClient) ModelList(context.Context) ([]codex.Model, error) {
 
 func (c *spyCodexClient) AccountRead(context.Context) (codex.Account, error) {
 	return codex.Account{ID: "acct", Email: "user@example.com", PlanType: "plus", Raw: map[string]any{"accessToken": "secret"}}, nil
+}
+
+func (c *spyCodexClient) RateLimitsSupported() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.rateLimitsSupported
+}
+
+func (c *spyCodexClient) ReadRateLimits(context.Context) (codex.RateLimitSnapshot, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.rateLimitsReads++
+	if c.rateLimitsErr != nil {
+		return codex.RateLimitSnapshot{}, c.rateLimitsErr
+	}
+
+	return c.rateLimits, nil
 }
 
 func (c *spyCodexClient) LoginWithChatGPTTokens(_ context.Context, tokens codex.ChatGPTAuthTokens) error {

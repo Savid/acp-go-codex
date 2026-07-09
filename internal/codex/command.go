@@ -27,14 +27,15 @@ var processCloseGrace = 2 * time.Second
 // the version check, while procCtx governs the lifetime of the spawned process
 // (see NewAppServerClient): binding the process to procCtx prevents
 // exec.CommandContext from SIGKILLing codex when the launching request returns.
-func launchAppServer(ctx context.Context, procCtx context.Context, options Options) (*lineTransport, *exec.Cmd, error) {
+func launchAppServer(ctx context.Context, procCtx context.Context, options Options) (*lineTransport, *exec.Cmd, string, error) {
 	path, err := resolveCodexPath(options.CLIPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
-	if versionErr := validateCodexVersion(ctx, path); versionErr != nil {
-		return nil, nil, versionErr
+	version, versionErr := validateCodexVersion(ctx, path)
+	if versionErr != nil {
+		return nil, nil, "", versionErr
 	}
 
 	cmd := execCommandContext(procCtx, path, appServerArgs(options)...)
@@ -42,14 +43,14 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	stderr := codexStderrWriter(options.Logger)
@@ -59,12 +60,12 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		_ = stdin.Close()
 		_ = stdout.Close()
 
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}
 
-	return newLineTransport(stdout, stdin, proc), cmd, nil
+	return newLineTransport(stdout, stdin, proc), cmd, version, nil
 }
 
 // appServerArgs builds the codex app-server argument list: the base launch
@@ -154,24 +155,24 @@ func resolveCodexPath(path string) (string, error) {
 	return resolved, nil
 }
 
-func validateCodexVersion(ctx context.Context, path string) error {
+func validateCodexVersion(ctx context.Context, path string) (string, error) {
 	cmd := execCommandContext(ctx, path, "--version")
 
 	output, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("check codex CLI version: %w", err)
+		return "", fmt.Errorf("check codex CLI version: %w", err)
 	}
 
 	version := parseCodexVersion(string(output))
 	if version == "" {
-		return fmt.Errorf("check codex CLI version: could not parse %q", strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("check codex CLI version: could not parse %q", strings.TrimSpace(string(output)))
 	}
 
 	if compareSemver(version, minCodexVersion) < 0 {
-		return fmt.Errorf("codex CLI %s is too old; need >= %s", version, minCodexVersion)
+		return "", fmt.Errorf("codex CLI %s is too old; need >= %s", version, minCodexVersion)
 	}
 
-	return nil
+	return version, nil
 }
 
 var codexVersionRE = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)

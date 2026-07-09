@@ -115,6 +115,9 @@ type Agent struct {
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
+
+	rateLimitsMu   sync.Mutex
+	rateLimitsSnap *codex.RateLimitSnapshot
 }
 
 type codexClientEventSink struct {
@@ -406,7 +409,7 @@ func (a *Agent) codexConfig() map[string]any {
 
 func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	switch event.Kind {
-	case codex.EventAccountUpdated:
+	case codex.EventAccountUpdated, codex.EventRateLimitsUpdated:
 	default:
 		return
 	}
@@ -438,9 +441,40 @@ func (s *codexClientEventSink) SetClient(client codex.Client) {
 }
 
 func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, event codex.Event) {
-	if event.Kind == codex.EventAccountUpdated {
+	switch event.Kind {
+	case codex.EventAccountUpdated:
 		a.updateAccountForClient(client, event.ThreadID, event.Account)
+	case codex.EventRateLimitsUpdated:
+		if event.RateLimits != nil {
+			a.cacheRateLimits(*event.RateLimits)
+		}
 	}
+}
+
+// cacheRateLimits records the latest harness-reported rate-limit snapshot.
+// The cache is agent-level and latest-wins across every session: any newer
+// snapshot from any client replaces the previous one.
+func (a *Agent) cacheRateLimits(snapshot codex.RateLimitSnapshot) {
+	if !snapshot.HasData() {
+		return
+	}
+
+	a.rateLimitsMu.Lock()
+	defer a.rateLimitsMu.Unlock()
+
+	a.rateLimitsSnap = &snapshot
+}
+
+// cachedRateLimits returns the latest cached snapshot, if any.
+func (a *Agent) cachedRateLimits() (codex.RateLimitSnapshot, bool) {
+	a.rateLimitsMu.Lock()
+	defer a.rateLimitsMu.Unlock()
+
+	if a.rateLimitsSnap == nil {
+		return codex.RateLimitSnapshot{}, false
+	}
+
+	return *a.rateLimitsSnap, true
 }
 
 func (a *Agent) updateAccountForClient(client codex.Client, threadID string, account codex.Account) {

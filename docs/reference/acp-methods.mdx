@@ -1,9 +1,9 @@
 ---
 title: "ACP Methods"
-description: "The ACP methods the adapter routes and the two namespaced Codex extensions it adds."
+description: "The ACP methods the adapter routes and the namespaced Codex extensions it adds."
 ---
 
-The adapter routes the standard ACP method set and adds two namespaced
+The adapter routes the standard ACP method set and adds namespaced
 `_codex/*` extensions. This page lists each method and its behavior.
 
 ## Supported methods
@@ -28,10 +28,43 @@ Codex extension methods live under the `_codex/*` namespace:
 | Method | Status |
 | --- | --- |
 | `_codex/session/fork` | implemented through `HandleExtensionMethod` |
+| `_codex/rateLimits` | implemented through `HandleExtensionMethod` |
 | `_codex/rawEvent` | notification only |
 
 Unsupported or removed methods return method-not-found uniformly. `session/fork`
 and `session/set_mode` are intentionally not routed.
+
+### `_codex/rateLimits`
+
+`_codex/rateLimits` reports the harness's subscription rate-limit usage. It is an
+agent-level request: the params are an empty object (`{}`) and carry no
+`sessionId`. A malformed params value that does not decode as an object is
+rejected with invalid-params.
+
+The response reports only harness-supplied values — nothing is derived from token
+counts or fabricated:
+
+```json
+{
+  "windows": [
+    { "id": "primary", "usedPercent": 42, "resetsAt": "2026-07-09T18:00:00Z" },
+    { "id": "secondary", "usedPercent": 12 }
+  ],
+  "planType": "pro"
+}
+```
+
+`windows` is always present, and is an empty array when the harness has reported
+no usage. Each window `id` is codex-native (`primary` or `secondary`),
+`usedPercent` is passed through in the range 0-100, and `resetsAt` is an RFC3339
+instant included only when the harness supplies one. `planType` is included only
+when reported.
+
+The adapter resolves the view from harness data in order: a fresh
+`account/rateLimits/read` query against a live session whose native codex version
+supports it (0.142.0 or newer); otherwise the latest snapshot seen on the
+app-server rate-limit update stream (cached agent-level, latest-wins); otherwise
+an empty window set. Absence is never an error.
 
 ## Slash commands
 

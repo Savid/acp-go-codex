@@ -109,15 +109,19 @@ func TestValidateCodexVersion(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho codex-cli 0.141.0\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
-	if err := validateCodexVersion(context.Background(), script); err != nil {
+	version, err := validateCodexVersion(context.Background(), script)
+	if err != nil {
 		t.Fatalf("validateCodexVersion returned error: %v", err)
+	}
+	if version != "0.141.0" {
+		t.Fatalf("validateCodexVersion returned %q, want 0.141.0", version)
 	}
 
 	old := filepath.Join(t.TempDir(), "codex-old")
 	if err := os.WriteFile(old, []byte("#!/bin/sh\necho codex-cli 0.1.0\n"), 0o700); err != nil {
 		t.Fatalf("write old script: %v", err)
 	}
-	if err := validateCodexVersion(context.Background(), old); err == nil {
+	if _, err := validateCodexVersion(context.Background(), old); err == nil {
 		t.Fatal("old codex version succeeded")
 	}
 
@@ -125,7 +129,7 @@ func TestValidateCodexVersion(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("#!/bin/sh\necho nope\n"), 0o700); err != nil {
 		t.Fatalf("write bad script: %v", err)
 	}
-	if err := validateCodexVersion(context.Background(), bad); err == nil {
+	if _, err := validateCodexVersion(context.Background(), bad); err == nil {
 		t.Fatal("bad codex version output succeeded")
 	}
 
@@ -133,7 +137,7 @@ func TestValidateCodexVersion(t *testing.T) {
 	if err := os.WriteFile(fail, []byte("#!/bin/sh\nexit 9\n"), 0o700); err != nil {
 		t.Fatalf("write failing script: %v", err)
 	}
-	if err := validateCodexVersion(context.Background(), fail); err == nil {
+	if _, err := validateCodexVersion(context.Background(), fail); err == nil {
 		t.Fatal("failing codex version command succeeded")
 	}
 }
@@ -229,7 +233,7 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return cmd
 	}
-	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored StdinPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
@@ -241,7 +245,7 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return cmd
 	}
-	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored StdoutPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
@@ -251,18 +255,18 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return exec.Command(filepath.Join(t.TempDir(), "missing"))
 	}
-	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored start error")
 	}
 	execCommandContext = func(context.Context, string, ...string) *exec.Cmd {
 		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.1.0")
 	}
-	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
 		t.Fatal("launchAppServer ignored version error")
 	}
 	execCommandContext = origExec
 	t.Setenv("PATH", t.TempDir())
-	if _, _, err := launchAppServer(context.Background(), context.Background(), Options{}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{}); err == nil {
 		t.Fatal("launchAppServer ignored missing codex path")
 	}
 }

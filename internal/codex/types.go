@@ -24,6 +24,8 @@ type Client interface {
 	UnsubscribeThread(context.Context, string) error
 	ModelList(context.Context) ([]Model, error)
 	AccountRead(context.Context) (Account, error)
+	RateLimitsSupported() bool
+	ReadRateLimits(context.Context) (RateLimitSnapshot, error)
 	LoginWithChatGPTTokens(context.Context, ChatGPTAuthTokens) error
 	Logout(context.Context) error
 	Close(context.Context) error
@@ -190,6 +192,7 @@ const (
 	EventDiffUpdated       EventKind = "diff_updated"
 	EventUsageUpdated      EventKind = "usage_updated"
 	EventAccountUpdated    EventKind = "account_updated"
+	EventRateLimitsUpdated EventKind = "rate_limits_updated"
 	EventRaw               EventKind = "raw"
 	EventWarning           EventKind = "warning"
 	EventError             EventKind = "error"
@@ -230,6 +233,7 @@ type Event struct {
 	Usage      Usage
 	TokenUsage TokenUsage
 	Account    Account
+	RateLimits *RateLimitSnapshot
 	Completed  bool
 	RawMethod  string
 	RawParams  json.RawMessage

@@ -293,6 +293,16 @@ func (c *PlaceholderClient) AccountRead(context.Context) (Account, error) {
 	return Account{Raw: map[string]any{fieldType: valuePlaceholder}}, nil
 }
 
+// RateLimitsSupported always reports false: the placeholder client has no
+// native app-server and therefore no account/rateLimits/read request.
+func (c *PlaceholderClient) RateLimitsSupported() bool { return false }
+
+// ReadRateLimits returns an empty snapshot: the placeholder client never has
+// harness-reported rate limits.
+func (c *PlaceholderClient) ReadRateLimits(context.Context) (RateLimitSnapshot, error) {
+	return RateLimitSnapshot{}, nil
+}
+
 func (c *PlaceholderClient) LoginWithChatGPTTokens(context.Context, ChatGPTAuthTokens) error {
 	return nil
 }

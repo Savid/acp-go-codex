@@ -922,6 +922,12 @@ func (t *scriptTransport) response(method string) any {
 		}}
 	case methodAccountRead:
 		return map[string]any{"account": map[string]any{"chatgptAccountId": "acct", "email": "u@example.com", "chatgptPlanType": "plus"}}
+	case methodAccountRateLimitsRead:
+		return map[string]any{"rateLimits": map[string]any{
+			"planType":  "pro",
+			"primary":   map[string]any{"usedPercent": float64(12), "windowDurationMins": float64(300), "resetsAt": float64(1_000_000)},
+			"secondary": map[string]any{"usedPercent": float64(80)},
+		}}
 	default:
 		return map[string]any{"ok": true}
 	}

@@ -24,8 +24,11 @@
 // under _meta.codex.structuredOutput.
 //
 // Hosts can call [CallForkSession] for the Codex fork extension method
-// _codex/session/fork. Raw Codex events are emitted only when a session request
-// opts in with [WithSessionRawEvents].
+// _codex/session/fork. Calling [RateLimitsMethod] (_codex/rateLimits) reports
+// the harness's subscription rate-limit usage as a [RateLimitsResponse]; it is
+// agent-level, takes an empty params object, and reports only harness-supplied
+// values. Raw Codex events are emitted only when a session request opts in with
+// [WithSessionRawEvents].
 // The adapter advertises no ACP slash commands: slash-prefixed text such as
 // /review, /plan, and /compact remains ordinary session/prompt input for Codex
 // turn/start. Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items)
