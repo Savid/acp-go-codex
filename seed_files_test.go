@@ -162,7 +162,7 @@ func TestWriteSeedFilesFailsClosedOnUnmanagedFile(t *testing.T) {
 	target := filepath.Join(home, "config.toml")
 	require.NoError(t, os.WriteFile(target, []byte(operator), 0o600))
 
-	err := writeSeedFiles(home, map[string]string{"config.toml": "wagie\n"})
+	err := writeSeedFiles(home, map[string]string{"config.toml": "seeded\n"})
 	requireUnsupported(t, err)
 
 	current, readErr := os.ReadFile(target)
@@ -241,7 +241,7 @@ func TestWriteSeedFilesBackupWriteError(t *testing.T) {
 	require.NoError(t, writeSeedFiles(home, map[string]string{"config.toml": "old\n"}))
 
 	// A read-only home lets the managed compare read succeed but fails the
-	// .wagie.bak sidecar write.
+	// .seed.bak sidecar write.
 	require.NoError(t, os.Chmod(home, 0o500))
 	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
 

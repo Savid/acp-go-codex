@@ -50,8 +50,8 @@ Codex process launches, so Codex reads them as its own config. Paths are
 relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
 keys fail closed at session start. `WithHome` must be set explicitly — seeding
 never writes into the operator's default `~/.codex`. Writes are tracked in a
-`.wagie-seed-manifest.json` ownership manifest: a managed file is overwritten in
-place (prior bytes kept in a `<relpath>.wagie.bak` sidecar when content changes),
+`.seed-manifest.json` ownership manifest: a managed file is overwritten in
+place (prior bytes kept in a `<relpath>.seed.bak` sidecar when content changes),
 while an existing file the adapter does not own fails closed and is never
 clobbered. Keep secrets in `WithEnv` and reference them from seeded files by
 Codex `env_key` indirection.

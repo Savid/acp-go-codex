@@ -51,9 +51,9 @@ error — seeding never writes into the operator's default `~/.codex`. Paths are
 relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
 keys are rejected.
 
-Seed writes go through an ownership manifest (`.wagie-seed-manifest.json` in the
+Seed writes go through an ownership manifest (`.seed-manifest.json` in the
 seed root). A seeded file the adapter already owns is overwritten in place (the
-prior bytes are kept in a `<relpath>.wagie.bak` sidecar when the content
+prior bytes are kept in a `<relpath>.seed.bak` sidecar when the content
 changes), but if a seed target already exists and the adapter did not create it,
 the write fails closed and touches nothing — an operator-authored `config.toml`
 is never clobbered.

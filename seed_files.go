@@ -12,13 +12,13 @@ import (
 )
 
 const (
-	// seedManifestName is the wagie-owned ownership manifest written into the
-	// seed root. It records the relative paths wagie manages so re-seeding never
-	// clobbers an operator-authored file.
-	seedManifestName = ".wagie-seed-manifest.json"
+	// seedManifestName is the seed-owned ownership manifest written into the
+	// seed root. It records the relative paths the seed feature manages so
+	// re-seeding never clobbers an operator-authored file.
+	seedManifestName = ".seed-manifest.json"
 	// seedBackupSuffix names the sidecar that holds the prior bytes of a managed
 	// seed file whenever its content changes.
-	seedBackupSuffix = ".wagie.bak"
+	seedBackupSuffix = ".seed.bak"
 )
 
 // seedTarget is a validated, home-confined destination for one seed file.
@@ -41,11 +41,12 @@ type seedTarget struct {
 // keys fail closed with the uniform unsupported error. Contents are written
 // verbatim (callers reference secrets from WithEnv via Codex env_key).
 //
-// Writes are routed through an ownership manifest (.wagie-seed-manifest.json in
-// the seed root) so seeding never overwrites a file wagie did not create: a
-// first write records the path in the manifest; a managed file is overwritten
-// (keeping a .wagie.bak of the prior bytes when the content changes); an
-// existing unmanaged file fails closed, leaving every file untouched.
+// Writes are routed through an ownership manifest (.seed-manifest.json in
+// the seed root) so seeding never overwrites a file the seed feature did not
+// create: a first write records the path in the manifest; a managed file is
+// overwritten (keeping a .seed.bak of the prior bytes when the content
+// changes); an existing unmanaged file fails closed, leaving every file
+// untouched.
 func writeSeedFiles(home string, files map[string]string) error {
 	if len(files) == 0 {
 		return nil
@@ -79,8 +80,8 @@ func writeSeedFiles(home string, files map[string]string) error {
 		return err
 	}
 
-	// Fail closed if any target already exists but wagie does not own it, before
-	// writing anything.
+	// Fail closed if any target already exists but the seed feature does not own
+	// it, before writing anything.
 	for i := range targets {
 		exists, existsErr := seedTargetExists(targets[i].path)
 		if existsErr != nil {
@@ -116,13 +117,13 @@ func writeSeedFiles(home string, files map[string]string) error {
 
 // writeSeedTarget writes data to the target. A new target is written directly; a
 // managed target is compared to its on-disk bytes and, only when they differ, is
-// backed up to a .wagie.bak sidecar before the new bytes are written.
+// backed up to a .seed.bak sidecar before the new bytes are written.
 func writeSeedTarget(target seedTarget, data []byte) error {
 	if !target.exists {
 		return writeSeedBytes(target.path, data)
 	}
 
-	current, err := os.ReadFile(target.path) // #nosec G304 -- wagie-owned managed seed target under confined CODEX_HOME.
+	current, err := os.ReadFile(target.path) // #nosec G304 -- seed-owned managed seed target under confined CODEX_HOME.
 	if err != nil {
 		return fmt.Errorf("read managed seed file: %w", err)
 	}
@@ -144,7 +145,7 @@ func writeSeedBytes(path string, data []byte) error {
 		return fmt.Errorf("create seed file directory: %w", err)
 	}
 
-	// #nosec G703 G304 -- path is confined under CODEX_HOME (resolveSeedPath rejects abs/.. escapes) or is a wagie-owned manifest/backup sidecar.
+	// #nosec G703 G304 -- path is confined under CODEX_HOME (resolveSeedPath rejects abs/.. escapes) or is a seed-owned manifest/backup sidecar.
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write seed file: %w", err)
 	}
@@ -166,7 +167,7 @@ func seedTargetExists(path string) (bool, error) {
 	return true, nil
 }
 
-// manifestOwns reports whether rel is a wagie-managed relative path.
+// manifestOwns reports whether rel is a seed-managed relative path.
 func manifestOwns(manifest []string, rel string) bool {
 	for _, entry := range manifest {
 		if entry == rel {
@@ -180,7 +181,7 @@ func manifestOwns(manifest []string, rel string) bool {
 // loadSeedManifest reads the ownership manifest fresh from the seed root,
 // returning an empty manifest when it is absent.
 func loadSeedManifest(home string) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join(home, seedManifestName)) // #nosec G304 -- wagie-owned manifest under confined CODEX_HOME.
+	data, err := os.ReadFile(filepath.Join(home, seedManifestName)) // #nosec G304 -- seed-owned manifest under confined CODEX_HOME.
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
