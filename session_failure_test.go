@@ -119,7 +119,26 @@ func TestTurnFailureProviderError(t *testing.T) {
 				t.Fatalf("prompt error = %v, want code %d", promptErr, tc.wantCode)
 			}
 
-			if tc.wantCode != -32603 {
+			if tc.wantCode == -32000 {
+				// The auth carve-out still carries the uniform turn-failure
+				// envelope alongside the additive _meta.codex.auth block.
+				authData, isMap := reqErr.Data.(map[string]any)
+				if !isMap {
+					t.Fatalf("auth data = %#v", reqErr.Data)
+				}
+				if authData[jsonFieldError] != valueTurnFailed {
+					t.Fatalf("auth error tag = %v, want %s", authData[jsonFieldError], valueTurnFailed)
+				}
+				if authData[jsonFieldCause] != codex.CauseProvider {
+					t.Fatalf("auth cause = %v, want provider", authData[jsonFieldCause])
+				}
+				if msg, _ := authData[jsonFieldMessage].(string); !strings.Contains(msg, "unauthorized") {
+					t.Fatalf("auth message = %v, want native cause", authData[jsonFieldMessage])
+				}
+				if asType[map[string]any](t, authData[codexMetaKey])[authMetaAuthKey] == nil {
+					t.Fatalf("auth data missing _meta.codex.auth: %#v", authData)
+				}
+
 				return
 			}
 

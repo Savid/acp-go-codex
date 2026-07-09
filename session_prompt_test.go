@@ -24,8 +24,13 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 		t.Fatalf("canceled acquire resp=%#v err=%v", resp, err)
 	}
 	<-held
-	if _, err := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: []acp.ContentBlock{acp.AudioBlock("x", "audio/wav")}}); err == nil {
-		t.Fatal("Prompt accepted audio block")
+	_, audioErr := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: []acp.ContentBlock{acp.AudioBlock("x", "audio/wav")}})
+	var audioReqErr *acp.RequestError
+	if !errors.As(audioErr, &audioReqErr) || audioReqErr.Code != -32602 {
+		t.Fatalf("audio prompt error = %#v, want -32602 invalid params", audioErr)
+	}
+	if data, ok := audioReqErr.Data.(map[string]any); !ok || data["error"] != "unsupported" || data["field"] != "prompt" {
+		t.Fatalf("audio prompt data = %#v, want unsupported/prompt", audioReqErr.Data)
 	}
 
 	promptSession.client = &runEventsClient{runErr: errors.New("not logged in")}

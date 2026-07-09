@@ -3,7 +3,6 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -35,6 +34,18 @@ const (
 	sandboxTypeReadOnly         = "readOnly"
 	sandboxTypeWorkspaceWrite   = "workspaceWrite"
 )
+
+// promptToCodex maps ACP prompt content into the native Codex user-input
+// representation. The only native mapping failure is unsupported audio, which
+// surfaces as the uniform ACP unsupported-content error (-32602).
+func promptToCodex(blocks []acp.ContentBlock) ([]codex.UserInput, error) {
+	input, err := codex.PromptToUserInput(blocks)
+	if err != nil {
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
+	}
+
+	return input, nil
+}
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
 	releaseTurn, err := s.acquireTurn(ctx)
@@ -248,69 +259,6 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 	}
 
 	return nil
-}
-
-// turnFailureFromEvent extracts the native failure cause from a terminal event:
-// a codex `error` event, or a `turn/completed` whose status is failed/errored.
-func turnFailureFromEvent(event codex.Event) error {
-	switch event.Kind {
-	case codex.EventError, codex.EventCompleted:
-		return event.Err
-	default:
-		return nil
-	}
-}
-
-// mapTurnFailure translates a native turn failure into the uniform ACP wire
-// error. A dead app-server connection marks the session for lazy relaunch but
-// leaves it addressable; a native thread-id drift is a wrapper-invariant break
-// and surfaces as the unknown-session error.
-func (s *session) mapTurnFailure(err error) error {
-	if errors.Is(err, codex.ErrThreadNotFound) {
-		return newUnknownSession()
-	}
-
-	if isCodexAuthError(err) {
-		return codexAuthRequiredError(err, s.accountMetaSnapshot())
-	}
-
-	data := map[string]any{
-		jsonFieldError:   valueTurnFailed,
-		jsonFieldCause:   codex.CauseProvider,
-		jsonFieldMessage: err.Error(),
-	}
-
-	var (
-		tf       *codex.TurnFailedError
-		procExit *codex.ProcessExitError
-	)
-
-	switch {
-	case errors.As(err, &tf):
-		data[jsonFieldCause] = tf.Cause
-		data[jsonFieldMessage] = tf.Message
-
-		if tf.StatusCode > 0 {
-			data[jsonFieldStatusCode] = tf.StatusCode
-		}
-
-		if tf.ProviderCode != "" {
-			data[jsonFieldProviderCode] = tf.ProviderCode
-		}
-	case errors.As(err, &procExit):
-		// The app-server process died mid-turn: name the real exit status and
-		// stderr tail instead of a bare transport EOF.
-		data[jsonFieldCause] = codex.CauseProcessExit
-		data[jsonFieldMessage] = procExit.Error()
-
-		s.markClientDead()
-	case errors.Is(err, codex.ErrConnectionClosed):
-		data[jsonFieldCause] = codex.CauseTransport
-
-		s.markClientDead()
-	}
-
-	return acp.NewInternalError(data)
 }
 
 // abortTurnAfterTimeout interrupts the in-flight native Codex turn after the

@@ -32,12 +32,15 @@ const (
 	jsonFieldField      = "field"
 	validationRequired  = "required"
 	validationDuplicate = "duplicate"
+	errValueUnsupported = "unsupported"
 
 	jsonFieldSource        = "source"
 	jsonFieldSequence      = "sequence"
 	jsonFieldEvent         = "event"
 	jsonFieldScope         = "scope"
 	jsonFieldName          = "name"
+	jsonFieldServer        = "server"
+	jsonFieldPrompt        = "prompt"
 	jsonFieldText          = "text"
 	jsonFieldType          = "type"
 	jsonFieldURL           = "url"
@@ -330,7 +333,7 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 		return nil, err
 	}
 
-	extraArgs, mcpEnv, err := a.mcpServerConfigArgs(mcpServers, mcpToolApprovalMode)
+	extraArgs, mcpEnv, err := codex.MCPServerConfigArgs(mcpServers, mcpToolApprovalMode)
 	if err != nil {
 		return nil, err
 	}
@@ -671,4 +674,14 @@ func mapFromRaw(raw json.RawMessage) map[string]any {
 	}
 
 	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
 }

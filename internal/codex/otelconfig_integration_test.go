@@ -1,6 +1,6 @@
 //go:build integration
 
-package codexacp
+package codex
 
 import (
 	"context"
@@ -10,11 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
-
-const (
-	envIntegrationRun       = "ACP_GO_CODEX_RUN_INTEGRATION"
-	envIntegrationCodexPath = "ACP_GO_CODEX_HARNESS_PATH"
 )
 
 func TestCodexOTELStrictConfigIntegration(t *testing.T) {
@@ -56,7 +51,7 @@ func TestCodexOTELStrictConfigIntegration(t *testing.T) {
 
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
-			config, err := codexOTELConfigFromEnv(env)
+			config, err := OTELConfigFromEnv(env)
 			if err != nil {
 				t.Fatalf("build OTEL config: %v", err)
 			}
@@ -71,8 +66,8 @@ func TestCodexOTELStrictConfigIntegration(t *testing.T) {
 func integrationCodexCLI(t *testing.T) string {
 	t.Helper()
 
-	if os.Getenv(envIntegrationRun) != "1" {
-		t.Skipf("set %s=1 to run live Codex integration tests", envIntegrationRun)
+	if os.Getenv(envRunIntegration) != "1" {
+		t.Skipf("set %s=1 to run live Codex integration tests", envRunIntegration)
 	}
 
 	path := os.Getenv(envIntegrationCodexPath)

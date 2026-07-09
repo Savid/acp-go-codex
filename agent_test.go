@@ -427,7 +427,7 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	if _, err := envAgent.newClient(ctx, []acp.McpServer{
 		StdioMCPServer("stdio", "cmd", nil, map[string]string{"A": "B"}),
 		HTTPMCPServer("http", "https://example.test", map[string]string{"Authorization": "secret"}),
-	}, map[string]string{"OVERLAY": "1"}, mcpApprovalModePrompt); err != nil {
+	}, map[string]string{"OVERLAY": "1"}, "prompt"); err != nil {
 		t.Fatalf("newClient with env overlays returned error: %v", err)
 	}
 	if gotOptions.Env["OVERLAY"] != "1" || len(gotOptions.Env) < 2 {

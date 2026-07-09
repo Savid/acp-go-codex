@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -194,40 +193,4 @@ func redactedAccountMeta(account codex.Account) map[string]any {
 	}
 
 	return out
-}
-
-func codexAuthRequiredError(err error, account map[string]any) error {
-	if err == nil || !isCodexAuthError(err) {
-		return err
-	}
-
-	data := map[string]any{
-		codexMetaKey: map[string]any{
-			authMetaAuthKey: map[string]any{
-				jsonFieldReason: "codex-auth-required",
-				"methodIds":     []string{authMethodCodexLogin, authMethodChatGPTAuthTokens},
-			},
-		},
-	}
-	if len(account) > 0 {
-		codexMeta, _ := data[codexMetaKey].(map[string]any)
-		codexMeta[codexAccountMetaKey] = cloneAnyMap(account)
-	}
-
-	return acp.NewAuthRequired(data)
-}
-
-func isCodexAuthError(err error) bool {
-	text := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(text, "authentication required"),
-		strings.Contains(text, "not authenticated"),
-		strings.Contains(text, "not logged in"),
-		strings.Contains(text, "login required"),
-		strings.Contains(text, "unauthorized"),
-		strings.Contains(text, "401"):
-		return true
-	default:
-		return false
-	}
 }

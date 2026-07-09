@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 type sessionMeta struct {
@@ -115,7 +116,7 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 	}
 
 	if mode, _ := optionsMap["mcpToolApprovalMode"].(string); mode != "" {
-		if !validMCPApprovalMode(mode) {
+		if !codex.ValidMCPApprovalMode(mode) {
 			return codexOptions{}, fmt.Errorf("_meta.codex.options.mcpToolApprovalMode is unsupported")
 		}
 
@@ -180,7 +181,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 
 func unsupportedField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: "unsupported",
+		jsonFieldError: errValueUnsupported,
 		jsonFieldField: path,
 	})
 }

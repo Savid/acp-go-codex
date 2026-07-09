@@ -99,6 +99,24 @@ func TestAuthCapabilitiesTerminalArgsAndAuthRequired(t *testing.T) {
 	if !ok || reqErr.Message != "Authentication required" {
 		t.Fatalf("auth required error = %#v", err)
 	}
+
+	authData, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("auth required data = %#v", reqErr.Data)
+	}
+	if authData[jsonFieldError] != valueTurnFailed {
+		t.Fatalf("auth required error tag = %v, want %s", authData[jsonFieldError], valueTurnFailed)
+	}
+	if authData[jsonFieldCause] != codex.CauseProvider {
+		t.Fatalf("auth required cause = %v, want %s", authData[jsonFieldCause], codex.CauseProvider)
+	}
+	if authData[jsonFieldMessage] != "not logged in" {
+		t.Fatalf("auth required message = %v, want native cause text", authData[jsonFieldMessage])
+	}
+	codexAuthMeta := asType[map[string]any](t, asType[map[string]any](t, authData[codexMetaKey])[authMetaAuthKey])
+	if codexAuthMeta[jsonFieldReason] != "codex-auth-required" {
+		t.Fatalf("auth required _meta.codex.auth = %#v", codexAuthMeta)
+	}
 	if codexAuthRequiredError(errors.New("other"), nil).Error() != "other" {
 		t.Fatal("non-auth error was changed")
 	}
