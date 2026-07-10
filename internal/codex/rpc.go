@@ -10,6 +10,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const jsonRPCVersion = "2.0"
@@ -57,10 +58,20 @@ type lineTransport struct {
 	w    io.Writer
 	proc *process
 	mu   sync.Mutex
+
+	// grace bounds how long readError waits for the process to be reaped
+	// before classifying a read failure as a live-transport fault. Captured at
+	// construction so concurrent readers never touch shared mutable state.
+	grace time.Duration
 }
 
 func newLineTransport(r io.Reader, w io.Writer, proc *process) *lineTransport {
-	return &lineTransport{r: bufio.NewReaderSize(r, 1024*1024), w: w, proc: proc}
+	return &lineTransport{
+		r:     bufio.NewReaderSize(r, 1024*1024),
+		w:     w,
+		proc:  proc,
+		grace: processExitGrace,
+	}
 }
 
 func (t *lineTransport) Send(ctx context.Context, msg rpcMessage) error {
@@ -114,7 +125,7 @@ func (t *lineTransport) readError(err error) error {
 		return err
 	}
 
-	status, stderrTail, ok := t.proc.exited(processExitGrace)
+	status, stderrTail, ok := t.proc.exited(t.grace)
 	if !ok {
 		return err
 	}

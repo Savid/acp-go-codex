@@ -267,8 +267,9 @@ func shellValue(value any) string {
 // process to be reaped after its stdout stream ends, so a mid-turn stream EOF
 // can be attributed to the real process exit status instead of a bare transport
 // fault. Transport death while the process is still running exceeds the grace
-// and stays cause:"transport".
-var processExitGrace = 2 * time.Second
+// and stays cause:"transport". Each lineTransport captures it at construction;
+// there is no shared mutable grace state.
+const processExitGrace = 2 * time.Second
 
 // process owns the codex app-server child process: its stdio, its bounded
 // stderr tail, and the single cmd.Wait reaper shared by the transport

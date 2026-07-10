@@ -66,10 +66,6 @@ func TestLineTransportCapturesProcessExit(t *testing.T) {
 // process is still running is not misclassified as a process exit; it stays a
 // bare transport error (cause:"transport").
 func TestLineTransportReadErrorProcessAlive(t *testing.T) {
-	origGrace := processExitGrace
-	processExitGrace = 10 * time.Millisecond
-	t.Cleanup(func() { processExitGrace = origGrace })
-
 	cmd := sleepCommand(t, "10")
 
 	stderr := codexStderrWriter(nil)
@@ -91,6 +87,12 @@ func TestLineTransportReadErrorProcessAlive(t *testing.T) {
 
 	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}
 	transport := newLineTransport(stdout, stdin, proc)
+	// Shrink this transport instance's exit grace so the alive-process
+	// classification path does not stall the test. The field is written before
+	// any other goroutine can observe the transport, so there is no shared
+	// mutable state (a package-level grace override here raced with readError
+	// in rpcConn read loops leaked past rpcConn.Close by earlier tests).
+	transport.grace = 10 * time.Millisecond
 
 	// Force a read failure while the process keeps running.
 	_ = stdout.Close()
