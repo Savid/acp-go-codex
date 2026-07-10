@@ -52,9 +52,6 @@ const (
 	jsonFieldPath          = "path"
 	jsonFieldConfigID      = "configId"
 	jsonFieldAccessToken   = "accessToken"
-	jsonFieldDecision      = "decision"
-	jsonFieldPermissions   = "permissions"
-	jsonFieldAnswers       = "answers"
 	jsonFieldNetworkAccess = "networkAccess"
 
 	valueBackpressure   = "backpressure"
@@ -72,7 +69,6 @@ const (
 	roleAgent           = "agent"
 	statusDone          = "done"
 	valueDefault        = "default"
-	valueTurn           = "turn"
 	roleAssistant       = "assistant"
 	eventUserMessage    = "user_message"
 
@@ -176,6 +172,10 @@ func (a *Agent) setAgentClient(conn agentClient) {
 
 // Serve runs an ACP agent over the provided streams.
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	agent := NewAgent(opts...)
 	defer func() {
 		if err := agent.Close(); err != nil {

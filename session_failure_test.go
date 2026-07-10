@@ -398,3 +398,28 @@ func (c *recordingCancelClient) DeleteThread(context.Context, codex.ThreadDelete
 	return nil
 }
 func (c *recordingCancelClient) Close(context.Context) error { return nil }
+
+func TestMapTurnFailureBranches(t *testing.T) {
+	failSession := &session{agent: NewAgent(), id: "map"}
+
+	unknown := failSession.mapTurnFailure(errors.Join(codex.ErrThreadNotFound, errors.New("drift")))
+
+	var reqErr *acp.RequestError
+	if !errors.As(unknown, &reqErr) || reqErr.Code != -32602 {
+		t.Fatalf("thread-not-found mapped to %v, want -32602 unknown session", unknown)
+	}
+
+	auth := failSession.mapTurnFailure(errors.New("unauthorized: 401"))
+	if !errors.As(auth, &reqErr) || reqErr.Code != -32000 {
+		t.Fatalf("auth failure mapped to %v, want -32000", auth)
+	}
+
+	provider := failSession.mapTurnFailure(errors.New("weird provider glitch"))
+	data := turnFailureData(t, provider)
+	if data[jsonFieldCause] != codex.CauseProvider {
+		t.Fatalf("generic failure cause = %v, want provider", data[jsonFieldCause])
+	}
+	if failSession.clientDead {
+		t.Fatal("provider failure must not mark the client dead")
+	}
+}

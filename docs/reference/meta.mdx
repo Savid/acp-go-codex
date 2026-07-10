@@ -47,7 +47,10 @@ Accepted initialize capability metadata under `_meta.codex`:
 ## Rules
 
 Unknown keys in the adapter-owned namespace fail closed with invalid params.
-There is no command capability or command metadata under `_meta.codex`.
+Wrong-typed values for known option keys are also rejected with invalid params
+whose data is `{"error": "unsupported", "field": "_meta.codex.options.<key>"}`
+— never silently ignored. There is no command capability or command metadata
+under `_meta.codex`.
 
 Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are not commands
 and are not projected as `AvailableCommand` entries.

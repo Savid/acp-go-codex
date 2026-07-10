@@ -85,7 +85,8 @@ func NewInMemorySessionStore() *InMemorySessionStore {
 	}
 }
 
-// Append stores rollout entries under key.
+// Append stores rollout entries under key. Keys with an empty SessionID are
+// rejected.
 func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -97,6 +98,10 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 
 	if len(entries) == 0 {
 		return nil
+	}
+
+	if key.SessionID == "" {
+		return fmt.Errorf("session id is required")
 	}
 
 	s.mu.Lock()
@@ -253,6 +258,7 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 }
 
 // Delete writes a tombstone. Deleting the main key cascades to subpaths.
+// Deleting a key with an empty SessionID is a pure no-op.
 func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -260,6 +266,10 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
+	}
+
+	if key.SessionID == "" {
+		return nil
 	}
 
 	s.mu.Lock()

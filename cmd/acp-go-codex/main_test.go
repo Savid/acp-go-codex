@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	codexacp "github.com/savid/acp-go-codex"
 )
 
@@ -326,7 +328,7 @@ func TestRunCodexCLISubcommand(t *testing.T) {
 
 		return nil
 	}
-	if code := run(context.Background(), []string{"login", "-path", "/bin/codex", "-home", "/tmp/codex", "-device-auth"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
+	if code := run(context.Background(), []string{"login", "-path", "/bin/codex", "-home", "/tmp/codex", "-codex-device-auth"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
 		t.Fatalf("successful login code = %d", code)
 	}
 	if gotPath != "/bin/codex" || gotHome != "/tmp/codex" || gotMode != "login" || !gotDeviceAuth {
@@ -517,4 +519,16 @@ func waitUntil(t *testing.T, ready func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("condition was not met")
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
+
+func TestRecoverMainGoroutineCatchesPanic(t *testing.T) {
+	func() {
+		defer recoverMainGoroutine(context.Background(), "test goroutine")
+		panic("boom")
+	}()
+	recoverMainGoroutine(context.Background(), "none")
 }

@@ -388,18 +388,24 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 	return cancels
 }
 
+// Close shuts the session's native Codex client down under a bounded
+// background context so a cancelled or expired caller context can never
+// leave the native process running.
 func (s *session) Close(ctx context.Context) error {
 	s.cancelTurn()
 	client, codexThreadID, materializedPath := s.closeState()
 
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+
 	var err error
 
 	if client != nil && codexThreadID != "" {
-		_ = client.UnsubscribeThread(ctx, codexThreadID)
+		_ = client.UnsubscribeThread(closeCtx, codexThreadID)
 	}
 
 	if client != nil {
-		err = client.Close(ctx)
+		err = client.Close(closeCtx)
 	}
 
 	if materializedPath != "" {

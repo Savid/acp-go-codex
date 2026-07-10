@@ -24,14 +24,6 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 		t.Fatalf("canceled acquire resp=%#v err=%v", resp, err)
 	}
 	<-held
-	_, audioErr := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: []acp.ContentBlock{acp.AudioBlock("x", "audio/wav")}})
-	var audioReqErr *acp.RequestError
-	if !errors.As(audioErr, &audioReqErr) || audioReqErr.Code != -32602 {
-		t.Fatalf("audio prompt error = %#v, want -32602 invalid params", audioErr)
-	}
-	if data, ok := audioReqErr.Data.(map[string]any); !ok || data["error"] != "unsupported" || data["field"] != "prompt" {
-		t.Fatalf("audio prompt data = %#v, want unsupported/prompt", audioReqErr.Data)
-	}
 
 	promptSession.client = &runEventsClient{runErr: errors.New("not logged in")}
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
@@ -638,5 +630,63 @@ func TestTokenUsageAndObserverBranches(t *testing.T) {
 	}
 	if structuredOutputMeta("", map[string]any{"type": "object"}) != nil || structuredOutputMeta(`{"ok":true}`, nil) != nil {
 		t.Fatal("structured output emitted without schema/text")
+	}
+}
+
+func TestPromptValueHelpers(t *testing.T) {
+	if nullableString("") != nil || nullableString("x") != "x" {
+		t.Fatal("nullableString failed")
+	}
+	if toolKind(codex.ToolEvent{Kind: "mcpToolCall"}) != acp.ToolKindOther || toolKind(codex.ToolEvent{Kind: "unknown"}) != acp.ToolKindOther {
+		t.Fatal("toolKind special cases failed")
+	}
+	if stopReasonFromCodex(codex.StopReasonCancelled) != acp.StopReasonCancelled || stopReasonFromCodex(codex.StopReasonError) != acp.StopReasonEndTurn {
+		t.Fatal("stopReasonFromCodex special cases failed")
+	}
+}
+
+func TestRecordRawEmitFailure(t *testing.T) {
+	recordSession := &session{agent: NewAgent(), id: "record"}
+	recordSession.recordRawEmitFailure(context.Background(), nil)
+	if recordSession.rawEmitFailures != 0 {
+		t.Fatal("nil raw emit error advanced the counter")
+	}
+
+	recordSession.recordRawEmitFailure(context.Background(), errors.New("emit failed"))
+	if recordSession.rawEmitFailures != 1 {
+		t.Fatalf("raw emit failure counter = %d, want 1", recordSession.rawEmitFailures)
+	}
+}
+
+// TestPromptContentFailsClosed pins the fail-closed prompt-content contract:
+// empty prompts, audio blocks, and unknown or empty content blocks reject with
+// the uniform unsupported/prompt shape, and images without data or a URI
+// reject with the uniform prompt.image shape. Nothing is silently dropped.
+func TestPromptContentFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	promptSession := &session{agent: NewAgent(), id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
+
+	for _, tt := range []struct {
+		name      string
+		prompt    []acp.ContentBlock
+		wantField string
+		wantError string
+	}{
+		{name: "audio block", prompt: []acp.ContentBlock{acp.AudioBlock("x", "audio/wav")}, wantField: "prompt", wantError: "unsupported"},
+		{name: "empty prompt", prompt: nil, wantField: "prompt", wantError: "unsupported"},
+		{name: "unknown block", prompt: []acp.ContentBlock{{}}, wantField: "prompt", wantError: "unsupported"},
+		{name: "data-less image", prompt: []acp.ContentBlock{acp.ImageBlock("", "image/png")}, wantField: "prompt.image", wantError: "missing image data or uri"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: tt.prompt})
+
+			var reqErr *acp.RequestError
+			if !errors.As(err, &reqErr) || reqErr.Code != -32602 {
+				t.Fatalf("prompt error = %#v, want -32602 invalid params", err)
+			}
+			if data, ok := reqErr.Data.(map[string]any); !ok || data["error"] != tt.wantError || data["field"] != tt.wantField {
+				t.Fatalf("prompt data = %#v, want %s/%s", reqErr.Data, tt.wantError, tt.wantField)
+			}
+		})
 	}
 }

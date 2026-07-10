@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 func TestSessionInteractionCancellationBranches(t *testing.T) {
@@ -127,5 +128,69 @@ func TestSessionCloseJoinsClientAndMaterializedErrors(t *testing.T) {
 	err := session.Close(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "close failed") || !strings.Contains(err.Error(), "remove failed") {
 		t.Fatalf("joined close error = %v", err)
+	}
+}
+
+type closeContextRecordingClient struct {
+	*spyCodexClient
+	closeCtxErr error
+}
+
+func (c *closeContextRecordingClient) Close(ctx context.Context) error {
+	c.closeCtxErr = ctx.Err()
+
+	return ctx.Err()
+}
+
+func TestSessionCloseUsesBoundedBackgroundContext(t *testing.T) {
+	client := &closeContextRecordingClient{spyCodexClient: newSpyCodexClient()}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+
+	if _, closeErr := agent.CloseSession(canceledContext(), acp.CloseSessionRequest{SessionId: resp.SessionId}); closeErr != nil {
+		t.Fatalf("CloseSession with canceled caller context returned error: %v", closeErr)
+	}
+	if client.closeCtxErr != nil {
+		t.Fatalf("native close ran under the caller's canceled context: %v", client.closeCtxErr)
+	}
+}
+
+func TestEnsureLiveClientRelaunchFailures(t *testing.T) {
+	ctx := context.Background()
+
+	factoryErr := errors.New("relaunch factory failed")
+	newClientFails := &session{
+		agent:         NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return nil, factoryErr })),
+		id:            "relaunch-factory",
+		codexThreadID: "thread",
+		clientDead:    true,
+	}
+	if err := newClientFails.ensureLiveClient(ctx); !errors.Is(err, factoryErr) {
+		t.Fatalf("ensureLiveClient factory error = %v", err)
+	}
+	if !newClientFails.clientDead {
+		t.Fatal("failed relaunch must leave client dead")
+	}
+
+	resumeErr := errors.New("resume rejected")
+	resumeClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: resumeErr}
+	resumeFails := &session{
+		agent:         NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return resumeClient, nil })),
+		id:            "relaunch-resume",
+		codexThreadID: "thread",
+		clientDead:    true,
+	}
+	if err := resumeFails.ensureLiveClient(ctx); !errors.Is(err, resumeErr) {
+		t.Fatalf("ensureLiveClient resume error = %v", err)
+	}
+
+	// A prompt on a dead session whose relaunch fails surfaces the transport
+	// failure and keeps the session addressable.
+	if _, err := resumeFails.Prompt(ctx, TextPromptRequest("relaunch-resume", "hi")); !isTurnFailure(err, codex.CauseTransport) {
+		t.Fatalf("prompt after failed relaunch = %v, want transport failure", err)
 	}
 }

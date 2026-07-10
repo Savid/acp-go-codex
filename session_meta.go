@@ -66,11 +66,20 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 	}
 
 	options := codexOptions{}
-	if model, _ := optionsMap["model"].(string); model != "" {
-		options.Model = model
+
+	model, err := metaOptionString(optionsMap, metaModelKey)
+	if err != nil {
+		return codexOptions{}, err
 	}
 
-	if effort, _ := optionsMap["effort"].(string); effort != "" {
+	options.Model = model
+
+	effort, err := metaOptionString(optionsMap, metaEffortKey)
+	if err != nil {
+		return codexOptions{}, err
+	}
+
+	if effort != "" {
 		if !validReasoningEffort(effort) {
 			return codexOptions{}, fmt.Errorf("_meta.codex.options.effort is unsupported")
 		}
@@ -78,11 +87,19 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 		options.ReasoningEffort = effort
 	}
 
-	if tier, _ := optionsMap["serviceTier"].(string); tier != "" {
-		options.ServiceTier = tier
+	tier, err := metaOptionString(optionsMap, metaServiceTierKey)
+	if err != nil {
+		return codexOptions{}, err
 	}
 
-	if personality, _ := optionsMap["personality"].(string); personality != "" {
+	options.ServiceTier = tier
+
+	personality, err := metaOptionString(optionsMap, metaPersonalityKey)
+	if err != nil {
+		return codexOptions{}, err
+	}
+
+	if personality != "" {
 		if !validPersonality(personality) {
 			return codexOptions{}, fmt.Errorf("_meta.codex.options.personality is unsupported")
 		}
@@ -91,9 +108,9 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 	}
 
 	if rawEnv, ok := optionsMap[metaEnvKey]; ok {
-		env, err := stringMapFromMeta(rawEnv)
-		if err != nil {
-			return codexOptions{}, err
+		env, envErr := stringMapFromMeta(rawEnv)
+		if envErr != nil {
+			return codexOptions{}, envErr
 		}
 
 		options.Env = env
@@ -108,14 +125,19 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 	}
 
 	if schema, ok := optionsMap[metaOutputSchemaKey]; ok {
-		if err := validateSchemaObject(schema); err != nil {
-			return codexOptions{}, err
+		if schemaErr := validateSchemaObject(schema); schemaErr != nil {
+			return codexOptions{}, schemaErr
 		}
 
 		options.OutputSchema = cloneAny(schema)
 	}
 
-	if mode, _ := optionsMap["mcpToolApprovalMode"].(string); mode != "" {
+	mode, err := metaOptionString(optionsMap, metaMCPToolApprovalModeKey)
+	if err != nil {
+		return codexOptions{}, err
+	}
+
+	if mode != "" {
 		if !codex.ValidMCPApprovalMode(mode) {
 			return codexOptions{}, fmt.Errorf("_meta.codex.options.mcpToolApprovalMode is unsupported")
 		}
@@ -124,6 +146,23 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 	}
 
 	return options, nil
+}
+
+// metaOptionString reads a known string-typed _meta.codex.options value.
+// Wrong-typed values are rejected with the uniform invalid-params data shape
+// instead of being silently ignored.
+func metaOptionString(optionsMap map[string]any, key string) (string, error) {
+	raw, ok := optionsMap[key]
+	if !ok {
+		return "", nil
+	}
+
+	value, ok := raw.(string)
+	if !ok {
+		return "", unsupportedField("_meta.codex.options." + key)
+	}
+
+	return value, nil
 }
 
 func validateLifecycleMeta(meta map[string]any) error {
@@ -150,7 +189,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 
 			for optionKey := range optionsMap {
 				switch optionKey {
-				case "model", metaEnvKey, metaOutputSchemaKey, "effort", "serviceTier", "personality", "approvalPolicy", "sandboxPolicy", "mcpToolApprovalMode":
+				case metaModelKey, metaEnvKey, metaOutputSchemaKey, metaEffortKey, metaServiceTierKey, metaPersonalityKey, metaApprovalPolicyKey, metaSandboxPolicyKey, metaMCPToolApprovalModeKey:
 				default:
 					return unsupportedField("_meta.codex.options." + optionKey)
 				}
@@ -247,19 +286,19 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 	}
 
 	if snapshot.model != "" {
-		codexMeta["model"] = snapshot.model
+		codexMeta[metaModelKey] = snapshot.model
 	}
 
 	if snapshot.reasoningEffort != "" {
-		codexMeta["effort"] = snapshot.reasoningEffort
+		codexMeta[metaEffortKey] = snapshot.reasoningEffort
 	}
 
 	if snapshot.serviceTier != "" {
-		codexMeta["serviceTier"] = snapshot.serviceTier
+		codexMeta[metaServiceTierKey] = snapshot.serviceTier
 	}
 
 	if snapshot.personality != "" {
-		codexMeta["personality"] = snapshot.personality
+		codexMeta[metaPersonalityKey] = snapshot.personality
 	}
 
 	if len(snapshot.accountMeta) > 0 {

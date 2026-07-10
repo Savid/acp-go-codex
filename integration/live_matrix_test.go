@@ -57,12 +57,11 @@ func TestCodexCLIRawExtensionNotifications(t *testing.T) {
 		for _, notification := range client.extensionSnapshot() {
 			event, _ := notification.Params["event"].(map[string]any)
 			payload, _ := event["payload"].(map[string]any)
-			rawJSON, _ := notification.Params["rawJSON"].(string)
 			if notification.Method == codexacp.RawEventMethod &&
+				len(notification.Params) == 4 &&
 				notification.Params["sessionId"] == string(session.SessionId) &&
 				event["type"] == "event_msg" &&
-				payload["type"] == "agent_message" &&
-				strings.Contains(rawJSON, `"agent_message"`) {
+				payload["type"] == "agent_message" {
 				return true
 			}
 		}

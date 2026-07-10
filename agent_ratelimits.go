@@ -14,13 +14,6 @@ import (
 // params object and carries no sessionId.
 const RateLimitsMethod = "_codex/rateLimits"
 
-// RateLimitsRequest is the (empty) parameter object for [RateLimitsMethod].
-type RateLimitsRequest struct{}
-
-// Validate reports whether the request is well formed. The request carries no
-// fields, so it is always valid once it decodes as an object.
-func (RateLimitsRequest) Validate() error { return nil }
-
 // RateLimitsResponse is the payload returned by [RateLimitsMethod]. Windows is
 // always present; it is an empty slice when the harness has reported no usage.
 type RateLimitsResponse struct {
@@ -91,7 +84,8 @@ func rateLimitsResponseFromSnapshot(snapshot codex.RateLimitSnapshot) RateLimits
 
 // decodeRateLimitsParams applies the shared extension-method validation: an
 // absent, null, or empty params object is accepted, while anything else —
-// including unknown fields — is rejected as invalid params.
+// including unknown fields — is rejected as invalid params. The request
+// carries no fields, so it is validated inline against an empty object.
 func decodeRateLimitsParams(params json.RawMessage) error {
 	trimmed := bytes.TrimSpace(params)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -101,10 +95,10 @@ func decodeRateLimitsParams(params json.RawMessage) error {
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.DisallowUnknownFields()
 
-	var req RateLimitsRequest
+	var req struct{}
 	if err := decoder.Decode(&req); err != nil {
 		return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	return req.Validate()
+	return nil
 }

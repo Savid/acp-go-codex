@@ -214,23 +214,21 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		addSessionInfo(&sessions, seen, session.info())
 	}
 
-	if params.Cwd != nil {
-		storeSessions, err := a.listStoredSessions(ctx, *params.Cwd, seen)
-		if err != nil {
-			return acp.ListSessionsResponse{}, err
-		}
+	storeSessions, err := a.listStoredSessions(ctx, params.Cwd, seen)
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
 
-		for _, session := range storeSessions {
-			addSessionInfo(&sessions, seen, session)
-		}
+	for _, session := range storeSessions {
+		addSessionInfo(&sessions, seen, session)
 	}
 
 	a.retryDeletedNativeCodexSessions(ctx)
 
 	if a.nativeSessionFallbackEnabled() {
-		codexSessions, err := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
-		if err != nil {
-			return acp.ListSessionsResponse{}, err
+		codexSessions, nativeErr := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
+		if nativeErr != nil {
+			return acp.ListSessionsResponse{}, nativeErr
 		}
 
 		for _, session := range codexSessions {
@@ -721,13 +719,21 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	return acp.LoadSessionResponse(resp), nil
 }
 
-func (a *Agent) listStoredSessions(ctx context.Context, cwd string, activeIDs map[acp.SessionId]struct{}) ([]acp.SessionInfo, error) {
+// listStoredSessions lists store-backed session summaries unconditionally.
+// When cwd is provided it filters summaries whose recorded cwd differs;
+// summaries with an empty recorded cwd are always retained.
+func (a *Agent) listStoredSessions(ctx context.Context, cwd *string, activeIDs map[acp.SessionId]struct{}) ([]acp.SessionInfo, error) {
 	listCtx, cancel := a.sessionStoreContext(ctx)
 	defer cancel()
 
 	summaries, err := a.sessionStore().ListSessions(listCtx)
 	if err != nil {
 		return nil, err
+	}
+
+	filterCwd := ""
+	if cwd != nil {
+		filterCwd = *cwd
 	}
 
 	out := make([]acp.SessionInfo, 0, len(summaries))
@@ -737,7 +743,7 @@ func (a *Agent) listStoredSessions(ctx context.Context, cwd string, activeIDs ma
 			continue
 		}
 
-		if summary.Cwd != "" && summary.Cwd != cwd {
+		if cwd != nil && summary.Cwd != "" && summary.Cwd != filterCwd {
 			continue
 		}
 
@@ -754,7 +760,7 @@ func (a *Agent) listStoredSessions(ctx context.Context, cwd string, activeIDs ma
 
 		out = append(out, acp.SessionInfo{
 			SessionId: id,
-			Cwd:       firstNonEmpty(summary.Cwd, cwd),
+			Cwd:       firstNonEmpty(summary.Cwd, filterCwd),
 			Title:     &title,
 			UpdatedAt: &updatedAt,
 			Meta: map[string]any{

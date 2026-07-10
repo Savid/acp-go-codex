@@ -143,9 +143,9 @@ func (c *AppServerClient) initialize(ctx context.Context) error {
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodInitialize, map[string]any{
 		"clientInfo": map[string]any{
-			fieldName: "acp-go-codex",
-			"title":   "acp-go-codex",
-			"version": "0.1.0",
+			fieldName:  "acp-go-codex",
+			fieldTitle: "acp-go-codex",
+			"version":  "0.1.0",
 		},
 		"capabilities": map[string]any{
 			"experimentalApi": true,
@@ -806,7 +806,7 @@ func threadFromResponse(resp map[string]any) Thread {
 		Model:           firstNonEmpty(stringValue(resp, "model"), stringValue(rawThread, "model")),
 		Provider:        firstNonEmpty(stringValue(resp, "modelProvider"), stringValue(rawThread, "modelProvider")),
 		ReasoningEffort: firstNonEmpty(stringValue(resp, "reasoningEffort"), stringValue(rawThread, "reasoningEffort")),
-		Title:           firstNonEmpty(stringValue(rawThread, fieldName), stringValue(rawThread, "title"), stringValue(rawThread, "preview")),
+		Title:           firstNonEmpty(stringValue(rawThread, fieldName), stringValue(rawThread, fieldTitle), stringValue(rawThread, "preview")),
 		UpdatedAt:       firstNonEmpty(timestampValue(rawThread, "updatedAt"), timestampValue(rawThread, "mtime")),
 		Raw:             rawThread,
 	}
@@ -1033,7 +1033,7 @@ func toolEventFromItem(params map[string]any, status string) ToolEvent {
 }
 
 func toolTitleFromItem(item map[string]any) string {
-	if title := firstNonEmpty(stringValue(item, "title"), stringValue(item, fieldName)); title != "" {
+	if title := firstNonEmpty(stringValue(item, fieldTitle), stringValue(item, fieldName)); title != "" {
 		return title
 	}
 

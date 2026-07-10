@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -268,5 +269,35 @@ func TestInMemorySessionStoreListAndDeleteBranches(t *testing.T) {
 	sorted, err := sortStore.ListSessions(ctx)
 	if err != nil || len(sorted) != 2 || sorted[0].SessionID != "newer" {
 		t.Fatalf("sorted sessions = %#v err=%v", sorted, err)
+	}
+}
+
+func TestInMemorySessionStoreEmptySessionIDKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+
+	if err := store.Append(ctx, SessionKey{}, []SessionStoreEntry{SessionStoreEntry(`{"a":1}`)}); err == nil || !strings.Contains(err.Error(), "session id is required") {
+		t.Fatalf("Append with empty session id = %v, want session id is required", err)
+	}
+
+	if err := store.Append(ctx, SessionKey{SessionID: "live"}, []SessionStoreEntry{SessionStoreEntry(`{"a":1}`)}); err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	if err := store.Delete(ctx, SessionKey{}); err != nil {
+		t.Fatalf("Delete with empty session id = %v, want pure no-op", err)
+	}
+	if err := store.Delete(ctx, SessionKey{Subpath: "sub"}); err != nil {
+		t.Fatalf("Delete with empty session id and subpath = %v, want pure no-op", err)
+	}
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: "live"})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("live session after empty-id delete = %#v err=%v", entries, err)
+	}
+
+	summaries, err := store.ListSessions(ctx)
+	if err != nil || len(summaries) != 1 || summaries[0].SessionID != "live" {
+		t.Fatalf("summaries after empty-id delete = %#v err=%v", summaries, err)
 	}
 }

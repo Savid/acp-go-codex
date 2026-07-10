@@ -205,7 +205,7 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 	codexPath := flags.String("path", "", "path to codex CLI")
 	codexHome := flags.String("home", "", "Codex home directory")
 
-	deviceAuth := flags.Bool("device-auth", false, "use Codex device auth for login")
+	deviceAuth := flags.Bool("codex-device-auth", false, "use Codex device auth for login")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -302,4 +302,15 @@ func commandExitCode(err error) int {
 	}
 
 	return 1
+}
+
+// recoverMainGoroutine logs a panic recovered from a command-owned goroutine
+// instead of letting it crash the process.
+func recoverMainGoroutine(ctx context.Context, name string) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+
+	slog.Default().ErrorContext(ctx, "command goroutine panic", slog.String("goroutine", name), slog.Any("panic", recovered))
 }

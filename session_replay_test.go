@@ -3,6 +3,8 @@ package codexacp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -244,5 +246,20 @@ func TestLoadSessionFallsBackToTypedThreadHistory(t *testing.T) {
 	}
 	if len(conn.updates) == 0 {
 		t.Fatal("typed thread history was not replayed")
+	}
+}
+
+func TestReplayValueHelpers(t *testing.T) {
+	if replayStatus("failed") != acp.ToolCallStatusFailed || replayStatus("in_progress") != acp.ToolCallStatusInProgress || replayStatus("done") != acp.ToolCallStatusCompleted {
+		t.Fatal("replayStatus failed")
+	}
+	if !strings.Contains(textFromAny([]any{"a", map[string]any{"text": "b"}}), `"text":"b"`) {
+		t.Fatal("textFromAny slice failed")
+	}
+	if stringFromAny(fmt.Stringer(stringer("x"))) != "x" {
+		t.Fatal("stringFromAny did not use Stringer")
+	}
+	if mapFromAny("bad") != nil {
+		t.Fatal("mapFromAny accepted non-map")
 	}
 }

@@ -63,3 +63,7 @@ related generations.
 must be present exactly once, and unlisted subpaths are hidden atomically.
 `Delete` writes a tombstone first; deleting the main subpath cascades to every
 subpath and hides the session from list, load, and resume.
+
+Keys with an empty `SessionID` are rejected by `Append` and `Replace` with a
+"session id is required" error; `Delete` of such a key is a pure no-op and
+writes no tombstone.

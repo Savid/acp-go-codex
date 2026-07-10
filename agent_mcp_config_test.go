@@ -64,9 +64,16 @@ func TestMCPConfigRejectsMissingTransport(t *testing.T) {
 		"field":  "mcpServers[0]",
 		"server": "acp",
 	}, acpReqErr.Data)
-	if _, err := agent.prepareMCPServers(ctx, "s", []acp.McpServer{{}}); err == nil {
-		t.Fatal("prepareMCPServers accepted missing transport")
-	}
+	_, noTransportErr := agent.prepareMCPServers(ctx, "s", []acp.McpServer{{}})
+
+	var noTransportReqErr *acp.RequestError
+
+	require.ErrorAs(t, noTransportErr, &noTransportReqErr)
+	require.Equal(t, -32602, noTransportReqErr.Code)
+	require.Equal(t, map[string]any{
+		"error": "no_transport",
+		"field": "mcpServers[0]",
+	}, noTransportReqErr.Data)
 }
 
 // TestMCPServerNameRequired pins R6-1: an accepted (stdio or http) MCP server

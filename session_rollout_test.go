@@ -278,3 +278,14 @@ func (s *appendFuncStore) ListSessions(context.Context) ([]SessionSummary, error
 func (s *appendFuncStore) ListSubkeys(context.Context, SessionKey) ([]string, error) {
 	return nil, nil
 }
+
+func TestDurableRolloutEntriesSkipsMirroredRows(t *testing.T) {
+	skipSession := &session{mirroredRows: 1}
+	entries, next := skipSession.durableRolloutEntries([]rolloutMirrorRow{
+		{index: 0, entry: SessionStoreEntry(`{"type":"already"}`)},
+		{index: 1, entry: SessionStoreEntry(`{"type":"new"}`)},
+	})
+	if len(entries) != 1 || next != 2 {
+		t.Fatalf("durable entries=%d next=%d, want 1 and 2", len(entries), next)
+	}
+}

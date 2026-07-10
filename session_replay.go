@@ -413,3 +413,23 @@ func firstNonNil(values ...any) any {
 
 	return nil
 }
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return ""
+	}
+}
+
+func mapFromAny(value any) map[string]any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed
+	default:
+		return nil
+	}
+}

@@ -90,7 +90,7 @@ func TestAuthCapabilitiesTerminalArgsAndAuthRequired(t *testing.T) {
 		t.Fatalf("auth methods = %#v", resp.AuthMethods)
 	}
 	args := resp.AuthMethods[0].Terminal.Args
-	if !containsAll(jsonString(args), "login", "-device-auth", "-path", "/bin/codex", "-home", "/tmp/codex-home") {
+	if !containsAll(jsonString(args), "login", "-codex-device-auth", "-path", "/bin/codex", "-home", "/tmp/codex-home") {
 		t.Fatalf("terminal auth args = %#v", args)
 	}
 

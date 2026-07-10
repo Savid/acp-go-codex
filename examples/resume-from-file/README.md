@@ -20,4 +20,5 @@ defaults to the `session_meta` cwd or the current directory. Loading uses normal
 ACP `session/load`, and the prompt uses normal ACP `session/prompt`.
 
 Pass `-prompt "..."` to change the smoke-test turn, `-path` to point at a
-specific `codex` CLI, and `-home` to set `CODEX_HOME`.
+specific `codex` CLI, and `-home` to choose the parent root for isolated Codex
+session state.

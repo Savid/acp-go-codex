@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -36,15 +37,25 @@ const (
 )
 
 // promptToCodex maps ACP prompt content into the native Codex user-input
-// representation. The only native mapping failure is unsupported audio, which
-// surfaces as the uniform ACP unsupported-content error (-32602).
+// representation. Mapping fails closed with -32602: empty prompts, audio
+// blocks, and unknown or empty content blocks surface as the uniform ACP
+// unsupported-content error, and images without data or a URI surface as the
+// uniform prompt-image error. Nothing is silently dropped.
 func promptToCodex(blocks []acp.ContentBlock) ([]codex.UserInput, error) {
-	input, err := codex.PromptToUserInput(blocks)
-	if err != nil {
+	if len(blocks) == 0 {
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
 	}
 
-	return input, nil
+	input, err := codex.PromptToUserInput(blocks)
+
+	switch {
+	case err == nil:
+		return input, nil
+	case errors.Is(err, codex.ErrImageMissingData):
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldField: "prompt.image", jsonFieldError: "missing image data or uri"})
+	default:
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
+	}
 }
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -378,7 +389,7 @@ func (s *session) turnSettings() (model string, effort string, serviceTier strin
 		collaborationMode = map[string]any{
 			jsonFieldMode: string(modePlan),
 			"settings": map[string]any{
-				"model":                  firstNonEmpty(model, valueDefault),
+				metaModelKey:             firstNonEmpty(model, valueDefault),
 				"developer_instructions": nil,
 				"reasoning_effort":       nullableString(effort),
 			},
@@ -432,9 +443,6 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 		jsonFieldSequence:  s.nextRawEventSequence(),
 		jsonFieldSource:    "codex-app-server",
 		jsonFieldEvent:     raw,
-	}
-	if event.RawJSON != "" {
-		payload["rawJSON"] = event.RawJSON
 	}
 
 	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))

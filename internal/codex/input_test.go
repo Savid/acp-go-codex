@@ -54,4 +54,13 @@ func TestPromptToUserInputImageSources(t *testing.T) {
 	if got := imageDataURL("", "abc"); got != "data:application/octet-stream;base64,abc" {
 		t.Fatalf("default image data URL = %q", got)
 	}
+	if _, err := PromptToUserInput([]acp.ContentBlock{acp.ImageBlock("", "image/png")}); !errors.Is(err, ErrImageMissingData) {
+		t.Fatalf("data-less image error = %v, want ErrImageMissingData", err)
+	}
+}
+
+func TestPromptToUserInputFailsClosedOnUnknownBlocks(t *testing.T) {
+	if _, err := PromptToUserInput([]acp.ContentBlock{{}}); !errors.Is(err, ErrUnsupportedContentBlock) {
+		t.Fatalf("empty block error = %v, want ErrUnsupportedContentBlock", err)
+	}
 }

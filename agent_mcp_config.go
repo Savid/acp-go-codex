@@ -8,8 +8,6 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-const mcpServersKey = "mcpServers"
-
 func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []acp.McpServer) ([]acp.McpServer, error) {
 	seen := make(map[string]struct{}, len(servers))
 
@@ -39,7 +37,10 @@ func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []
 				jsonFieldServer: server.Acp.Name,
 			})
 		default:
-			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: fmt.Sprintf("server %d has no transport", index)})
+			return nil, acp.NewInvalidParams(map[string]any{
+				jsonFieldError: "no_transport",
+				jsonFieldField: fmt.Sprintf("mcpServers[%d]", index),
+			})
 		}
 	}
 

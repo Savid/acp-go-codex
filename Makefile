@@ -33,12 +33,12 @@ test-integration-live:
 ## test-integration: alias for full live integration tests
 test-integration: test-integration-live
 
-## test-integration-cover: run full live integration tests with compiled binary coverage
+## test-integration-cover: run token-free live integration tests with compiled binary coverage
 test-integration-cover:
 	rm -rf .tmp/integration-cover coverage-integration.out
 	mkdir -p .tmp/integration-cover/data
 	go build -cover -coverpkg=./... -o .tmp/integration-cover/acp-go-codex ./cmd/acp-go-codex
-	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_RUN_LIVE_TOKENS=1 ACP_GO_CODEX_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-codex GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
+	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-codex GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
 	go tool covdata percent -i=.tmp/integration-cover/data
 	go tool covdata textfmt -i=.tmp/integration-cover/data -o coverage-integration.out
 

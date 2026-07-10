@@ -1,7 +1,10 @@
 package codexacp
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 func TestSessionMetaStructuredOutputValidation(t *testing.T) {
@@ -63,11 +66,30 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 		{codexMetaKey: map[string]any{"options": map[string]any{"mcpToolApprovalMode": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"env": "bad"}}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"env": map[string]any{"A": 1}}}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"model": 42}}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"effort": 42}}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"serviceTier": 42}}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"personality": 42}}},
+		{codexMetaKey: map[string]any{"options": map[string]any{"mcpToolApprovalMode": 42}}},
 	}
 	for _, tc := range cases {
 		if _, err := sessionMetaFromLifecycle(tc); err == nil {
 			t.Fatalf("expected error for %#v", tc)
 		}
+	}
+}
+
+func TestSessionMetaRejectsWrongTypedOptionValues(t *testing.T) {
+	_, err := sessionMetaFromLifecycle(map[string]any{
+		codexMetaKey: map[string]any{"options": map[string]any{"model": 42}},
+	})
+
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) || reqErr.Code != -32602 {
+		t.Fatalf("wrong-typed model error = %#v, want -32602 invalid params", err)
+	}
+	if data, ok := reqErr.Data.(map[string]any); !ok || data["error"] != "unsupported" || data["field"] != "_meta.codex.options.model" {
+		t.Fatalf("wrong-typed model data = %#v, want unsupported/_meta.codex.options.model", reqErr.Data)
 	}
 }
 

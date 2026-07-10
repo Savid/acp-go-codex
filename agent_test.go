@@ -713,7 +713,7 @@ type extensionNotification struct {
 }
 
 func newRecordingAgentClient() *recordingAgentClient {
-	return &recordingAgentClient{done: make(chan struct{}), permission: permissionAccept}
+	return &recordingAgentClient{done: make(chan struct{}), permission: "accept"}
 }
 
 func (c *recordingAgentClient) Done() <-chan struct{} { return c.done }
@@ -1035,7 +1035,7 @@ func (c *blockingPermissionAgentClient) RequestPermission(context.Context, acp.R
 	close(c.started)
 	<-c.release
 
-	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionAccept)}, nil
+	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("accept")}, nil
 }
 
 type readErrorClient struct {
@@ -1224,3 +1224,10 @@ func (c *cancelDuringRunClient) DeleteThread(context.Context, codex.ThreadDelete
 	return nil
 }
 func (c *cancelDuringRunClient) Close(context.Context) error { return nil }
+
+func TestServeReturnsImmediatelyOnCanceledContext(t *testing.T) {
+	err := Serve(canceledContext(), strings.NewReader(""), io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Serve with canceled context = %v, want context.Canceled", err)
+	}
+}

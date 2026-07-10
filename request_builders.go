@@ -10,6 +10,9 @@ import (
 const (
 	metaOptionsKey             = "options"
 	metaModelKey               = "model"
+	metaEffortKey              = "effort"
+	metaServiceTierKey         = "serviceTier"
+	metaPersonalityKey         = "personality"
 	metaEnvKey                 = "env"
 	metaApprovalPolicyKey      = "approvalPolicy"
 	metaSandboxPolicyKey       = "sandboxPolicy"

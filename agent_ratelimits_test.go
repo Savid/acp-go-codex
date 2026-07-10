@@ -181,7 +181,3 @@ func TestHandleExtensionMethodRateLimitsClosedAgent(t *testing.T) {
 	_, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, json.RawMessage(`{}`))
 	require.Error(t, err)
 }
-
-func TestRateLimitsRequestValidate(t *testing.T) {
-	require.NoError(t, RateLimitsRequest{}.Validate())
-}

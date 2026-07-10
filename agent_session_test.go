@@ -866,6 +866,12 @@ func TestSessionHelperBranches(t *testing.T) {
 	if got := mcpServerName(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp"}}); got != "acp" {
 		t.Fatalf("ACP mcpServerName = %q", got)
 	}
+	if got := mcpServerName(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}); got != "sse" {
+		t.Fatalf("SSE mcpServerName = %q", got)
+	}
+	if got := mcpServerName(acp.McpServer{Stdio: &acp.McpServerStdio{Name: "stdio"}}); got != "stdio" {
+		t.Fatalf("stdio mcpServerName = %q", got)
+	}
 	if got := mcpServerName(acp.McpServer{}); got != "" {
 		t.Fatalf("empty mcpServerName = %q", got)
 	}
@@ -1066,4 +1072,62 @@ type cancelErrorClient struct {
 
 func (c *cancelErrorClient) CancelTurn(context.Context, string, string) error {
 	return c.cancelErr
+}
+
+func TestListSessionsListsStoreBackedSessionsWithoutCwd(t *testing.T) {
+	agent := NewAgent(WithSessionStore(&configurableStore{summaries: []SessionSummary{
+		{SessionID: "stored-a", Cwd: "/tmp/project-a", UpdatedAtUnixMilli: 2},
+		{SessionID: "stored-b", Cwd: "", UpdatedAtUnixMilli: 1},
+	}}))
+
+	resp, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{})
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+	if len(resp.Sessions) != 2 || resp.Sessions[0].SessionId != "stored-a" || resp.Sessions[1].SessionId != "stored-b" {
+		t.Fatalf("store-backed sessions without cwd = %#v", resp.Sessions)
+	}
+
+	cwd := "/tmp/project-a"
+	filtered, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{Cwd: &cwd})
+	if err != nil {
+		t.Fatalf("ListSessions with cwd returned error: %v", err)
+	}
+	if len(filtered.Sessions) != 2 {
+		t.Fatalf("cwd filter must retain empty-cwd summaries, got %#v", filtered.Sessions)
+	}
+
+	other := "/tmp/other"
+	otherFiltered, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{Cwd: &other})
+	if err != nil {
+		t.Fatalf("ListSessions with other cwd returned error: %v", err)
+	}
+	if len(otherFiltered.Sessions) != 1 || otherFiltered.Sessions[0].SessionId != "stored-b" {
+		t.Fatalf("cwd filter result = %#v", otherFiltered.Sessions)
+	}
+}
+
+func TestCodexThreadACPErrorBranches(t *testing.T) {
+	if err := codexThreadACPError(errors.New("unauthorized"), nil); err == nil {
+		t.Fatal("auth error returned nil")
+	} else {
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) || reqErr.Code != -32000 {
+			t.Fatalf("auth error mapped to %v, want -32000", err)
+		}
+	}
+
+	if err := codexThreadACPError(errors.Join(codex.ErrThreadNotFound, errors.New("gone")), nil); err == nil {
+		t.Fatal("thread-not-found returned nil")
+	} else {
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) || reqErr.Code != -32602 {
+			t.Fatalf("thread-not-found mapped to %v, want -32602", err)
+		}
+	}
+
+	passthrough := errors.New("some other error")
+	if err := codexThreadACPError(passthrough, nil); !errors.Is(err, passthrough) {
+		t.Fatalf("passthrough error = %v", err)
+	}
 }

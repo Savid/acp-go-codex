@@ -22,7 +22,7 @@ func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 	methods := []acp.AuthMethod{}
 
 	if params.ClientCapabilities.Auth.Terminal {
-		args := []string{"login", "-device-auth"}
+		args := []string{"login", "-codex-device-auth"}
 		if a.options.ExecutablePath != "" {
 			args = append(args, "-path", a.options.ExecutablePath)
 		}

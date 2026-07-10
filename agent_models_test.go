@@ -294,3 +294,13 @@ func requireNoTopLevelConfigState(t *testing.T, response any) {
 		t.Fatalf("response contains removed modes: %s", string(encoded))
 	}
 }
+
+func TestUnstableConfigOptionMapping(t *testing.T) {
+	boolOpt := acp.SessionConfigOption{Boolean: &acp.SessionConfigOptionBoolean{Id: "b", Name: "Bool", Type: "checkbox", CurrentValue: true}}
+	if unstableConfigOption(boolOpt).Boolean == nil {
+		t.Fatal("unstableConfigOption did not map boolean")
+	}
+	if unstableConfigOption(acp.SessionConfigOption{}).Select != nil {
+		t.Fatal("empty unstableConfigOption produced select")
+	}
+}

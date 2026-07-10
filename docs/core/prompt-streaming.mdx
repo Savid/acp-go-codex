@@ -8,6 +8,13 @@ host as ACP `session/update` notifications. The adapter translates each native
 Codex event into the closest ACP update, and completes the call when the turn
 ends — successfully, by cancellation, or with a failure.
 
+Prompt content fails closed before any turn starts: an empty prompt, an audio
+block, or an unknown or empty content block is rejected with invalid params
+whose data is `{"error": "unsupported", "field": "prompt"}`, and an image with
+neither inline data nor a URI is rejected with
+`{"field": "prompt.image", "error": "missing image data or uri"}`. Nothing is
+silently dropped.
+
 ## From Codex events to ACP updates
 
 | Codex event | ACP update |

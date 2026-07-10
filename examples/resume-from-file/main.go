@@ -117,7 +117,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	cwd := flags.String("cwd", "", "session cwd; defaults to the JSONL cwd or current directory")
 	prompt := flags.String("prompt", defaultPrompt, "prompt to send after loading history")
 	codexPath := flags.String("path", "", "path to codex CLI")
-	codexHome := flags.String("home", "", "CODEX_HOME config directory")
+	codexHome := flags.String("home", "", "parent root for isolated Codex session state")
 
 	if err := flags.Parse(args); err != nil {
 		return err

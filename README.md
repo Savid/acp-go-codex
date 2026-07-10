@@ -137,9 +137,9 @@ coverage, cross-compile, vuln, and docs checks. Live integration tests require a
 local authenticated `codex` CLI. `make test-integration-smoke` sets
 `ACP_GO_CODEX_RUN_INTEGRATION=1` and avoids model spend; `make test-integration-live`
 sets both `ACP_GO_CODEX_RUN_INTEGRATION=1` and `ACP_GO_CODEX_RUN_LIVE_TOKENS=1`
-and may spend model tokens; `make test-integration-cover` runs the live suite
-against a coverage-instrumented binary. Live tests always launch Codex with an
-isolated temp `CODEX_HOME`. When `OPENAI_API_KEY` is set and `ACP_GO_CODEX_HOME`
+and may spend model tokens; `make test-integration-cover` runs the token-free
+live suite against a coverage-instrumented binary. Live tests always launch
+Codex with an isolated temp `CODEX_HOME`. When `OPENAI_API_KEY` is set and `ACP_GO_CODEX_HOME`
 is unset, tests use a fresh temp home; otherwise they copy the source home and
 clear copied auth refresh tokens so live tests cannot rotate the source home's
 refresh token. If neither env auth nor copied `auth.json` is available, tests
