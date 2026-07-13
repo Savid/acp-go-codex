@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,22 +17,22 @@ func TestMaterializeRolloutFileHookErrorBranches(t *testing.T) {
 		removeMaterializedRolloutFile = origRemoveRollout
 	})
 
-	createMaterializedRolloutTemp = func() (materializedRolloutFile, error) {
+	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) {
 		return &fakeRolloutFile{name: "rollout", failWriteAt: 1}, nil
 	}
-	if _, err := materializeRollout([]SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
+	if _, err := materializeRollout("", []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
 		t.Fatal("materializeRollout ignored entry write error")
 	}
-	createMaterializedRolloutTemp = func() (materializedRolloutFile, error) {
+	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) {
 		return &fakeRolloutFile{name: "rollout", failWriteAt: 2}, nil
 	}
-	if _, err := materializeRollout([]SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
+	if _, err := materializeRollout("", []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
 		t.Fatal("materializeRollout ignored newline write error")
 	}
-	createMaterializedRolloutTemp = func() (materializedRolloutFile, error) {
+	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) {
 		return &fakeRolloutFile{name: "rollout", closeErr: errors.New("close failed")}, nil
 	}
-	if _, err := materializeRollout([]SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
+	if _, err := materializeRollout("", []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
 		t.Fatal("materializeRollout ignored close error")
 	}
 	createMaterializedRolloutTemp = origCreateRollout
@@ -49,11 +50,11 @@ func TestMaterializeRolloutFileHookErrorBranches(t *testing.T) {
 }
 
 func TestMaterializeRolloutBranches(t *testing.T) {
-	emptyPath, err := materializeRollout(nil)
+	emptyPath, err := materializeRollout("", nil)
 	if err != nil || emptyPath != "" {
 		t.Fatalf("empty materializeRollout path=%q err=%v", emptyPath, err)
 	}
-	path, err := materializeRollout([]SessionStoreEntry{json.RawMessage(`{"type":"a"}`)})
+	path, err := materializeRollout("", []SessionStoreEntry{json.RawMessage(`{"type":"a"}`)})
 	if err != nil {
 		t.Fatalf("materializeRollout returned error: %v", err)
 	}
@@ -68,10 +69,35 @@ func TestMaterializeRolloutBranches(t *testing.T) {
 	}
 }
 
-func TestMaterializeRolloutRejectsInvalidTempDir(t *testing.T) {
-	t.Setenv("TMPDIR", "/path/that/does/not/exist")
-	if _, err := materializeRollout([]SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
-		t.Fatal("materializeRollout accepted invalid TMPDIR")
+func TestMaterializeRolloutUnderScratchDir(t *testing.T) {
+	scratch := filepath.Join(t.TempDir(), "scratch")
+
+	path, err := materializeRollout(scratch, []SessionStoreEntry{json.RawMessage(`{"type":"a"}`)})
+	if err != nil {
+		t.Fatalf("materializeRollout returned error: %v", err)
+	}
+	parent := filepath.Dir(path)
+	if filepath.Dir(parent) != scratch {
+		t.Fatalf("materialized rollout %q is not under scratch dir %q", path, scratch)
+	}
+	if !strings.HasPrefix(filepath.Base(parent), materializedRolloutTempDirPrefix) {
+		t.Fatalf("materialized rollout dir %q lacks prefix %q", parent, materializedRolloutTempDirPrefix)
+	}
+	if err := removeMaterializedRollout(path); err != nil {
+		t.Fatalf("removeMaterializedRollout returned error: %v", err)
+	}
+	if _, statErr := os.Stat(parent); !os.IsNotExist(statErr) {
+		t.Fatalf("materialized rollout dir under scratch still exists: %v", statErr)
+	}
+}
+
+func TestMaterializeRolloutRejectsInvalidScratchDir(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatalf("write blocking scratch file: %v", err)
+	}
+	if _, err := materializeRollout(blocked, []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
+		t.Fatal("materializeRollout accepted invalid scratch dir")
 	}
 }
 

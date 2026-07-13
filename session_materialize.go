@@ -13,18 +13,18 @@ type materializedRolloutFile interface {
 
 var (
 	materializedRolloutTempDirPrefix = "acp-go-codex-rollout-"
-	createMaterializedRolloutTemp    = func() (materializedRolloutFile, error) {
-		return createPrivateTempFile(materializedRolloutTempDirPrefix, "rollout-*.jsonl")
+	createMaterializedRolloutTemp    = func(scratchDir string) (materializedRolloutFile, error) {
+		return createPrivateTempFile(scratchDir, materializedRolloutTempDirPrefix, "rollout-*.jsonl")
 	}
 	removeMaterializedRolloutFile = os.Remove
 )
 
-func materializeRollout(entries []SessionStoreEntry) (string, error) {
+func materializeRollout(scratchDir string, entries []SessionStoreEntry) (string, error) {
 	if len(entries) == 0 {
 		return "", nil
 	}
 
-	file, err := createMaterializedRolloutTemp()
+	file, err := createMaterializedRolloutTemp(scratchDir)
 	if err != nil {
 		return "", fmt.Errorf("create materialized rollout: %w", err)
 	}

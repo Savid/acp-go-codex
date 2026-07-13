@@ -21,6 +21,7 @@ func TestOptionsSetters(t *testing.T) {
 	options := applyOptions([]Option{
 		WithExecutablePath("/bin/codex"),
 		WithHome("/tmp/codex"),
+		WithScratchDir("/tmp/codex-scratch"),
 		WithDefaultModel("gpt-5.5"),
 		WithLogger(logger),
 		WithEnv(map[string]string{"A": "B"}),
@@ -35,6 +36,7 @@ func TestOptionsSetters(t *testing.T) {
 	})
 	if options.ExecutablePath != "/bin/codex" ||
 		options.Home != "/tmp/codex" ||
+		options.ScratchDir != "/tmp/codex-scratch" ||
 		options.DefaultModel != "gpt-5.5" ||
 		options.Logger != logger ||
 		options.Env["A"] != "B" ||

@@ -81,9 +81,9 @@ func main() {
 ```
 
 See the [Go API reference](https://pkg.go.dev/github.com/savid/acp-go-codex)
-for options such as the Codex executable path, `CODEX_HOME`, default model,
-session storage, external ChatGPT token refresh, guarded logout, and
-OpenTelemetry providers.
+for options such as the Codex executable path, `CODEX_HOME`, the ephemeral
+scratch directory, default model, session storage, external ChatGPT token
+refresh, guarded logout, and OpenTelemetry providers.
 
 ## What It Provides
 

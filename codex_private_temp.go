@@ -12,8 +12,13 @@ var (
 	privateCreateTemp = os.CreateTemp
 )
 
-func createPrivateTempFile(dirPrefix string, filePattern string) (*os.File, error) {
-	dir, err := privateMkdirTemp("", dirPrefix)
+func createPrivateTempFile(scratchDir string, dirPrefix string, filePattern string) (*os.File, error) {
+	parent, err := ensureScratchParent(scratchDir)
+	if err != nil {
+		return nil, err
+	}
+
+	dir, err := privateMkdirTemp(parent, dirPrefix)
 	if err != nil {
 		return nil, err
 	}

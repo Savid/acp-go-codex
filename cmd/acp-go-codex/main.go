@@ -110,6 +110,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	codexPath := flags.String("path", "", "path to codex CLI")
 	codexHome := flags.String("home", "", "Codex home directory")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	model := flags.String("model", "", "default Codex model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
@@ -161,6 +162,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		codexacp.WithAgentVersion(version),
 		codexacp.WithExecutablePath(*codexPath),
 		codexacp.WithHome(*codexHome),
+		codexacp.WithScratchDir(*scratchDir),
 		codexacp.WithDefaultModel(*model),
 		codexacp.WithCodexAllowAccountLogout(*allowAccountLogout),
 		codexacp.WithLogger(logger),

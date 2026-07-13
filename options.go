@@ -42,6 +42,11 @@ type Options struct {
 	ExecutablePath string
 	// Home sets CODEX_HOME for launched Codex CLI sessions.
 	Home string
+	// ScratchDir is the parent directory for all ephemeral on-disk
+	// materialization (per-session roots, hydration temp files, probe dirs).
+	// Empty means the system temp directory. The directory is created 0700
+	// when missing.
+	ScratchDir string
 	// DefaultModel is the model preference for newly created Codex threads.
 	DefaultModel string
 	// Env is merged into launched Codex process environments.
@@ -142,6 +147,16 @@ func WithExecutablePath(path string) Option {
 func WithHome(path string) Option {
 	return func(options *Options) {
 		options.Home = path
+	}
+}
+
+// WithScratchDir sets the parent directory for all ephemeral on-disk
+// materialization (per-session roots, hydration temp files, probe dirs).
+// Empty means the system temp directory. The directory is created 0700
+// when missing.
+func WithScratchDir(dir string) Option {
+	return func(options *Options) {
+		options.ScratchDir = dir
 	}
 }
 

@@ -741,7 +741,7 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	}
 	origCreateRollout := createMaterializedRolloutTemp
 	t.Cleanup(func() { createMaterializedRolloutTemp = origCreateRollout })
-	createMaterializedRolloutTemp = func() (materializedRolloutFile, error) {
+	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) {
 		return nil, errors.New("create rollout failed")
 	}
 	if _, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("bad-rollout", "/tmp/project"), materializedEntries); err == nil {

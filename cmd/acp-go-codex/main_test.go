@@ -44,6 +44,7 @@ func TestRunPassesOptions(t *testing.T) {
 		[]string{
 			"-path", "/bin/codex",
 			"-home", "/tmp/codex",
+			"-scratch-dir", "/tmp/codex-scratch",
 			"-model", "gpt-5.5",
 			"-debug",
 			"-codex-allow-account-logout",
@@ -64,6 +65,9 @@ func TestRunPassesOptions(t *testing.T) {
 	}
 	if got.Home != "/tmp/codex" {
 		t.Fatalf("home = %q", got.Home)
+	}
+	if got.ScratchDir != "/tmp/codex-scratch" {
+		t.Fatalf("scratch dir = %q", got.ScratchDir)
 	}
 	if got.DefaultModel != "gpt-5.5" {
 		t.Fatalf("default model = %q", got.DefaultModel)

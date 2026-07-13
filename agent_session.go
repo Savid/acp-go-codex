@@ -577,7 +577,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
 
-	path, err := materializeRollout(entries)
+	path, err := materializeRollout(a.options.ScratchDir, entries)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -794,7 +794,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
 
-	path, err := materializeRollout(entries)
+	path, err := materializeRollout(a.options.ScratchDir, entries)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}

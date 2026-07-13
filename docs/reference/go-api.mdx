@@ -29,6 +29,7 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | --- | --- |
 | `WithExecutablePath(path)` | Codex CLI executable path (defaults to `codex` on `PATH`). |
 | `WithHome(path)` | `CODEX_HOME` for launched Codex processes. |
+| `WithScratchDir(dir)` | Parent directory for all ephemeral on-disk materialization; empty means the system temp directory. Created `0700` when missing. |
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
 | `WithEnv(env)` | Environment variables merged into launched Codex processes. |
 | `WithLogger(logger)` | `*slog.Logger` for structured adapter diagnostics. |
