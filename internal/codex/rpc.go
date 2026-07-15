@@ -147,6 +147,7 @@ type pendingCall struct {
 
 type pendingRequest struct {
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 type rpcConn struct {
@@ -285,6 +286,17 @@ func (c *rpcConn) Respond(ctx context.Context, id json.RawMessage, result any, r
 }
 
 func (c *rpcConn) Close() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	return c.closeContext(ctx, false)
+}
+
+func (c *rpcConn) CloseContext(ctx context.Context) error {
+	return c.closeContext(ctx, true)
+}
+
+func (c *rpcConn) closeContext(ctx context.Context, reportWaitErr bool) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -298,13 +310,35 @@ func (c *rpcConn) Close() error {
 		close(call.result)
 	}
 
-	for key, request := range c.requests {
-		delete(c.requests, key)
-		request.cancel()
+	requestDone := make([]<-chan struct{}, 0, len(c.requests))
+	for _, request := range c.requests {
+		requestDone = append(requestDone, request.done)
 	}
 	c.mu.Unlock()
 
-	err := c.transport.Close()
+	var waitErr error
+
+	for _, done := range requestDone {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			waitErr = ctx.Err()
+		}
+	}
+
+	if waitErr != nil {
+		c.mu.Lock()
+		for _, request := range c.requests {
+			request.cancel()
+		}
+		c.mu.Unlock()
+	}
+
+	if !reportWaitErr {
+		waitErr = nil
+	}
+
+	err := errors.Join(waitErr, c.transport.Close())
 	c.closeDone()
 
 	return err
@@ -453,7 +487,7 @@ func (c *rpcConn) handleRequest(msg rpcMessage) {
 
 func (c *rpcConn) beginRequest(key string) (context.Context, func(), bool) {
 	ctx, cancel := context.WithCancel(context.Background())
-	request := &pendingRequest{cancel: cancel}
+	request := &pendingRequest{cancel: cancel, done: make(chan struct{})}
 
 	c.mu.Lock()
 	if c.closed {
@@ -473,6 +507,7 @@ func (c *rpcConn) beginRequest(key string) (context.Context, func(), bool) {
 		}
 		c.mu.Unlock()
 		cancel()
+		close(request.done)
 	}
 
 	return ctx, finish, true

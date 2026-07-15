@@ -174,6 +174,43 @@ func TestRPCConnServerRequestContextCanceledErrorSuppressesResponse(t *testing.T
 	}
 }
 
+func TestRPCConnGracefulCloseDrainsServerResponse(t *testing.T) {
+	transport := &manualTransport{recv: make(chan rpcMessage, 2)}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	conn := newRPCConn(transport, func(context.Context, ServerRequest) (any, error) {
+		close(started)
+		<-release
+
+		return map[string]any{"decision": "cancel"}, nil
+	})
+
+	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("103"), Method: RequestCommandApproval, Params: json.RawMessage(`{}`)}
+	<-started
+	closeErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		closeErr <- conn.CloseContext(ctx)
+	}()
+
+	select {
+	case err := <-closeErr:
+		t.Fatalf("CloseContext returned before request completion: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-closeErr; err != nil {
+		t.Fatalf("CloseContext returned error: %v", err)
+	}
+
+	sent := transport.sentMessages()
+	if len(sent) != 1 || string(sent[0].ID) != "103" || sent[0].Error != nil {
+		t.Fatalf("graceful close responses = %#v", sent)
+	}
+}
+
 func TestRPCConnReadLoopSkipsMalformedLines(t *testing.T) {
 	transport := &rawManualTransport{recv: make(chan recvItem, 4)}
 	conn := newRPCConn(transport, nil)

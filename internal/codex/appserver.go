@@ -527,7 +527,7 @@ func (c *AppServerClient) Logout(ctx context.Context) error {
 	return c.rpc.Call(ctx, methodAccountLogout, map[string]any{}, nil)
 }
 
-func (c *AppServerClient) Close(context.Context) error {
+func (c *AppServerClient) Close(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -538,7 +538,7 @@ func (c *AppServerClient) Close(context.Context) error {
 	c.closed = true
 	c.mu.Unlock()
 
-	err := c.rpc.Close()
+	err := c.rpc.CloseContext(ctx)
 	if done := c.eventPumpDone(); done != nil {
 		<-done
 	} else {
