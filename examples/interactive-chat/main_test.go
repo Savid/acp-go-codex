@@ -771,41 +771,41 @@ func TestHandleInputEventBranches(t *testing.T) {
 		queuedFlags = append(queuedFlags, queued)
 	}
 
-	control := handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputPrompt, text: " /quit "}, false, enqueue)
+	control := handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputPrompt, text: " /quit "}, false, enqueue)
 	require.True(t, control.exit)
 	require.Empty(t, conn.cancelledSnapshot())
 
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputPrompt, text: "quit"}, true, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputPrompt, text: "quit"}, true, enqueue)
 	require.True(t, control.exit)
 	require.Equal(t, []acp.SessionId{"session-1"}, conn.cancelledSnapshot())
 
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputPrompt, text: " work "}, true, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputPrompt, text: " work "}, true, enqueue)
 	require.False(t, control.exit)
 	require.Equal(t, []string{"work"}, enqueued)
 	require.Equal(t, []bool{true}, queuedFlags)
 
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputInterrupt}, false, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputInterrupt}, false, enqueue)
 	require.NoError(t, control.err)
 
 	conn.cancelErr = errors.New("cancel")
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputInterrupt}, true, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputInterrupt}, true, enqueue)
 	require.Error(t, control.err)
 
 	conn.cancelErr = nil
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputInterrupt}, true, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputInterrupt}, true, enqueue)
 	require.NoError(t, control.err)
 
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputExit}, true, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputExit}, true, enqueue)
 	require.True(t, control.exit)
 
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputClosed}, false, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputClosed}, false, enqueue)
 	require.True(t, control.inputDone)
 
 	err := errors.New("input")
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputError, err: err}, false, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputError, err: err}, false, enqueue)
 	require.ErrorIs(t, control.err, err)
 
-	control = handleInputEvent(context.Background(), conn, ui, "session-1", inputEvent{kind: inputEventKind(99)}, false, enqueue)
+	control = handleInputEvent(context.Background(), conn, ui, "session-1", "test-turn", inputEvent{kind: inputEventKind(99)}, false, enqueue)
 	require.Empty(t, control)
 }
 
@@ -1125,15 +1125,15 @@ func TestRunPrompt(t *testing.T) {
 	conn := &fakeAgentConnection{}
 	var output bytes.Buffer
 	ui := newChatUI(&output)
-	require.NoError(t, runPrompt(context.Background(), conn, ui, "session-1", "hello"))
+	require.NoError(t, runPrompt(context.Background(), conn, ui, "session-1", "test-turn", "hello"))
 	require.Equal(t, []string{"hello"}, conn.promptsSnapshot())
 	require.Contains(t, output.String(), "codex> ")
 
 	conn.promptErr = errors.New("prompt")
-	require.Error(t, runPrompt(context.Background(), conn, ui, "session-1", "again"))
+	require.Error(t, runPrompt(context.Background(), conn, ui, "session-1", "test-turn", "again"))
 
 	conn.promptErr = context.Canceled
-	require.Error(t, runPrompt(context.Background(), conn, ui, "session-1", "cancel"))
+	require.Error(t, runPrompt(context.Background(), conn, ui, "session-1", "test-turn", "cancel"))
 	require.Contains(t, output.String(), "stop> cancelled")
 }
 

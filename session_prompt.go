@@ -59,6 +59,11 @@ func promptToCodex(blocks []acp.ContentBlock) ([]codex.UserInput, error) {
 }
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	route, err := parseInboundRoute(params.Meta)
+	if err != nil {
+		return acp.PromptResponse{}, routeInvalidParams(err)
+	}
+
 	releaseTurn, err := s.acquireTurn(ctx)
 	if err != nil {
 		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
@@ -74,7 +79,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, s.mapTurnFailure(fmt.Errorf("%w: %w", codex.ErrConnectionClosed, relaunchErr))
 	}
 
-	turnCtx := s.beginTurn(ctx)
+	turnCtx := s.beginTurn(ctx, route.TurnNonce)
 	defer s.finishTurn()
 
 	snapshot := s.snapshot()
@@ -443,6 +448,9 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 		jsonFieldSequence:  s.nextRawEventSequence(),
 		jsonFieldSource:    "codex-app-server",
 		jsonFieldEvent:     raw,
+	}
+	if meta := turnRouteMetaFromContext(ctx); meta != nil {
+		payload["_meta"] = meta
 	}
 
 	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))

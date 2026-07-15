@@ -28,6 +28,7 @@ func TestCodexACPAgentBinaryConversation(t *testing.T) {
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_BINARY_OK and no punctuation.")},
 		})

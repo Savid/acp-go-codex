@@ -49,6 +49,12 @@ an explicit `-home`.
 Login helpers delegate to the Codex CLI:
 
 ```sh
-acp-go-codex login [-path PATH] [-home DIR] [-codex-device-auth]
-acp-go-codex logout [-path PATH] [-home DIR]
+acp-go-codex login [-path PATH] [-home DIR] [-scratch-dir DIR] [-codex-device-auth]
+acp-go-codex logout [-path PATH] [-home DIR] [-scratch-dir DIR]
 ```
+
+Both subcommands require Codex CLI 0.144.1 or newer and run under the same
+writable-home lock and process-tree containment as app-server mode.
+`-scratch-dir` selects the parent for their private supervisor scratch and
+defaults to system temp. A command fails closed when the home is already
+claimed or is not on an approved local filesystem.

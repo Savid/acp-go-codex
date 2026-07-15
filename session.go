@@ -19,6 +19,7 @@ type session struct {
 	codexThreadID         string
 	rolloutPath           string
 	materializedPath      string
+	materializedRelease   func()
 	title                 string
 	updatedAt             string
 	model                 string
@@ -28,7 +29,6 @@ type session struct {
 	reasoningEffort       string
 	serviceTier           string
 	personality           string
-	env                   map[string]string
 	approvalPolicy        any
 	sandboxPolicy         any
 	rawMessages           rawMessageConfig
@@ -45,6 +45,7 @@ type session struct {
 	cancel           context.CancelFunc
 	turnDone         <-chan struct{}
 	turnID           string
+	turnNonce        string
 	turnCancelled    bool
 	clientDead       bool
 	rawEmitFailures  int64
@@ -73,7 +74,6 @@ type sessionSnapshot struct {
 	reasoningEffort       string
 	serviceTier           string
 	personality           string
-	env                   map[string]string
 	approvalPolicy        any
 	sandboxPolicy         any
 	outputSchema          any
@@ -106,7 +106,6 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		reasoningEffort:       firstNonEmpty(meta.ReasoningEffort, thread.ReasoningEffort),
 		serviceTier:           meta.ServiceTier,
 		personality:           meta.Personality,
-		env:                   cloneStringMap(meta.Env),
 		approvalPolicy:        cloneAny(meta.ApprovalPolicy),
 		sandboxPolicy:         cloneAny(meta.SandboxPolicy),
 		rawMessages:           meta.RawMessages,
@@ -117,12 +116,13 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 	}
 }
 
-// markClientDead records that the session's Codex app-server connection is gone
-// so the next prompt relaunches it lazily. The session stays addressable.
 func (s *session) markClientDead() {
 	s.mu.Lock()
+	client := s.client
 	s.clientDead = true
 	s.mu.Unlock()
+
+	s.agent.markRuntimeDead(client)
 }
 
 // ensureLiveClient relaunches the Codex app-server and reattaches to the thread
@@ -136,40 +136,56 @@ func (s *session) ensureLiveClient(ctx context.Context) error {
 		return nil
 	}
 
-	mcpServers := append([]acp.McpServer(nil), s.mcpServers...)
-	approvalMode := s.mcpApprovalMode
-	env := cloneStringMap(s.env)
-	threadID := s.codexThreadID
-	cwd := s.cwd
-	materializedPath := s.materializedPath
 	s.mu.Unlock()
 
-	client, err := s.agent.newClient(ctx, mcpServers, env, approvalMode)
+	client, err := s.agent.sharedRuntime(ctx)
 	if err != nil {
 		return err
 	}
 
-	if _, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: threadID,
-		Path:     materializedPath,
-		Cwd:      cwd,
-	}); err != nil {
-		_ = client.Close(context.Background())
-
-		return err
-	}
-
 	s.mu.Lock()
-	old := s.client
 	s.client = client
 	s.clientDead = false
 	s.mu.Unlock()
 
-	if old != nil {
-		_ = old.Close(context.Background())
+	return nil
+}
+
+func (s *session) setClient(client codex.Client, dead bool) {
+	s.mu.Lock()
+	s.client = client
+	s.clientDead = dead
+	s.mu.Unlock()
+}
+
+func (s *session) setClientDead(dead bool) {
+	s.mu.Lock()
+	s.clientDead = dead
+	s.mu.Unlock()
+}
+
+func (s *session) threadConfig() (map[string]any, error) {
+	s.mu.Lock()
+	servers := cloneMCPServers(s.mcpServers)
+	approvalMode := s.mcpApprovalMode
+	s.mu.Unlock()
+
+	return codex.MCPServerThreadConfig(servers, approvalMode)
+}
+
+func (s *session) resumeRequest() (codex.ThreadResumeRequest, error) {
+	s.mu.Lock()
+	threadID := s.codexThreadID
+	path := s.materializedPath
+	cwd := s.cwd
+	s.mu.Unlock()
+
+	config, err := s.threadConfig()
+	if err != nil {
+		return codex.ThreadResumeRequest{}, err
 	}
 
-	return nil
+	return codex.ThreadResumeRequest{ThreadID: threadID, Path: path, Cwd: cwd, Config: config}, nil
 }
 
 func (s *session) acquireTurn(ctx context.Context) (func(), error) {
@@ -195,14 +211,16 @@ func (s *session) turnQueue() chan struct{} {
 	return s.turn
 }
 
-func (s *session) beginTurn(ctx context.Context) context.Context {
+func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	turnCtx, cancel := context.WithCancel(ctx)
+	turnCtx = withTurnRoute(turnCtx, turnNonce)
 	s.cancel = cancel
 	s.turnDone = turnCtx.Done()
 	s.turnCancelled = false
+	s.turnNonce = turnNonce
 
 	return turnCtx
 }
@@ -214,6 +232,7 @@ func (s *session) finishTurn() {
 	s.cancel = nil
 	s.turnDone = nil
 	s.turnID = ""
+	s.turnNonce = ""
 	s.turnCancelled = false
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Unlock()
@@ -225,6 +244,13 @@ func (s *session) finishTurn() {
 	for _, cancel := range interactions {
 		cancel()
 	}
+}
+
+func (s *session) activeTurnNonce() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnNonce
 }
 
 func (s *session) setTurnID(turnID string) {
@@ -268,7 +294,6 @@ func (s *session) snapshot() sessionSnapshot {
 		reasoningEffort:       s.reasoningEffort,
 		serviceTier:           s.serviceTier,
 		personality:           s.personality,
-		env:                   cloneStringMap(s.env),
 		approvalPolicy:        cloneAny(s.approvalPolicy),
 		sandboxPolicy:         cloneAny(s.sandboxPolicy),
 		outputSchema:          cloneAny(s.outputSchema),
@@ -283,11 +308,11 @@ func (s *session) accountMetaSnapshot() map[string]any {
 	return cloneAnyMap(s.accountMeta)
 }
 
-func (s *session) closeState() (codex.Client, string, string) {
+func (s *session) closeState() (codex.Client, string, string, func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.client, s.codexThreadID, s.materializedPath
+	return s.client, s.codexThreadID, s.materializedPath, s.materializedRelease
 }
 
 func (s *session) cancelTurn() {
@@ -388,12 +413,11 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 	return cancels
 }
 
-// Close shuts the session's native Codex client down under a bounded
-// background context so a cancelled or expired caller context can never
-// leave the native process running.
+// Close releases one logical thread. The Agent owns the shared app-server and
+// closes it only when the service itself closes.
 func (s *session) Close(ctx context.Context) error {
 	s.cancelTurn()
-	client, codexThreadID, materializedPath := s.closeState()
+	client, codexThreadID, materializedPath, materializedRelease := s.closeState()
 
 	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
@@ -404,12 +428,12 @@ func (s *session) Close(ctx context.Context) error {
 		_ = client.UnsubscribeThread(closeCtx, codexThreadID)
 	}
 
-	if client != nil {
-		err = client.Close(closeCtx)
-	}
-
 	if materializedPath != "" {
 		err = errors.Join(err, removeMaterializedRollout(materializedPath))
+	}
+
+	if materializedRelease != nil {
+		materializedRelease()
 	}
 
 	return err

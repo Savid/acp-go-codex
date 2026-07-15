@@ -13,6 +13,28 @@ reach, and how failures are surfaced.
 Point it at an adapter-owned directory whenever you enable logout, so a client
 can never clear the credentials of the operator's normal Codex install.
 
+Only one cooperating app-server or terminal login/logout command may mutate a
+writable Codex home.
+The adapter takes two mode-0600, never-unlinked files in that home —
+`acp-go-codex-runtime.claim.lock` and
+`acp-go-codex-runtime.liveness.lock` — with build-tagged Unix `flock` or Windows
+`LockFileEx` backends. A guardian process owns only the claim lock; its separate
+liveness supervisor owns only the liveness lock and directly parents the native
+root. The native process never inherits either descriptor. Unix contains the
+root and descendants in a process group; Windows starts the root suspended,
+assigns it to a named Job Object with `KILL_ON_JOB_CLOSE`, and only then resumes
+it. Both supervisors can terminate the containment and prove its process count
+empty if the other supervisor dies. Adapter/control EOF does the same. Only
+after that proof does shutdown release liveness and then claim, so a second
+claimant fails closed while any old tree can still write the home.
+
+Lock admission also validates the filesystem containing the opened lock file.
+Linux accepts ext2, ext3, ext4, XFS, Btrfs, F2FS, and tmpfs; Darwin/FreeBSD/OpenBSD accept
+only their enumerated local APFS/HFS/UFS/ZFS/FFS/tmpfs families; Windows accepts
+fixed or RAM drives formatted as NTFS or ReFS. Network mounts, overlay
+filesystems, unknown filesystem types, and platforms without a proved backend
+fail closed before either native runtime or terminal account mutation starts.
+
 ACP logout is disabled by default and is refused unless the adapter is started
 with `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. See
 [Authentication](/docs/features/authentication) for the full flow.
@@ -22,6 +44,10 @@ with `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. See
 The adapter accepts only stdio and streamable-HTTP
 [MCP servers](/docs/features/mcp); any other transport is rejected with invalid
 params.
+
+Session MCP is serialized only into thread-scoped app-server requests. Bearer
+headers do not ride process arguments or process-wide environment variables and
+are not written to the workspace or rollout store.
 
 [Raw events](/docs/features/raw-events) can contain unredacted Codex rollout
 JSON. Enable `_codex/rawEvent` only when the host is prepared to receive and
@@ -33,7 +59,9 @@ privacy defaults.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Session start fails with "codex CLI ... is too old; need >= 0.141.0" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
+| Session start fails with "codex CLI ... is too old; need >= 0.144.1" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
+| Session start or terminal auth reports unapproved filesystem lock semantics | `CODEX_HOME` is on a network, overlay, or unknown filesystem. Move it to a supported local filesystem. |
+| Terminal login/logout reports a writable-home claim failure | Another cooperating runtime or terminal account command still owns that home. Quiesce it before retrying. |
 | `session/prompt` fails with `codex_turn_failed` `cause: "timeout"` | The turn exceeded [`WithTurnTimeout`](/docs/core/sessions#turn-deadlines). Raise or clear the timeout; the session stays usable. |
 | `session/prompt` fails with authentication-required (`-32000`) | Codex credentials are missing or expired. Run `acp-go-codex login` or supply a token refresher. |
 | ACP logout is refused | Logout is gated. Start with `-codex-allow-account-logout` for an adapter-owned `CODEX_HOME`. |

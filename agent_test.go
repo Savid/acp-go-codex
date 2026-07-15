@@ -102,6 +102,7 @@ func TestPlaceholderSessionLifecycle(t *testing.T) {
 		SessionId: newResp.SessionId,
 		MessageId: &messageID,
 		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+		Meta:      inboundRouteMeta("turn-1"),
 	})
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
@@ -132,8 +133,8 @@ func TestPlaceholderSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSessions after close returned error: %v", err)
 	}
-	if len(listResp.Sessions) != 0 {
-		t.Fatalf("listed sessions after close = %d, want 0", len(listResp.Sessions))
+	if len(listResp.Sessions) != 1 {
+		t.Fatalf("listed resumable native sessions after logical release = %d, want 1", len(listResp.Sessions))
 	}
 }
 
@@ -170,6 +171,7 @@ func TestACPConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	promptResp, err := clientConn.Prompt(ctx, acp.PromptRequest{
 		SessionId: newResp.SessionId,
 		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+		Meta:      inboundRouteMeta("turn-1"),
 	})
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
@@ -222,7 +224,7 @@ func TestServeLocalConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	if _, err := clientConn.Prompt(ctx, TextPromptRequest(newResp.SessionId, "hello")); err != nil {
+	if _, err := clientConn.Prompt(ctx, TextPromptRequest(newResp.SessionId, "test-turn", "hello")); err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
 	}
 	if _, err := clientConn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: newResp.SessionId}); err != nil {
@@ -424,17 +426,11 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 
 		return newSpyCodexClient(), nil
 	}))
-	if _, err := envAgent.newClient(ctx, []acp.McpServer{
-		StdioMCPServer("stdio", "cmd", nil, map[string]string{"A": "B"}),
-		HTTPMCPServer("http", "https://example.test", map[string]string{"Authorization": "secret"}),
-	}, map[string]string{"OVERLAY": "1"}, "prompt"); err != nil {
+	if _, err := envAgent.launchRuntimeClient(ctx, 1, ""); err != nil {
 		t.Fatalf("newClient with env overlays returned error: %v", err)
 	}
-	if gotOptions.Env["OVERLAY"] != "1" || len(gotOptions.Env) < 2 {
+	if len(gotOptions.Env) != 0 {
 		t.Fatalf("newClient env = %#v", gotOptions.Env)
-	}
-	if _, err := envAgent.newClient(ctx, []acp.McpServer{StdioMCPServer("stdio", "cmd", nil, nil)}, nil, "bad"); err == nil {
-		t.Fatal("newClient accepted invalid MCP approval mode")
 	}
 
 	nilCalls := NewAgent()
@@ -623,7 +619,7 @@ func (c *spyCodexClient) CollaborationModeList(context.Context) (codex.Collabora
 	return codex.CollaborationModeListResponse{Modes: []codex.CollaborationMode{{ID: "default"}, {ID: "plan"}}}, nil
 }
 
-func (c *spyCodexClient) MCPServerStatusList(context.Context) (codex.MCPServerStatusListResponse, error) {
+func (c *spyCodexClient) MCPServerStatusList(context.Context, string) (codex.MCPServerStatusListResponse, error) {
 	return codex.MCPServerStatusListResponse{Servers: []codex.MCPServerStatus{{Name: "mcp", Status: "ready"}}}, nil
 }
 
@@ -772,9 +768,18 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	a2cR, a2cW := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Serve(serveCtx, c2aR, a2cW, withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-			return &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, nil
-		}))
+		errCh <- Serve(
+			serveCtx,
+			c2aR,
+			a2cW,
+			WithScratchDir(t.TempDir()),
+			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+				return &errorCodexClient{
+					spyCodexClient: newSpyCodexClient(),
+					closeErr:       errors.Join(errors.New("close failed"), codex.ErrProcessTreeUnproven),
+				}, nil
+			}),
+		)
 	}()
 	clientConn := acp.NewClientSideConnection(&recordingClient{}, c2aW, a2cR)
 	if _, err := clientConn.Initialize(context.Background(), acp.InitializeRequest{}); err != nil {
@@ -786,8 +791,12 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	serveCancel()
 	_ = c2aW.Close()
 	_ = a2cR.Close()
-	if err := <-errCh; err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("Serve close-error returned %v", err)
+	serveErr := <-errCh
+	if !errors.Is(serveErr, ErrProcessTreeUnproven) {
+		t.Fatalf("Serve close-error returned %v, want ErrProcessTreeUnproven", serveErr)
+	}
+	if !errors.Is(ErrProcessTreeUnproven, codex.ErrProcessTreeUnproven) {
+		t.Fatalf("public process-tree error does not preserve internal identity")
 	}
 	_ = c2aR.Close()
 	_ = a2cW.Close()
@@ -795,7 +804,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	agent := NewAgent()
 	agent.options.clientFactory = nil
 	agent.options.ExecutablePath = filepath.Join(t.TempDir(), "missing-codex")
-	if _, err := agent.newClient(context.Background(), nil, nil, ""); err == nil {
+	if _, err := agent.launchRuntimeClient(context.Background(), 1, ""); err == nil {
 		t.Fatal("newClient with nil factory and no Codex CLI succeeded")
 	}
 	var gotOptions codex.Options
@@ -804,7 +813,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 
 		return newSpyCodexClient(), nil
 	}))
-	if _, err := requestAgent.newClient(context.Background(), nil, nil, ""); err != nil {
+	if _, err := requestAgent.launchRuntimeClient(context.Background(), 1, ""); err != nil {
 		t.Fatalf("newClient for request handler returned error: %v", err)
 	}
 	if _, err := gotOptions.RequestHandler(context.Background(), codex.ServerRequest{Method: "missing"}); err == nil {
@@ -930,12 +939,12 @@ func (c *errorCodexClient) CollaborationModeList(ctx context.Context) (codex.Col
 	return c.spyCodexClient.CollaborationModeList(ctx)
 }
 
-func (c *errorCodexClient) MCPServerStatusList(ctx context.Context) (codex.MCPServerStatusListResponse, error) {
+func (c *errorCodexClient) MCPServerStatusList(ctx context.Context, threadID string) (codex.MCPServerStatusListResponse, error) {
 	if c.mcpStatusErr != nil {
 		return codex.MCPServerStatusListResponse{}, c.mcpStatusErr
 	}
 
-	return c.spyCodexClient.MCPServerStatusList(ctx)
+	return c.spyCodexClient.MCPServerStatusList(ctx, threadID)
 }
 
 func (c *errorCodexClient) ModelList(ctx context.Context) ([]codex.Model, error) {
@@ -1052,7 +1061,7 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "--version":
-			fmt.Println("codex-cli 0.141.0")
+			fmt.Println("codex-cli 0.144.1")
 			os.Exit(0)
 		case "app-server":
 			runFakeCodexAppServer()

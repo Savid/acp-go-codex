@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"testing"
 	"time"
 
@@ -82,7 +83,7 @@ func TestLocalAgentConnectionOutboundClientCalls(t *testing.T) {
 		t.Fatalf("permission response = %#v", permission)
 	}
 
-	elicitation, err := agentConn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	elicitation, err := agentConn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message: "Need a value",
 			Mode:    "form",
@@ -91,15 +92,45 @@ func TestLocalAgentConnectionOutboundClientCalls(t *testing.T) {
 			},
 			Meta: map[string]any{"source": "test"},
 		},
-	})
+	}, elicitationScope{SessionID: "session-1", TurnNonce: "turn-1", ToolCallID: "tool-1"})
 	if err != nil {
 		t.Fatalf("UnstableCreateElicitation returned error: %v", err)
 	}
 	if elicitation.Accept == nil || elicitation.Accept.Content["ok"] != true {
 		t.Fatalf("elicitation response = %#v", elicitation)
 	}
-	if got := client.Elicitations(); len(got) != 1 || got[0].Form == nil || got[0].Form.Meta["source"] != "test" {
+	requestIDValue := acp.RequestIdStr("request-2")
+	requestID := acp.RequestId{Str: &requestIDValue}
+	urlElicitation, err := agentConn.CreateElicitation(ctx, acp.NewUnstableCreateElicitationRequestUrl(
+		"elicitation-2", "https://example.test/open",
+	), elicitationScope{SessionID: "session-1", TurnNonce: "turn-1", RequestID: &requestID})
+	if err != nil {
+		t.Fatalf("URL elicitation returned error: %v", err)
+	}
+	if urlElicitation.Accept == nil {
+		t.Fatalf("URL elicitation response = %#v", urlElicitation)
+	}
+	if got := client.Elicitations(); len(got) != 2 || got[0].Form == nil || got[0].Form.Meta["source"] != "test" || got[1].Url == nil {
 		t.Fatalf("client elicitations = %#v", got)
+	}
+	gotElicitations := client.Elicitations()
+	formRoute := asType[map[string]any](t, gotElicitations[0].Form.Meta[routeMetaKey])
+	if !reflect.DeepEqual(formRoute, map[string]any{
+		routeVersionKey:    float64(routeVersion),
+		jsonFieldSessionID: "session-1",
+		routeTurnNonceKey:  "turn-1",
+		routeToolCallIDKey: "tool-1",
+	}) {
+		t.Fatalf("decoded form elicitation route = %#v", formRoute)
+	}
+	urlRoute := asType[map[string]any](t, gotElicitations[1].Url.Meta[routeMetaKey])
+	if !reflect.DeepEqual(urlRoute, map[string]any{
+		routeVersionKey:    float64(routeVersion),
+		jsonFieldSessionID: "session-1",
+		routeTurnNonceKey:  "turn-1",
+		routeRequestIDKey:  "request-2",
+	}) {
+		t.Fatalf("decoded URL elicitation route = %#v", urlRoute)
 	}
 
 	if err := agentConn.NotifyExtension(ctx, "_codex.test/event", map[string]any{"ok": true}); err != nil {
@@ -151,8 +182,6 @@ func TestLocalAgentConnectionHelpers(t *testing.T) {
 	if _, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{}, elicitationScope{}); err == nil {
 		t.Fatal("empty elicitation params succeeded")
 	}
-	requestIDValue := acp.RequestIdStr("request-1")
-	requestID := acp.RequestId{Str: &requestIDValue}
 	raw, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
 			ElicitationId: "elicitation-1",
@@ -161,12 +190,13 @@ func TestLocalAgentConnectionHelpers(t *testing.T) {
 			Url:           "https://example.test",
 			Meta:          map[string]any{"m": true},
 		},
-	}, elicitationScope{SessionID: "session-1", ToolCallID: "tool-1", RequestID: &requestID})
+	}, elicitationScope{SessionID: "session-1", TurnNonce: "turn-1", ToolCallID: "tool-1"})
 	if err != nil {
 		t.Fatalf("url elicitation params returned error: %v", err)
 	}
 	got := mapFromRaw(raw)
-	if got["sessionId"] != "session-1" || got["toolCallId"] != "tool-1" || got["url"] != "https://example.test" {
+	route := asType[map[string]any](t, asType[map[string]any](t, got[jsonFieldMeta])[routeMetaKey])
+	if route[jsonFieldSessionID] != "session-1" || route[routeToolCallIDKey] != "tool-1" || got["url"] != "https://example.test" {
 		t.Fatalf("scoped elicitation payload = %#v", got)
 	}
 

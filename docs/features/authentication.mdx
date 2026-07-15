@@ -7,6 +7,12 @@ Authentication is owned by the Codex CLI. The adapter never manages Codex
 credentials on its own — it advertises the auth methods a client can use and,
 optionally, refreshes external ChatGPT tokens on the app-server's behalf.
 
+Codex authentication is process-global. Authenticate and logout therefore
+require a quiescent shared runtime: authentication is rejected while any ACP
+session is loaded, and logout first releases every loaded thread before
+mutating the account and closing the runtime. No thread can switch accounts
+independently.
+
 ## Terminal login
 
 The `login` and `logout` subcommands delegate to `codex`:
@@ -16,6 +22,13 @@ acp-go-codex login
 acp-go-codex login -codex-device-auth
 acp-go-codex logout
 ```
+
+Terminal account commands use the same two-lock guardian/liveness supervisor
+and contained process tree as app-server runtimes. They fail immediately when
+another cooperating process owns the selected `CODEX_HOME`, and they return
+only after the Codex command and all descendants are quiescent. The command
+therefore cannot mutate credentials alongside an active app-server. Codex CLI
+0.144.1 or newer and a supported local writable-home filesystem are required.
 
 During ACP initialize, the terminal auth method is advertised only when the
 client declares terminal auth support. The agent auth method

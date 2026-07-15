@@ -4,8 +4,15 @@ description: "Attach MCP servers to a session and set their tool trust level."
 ---
 
 The adapter accepts MCP servers on a session and converts them into `codex
-app-server` MCP configuration. Two transports are supported: stdio and
+app-server` thread configuration. Two transports are supported: stdio and
 streamable HTTP.
+
+The adapter sends each session's servers only through
+`thread/start.config.mcp_servers` and re-supplies the same config through
+`thread/resume.config.mcp_servers`. It never converts session MCP into
+process-global `-c mcp_servers.*` arguments. HTTP headers and stdio environment
+values therefore stay inside the app-server JSON-RPC stream instead of process
+arguments, the app-server environment, the workspace, or the rollout store.
 
 ## Configure MCP servers
 
@@ -44,3 +51,8 @@ does. Any other value is rejected with invalid params.
   and streamable-HTTP transports are accepted. Any other transport is rejected
   with an invalid-params error at session start.
 </Note>
+
+After native-process replacement, every loaded thread is configured before any
+thread runs its bounded `runtime_ready` canary. This ordering is required even
+when two threads use the same MCP server name with different endpoints or
+credentials.

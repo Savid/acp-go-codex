@@ -31,6 +31,10 @@ func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 			args = append(args, "-home", a.options.Home)
 		}
 
+		if a.options.ScratchDir != "" {
+			args = append(args, "-scratch-dir", a.options.ScratchDir)
+		}
+
 		method := acp.AuthMethodTerminalInline{
 			Id:          authMethodCodexLogin,
 			Name:        "Codex Login",
@@ -77,15 +81,28 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 		return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
+	a.mu.Lock()
+	active := len(a.sessions)
+	a.mu.Unlock()
+
+	if active != 0 {
+		return acp.AuthenticateResponse{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex authentication requires a quiescent runtime with no loaded sessions",
+		})
+	}
+
+	if closeErr := a.closeSharedRuntime(context.Background()); closeErr != nil {
+		return acp.AuthenticateResponse{}, closeErr
+	}
+
 	a.setExternalAuthTokens(tokens)
 
-	client, err := a.newClient(ctx, nil, nil, "")
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		a.clearExternalAuthTokens()
 
 		return acp.AuthenticateResponse{}, err
 	}
-	defer client.Close(context.Background())
 
 	account, _ := client.AccountRead(ctx)
 
@@ -103,8 +120,6 @@ func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResp
 		})
 	}
 
-	a.clearExternalAuthTokens()
-
 	a.mu.Lock()
 
 	sessions := make([]*session, 0, len(a.sessions))
@@ -119,13 +134,17 @@ func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResp
 		err = errors.Join(err, session.Close(ctx))
 	}
 
-	client, clientErr := a.newClient(ctx, nil, nil, "")
+	a.observe.AddActiveSession(ctx, -int64(len(sessions)))
+
+	client, clientErr := a.sharedRuntime(ctx)
 	if clientErr != nil {
 		return acp.LogoutResponse{}, errors.Join(err, clientErr)
 	}
-	defer client.Close(context.Background())
 
 	err = errors.Join(err, client.Logout(ctx))
+
+	a.clearExternalAuthTokens()
+	err = errors.Join(err, a.closeSharedRuntime(context.Background()))
 
 	return acp.LogoutResponse{}, err
 }

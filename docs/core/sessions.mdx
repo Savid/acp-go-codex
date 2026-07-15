@@ -13,13 +13,41 @@ host reconnects.
 `session/new` starts a Codex thread rooted at an absolute `cwd`. `session/prompt`
 starts a Codex turn on that thread and streams
 [ACP updates](/docs/core/prompt-streaming) until Codex completes, the turn is
-cancelled, or it fails. `session/cancel` aborts the in-flight turn; `session/close`
-releases the session and the Codex process backing it.
+cancelled, or it fails. `session/cancel` aborts the in-flight turn;
+`session/close` unsubscribes and releases that logical thread without closing
+the shared app-server.
 
-Codex `app-server` processes are launched on demand and are owned by the
-adapter. A process that dies mid-turn is marked for lazy relaunch, so the
-session stays addressable and the next prompt starts a fresh process rather
-than surfacing a dead handle.
+One Agent owns one Codex `app-server` and multiplexes all of its ACP sessions as
+independent native threads. Working directory, model, approval/sandbox policy,
+MCP configuration, callbacks, event streams, and cancellation remain keyed by
+thread. Agent close owns app-server shutdown.
+
+If the shared process dies, its runtime epoch is fenced and every bound thread
+is marked unavailable. The next explicit operation starts one replacement,
+resumes every loaded thread with its own `thread/resume.config.mcp_servers`, and
+only publishes the replacement after all resume/config calls have completed.
+For MCP-bearing resumed threads, an adapter-owned `runtime_ready` marker turn
+must then succeed within five attempts and two minutes. Native MCP status is
+telemetry only, and no user prompt is replayed as a probe.
+
+## Turn route identity
+
+Every `session/prompt` must carry exactly this reserved metadata object, with a
+fresh, unguessable nonce minted by the host:
+
+```json
+{"acp-go.dev/route":{"version":1,"turnNonce":"host-minted-nonce"}}
+```
+
+An active-turn `session/cancel` must carry the identical object. Missing,
+malformed, or stale routes are rejected; cancellation never falls back to a
+mutable "current turn". Embedded Go clients should use `PromptRequest`,
+`TextPromptRequest`, and `CancelRequest`, which require the nonce explicitly.
+
+Every live-turn `session/update` and `_codex/rawEvent` notification carries the
+same exact `{version, turnNonce}` object in its notification `_meta`; raw-event
+payloads also carry their structural `sessionId`. Lifecycle and load-history
+updates remain outside a turn epoch and omit the envelope.
 
 ## Load, resume, and fork
 

@@ -14,7 +14,17 @@ import (
 // client capability gating, and the ACP calls themselves.
 func (a *Agent) handleCodexServerRequest(ctx context.Context, req codex.ServerRequest) (any, error) {
 	params := codex.ServerRequestParams(req)
-	if session := a.sessionByCodexThread(codex.RequestThreadID(params)); session != nil {
+	if req.Method != codex.RequestAuthTokenRefresh {
+		threadID := codex.RequestThreadID(params)
+		if threadID == "" {
+			return nil, fmt.Errorf("codex server request %q omitted required threadId", req.Method)
+		}
+
+		session := a.sessionByCodexThread(threadID)
+		if session == nil {
+			return nil, fmt.Errorf("codex server request %q addressed unknown threadId", req.Method)
+		}
+
 		var finish func()
 
 		ctx, finish = session.beginInteraction(ctx, codex.ServerInteractionKey(req, params))
@@ -169,6 +179,7 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 		Form: codex.ToolUserInputForm(params, map[string]any{codexMetaKey: params}),
 	}, elicitationScope{
 		SessionID:  session.id,
+		TurnNonce:  session.activeTurnNonce(),
 		ToolCallID: acp.ToolCallId(codex.ToolUserInputToolCallID(req, params)),
 	})
 	if err != nil {
@@ -246,10 +257,14 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 
 	scope := elicitationScope{
 		ToolCallID: acp.ToolCallId(codex.MCPElicitationToolCallID(req, params)),
-		RequestID:  codex.RequestIDFromRaw(req.ID),
 	}
 	if session := a.sessionByCodexThread(codex.RequestThreadID(params)); session != nil {
 		scope.SessionID = session.id
+		scope.TurnNonce = session.activeTurnNonce()
+	}
+
+	if scope.ToolCallID == "" {
+		scope.RequestID = codex.RequestIDFromRaw(req.ID)
 	}
 
 	resp, err := conn.CreateElicitation(ctx, codex.MCPElicitationRequest(params, map[string]any{codexMetaKey: params}), scope)

@@ -119,7 +119,7 @@ func TestCommandContractSlashTextPassesThroughRunTurn(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewSession returned error: %v", err)
 			}
-			if _, err := agent.Prompt(ctx, TextPromptRequest(session.SessionId, tc.text)); err != nil {
+			if _, err := agent.Prompt(ctx, TextPromptRequest(session.SessionId, "test-turn", tc.text)); err != nil {
 				t.Fatalf("Prompt returned error: %v", err)
 			}
 

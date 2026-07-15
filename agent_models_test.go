@@ -56,7 +56,7 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 		t.Fatalf("SetSessionConfigOption effort returned error: %v", err)
 	}
 
-	_, err = agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "hello"))
+	_, err = agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "hello"))
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
 	}

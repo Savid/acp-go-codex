@@ -13,19 +13,8 @@ var (
 )
 
 func createPrivateTempFile(scratchDir string, dirPrefix string, filePattern string) (*os.File, error) {
-	parent, err := ensureScratchParent(scratchDir)
+	dir, err := createPrivateTempDir(scratchDir, dirPrefix)
 	if err != nil {
-		return nil, err
-	}
-
-	dir, err := privateMkdirTemp(parent, dirPrefix)
-	if err != nil {
-		return nil, err
-	}
-
-	if err = privateChmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-
 		return nil, err
 	}
 
@@ -37,6 +26,26 @@ func createPrivateTempFile(scratchDir string, dirPrefix string, filePattern stri
 	}
 
 	return file, nil
+}
+
+func createPrivateTempDir(scratchDir string, dirPrefix string) (string, error) {
+	parent, err := ensureScratchParent(scratchDir)
+	if err != nil {
+		return "", err
+	}
+
+	dir, err := privateMkdirTemp(parent, dirPrefix)
+	if err != nil {
+		return "", err
+	}
+
+	if err = privateChmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+
+		return "", err
+	}
+
+	return dir, nil
 }
 
 func removePrivateTempFile(path string, dirPrefix string, removeFile func(string) error) error {

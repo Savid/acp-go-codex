@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 	codexacp "github.com/savid/acp-go-codex"
 )
 
@@ -35,6 +36,12 @@ const (
 )
 
 var integrationLogger = slog.New(slog.DiscardHandler)
+
+func turnRouteMeta(turnNonce string) map[string]any {
+	return map[string]any{"acp-go.dev/route": map[string]any{"version": 1, "turnNonce": turnNonce}}
+}
+
+func newTurnRouteMeta() map[string]any { return turnRouteMeta(uuid.NewString()) }
 
 func TestMain(m *testing.M) {
 	previousLogger := slog.Default()

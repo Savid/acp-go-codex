@@ -6,7 +6,8 @@ description: "How acp-go-codex turns a local Codex CLI into an embeddable ACP ag
 `acp-go-codex` exposes the local `codex` CLI as an
 [Agent Client Protocol](https://agentclientprotocol.com/) agent. It speaks ACP
 over [JSON-RPC streams](https://agentclientprotocol.com/protocol/transports),
-starts `codex app-server` processes on demand, maps
+starts one `codex app-server` per Agent on demand, maps many ACP sessions onto
+native threads, maps
 [ACP prompts](https://agentclientprotocol.com/protocol/prompt-turn) and client
 callbacks into Codex app-server requests, and streams
 [ACP session updates](/docs/reference/updates) back to the host.
@@ -16,8 +17,8 @@ details behind a small Go adapter boundary.
 
 ## What it owns
 
-The adapter owns the ACP surface and the lifecycle of the Codex processes it
-launches: it translates ACP methods into `codex app-server` requests, streams
+The adapter owns the ACP surface and the lifecycle of the Codex runtime it
+launches: it translates ACP methods into thread-scoped `codex app-server` requests, streams
 the resulting events back as ACP updates, and bridges client callbacks
 (permissions, elicitation, MCP) across the boundary. It does **not** own Codex
 itself — authentication, model availability, MCP behavior, native telemetry,
@@ -39,7 +40,7 @@ extension namespace.
     Codex threads, app-server ownership, prompt turns, cancellation, replay, resume, fork, and rollout storage.
   </Card>
   <Card title="Production controls" icon="shield" href="/docs/operations/security">
-    Session-scoped policies, account auth boundaries, token-file MCP proxies, path validation, and predictable cleanup.
+    Session-scoped policies and MCP, account auth boundaries, writable-home exclusivity, path validation, and predictable cleanup.
   </Card>
   <Card title="Observable by default" icon="chart-line" href="/docs/operations/observability">
     Optional OpenTelemetry spans, metrics, trace propagation, structured logs, and native Codex OTEL forwarding.

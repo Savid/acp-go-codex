@@ -95,12 +95,17 @@ func capRawEventPayload(payload map[string]any) map[string]any {
 		}
 	}
 
-	return map[string]any{
+	capped := map[string]any{
 		jsonFieldSessionID: payload[jsonFieldSessionID],
 		jsonFieldSequence:  payload[jsonFieldSequence],
 		jsonFieldSource:    payload[jsonFieldSource],
 		jsonFieldEvent:     marker,
 	}
+	if meta, ok := payload[jsonFieldMeta]; ok {
+		capped[jsonFieldMeta] = meta
+	}
+
+	return capped
 }
 
 func stringMeta(values map[string]any, key string) string {

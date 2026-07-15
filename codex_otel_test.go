@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
@@ -33,7 +32,7 @@ func TestCodexOTELEffectiveEnvPrecedence(t *testing.T) {
 	}
 }
 
-func TestAgentNewClientMergesCodexOTELWithMCPAndEnv(t *testing.T) {
+func TestAgentRuntimeClientMergesCodexOTELWithAgentEnv(t *testing.T) {
 	original := osEnviron
 	t.Cleanup(func() { osEnviron = original })
 	osEnviron = func() []string { return nil }
@@ -52,28 +51,22 @@ func TestAgentNewClientMergesCodexOTELWithMCPAndEnv(t *testing.T) {
 		}),
 	)
 
-	_, err := agent.newClient(context.Background(), []acp.McpServer{{
-		Stdio: &acp.McpServerStdio{Name: "Echo", Command: "echo"},
-	}}, map[string]string{
-		"OTEL_TRACES_EXPORTER":        "otlp",
-		"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
-		"OTEL_METRICS_EXPORTER":       "none",
-		"BASE":                        "session",
-	}, "")
+	_, err := agent.launchRuntimeClient(context.Background(), 1, "")
+
 	if err != nil {
 		t.Fatalf("newClient returned error: %v", err)
 	}
-	if gotOptions.Env["BASE"] != "session" {
+	if gotOptions.Env["BASE"] != "agent" {
 		t.Fatalf("Codex env precedence = %#v", gotOptions.Env)
 	}
 	args := strings.Join(gotOptions.ExtraArgs, " ")
 	requireContainsAll(t, args,
 		"--analytics-default-enabled",
-		`otel.trace_exporter="otlp-grpc"`,
-		`otel.trace_exporter.otlp-grpc.endpoint="http://collector:4318"`,
-		`mcp_servers.Echo.command="echo"`,
+		`otel.metrics_exporter`,
+		`endpoint = "http://collector:4318/v1/metrics"`,
 	)
-	requireNotContainsAny(t, args, `otel.metrics_exporter`)
+	requireNotContainsAny(t, args, "mcp_servers")
+	requireNotContainsAny(t, args, `otel.trace_exporter`)
 }
 
 func TestAgentNewClientReturnsCodexOTELError(t *testing.T) {
@@ -88,7 +81,7 @@ func TestAgentNewClientReturnsCodexOTELError(t *testing.T) {
 			return newSpyCodexClient(), nil
 		}),
 	)
-	if _, err := agent.newClient(context.Background(), nil, nil, ""); err == nil {
+	if _, err := agent.launchRuntimeClient(context.Background(), 1, ""); err == nil {
 		t.Fatal("newClient accepted invalid Codex OTEL config")
 	}
 }

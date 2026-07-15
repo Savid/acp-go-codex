@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 	codexacp "github.com/savid/acp-go-codex"
 )
 
@@ -219,7 +220,7 @@ func runLoadedSession(
 
 	fmt.Fprintln(stdout, "== resume smoke test ==")
 
-	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(id, prompt))
+	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(id, uuid.NewString(), prompt))
 	if err != nil {
 		return err
 	}

@@ -23,6 +23,12 @@ err := codexacp.Serve(ctx, stdin, stdout,
 )
 ```
 
+`Serve` closes the agent before it returns. If shutdown fails, that close error
+takes precedence over EOF or context cancellation. In particular,
+`errors.Is(err, codexacp.ErrProcessTreeUnproven)` means the adapter could not
+prove every native Codex descendant exited; an embedding host must keep that
+runtime and its resources quarantined.
+
 ## Agent options
 
 | Option | Purpose |
@@ -37,6 +43,7 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |
 | `WithConcurrencyLimits(limits)` | Bounds active sessions, prompts, and client calls. |
 | `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |
+| `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
 | `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk. |
 | `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh callback. |
@@ -95,6 +102,21 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `WithSessionRawEvents` | Enable `_codex/rawEvent`. |
 | `WithSessionOutputSchema` | Configure structured output. |
 | `WithSessionCodexOptions` | Merge `_meta.codex.options`. |
+| `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and turn nonce. |
+| `CancelRequest` | Build an active-turn cancellation with the same mandatory route. |
+
+`RuntimeResourceHooks` exposes `AcquireNativeRoot`, `ReserveScratchRoot`,
+`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.
+Admission callbacks receive one of `runtime`, `session`, `prompt`, or
+`discovery`; rejection is propagated fail closed. A successful hook must
+return a release function. The adapter releases a native-root reservation only
+after the full client process has exited, and a scratch reservation only after
+its root has been deleted. Codex reports the two actual home-lock supervisors
+after readiness and removes them when their waiter proves exit; it never
+derives that count from root permits. Absolute descendant snapshots are
+emitted only when containment proves them. Startup stages are `spawn`,
+`readiness`, `configuration`, and native `session` creation. Nil callbacks
+select standalone, adapter-owned unbounded accounting.
 
 ## Store constants
 

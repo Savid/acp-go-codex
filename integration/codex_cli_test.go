@@ -132,6 +132,7 @@ func TestCodexCLIACPConversation(t *testing.T) {
 	messageID := "22222222-2222-4222-8222-222222222222"
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			MessageId: &messageID,
 			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_OK and no punctuation.")},

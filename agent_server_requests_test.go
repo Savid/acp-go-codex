@@ -36,7 +36,10 @@ func newServerRequestSession(t *testing.T) (*Agent, *session, context.Context) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 
-	return agent, agent.sessionMust(resp.SessionId), ctx
+	session := agent.sessionMust(resp.SessionId)
+	_ = session.beginTurn(ctx, "turn-1")
+
+	return agent, session, ctx
 }
 
 func TestClientElicitationCapabilityGating(t *testing.T) {
@@ -71,40 +74,40 @@ func TestClientElicitationCapabilityGating(t *testing.T) {
 func TestServerRequestsNoSessionOrClientBranches(t *testing.T) {
 	agent := NewAgent()
 	ctx := context.Background()
-	cancelResp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+	_, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestCommandApproval,
 		Params: json.RawMessage(`{"threadId":"missing","command":"ls"}`),
 	})
-	if err != nil || asType[map[string]any](t, cancelResp)["decision"] != "cancel" {
-		t.Fatalf("approval without session = %#v err=%v", cancelResp, err)
+	if err == nil {
+		t.Fatal("approval without session succeeded")
 	}
-	permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+	_, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestPermissionsApproval,
 		Params: json.RawMessage(`{"threadId":"missing","permissions":{"network":true}}`),
 	})
-	if err != nil || asType[map[string]any](t, permissions)["scope"] != "turn" {
-		t.Fatalf("permissions without session = %#v err=%v", permissions, err)
+	if err == nil {
+		t.Fatal("permissions without session succeeded")
 	}
-	input, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+	_, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestToolUserInput,
 		Params: json.RawMessage(`{}`),
 	})
-	if err != nil || asType[map[string]any](t, input)["answers"] == nil {
-		t.Fatalf("tool input without client = %#v err=%v", input, err)
+	if err == nil {
+		t.Fatal("tool input without thread succeeded")
 	}
-	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+	_, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestMCPElicitation,
 		Params: json.RawMessage(`{}`),
 	})
-	if err != nil || asType[map[string]any](t, mcp)["action"] != "cancel" {
-		t.Fatalf("mcp without client = %#v err=%v", mcp, err)
+	if err == nil {
+		t.Fatal("MCP elicitation without thread succeeded")
 	}
-	mcpApproval, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+	_, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestMCPElicitation,
 		Params: json.RawMessage(`{"threadId":"missing","_meta":{"codex":{"_meta":{"codex_approval_kind":"mcp_tool_call"}}}}`),
 	})
-	if err != nil || asType[map[string]any](t, mcpApproval)["action"] != "cancel" {
-		t.Fatalf("mcp approval without session = %#v err=%v", mcpApproval, err)
+	if err == nil {
+		t.Fatal("MCP approval without session succeeded")
 	}
 }
 
@@ -117,6 +120,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 	session := agent.sessionMust(resp.SessionId)
+	_ = session.beginTurn(ctx, "turn-1")
 	errConn := &serverRequestErrorClient{recordingAgentClient: newRecordingAgentClient(), permissionErr: errors.New("permission failed"), elicitationErr: errors.New("elicitation failed")}
 	agent.setAgentClient(errConn)
 	if _, fileErr := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
@@ -140,7 +144,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 	}
 	if _, mcpErr := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestMCPElicitation,
-		Params: json.RawMessage(`{"mode":"form"}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"form"}`),
 	}); mcpErr == nil {
 		t.Fatal("MCP elicitation with elicitation error succeeded")
 	}
@@ -164,7 +168,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 	}
 	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestMCPElicitation,
-		Params: json.RawMessage(`{"mode":"form"}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"form"}`),
 	})
 	if err != nil || asType[map[string]any](t, mcp)["action"] != "cancel" {
 		t.Fatalf("canceled MCP elicitation = %#v err=%v", mcp, err)
@@ -187,13 +191,14 @@ func TestServerRequestLateApprovalIsDetachedOnCancel(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 	session := agent.sessionMust(resp.SessionId)
+	_ = session.beginTurn(ctx, "turn-1")
 	blocking := &blockingPermissionAgentClient{
 		recordingAgentClient: newRecordingAgentClient(),
 		started:              make(chan struct{}),
 		release:              make(chan struct{}),
 	}
 	agent.setAgentClient(blocking)
-	_ = session.beginTurn(ctx)
+	_ = session.beginTurn(ctx, "test-turn")
 	resultCh := make(chan any, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -311,6 +316,7 @@ func TestServerRequestsPermissionsAndMCPElicitation(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 	session := agent.sessionMust(resp.SessionId)
+	_ = session.beginTurn(ctx, "turn-1")
 
 	permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestPermissionsApproval,
@@ -336,14 +342,14 @@ func TestServerRequestsPermissionsAndMCPElicitation(t *testing.T) {
 	if !ok || formMap["action"] != "accept" {
 		t.Fatalf("form elicitation response = %#v", form)
 	}
-	if len(conn.scopes) == 0 || conn.scopes[len(conn.scopes)-1].SessionID != session.id || conn.scopes[len(conn.scopes)-1].RequestID == nil {
+	if len(conn.scopes) == 0 || conn.scopes[len(conn.scopes)-1].SessionID != session.id || conn.scopes[len(conn.scopes)-1].TurnNonce != "turn-1" || conn.scopes[len(conn.scopes)-1].ToolCallID == "" {
 		t.Fatalf("MCP form scope = %#v", conn.scopes)
 	}
 
 	conn.elicitation = acp.NewUnstableCreateElicitationResponseDecline()
 	url, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestMCPElicitation,
-		Params: json.RawMessage(`{"mode":"url","message":"Open","url":"https://example.com","elicitationId":"e1"}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"url","message":"Open","url":"https://example.com","elicitationId":"e1"}`),
 	})
 	if err != nil {
 		t.Fatalf("MCP URL elicitation returned error: %v", err)
@@ -474,14 +480,14 @@ func TestServerRequestElicitationCapabilityBranches(t *testing.T) {
 	if err != nil || asType[map[string]any](t, input)["answers"] == nil {
 		t.Fatalf("accepted tool input = %#v err=%v", input, err)
 	}
-	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"mode":"url","url":"https://example.com","message":"Open"}`)})
+	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"url","url":"https://example.com","message":"Open"}`)})
 	if err != nil || asType[map[string]any](t, mcp)["action"] != "accept" {
 		t.Fatalf("accepted MCP URL = %#v err=%v", mcp, err)
 	}
 	declineConn := newRecordingAgentClient()
 	declineConn.elicitation = acp.NewUnstableCreateElicitationResponseDecline()
 	agent.setAgentClient(declineConn)
-	mcp, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"requestedSchema":{"title":"T","description":"D","required":["x"],"properties":{"x":{"type":"string"}}}}`)})
+	mcp, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","requestedSchema":{"title":"T","description":"D","required":["x"],"properties":{"x":{"type":"string"}}}}`)})
 	if err != nil || asType[map[string]any](t, mcp)["action"] != "decline" {
 		t.Fatalf("declined MCP form = %#v err=%v", mcp, err)
 	}

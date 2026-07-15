@@ -74,7 +74,12 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 }
 
 func TestAuthCapabilitiesTerminalArgsAndAuthRequired(t *testing.T) {
-	agent := NewAgent(WithExecutablePath("/bin/codex"), WithHome("/tmp/codex-home"), WithCodexAllowAccountLogout(true))
+	agent := NewAgent(
+		WithExecutablePath("/bin/codex"),
+		WithHome("/tmp/codex-home"),
+		WithScratchDir("/tmp/codex-scratch"),
+		WithCodexAllowAccountLogout(true),
+	)
 	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{
 		ClientCapabilities: acp.ClientCapabilities{
 			Auth: acp.AuthCapabilities{Terminal: true},
@@ -90,7 +95,7 @@ func TestAuthCapabilitiesTerminalArgsAndAuthRequired(t *testing.T) {
 		t.Fatalf("auth methods = %#v", resp.AuthMethods)
 	}
 	args := resp.AuthMethods[0].Terminal.Args
-	if !containsAll(jsonString(args), "login", "-codex-device-auth", "-path", "/bin/codex", "-home", "/tmp/codex-home") {
+	if !containsAll(jsonString(args), "login", "-codex-device-auth", "-path", "/bin/codex", "-home", "/tmp/codex-home", "-scratch-dir", "/tmp/codex-scratch") {
 		t.Fatalf("terminal auth args = %#v", args)
 	}
 
@@ -216,7 +221,5 @@ func TestAuthErrorBranches(t *testing.T) {
 	}
 	if _, err := logoutAgent.Logout(ctx, acp.LogoutRequest{}); !errors.Is(err, logoutErr) {
 		t.Fatalf("Logout error = %v", err)
-	} else if !errors.Is(err, closeErr) {
-		t.Fatalf("Logout missing session close error = %v", err)
 	}
 }

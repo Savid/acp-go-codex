@@ -54,6 +54,10 @@ func processCloseError(err error) error {
 		return nil
 	}
 
+	if errors.Is(err, ErrProcessTreeUnproven) {
+		return err
+	}
+
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {

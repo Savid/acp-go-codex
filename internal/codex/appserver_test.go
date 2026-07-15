@@ -72,6 +72,7 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 		Model:                 "gpt-test",
 		ServiceTier:           "flex",
 		Personality:           "pragmatic",
+		Config:                map[string]any{"mcp_servers": map[string]any{"marker": map[string]any{"url": "https://a"}}},
 	})
 	if err != nil {
 		t.Fatalf("StartThread returned error: %v", err)
@@ -80,7 +81,7 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 		t.Fatalf("thread = %#v", thread)
 	}
 	start := transport.sentParams(methodThreadStart)
-	if start["permissions"] == nil || start["personality"] != "pragmatic" || start["serviceTier"] != "flex" {
+	if start["permissions"] == nil || start["personality"] != "pragmatic" || start["serviceTier"] != "flex" || start["config"] == nil {
 		t.Fatalf("thread/start params = %#v", start)
 	}
 	if _, startErr := client.StartThread(ctx, ThreadStartRequest{Personality: ""}); startErr != nil {
@@ -90,8 +91,12 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 		t.Fatalf("empty personality was sent: %#v", transport.sentParams(methodThreadStart))
 	}
 
-	if _, resumeErr := client.ResumeThread(ctx, ThreadResumeRequest{ThreadID: "thread-1", Path: "/tmp/rollout.jsonl", Cwd: "/repo"}); resumeErr != nil {
+	if _, resumeErr := client.ResumeThread(ctx, ThreadResumeRequest{ThreadID: "thread-1", Path: "/tmp/rollout.jsonl", Cwd: "/repo", Config: map[string]any{"mcp_servers": map[string]any{"marker": map[string]any{"url": "https://a"}}}}); resumeErr != nil {
 		t.Fatalf("ResumeThread returned error: %v", resumeErr)
+	}
+	resume := transport.sentParams(methodThreadResume)
+	if resume["config"] == nil {
+		t.Fatalf("thread/resume omitted config: %#v", resume)
 	}
 	if _, forkErr := client.ForkThread(ctx, ThreadForkRequest{ThreadID: "thread-1", Cwd: "/repo"}); forkErr != nil {
 		t.Fatalf("ForkThread returned error: %v", forkErr)
@@ -132,7 +137,7 @@ func TestAppServerClientTurnAndDiscoveryMethods(t *testing.T) {
 	if err != nil || len(modes.Modes) != 2 || modes.Modes[0].ID != "default" {
 		t.Fatalf("CollaborationModeList = %#v err=%v", modes, err)
 	}
-	status, err := client.MCPServerStatusList(ctx)
+	status, err := client.MCPServerStatusList(ctx, "thread-1")
 	if err != nil || len(status.Servers) != 1 || len(status.Servers[0].Tools) != 1 {
 		t.Fatalf("MCPServerStatusList = %#v err=%v", status, err)
 	}
@@ -170,7 +175,7 @@ func TestNewAppServerClientLaunchesCLI(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.141.0
+  echo codex-cli 0.144.1
   exit 0
 fi
 read line || exit 0
@@ -180,7 +185,7 @@ while read line; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write codex script: %v", err)
 	}
-	client, err := NewAppServerClient(context.Background(), Options{CLIPath: script, LaunchTimeout: 5 * time.Second})
+	client, err := NewAppServerClient(context.Background(), Options{CLIPath: script, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), LaunchTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
 	}
@@ -493,7 +498,7 @@ func TestAppServerClientRPCErrorBranches(t *testing.T) {
 	if _, err := client.CollaborationModeList(ctx); err == nil {
 		t.Fatal("CollaborationModeList with RPC error succeeded")
 	}
-	if _, err := client.MCPServerStatusList(ctx); err == nil {
+	if _, err := client.MCPServerStatusList(ctx, "thread"); err == nil {
 		t.Fatal("MCPServerStatusList with RPC error succeeded")
 	}
 	if err := client.UnsubscribeThread(ctx, "thread"); err == nil {
@@ -950,7 +955,7 @@ func TestAppServerLifecycleMappingEdges(t *testing.T) {
 	initErrorScript := filepath.Join(t.TempDir(), "codex-init-error")
 	if err := os.WriteFile(initErrorScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.141.0
+  echo codex-cli 0.144.1
   exit 0
 fi
 read line || exit 0
@@ -959,7 +964,7 @@ while read line; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write init error script: %v", err)
 	}
-	if _, err := NewAppServerClient(context.Background(), Options{CLIPath: initErrorScript, LaunchTimeout: time.Second}); err == nil {
+	if _, err := NewAppServerClient(context.Background(), Options{CLIPath: initErrorScript, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), LaunchTimeout: time.Second}); err == nil {
 		t.Fatal("NewAppServerClient accepted initialize failure")
 	}
 
@@ -1051,8 +1056,9 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 		codexPath = "codex"
 	}
 	client, err := NewAppServerClient(ctx, Options{
-		CLIPath:   codexPath,
-		CodexHome: t.TempDir(),
+		CLIPath:        codexPath,
+		CodexHome:      t.TempDir(),
+		SupervisorRoot: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
@@ -1073,10 +1079,6 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 	if _, collabErr := client.CollaborationModeList(ctx); collabErr != nil {
 		t.Fatalf("CollaborationModeList returned error: %v", collabErr)
 	}
-	if _, mcpErr := client.MCPServerStatusList(ctx); mcpErr != nil {
-		t.Fatalf("MCPServerStatusList returned error: %v", mcpErr)
-	}
-
 	thread, err := client.StartThread(ctx, ThreadStartRequest{
 		Cwd:   t.TempDir(),
 		Model: models[0].ID,
@@ -1086,6 +1088,9 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 	}
 	if thread.ID == "" {
 		t.Fatalf("thread missing ID: %#v", thread)
+	}
+	if _, mcpErr := client.MCPServerStatusList(ctx, thread.ID); mcpErr != nil {
+		t.Fatalf("MCPServerStatusList returned error: %v", mcpErr)
 	}
 	t.Cleanup(func() {
 		if unsubErr := client.UnsubscribeThread(context.Background(), thread.ID); unsubErr != nil {
@@ -1131,5 +1136,16 @@ func runLiveTurn(ctx context.Context, t *testing.T, client Client, threadID stri
 	}
 	if !completed {
 		t.Fatal("live turn did not emit completion")
+	}
+}
+
+func TestDispatchEventForwardsRuntimeErrors(t *testing.T) {
+	called := false
+	client := &AppServerClient{options: Options{EventHandler: func(_ context.Context, event Event) {
+		called = event.Kind == EventError
+	}}}
+	client.dispatchEvent(Event{Kind: EventError, Err: errors.New("runtime failed")})
+	if !called {
+		t.Fatal("runtime error was not forwarded to the event handler")
 	}
 }

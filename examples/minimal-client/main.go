@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 	codexacp "github.com/savid/acp-go-codex"
 )
 
@@ -304,7 +305,7 @@ func runConversation(
 		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	}()
 
-	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(session.SessionId, prompt))
+	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(session.SessionId, uuid.NewString(), prompt))
 	if err != nil {
 		return err
 	}

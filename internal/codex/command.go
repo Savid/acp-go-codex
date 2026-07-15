@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,7 +18,7 @@ import (
 
 const (
 	envCodexHome    = "CODEX_HOME"
-	minCodexVersion = "0.141.0"
+	minCodexVersion = "0.144.1"
 )
 
 var execCommandContext = exec.CommandContext
@@ -38,8 +39,25 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, "", versionErr
 	}
 
-	cmd := execCommandContext(procCtx, path, appServerArgs(options)...)
-	cmd.Env = mergedEnv(options)
+	var cmd *exec.Cmd
+
+	var supervisor *supervisorProof
+
+	if options.skipSupervisor {
+		cmd = execCommandContext(procCtx, path, appServerArgs(options)...)
+		cmd.Env = mergedEnv(options)
+	} else {
+		cmd, supervisor, err = supervisorCommand(procCtx, supervisorConfig{
+			NativePath: path,
+			NativeArgs: appServerArgs(options),
+			NativeEnv:  mergedEnv(options),
+			Home:       firstNonEmpty(options.WritableHome, options.CodexHome),
+			Scratch:    options.SupervisorRoot,
+		})
+		if err != nil {
+			return nil, nil, "", err
+		}
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -56,14 +74,19 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	stderr := codexStderrWriter(options.Logger)
 	cmd.Stderr = stderr
 
+	spawnStarted := time.Now()
 	if err := startProcess(cmd); err != nil {
+		observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, err)
+
 		_ = stdin.Close()
 		_ = stdout.Close()
 
 		return nil, nil, "", err
 	}
 
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}
+	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, nil)
+
+	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, supervisor: supervisor, observeProcess: options.ObserveProcess}
 
 	return newLineTransport(stdout, stdin, proc), cmd, version, nil
 }
@@ -275,14 +298,54 @@ const processExitGrace = 2 * time.Second
 // stderr tail, and the single cmd.Wait reaper shared by the transport
 // process-death detection and the deliberate Close escalation.
 type process struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr *stderrTail
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	stderr     *stderrTail
+	supervisor *supervisorProof
 
 	waitOnce sync.Once
 	waitErr  error
 	waitDone chan struct{}
+
+	observationMu       sync.Mutex
+	processExited       bool
+	supervisorsObserved bool
+	observeProcess      func(context.Context, string, int64)
+}
+
+func (p *process) markSupervisorsReady(ctx context.Context) {
+	if p == nil || p.supervisor == nil || p.observeProcess == nil {
+		return
+	}
+
+	p.observationMu.Lock()
+	if p.processExited || p.supervisorsObserved {
+		p.observationMu.Unlock()
+
+		return
+	}
+
+	p.supervisorsObserved = true
+	p.observationMu.Unlock()
+	p.observeProcess(ctx, "home_lock_supervisor", 2)
+}
+
+func (p *process) markExited() {
+	if p == nil {
+		return
+	}
+
+	p.observationMu.Lock()
+	p.processExited = true
+	observed := p.supervisorsObserved
+	p.supervisorsObserved = false
+	observe := p.observeProcess
+	p.observationMu.Unlock()
+
+	if observed && observe != nil {
+		observe(context.Background(), "home_lock_supervisor", -2)
+	}
 }
 
 // beginWait reaps the process exactly once in the background. Callers gate on
@@ -299,11 +362,22 @@ func (p *process) beginWait() {
 
 		go func() {
 			defer recoverCodexGoroutine(context.Background(), "Codex process waiter")
+			defer p.markExited()
 
 			p.waitErr = p.cmd.Wait()
+			if p.waitErr != nil && p.supervisor != nil {
+				p.waitErr = errors.Join(p.waitErr, p.supervisor.awaitCompletion())
+			}
+
 			close(p.waitDone)
 		}()
 	})
+}
+
+func observeCodexStartupStage(ctx context.Context, options Options, lifecycle, stage string, started time.Time, err error) {
+	if options.ObserveStartupStage != nil {
+		options.ObserveStartupStage(ctx, lifecycle, stage, time.Since(started), err)
+	}
 }
 
 // exited reports the process exit status and its stderr tail when the process
@@ -334,6 +408,12 @@ func (p *process) Close() error {
 	}
 
 	p.beginWait()
+
+	if p.supervisor != nil {
+		<-p.waitDone
+
+		return processCloseError(p.waitErr)
+	}
 
 	// Escalate: stdin EOF → SIGTERM → SIGKILL. The first grace window lets
 	// the app-server exit on its own after stdin closes so in-flight cleanup

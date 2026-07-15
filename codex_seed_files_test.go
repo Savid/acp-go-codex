@@ -96,7 +96,7 @@ func TestNewClientSeedsUnderHome(t *testing.T) {
 		}),
 	)
 
-	client, err := agent.newClient(context.Background(), nil, nil, "")
+	client, err := agent.launchRuntimeClient(context.Background(), 1, "")
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -115,7 +115,7 @@ func TestNewClientSeedFilesRequireHome(t *testing.T) {
 		}),
 	)
 
-	_, err := agent.newClient(context.Background(), nil, nil, "")
+	_, err := agent.launchRuntimeClient(context.Background(), 1, "")
 	requireUnsupported(t, err)
 }
 

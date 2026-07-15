@@ -1,6 +1,14 @@
 package codexacp
 
-import "os"
+import (
+	"os"
+
+	"github.com/savid/acp-go-codex/internal/codex"
+)
+
+func init() {
+	codex.SetScratchParentResolver(ensureScratchParent)
+}
 
 // scratchParent resolves the parent directory for all ephemeral on-disk
 // materialization: dir when set, else the system temp directory. This is the

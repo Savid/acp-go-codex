@@ -12,7 +12,6 @@ import (
 
 func TestRequestBuilderClones(t *testing.T) {
 	meta := map[string]any{"x": []any{map[string]any{"y": "z"}}}
-	env := map[string]string{"SECRET": "value"}
 	approvalPolicy := map[string]any{"mode": "never"}
 	sandboxPolicy := map[string]any{"type": "workspaceWrite"}
 	req := NewSessionRequest("/repo",
@@ -22,23 +21,18 @@ func TestRequestBuilderClones(t *testing.T) {
 		WithSessionCodexOptions(NewCodexOptions(
 			WithCodexModel("gpt"),
 			WithCodexEffort("low"),
-			WithCodexEnv(env),
 			WithCodexApprovalPolicy(approvalPolicy),
 			WithCodexSandboxPolicy(sandboxPolicy),
 			WithCodexOutputSchema(map[string]any{"type": "object"}),
 		)),
 	)
 	asType[map[string]any](t, asType[[]any](t, meta["x"])[0])["y"] = "changed"
-	env["SECRET"] = "changed"
 	approvalPolicy["mode"] = "changed"
 	sandboxPolicy["type"] = "changed"
 	if asType[map[string]any](t, asType[[]any](t, req.Meta["x"])[0])["y"] != "z" {
 		t.Fatal("WithSessionMeta did not clone input")
 	}
 	options := asType[map[string]any](t, asType[map[string]any](t, req.Meta[codexMetaKey])[metaOptionsKey])
-	if asType[map[string]string](t, options[metaEnvKey])["SECRET"] != "value" {
-		t.Fatalf("Codex env was not cloned: %#v", options)
-	}
 	if asType[map[string]any](t, options[metaApprovalPolicyKey])["mode"] != "never" {
 		t.Fatalf("Codex approval policy was not cloned: %#v", options)
 	}

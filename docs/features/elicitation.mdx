@@ -13,6 +13,13 @@ During a turn, a Codex `app-server` request that requires user input is mapped
 onto an ACP elicitation call to the client. The client's response is passed back
 to Codex so the turn can continue.
 
+The initialize response advertises route-envelope version 1 at
+`_meta["acp-go.dev/route"].versions`. Every form and URL elicitation preserves
+its native metadata and adds one complete reserved route object containing
+`version`, logical `sessionId`, the prompt's `turnNonce`, and exactly one native
+`toolCallId` or `requestId`. A native or MCP payload that already contains the
+reserved key is rejected rather than overwritten or merged.
+
 ## Capability gating
 
 Elicitation is gated on the capability the client advertised at initialize:

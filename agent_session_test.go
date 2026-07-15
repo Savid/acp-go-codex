@@ -333,8 +333,8 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 	if _, err := startAgent.NewSession(ctx, NewSessionRequest("/tmp/project")); !errors.Is(err, startErr) {
 		t.Fatalf("NewSession start err=%v", err)
 	}
-	if !startClient.closed {
-		t.Fatal("NewSession start error did not close client")
+	if startClient.closed {
+		t.Fatal("NewSession start error closed the Agent-owned shared runtime")
 	}
 
 	limitAgent := NewAgent(
@@ -358,7 +358,7 @@ func TestUnknownSessionUniformInvalidParams(t *testing.T) {
 		}),
 	)
 
-	_, promptErr := agent.Prompt(ctx, TextPromptRequest("missing", "hello"))
+	_, promptErr := agent.Prompt(ctx, TextPromptRequest("missing", "test-turn", "hello"))
 	requireUnknownSession(t, promptErr)
 	requireUnknownSession(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}))
 	_, configErr := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("missing", configModel, "gpt"))
@@ -380,7 +380,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 
-	if _, promptErr := agent.Prompt(ctx, TextPromptRequest("missing", "hello")); promptErr == nil {
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest("missing", "test-turn", "hello")); promptErr == nil {
 		t.Fatal("Prompt missing session succeeded")
 	}
 	if cancelErr := agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}); cancelErr == nil {
@@ -407,8 +407,11 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete close NewSession returned error: %v", err)
 	}
-	if _, closeDelErr := deleteCloseAgent.UnstableDeleteSession(ctx, DeleteSessionRequest(deleteCloseResp.SessionId)); !errors.Is(closeDelErr, deleteCloseErr) {
-		t.Fatalf("DeleteSession close error = %v", closeDelErr)
+	if _, closeDelErr := deleteCloseAgent.UnstableDeleteSession(ctx, DeleteSessionRequest(deleteCloseResp.SessionId)); closeDelErr != nil {
+		t.Fatalf("DeleteSession released thread with error = %v", closeDelErr)
+	}
+	if closeErr := deleteCloseAgent.Close(); !errors.Is(closeErr, deleteCloseErr) {
+		t.Fatalf("Agent close error = %v", closeErr)
 	}
 
 	cancelErr := codex.ErrThreadNotFound
@@ -428,7 +431,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fatal NewSession returned error: %v", err)
 	}
-	if _, fatalPromptErr := fatalAgent.Prompt(ctx, TextPromptRequest(fatalResp.SessionId, "hello")); !isTurnFailure(fatalPromptErr, codex.CauseTransport) {
+	if _, fatalPromptErr := fatalAgent.Prompt(ctx, TextPromptRequest(fatalResp.SessionId, "test-turn", "hello")); !isTurnFailure(fatalPromptErr, codex.CauseTransport) {
 		t.Fatalf("Prompt fatal process error = %v, want codex_turn_failed transport", fatalPromptErr)
 	}
 	if _, sessionErr := fatalAgent.session(fatalResp.SessionId); sessionErr != nil {
@@ -442,11 +445,14 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("close NewSession returned error: %v", err)
 	}
-	if _, err := closeAgent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: closeResp.SessionId}); !errors.Is(err, closeErr) {
-		t.Fatalf("CloseSession err=%v", err)
+	if _, err := closeAgent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: closeResp.SessionId}); err != nil {
+		t.Fatalf("CloseSession logical release err=%v", err)
 	}
 	if _, err := closeAgent.session(closeResp.SessionId); err == nil {
 		t.Fatal("CloseSession did not remove session")
+	}
+	if err := closeAgent.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("Agent runtime close err=%v", err)
 	}
 
 	if session := agent.removeSession(resp.SessionId); session == nil {
@@ -849,7 +855,7 @@ func TestSessionHelperBranches(t *testing.T) {
 			HTTPMCPServer("z", "https://z.example", nil),
 			StdioMCPServer("a", "cmd", nil, nil),
 		},
-		Meta: sessionMeta{Env: map[string]string{"A": "B"}, ApprovalPolicy: map[string]any{"mode": "ask"}},
+		Meta: sessionMeta{ApprovalPolicy: map[string]any{"mode": "ask"}},
 	}
 	if got := codexSessionStartFingerprint(start); got == "" {
 		t.Fatal("empty session start fingerprint")

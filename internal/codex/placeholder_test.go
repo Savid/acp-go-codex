@@ -93,7 +93,7 @@ func TestPlaceholderClientLifecycleMethods(t *testing.T) {
 	if modes, err := client.CollaborationModeList(ctx); err != nil || len(modes.Modes) != 2 {
 		t.Fatalf("CollaborationModeList = %#v err=%v", modes, err)
 	}
-	if status, err := client.MCPServerStatusList(ctx); err != nil || status.Raw == nil {
+	if status, err := client.MCPServerStatusList(ctx, resumed.ID); err != nil || status.Raw == nil {
 		t.Fatalf("MCPServerStatusList = %#v err=%v", status, err)
 	}
 	if err := client.UnsubscribeThread(ctx, resumed.ID); err != nil {

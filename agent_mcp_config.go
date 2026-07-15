@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []acp.McpServer) ([]acp.McpServer, error) {
@@ -45,6 +46,15 @@ func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []
 	}
 
 	return cloneMCPServers(servers), nil
+}
+
+// preparedMCPThreadConfig renders inputs that have already passed both
+// prepareMCPServers and sessionMetaFromLifecycle. Those validators enforce
+// every condition under which MCPServerThreadConfig can return an error.
+func preparedMCPThreadConfig(servers []acp.McpServer, approvalMode string) map[string]any {
+	config, _ := codex.MCPServerThreadConfig(servers, approvalMode)
+
+	return config
 }
 
 func stableMCPServersFromUnstable(servers []acp.UnstableMcpServer) []acp.McpServer {

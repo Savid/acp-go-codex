@@ -13,7 +13,6 @@ const (
 	metaEffortKey              = "effort"
 	metaServiceTierKey         = "serviceTier"
 	metaPersonalityKey         = "personality"
-	metaEnvKey                 = "env"
 	metaApprovalPolicyKey      = "approvalPolicy"
 	metaSandboxPolicyKey       = "sandboxPolicy"
 	metaOutputSchemaKey        = "outputSchema"
@@ -25,8 +24,6 @@ const (
 type CodexOptions struct {
 	// Model selects the initial Codex model for this session.
 	Model string `json:"model,omitempty"`
-	// Env adds session-scoped environment variables for the Codex app-server process.
-	Env map[string]string `json:"env,omitempty"`
 	// OutputSchema configures JSON Schema structured output for this session.
 	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 	// Effort selects the Codex reasoning effort for turns in this session.
@@ -48,10 +45,6 @@ func (options CodexOptions) Meta() map[string]any {
 	values := map[string]any{}
 	if options.Model != "" {
 		values[metaModelKey] = options.Model
-	}
-
-	if len(options.Env) > 0 {
-		values[metaEnvKey] = cloneStringMap(options.Env)
 	}
 
 	if options.OutputSchema != nil {
@@ -263,17 +256,24 @@ func (config sessionRequestConfig) additionalDirectoriesClone() []string {
 
 // PromptRequest constructs a session/prompt request with a non-nil prompt
 // slice for embedded Go callers.
-func PromptRequest(sessionID acp.SessionId, blocks ...acp.ContentBlock) acp.PromptRequest {
+func PromptRequest(sessionID acp.SessionId, turnNonce string, blocks ...acp.ContentBlock) acp.PromptRequest {
 	return acp.PromptRequest{
 		SessionId: sessionID,
 		Prompt:    append([]acp.ContentBlock{}, blocks...),
+		Meta:      inboundRouteMeta(turnNonce),
 	}
 }
 
 // TextPromptRequest constructs a session/prompt request containing one text
 // content block.
-func TextPromptRequest(sessionID acp.SessionId, text string) acp.PromptRequest {
-	return PromptRequest(sessionID, acp.TextBlock(text))
+func TextPromptRequest(sessionID acp.SessionId, turnNonce, text string) acp.PromptRequest {
+	return PromptRequest(sessionID, turnNonce, acp.TextBlock(text))
+}
+
+// CancelRequest constructs a session/cancel notification bound to the exact
+// active turn nonce. An unstamped or stale cancellation is rejected.
+func CancelRequest(sessionID acp.SessionId, turnNonce string) acp.CancelNotification {
+	return acp.CancelNotification{SessionId: sessionID, Meta: inboundRouteMeta(turnNonce)}
 }
 
 // SetConfigOptionRequest constructs a session/set_config_option value-id request.
@@ -391,15 +391,6 @@ func WithCodexPersonality(personality string) CodexOption {
 	}
 }
 
-// WithCodexEnv configures session-scoped Codex process environment variables.
-func WithCodexEnv(env map[string]string) CodexOption {
-	cloned := cloneStringMap(env)
-
-	return func(options *CodexOptions) {
-		options.Env = cloneStringMap(cloned)
-	}
-}
-
 // WithCodexApprovalPolicy configures Codex approval behavior.
 func WithCodexApprovalPolicy(policy any) CodexOption {
 	cloned := cloneAny(policy)
@@ -437,7 +428,6 @@ func WithCodexMCPToolApprovalMode(mode string) CodexOption {
 func cloneCodexOptions(options CodexOptions) CodexOptions {
 	return CodexOptions{
 		Model:        options.Model,
-		Env:          cloneStringMap(options.Env),
 		OutputSchema: cloneAnyMap(options.OutputSchema),
 		Effort:       options.Effort,
 		ServiceTier:  options.ServiceTier,

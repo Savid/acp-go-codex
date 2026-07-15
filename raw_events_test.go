@@ -214,7 +214,7 @@ func TestRawEventsEmitFailureDoesNotFailTurn(t *testing.T) {
 		}},
 	}
 
-	resp, err := session.Prompt(context.Background(), TextPromptRequest("emit-fail", "hi"))
+	resp, err := session.Prompt(context.Background(), TextPromptRequest("emit-fail", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("raw emit failure aborted the turn: %v", err)
 	}

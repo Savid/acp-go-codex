@@ -109,6 +109,15 @@ type Agent struct {
 	clientCalls   chan struct{}
 	authTokens    *ChatGPTAuthTokens
 
+	runtimeClient         codex.Client
+	runtimeEpoch          uint64
+	runtimeDead           bool
+	runtimeStarting       chan struct{}
+	runtimeNativeRelease  func()
+	runtimeScratchRoot    string
+	runtimeScratchRelease func()
+	runtimeCleanupErr     error
+
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
 
@@ -118,6 +127,7 @@ type Agent struct {
 
 type codexClientEventSink struct {
 	agent *Agent
+	epoch uint64
 
 	mu      sync.Mutex
 	client  codex.Client
@@ -146,16 +156,19 @@ func NewAgent(opts ...Option) *Agent {
 		log = slog.Default()
 	}
 
+	observe := observer.New(observer.Config{
+		MeterProvider:  options.MeterProvider,
+		Propagator:     options.TextMapPropagator,
+		TracerProvider: options.TracerProvider,
+		Version:        options.AgentVersion,
+	})
+	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
+
 	return &Agent{
-		options:    options,
-		log:        log,
-		optionsErr: optionsErr,
-		observe: observer.New(observer.Config{
-			MeterProvider:  options.MeterProvider,
-			Propagator:     options.TextMapPropagator,
-			TracerProvider: options.TracerProvider,
-			Version:        options.AgentVersion,
-		}),
+		options:       options,
+		log:           log,
+		optionsErr:    optionsErr,
+		observe:       observe,
 		sessions:      make(map[acp.SessionId]*session),
 		deleted:       make(map[acp.SessionId]struct{}),
 		explicitStore: options.SessionStore != nil,
@@ -171,15 +184,16 @@ func (a *Agent) setAgentClient(conn agentClient) {
 }
 
 // Serve runs an ACP agent over the provided streams.
-func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error {
+func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (serveErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	agent := NewAgent(opts...)
 	defer func() {
-		if err := agent.Close(); err != nil {
-			agent.log.DebugContext(context.Background(), "close Codex ACP agent failed", slog.String("error", err.Error()))
+		if closeErr := agent.Close(); closeErr != nil {
+			agent.log.DebugContext(context.Background(), "close Codex ACP agent failed", slog.String("error", closeErr.Error()))
+			serveErr = closeErr
 		}
 	}()
 
@@ -216,6 +230,11 @@ func (a *Agent) Close() error {
 
 		cancel()
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	err = errors.Join(err, a.closeSharedRuntime(ctx))
+
+	cancel()
 
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 
@@ -302,6 +321,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		AgentCapabilities: acp.AgentCapabilities{
 			Meta: map[string]any{
 				codexMetaKey: codexMeta,
+				routeMetaKey: map[string]any{routeVersionsKey: []int{routeVersion}},
 			},
 			LoadSession: true,
 			Auth:        a.authCapabilities(),
@@ -324,7 +344,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	}, nil
 }
 
-func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOverlay map[string]string, mcpToolApprovalMode string) (codex.Client, error) {
+func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string) (codex.Client, error) {
 	factory := a.options.clientFactory
 	if factory == nil {
 		factory = func(ctx context.Context, options codex.Options) (codex.Client, error) {
@@ -332,49 +352,50 @@ func (a *Agent) newClient(ctx context.Context, mcpServers []acp.McpServer, envOv
 		}
 	}
 
+	configurationStarted := time.Now()
 	if err := writeSeedFiles(a.options.Home, a.options.SeedFiles); err != nil {
+		observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, err)
+
 		return nil, err
 	}
 
-	extraArgs, mcpEnv, err := codex.MCPServerConfigArgs(mcpServers, mcpToolApprovalMode)
+	otelConfig, err := a.codexOTELConfig(nil)
 	if err != nil {
+		observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, err)
+
 		return nil, err
 	}
 
-	otelConfig, err := a.codexOTELConfig(envOverlay)
-	if err != nil {
-		return nil, err
-	}
-
-	extraArgs = append(append([]string(nil), otelConfig.ExtraArgs...), extraArgs...)
+	extraArgs := append([]string(nil), otelConfig.ExtraArgs...)
 
 	a.observe.RecordCodexProcessStart(ctx)
-	eventSink := &codexClientEventSink{agent: a}
+	eventSink := &codexClientEventSink{agent: a, epoch: epoch}
 
 	env := cloneStringMap(a.options.Env)
-	if env == nil && (len(envOverlay) > 0 || len(mcpEnv) > 0) {
-		env = map[string]string{}
-	}
-
-	for key, value := range envOverlay {
-		env[key] = value
-	}
-
-	for key, value := range mcpEnv {
-		env[key] = value
-	}
+	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, nil)
 
 	client, err := factory(ctx, codex.Options{
-		CLIPath:      a.options.ExecutablePath,
-		CodexHome:    a.options.Home,
-		DefaultModel: a.options.DefaultModel,
-		Env:          a.observe.InjectTraceEnv(ctx, env),
-		Config:       a.codexConfig(),
-		ExtraArgs:    extraArgs,
-		Logger:       a.log,
-		EventHandler: eventSink.Handle,
+		CLIPath:        a.options.ExecutablePath,
+		CodexHome:      a.options.Home,
+		WritableHome:   a.resolvedCodexHome(),
+		SupervisorRoot: supervisorRoot,
+		DefaultModel:   a.options.DefaultModel,
+		Env:            a.observe.InjectTraceEnv(ctx, env),
+		Config:         a.codexConfig(),
+		ExtraArgs:      extraArgs,
+		Logger:         a.log,
+		EventHandler:   eventSink.Handle,
 		RequestHandler: func(ctx context.Context, req codex.ServerRequest) (any, error) {
-			return a.handleCodexServerRequest(ctx, req)
+			return a.handleCodexServerRequestForEpoch(ctx, epoch, req)
+		},
+		ObserveProcess: func(processCtx context.Context, kind string, delta int64) {
+			observeRuntimeProcess(processCtx, a.options.RuntimeResourceHooks, RuntimeProcessKind(kind), delta)
+		},
+		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
+			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
+			if observe != nil {
+				observe(stageCtx, RuntimeResourceKind(lifecycle), RuntimeStartupStage(stage), elapsed, stageErr)
+			}
 		},
 	})
 	if err != nil {
@@ -408,8 +429,12 @@ func (a *Agent) codexConfig() map[string]any {
 }
 
 func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
+	if !s.agent.runtimeEpochIsCurrent(s.epoch) {
+		return
+	}
+
 	switch event.Kind {
-	case codex.EventAccountUpdated, codex.EventRateLimitsUpdated:
+	case codex.EventAccountUpdated, codex.EventRateLimitsUpdated, codex.EventError:
 	default:
 		return
 	}
@@ -448,6 +473,8 @@ func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, 
 		if event.RateLimits != nil {
 			a.cacheRateLimits(*event.RateLimits)
 		}
+	case codex.EventError:
+		a.markRuntimeDead(client)
 	}
 }
 
@@ -645,7 +672,11 @@ func (a *Agent) emitUpdate(ctx context.Context, sessionID acp.SessionId, update 
 		return nil
 	}
 
-	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sessionID, Update: update})
+	return conn.SessionUpdate(ctx, acp.SessionNotification{
+		Meta:      turnRouteMetaFromContext(ctx),
+		SessionId: sessionID,
+		Update:    update,
+	})
 }
 
 func (a *Agent) sessionStore() SessionStore {

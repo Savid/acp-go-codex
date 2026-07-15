@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	codexacp "github.com/savid/acp-go-codex"
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 const (
@@ -93,6 +95,7 @@ var agentVersion = version
 var exit = os.Exit
 var runCodexCLICommand = runCodexCLI
 var shutdownOpenTelemetry = shutdownTelemetry
+var codexCLIUserHomeDir = os.UserHomeDir
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -206,13 +209,14 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 	flags.SetOutput(stderr)
 	codexPath := flags.String("path", "", "path to codex CLI")
 	codexHome := flags.String("home", "", "Codex home directory")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral account-command scratch; empty means the system temp directory")
 
 	deviceAuth := flags.Bool("codex-device-auth", false, "use Codex device auth for login")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
 
-	if err := runCodexCLICommand(ctx, *codexPath, *codexHome, mode, *deviceAuth, stdin, stdout, stderr); err != nil {
+	if err := runCodexCLICommand(ctx, *codexPath, *codexHome, *scratchDir, mode, *deviceAuth, stdin, stdout, stderr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: %v\n", mode, err)
 
 		return commandExitCode(err)
@@ -221,64 +225,49 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 	return 0
 }
 
-func runCodexCLI(ctx context.Context, codexPath string, codexHome string, mode string, deviceAuth bool, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	if codexPath == "" {
-		codexPath = "codex"
-	}
-
-	var args []string
-
-	switch mode {
-	case loginCommand:
-		args = []string{loginCommand}
-		if deviceAuth {
-			args = append(args, "--device-auth")
-		}
-	case logoutCommand:
-		args = []string{logoutCommand}
-	default:
-		return fmt.Errorf("unsupported command %q", mode)
-	}
-
-	cmd := exec.CommandContext(ctx, codexPath, args...) // #nosec G204,G702 -- codexPath is the explicit user-configured Codex executable.
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-
-	cmd.Stderr = stderr
-	if codexHome != "" {
-		cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
-	}
-
-	if err := cmd.Start(); err != nil {
+func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratchDir string, mode string, deviceAuth bool, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	home, err := resolvedCodexCLIHome(codexHome)
+	if err != nil {
 		return err
 	}
 
 	signals := make(chan os.Signal, 1)
+
 	signal.Notify(signals, forwardedSignals()...)
+	defer signal.Stop(signals)
 
-	done := make(chan struct{})
+	return codex.RunAccountCommand(ctx, codex.AccountCommandOptions{
+		CLIPath:    codexPath,
+		CodexHome:  home,
+		ScratchDir: scratchDir,
+		Mode:       mode,
+		DeviceAuth: deviceAuth,
+		Stdin:      stdin,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		Signals:    signals,
+	})
+}
 
-	go func() {
-		defer recoverMainGoroutine(ctx, "Codex CLI signal forwarder")
-		defer signal.Stop(signals)
+func resolvedCodexCLIHome(configured string) (string, error) {
+	if configured != "" {
+		return filepath.Clean(configured), nil
+	}
 
-		for {
-			select {
-			case sig := <-signals:
-				if cmd.Process != nil {
-					_ = cmd.Process.Signal(sig)
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
+	if value := os.Getenv("CODEX_HOME"); value != "" {
+		return filepath.Clean(value), nil
+	}
 
-	err := cmd.Wait()
+	home, err := codexCLIUserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex writable home: %w", err)
+	}
 
-	close(done)
+	if home == "" {
+		return "", errors.New("resolve Codex writable home: user home is empty")
+	}
 
-	return err
+	return filepath.Join(home, ".codex"), nil
 }
 
 func pendingSignal(signals <-chan os.Signal) os.Signal {
@@ -304,15 +293,4 @@ func commandExitCode(err error) int {
 	}
 
 	return 1
-}
-
-// recoverMainGoroutine logs a panic recovered from a command-owned goroutine
-// instead of letting it crash the process.
-func recoverMainGoroutine(ctx context.Context, name string) {
-	recovered := recover()
-	if recovered == nil {
-		return
-	}
-
-	slog.Default().ErrorContext(ctx, "command goroutine panic", slog.String("goroutine", name), slog.Any("panic", recovered))
 }

@@ -109,7 +109,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 				t.Fatalf("NewSession returned error: %v", err)
 			}
 
-			promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "hi"))
+			promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "hi"))
 			if promptResp.StopReason == acp.StopReasonEndTurn {
 				t.Fatal("failed turn reported end_turn")
 			}
@@ -176,7 +176,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 
-	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "hi"))
+	_, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "hi"))
 	if !isTurnFailure(promptErr, codex.CauseTransport) {
 		t.Fatalf("prompt error = %v, want transport failure", promptErr)
 	}
@@ -198,7 +198,11 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 func TestTurnFailureProcessDeath(t *testing.T) {
 	ctx := context.Background()
 
-	client, err := codex.NewAppServerClient(ctx, codex.Options{CLIPath: os.Args[0]})
+	client, err := codex.NewAppServerClient(ctx, codex.Options{
+		CLIPath:        os.Args[0],
+		CodexHome:      t.TempDir(),
+		SupervisorRoot: t.TempDir(),
+	})
 	if err != nil {
 		t.Fatalf("launch fake app-server: %v", err)
 	}
@@ -208,7 +212,7 @@ func TestTurnFailureProcessDeath(t *testing.T) {
 	s.client = client
 	t.Cleanup(func() { _ = client.Close(context.Background()) })
 
-	resp, promptErr := s.Prompt(ctx, TextPromptRequest("death", "hi"))
+	resp, promptErr := s.Prompt(ctx, TextPromptRequest("death", "test-turn", "hi"))
 	if resp.StopReason == acp.StopReasonEndTurn {
 		t.Fatal("process death reported end_turn")
 	}
@@ -239,19 +243,25 @@ func TestPromptRelaunchesDeadClient(t *testing.T) {
 	ctx := context.Background()
 
 	relaunched := newSpyCodexClient()
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return relaunched, nil
+	}))
+	old := newSpyCodexClient()
 	s := &session{
-		agent: NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-			return relaunched, nil
-		})),
+		agent:         agent,
 		id:            "relaunch-ok",
 		cwd:           "/tmp/project",
 		codexThreadID: "thread-1",
 		clientDead:    true,
+		client:        old,
 	}
 	s.agent.setAgentClient(newRecordingAgentClient())
-	s.client = newSpyCodexClient()
+	agent.sessions[s.id] = s
+	agent.runtimeClient = old
+	agent.runtimeDead = true
+	agent.runtimeNativeRelease = func() {}
 
-	resp, err := s.Prompt(ctx, TextPromptRequest("relaunch-ok", "again"))
+	resp, err := s.Prompt(ctx, TextPromptRequest("relaunch-ok", "test-turn", "again"))
 	if err != nil {
 		t.Fatalf("relaunched prompt returned error: %v", err)
 	}
@@ -272,7 +282,7 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 	cancelSession.agent.setAgentClient(newRecordingAgentClient())
 	cancelSession.client = &cancelDuringRunClient{spyCodexClient: newSpyCodexClient(), session: cancelSession}
 
-	resp, err := cancelSession.Prompt(context.Background(), TextPromptRequest("cancel", "hi"))
+	resp, err := cancelSession.Prompt(context.Background(), TextPromptRequest("cancel", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("cancelled turn returned error: %v", err)
 	}
@@ -295,7 +305,7 @@ func TestTurnCancelWinsOnTimeoutCoincidence(t *testing.T) {
 	client := &cancelAtTurnStartClient{spyCodexClient: newSpyCodexClient(), session: coincideSession}
 	coincideSession.client = client
 
-	resp, err := coincideSession.Prompt(context.Background(), TextPromptRequest("coincide", "hi"))
+	resp, err := coincideSession.Prompt(context.Background(), TextPromptRequest("coincide", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("coincident cancel+timeout returned error: %v", err)
 	}
@@ -349,7 +359,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 	}
 	timeoutSession.agent.setAgentClient(newRecordingAgentClient())
 
-	resp, err := timeoutSession.Prompt(context.Background(), TextPromptRequest("timeout", "hi"))
+	resp, err := timeoutSession.Prompt(context.Background(), TextPromptRequest("timeout", "test-turn", "hi"))
 	if resp.StopReason == acp.StopReasonCancelled {
 		t.Fatal("timeout reported as cancelled")
 	}

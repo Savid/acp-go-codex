@@ -20,19 +20,19 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	promptSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
 	held := promptSession.turnQueue()
 	held <- struct{}{}
-	if resp, err := promptSession.Prompt(canceledContext(), TextPromptRequest("s", "hi")); err != nil || resp.StopReason != acp.StopReasonCancelled {
+	if resp, err := promptSession.Prompt(canceledContext(), TextPromptRequest("s", "test-turn", "hi")); err != nil || resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("canceled acquire resp=%#v err=%v", resp, err)
 	}
 	<-held
 
 	promptSession.client = &runEventsClient{runErr: errors.New("not logged in")}
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt accepted RunTurn error")
 	}
 
 	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
 	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventAgentMessageDelta, ThreadID: "thread", TurnID: "turn", Text: "hi"}}}
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored update error")
 	}
 	promptSession.client = &runEventsClient{events: []codex.Event{{
@@ -43,7 +43,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 			Last: codex.Usage{InputTokens: 1, OutputTokens: 2},
 		},
 	}}}
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored usage update error")
 	}
 
@@ -51,7 +51,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	promptSession.rawMessages = rawMessageConfig{enabled: true}
 	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventRaw, ThreadID: "thread", TurnID: "turn", RawMethod: "raw", RawParams: json.RawMessage(`{"type":"event_msg"}`)}}}
 	agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored raw extension error")
 	}
 
@@ -59,13 +59,13 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	promptSession.rawMessages = rawMessageConfig{}
 	promptSession.clientDead = false
 	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("boom")}}}
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored event error")
 	}
 
 	promptSession.clientDead = false
 	promptSession.client = &runEventsClient{}
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); !isTurnFailure(err, codex.CauseTransport) {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); !isTurnFailure(err, codex.CauseTransport) {
 		t.Fatalf("Prompt with closed event stream err=%v, want codex_turn_failed transport", err)
 	}
 
@@ -75,7 +75,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	promptSession.agent.setAgentClient(newRecordingAgentClient())
 	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"}}}
 	promptSession.rolloutPath = filepath.Join(t.TempDir(), "missing.jsonl")
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "hi")); err == nil {
+	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored final rollout mirror error")
 	}
 
@@ -159,13 +159,13 @@ func TestSessionPromptCancelAndAccountUpdate(t *testing.T) {
 	agent.setAgentClient(newRecordingAgentClient())
 	cancelSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread"}
 	cancelSession.client = &cancelDuringRunClient{session: cancelSession}
-	resp, err := cancelSession.Prompt(context.Background(), TextPromptRequest("s", "hi"))
+	resp, err := cancelSession.Prompt(context.Background(), TextPromptRequest("s", "test-turn", "hi"))
 	if err != nil || resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("canceled event prompt resp=%#v err=%v", resp, err)
 	}
 
 	interactionSession := &session{agent: agent, id: "interaction"}
-	interactionSession.beginTurn(context.Background())
+	interactionSession.beginTurn(context.Background(), "test-turn")
 	interactionCtx, finishInteraction := interactionSession.beginInteraction(context.Background(), "input")
 	interactionSession.mu.Lock()
 	cancelInteractionTurn := interactionSession.cancel
@@ -189,7 +189,7 @@ func TestSessionPromptCancelAndAccountUpdate(t *testing.T) {
 			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
 		}},
 	}
-	if _, acctErr := accountSession.Prompt(context.Background(), TextPromptRequest("acct", "hi")); acctErr != nil {
+	if _, acctErr := accountSession.Prompt(context.Background(), TextPromptRequest("acct", "test-turn", "hi")); acctErr != nil {
 		t.Fatalf("account update prompt returned error: %v", acctErr)
 	}
 	if accountSession.accountMeta["email"] != "new@example.com" || accountSession.accountMeta["accessToken"] != nil {
@@ -216,7 +216,7 @@ func TestSessionPromptDedupesDeltas(t *testing.T) {
 			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
 		}},
 	}
-	if _, err := dedupeSession.Prompt(context.Background(), TextPromptRequest("dedupe", "hi")); err != nil {
+	if _, err := dedupeSession.Prompt(context.Background(), TextPromptRequest("dedupe", "test-turn", "hi")); err != nil {
 		t.Fatalf("dedupe prompt returned error: %v", err)
 	}
 	messageUpdates := 0
@@ -261,7 +261,7 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
 		}},
 	}
-	usageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "hi"))
+	usageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("usage prompt returned error: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 		TurnID:   "turn",
 		Usage:    codex.Usage{InputTokens: 1, OutputTokens: 2},
 	}}}
-	completedUsageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "hi"))
+	completedUsageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("completed usage prompt returned error: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "prove it"))
+	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
 	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
 		t.Fatalf("fallback prompt resp=%#v err=%v", resp, err)
 	}
@@ -403,7 +403,7 @@ func TestPromptUsesImmediateRolloutTaskCompleteFallback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "prove it"))
+	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
 	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
 		t.Fatalf("immediate fallback prompt resp=%#v err=%v", resp, err)
 	}
@@ -443,7 +443,7 @@ func TestPromptReturnsRolloutEventUpdateError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := session.Prompt(ctx, TextPromptRequest("fallback", "show it")); err == nil {
+	if _, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "show it")); err == nil {
 		t.Fatal("rollout event update error was ignored")
 	}
 }
@@ -678,7 +678,7 @@ func TestPromptContentFailsClosed(t *testing.T) {
 		{name: "data-less image", prompt: []acp.ContentBlock{acp.ImageBlock("", "image/png")}, wantField: "prompt.image", wantError: "missing image data or uri"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: tt.prompt})
+			_, err := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: tt.prompt, Meta: inboundRouteMeta("turn-1")})
 
 			var reqErr *acp.RequestError
 			if !errors.As(err, &reqErr) || reqErr.Code != -32602 {

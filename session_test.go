@@ -45,7 +45,7 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 	}
 
 	turnParent := context.Background()
-	_ = session.beginTurn(turnParent)
+	_ = session.beginTurn(turnParent, "test-turn")
 	firstCtx, firstFinish := session.beginInteraction(context.Background(), "duplicate")
 	secondCtx, secondFinish := session.beginInteraction(context.Background(), "duplicate")
 	if firstCtx.Err() == nil {
@@ -59,7 +59,7 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 	secondFinish()
 	session.finishTurn()
 
-	_ = session.beginTurn(context.Background())
+	_ = session.beginTurn(context.Background(), "test-turn")
 	turnInteraction, turnFinish := session.beginInteraction(context.Background(), "finish-turn")
 	session.finishTurn()
 	if turnInteraction.Err() == nil {
@@ -126,8 +126,8 @@ func TestSessionCloseJoinsClientAndMaterializedErrors(t *testing.T) {
 		materializedPath: "/tmp/rollout.jsonl",
 	}
 	err := session.Close(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "close failed") || !strings.Contains(err.Error(), "remove failed") {
-		t.Fatalf("joined close error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "remove failed") || strings.Contains(err.Error(), "close failed") {
+		t.Fatalf("logical session release error = %v", err)
 	}
 }
 
@@ -169,6 +169,8 @@ func TestEnsureLiveClientRelaunchFailures(t *testing.T) {
 		codexThreadID: "thread",
 		clientDead:    true,
 	}
+	newClientFails.agent.sessions[newClientFails.id] = newClientFails
+	newClientFails.agent.runtimeDead = true
 	if err := newClientFails.ensureLiveClient(ctx); !errors.Is(err, factoryErr) {
 		t.Fatalf("ensureLiveClient factory error = %v", err)
 	}
@@ -184,13 +186,19 @@ func TestEnsureLiveClientRelaunchFailures(t *testing.T) {
 		codexThreadID: "thread",
 		clientDead:    true,
 	}
+	old := newSpyCodexClient()
+	resumeFails.client = old
+	resumeFails.agent.sessions[resumeFails.id] = resumeFails
+	resumeFails.agent.runtimeClient = old
+	resumeFails.agent.runtimeDead = true
+	resumeFails.agent.runtimeNativeRelease = func() {}
 	if err := resumeFails.ensureLiveClient(ctx); !errors.Is(err, resumeErr) {
 		t.Fatalf("ensureLiveClient resume error = %v", err)
 	}
 
 	// A prompt on a dead session whose relaunch fails surfaces the transport
 	// failure and keeps the session addressable.
-	if _, err := resumeFails.Prompt(ctx, TextPromptRequest("relaunch-resume", "hi")); !isTurnFailure(err, codex.CauseTransport) {
+	if _, err := resumeFails.Prompt(ctx, TextPromptRequest("relaunch-resume", "test-turn", "hi")); !isTurnFailure(err, codex.CauseTransport) {
 		t.Fatalf("prompt after failed relaunch = %v, want transport failure", err)
 	}
 }

@@ -19,7 +19,7 @@ type Client interface {
 	CompactThread(context.Context, ThreadCompactRequest) (map[string]any, error)
 	StartReview(context.Context, ReviewStartRequest) (map[string]any, error)
 	CollaborationModeList(context.Context) (CollaborationModeListResponse, error)
-	MCPServerStatusList(context.Context) (MCPServerStatusListResponse, error)
+	MCPServerStatusList(context.Context, string) (MCPServerStatusListResponse, error)
 	DeleteThread(context.Context, ThreadDeleteRequest) error
 	UnsubscribeThread(context.Context, string) error
 	ModelList(context.Context) ([]Model, error)
@@ -57,6 +57,7 @@ type ThreadResumeRequest struct {
 	ThreadID string
 	Path     string
 	Cwd      string
+	Config   map[string]any
 }
 
 type ThreadForkRequest struct {

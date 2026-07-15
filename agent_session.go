@@ -50,7 +50,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
-	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
+	threadConfig := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -63,10 +65,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		Personality:           meta.Personality,
 		ApprovalPolicy:        meta.ApprovalPolicy,
 		Sandbox:               sandboxMode(meta.SandboxPolicy),
+		Config:                threadConfig,
 	})
 	if err != nil {
-		_ = client.Close(context.Background())
-
 		return acp.NewSessionResponse{}, codexAuthRequiredError(err, nil)
 	}
 
@@ -108,6 +109,15 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return err
+	}
+
+	route, err := parseInboundRoute(params.Meta)
+	if err != nil {
+		return routeInvalidParams(err)
+	}
+
+	if route.TurnNonce != session.activeTurnNonce() {
+		return routeInvalidParams(fmt.Errorf("turnNonce does not identify the active turn"))
 	}
 
 	session.cancelTurn()
@@ -255,11 +265,10 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 		cwd = *params.Cwd
 	}
 
-	client, err := a.newClient(ctx, nil, nil, "")
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer client.Close(context.Background())
 
 	threads, err := client.ListThreads(ctx, codex.ThreadListRequest{Cwd: cwd})
 	if err != nil {
@@ -387,7 +396,6 @@ func codexMetaFingerprint(meta sessionMeta) codexMetaForHash {
 		ReasoningEffort: meta.ReasoningEffort,
 		ServiceTier:     meta.ServiceTier,
 		Personality:     meta.Personality,
-		Env:             cloneStringMap(meta.Env),
 		ApprovalPolicy:  cloneAny(meta.ApprovalPolicy),
 		SandboxPolicy:   cloneAny(meta.SandboxPolicy),
 		OutputSchema:    cloneAny(meta.OutputSchema),
@@ -532,7 +540,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
+	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -540,10 +550,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID: string(params.SessionId),
 		Cwd:      params.Cwd,
+		Config:   config,
 	})
 	if err != nil {
-		_ = client.Close(context.Background())
-
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
 	}
 
@@ -551,6 +560,12 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
+
+	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.ResumeSessionResponse{}, err
+	}
 
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
@@ -577,7 +592,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
 
-	path, err := materializeRollout(a.options.ScratchDir, entries)
+	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -586,12 +601,18 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	if err != nil {
 		_ = removeMaterializedRollout(path)
 
+		scratchRelease()
+
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
+	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
 
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -602,16 +623,20 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		ThreadID: threadID,
 		Path:     path,
 		Cwd:      params.Cwd,
+		Config:   config,
 	})
 	if err != nil {
-		_ = client.Close(context.Background())
 		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
 
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
 	}
 
 	id := params.SessionId
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	session.materializedPath = path
+	session.materializedRelease = scratchRelease
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -622,7 +647,12 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	})
 	session.setAccount(clientAccountMeta(ctx, client))
 
-	session.materializedPath = path
+	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.ResumeSessionResponse{}, err
+	}
+
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 
@@ -794,7 +824,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
 
-	path, err := materializeRollout(a.options.ScratchDir, entries)
+	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
@@ -803,12 +833,18 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	if err != nil {
 		_ = removeMaterializedRollout(path)
 
+		scratchRelease()
+
 		return acp.LoadSessionResponse{}, err
 	}
 
-	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
+	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
 
 		return acp.LoadSessionResponse{}, err
 	}
@@ -817,16 +853,20 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		ThreadID: firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
 		Path:     path,
 		Cwd:      params.Cwd,
+		Config:   config,
 	})
 	if err != nil {
-		_ = client.Close(context.Background())
 		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
 
 		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil)
 	}
 
 	id := params.SessionId
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	session.materializedPath = path
+	session.materializedRelease = scratchRelease
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -837,7 +877,12 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	})
 	session.setAccount(clientAccountMeta(ctx, client))
 
-	session.materializedPath = path
+	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.LoadSessionResponse{}, err
+	}
+
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 
@@ -895,11 +940,10 @@ func (a *Agent) retryDeleteNativeCodexSession(ctx context.Context, sessionID acp
 }
 
 func (a *Agent) deleteNativeCodexSession(ctx context.Context, sessionID acp.SessionId, knownThreadID string) error {
-	client, err := a.newClient(ctx, nil, nil, "")
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		return err
 	}
-	defer client.Close(context.Background())
 
 	threadIDs := map[string]struct{}{}
 	if knownThreadID != "" {
@@ -969,7 +1013,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	client, err := a.newClient(ctx, mcpServers, meta.Env, meta.MCPToolApprovalMode)
+	client, err := a.sharedRuntime(ctx)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -981,8 +1025,17 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		Cwd:      params.Cwd,
 	})
 	if err != nil {
-		_ = client.Close(context.Background())
+		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)
+	}
 
+	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	thread, err = client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: thread.ID,
+		Cwd:      params.Cwd,
+		Config:   config,
+	})
+	if err != nil {
 		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)
 	}
 
@@ -995,6 +1048,12 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		ForkParentID:          parentSnapshot.codexThreadID,
 	})
 	session.setAccount(clientAccountMeta(ctx, client))
+
+	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.UnstableForkSessionResponse{}, err
+	}
 
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())

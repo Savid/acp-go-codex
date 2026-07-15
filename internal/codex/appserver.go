@@ -130,11 +130,17 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 	}
 	client.ensureEventPump()
 
+	readinessStarted := time.Now()
 	if err := client.initialize(launchCtx); err != nil {
+		observeCodexStartupStage(ctx, options, "runtime", "readiness", readinessStarted, err)
+
 		_ = client.Close(context.Background())
 
 		return nil, err
 	}
+
+	observeCodexStartupStage(ctx, options, "runtime", "readiness", readinessStarted, nil)
+	transport.proc.markSupervisorsReady(ctx)
 
 	return client, nil
 }
@@ -158,6 +164,7 @@ func (c *AppServerClient) initialize(ctx context.Context) error {
 }
 
 func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartRequest) (Thread, error) {
+	started := time.Now()
 	params := map[string]any{}
 	setNonEmpty(params, "cwd", req.Cwd)
 	setNonEmpty(params, "model", firstNonEmpty(req.Model, c.options.DefaultModel))
@@ -183,8 +190,12 @@ func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartReques
 
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadStart, params, &resp); err != nil {
+		observeCodexStartupStage(ctx, c.options, "session", "session", started, err)
+
 		return Thread{}, err
 	}
+
+	observeCodexStartupStage(ctx, c.options, "session", "session", started, nil)
 
 	return threadFromResponse(resp), nil
 }
@@ -194,6 +205,10 @@ func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequ
 	setNonEmpty(params, fieldThreadID, req.ThreadID)
 	setNonEmpty(params, fieldPath, req.Path)
 	setNonEmpty(params, "cwd", req.Cwd)
+
+	if len(req.Config) > 0 {
+		params["config"] = req.Config
+	}
 
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadResume, params, &resp); err != nil {
@@ -370,9 +385,12 @@ func (c *AppServerClient) CollaborationModeList(ctx context.Context) (Collaborat
 	return CollaborationModeListResponse{Modes: modes, Raw: resp}, nil
 }
 
-func (c *AppServerClient) MCPServerStatusList(ctx context.Context) (MCPServerStatusListResponse, error) {
+func (c *AppServerClient) MCPServerStatusList(ctx context.Context, threadID string) (MCPServerStatusListResponse, error) {
+	params := map[string]any{}
+	setNonEmpty(params, fieldThreadID, threadID)
+
 	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodMCPStatusList, map[string]any{}, &resp); err != nil {
+	if err := c.rpc.Call(ctx, methodMCPStatusList, params, &resp); err != nil {
 		return MCPServerStatusListResponse{}, err
 	}
 
@@ -582,6 +600,10 @@ func (c *AppServerClient) dispatchEvent(event Event) {
 			c.options.EventHandler(context.Background(), event)
 		}
 	case EventRateLimitsUpdated:
+		if c.options.EventHandler != nil {
+			c.options.EventHandler(context.Background(), event)
+		}
+	case EventError:
 		if c.options.EventHandler != nil {
 			c.options.EventHandler(context.Background(), event)
 		}

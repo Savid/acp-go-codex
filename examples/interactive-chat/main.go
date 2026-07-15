@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 	codexacp "github.com/savid/acp-go-codex"
 	"golang.org/x/term"
 )
@@ -1402,6 +1403,7 @@ func runInteractiveLoop(
 	queue := make([]string, 0, 1)
 	inputDone := false
 	running := false
+	activeTurnNonce := ""
 
 	var done <-chan promptResult
 
@@ -1436,15 +1438,16 @@ func runInteractiveLoop(
 			prompt := queue[0]
 			queue = queue[1:]
 			running = true
+			activeTurnNonce = uuid.NewString()
 
 			result := make(chan promptResult, 1)
 			done = result
 
 			ticks.start()
 
-			go func() {
-				result <- promptResult{err: runPrompt(ctx, conn, ui, sessionID, prompt)}
-			}()
+			go func(turnNonce string) {
+				result <- promptResult{err: runPrompt(ctx, conn, ui, sessionID, turnNonce, prompt)}
+			}(activeTurnNonce)
 
 			continue
 		}
@@ -1462,7 +1465,7 @@ func runInteractiveLoop(
 				continue
 			}
 
-			control := handleInputEvent(ctx, conn, ui, sessionID, event, running, enqueue)
+			control := handleInputEvent(ctx, conn, ui, sessionID, activeTurnNonce, event, running, enqueue)
 			if control.err != nil {
 				return control.err
 			}
@@ -1477,6 +1480,7 @@ func runInteractiveLoop(
 			}
 		case result := <-done:
 			running = false
+			activeTurnNonce = ""
 			done = nil
 
 			ticks.stop()
@@ -1496,7 +1500,7 @@ func runInteractiveLoop(
 			ui.tick()
 		case <-ctx.Done():
 			if running {
-				_ = conn.Cancel(context.Background(), acp.CancelNotification{SessionId: sessionID})
+				_ = conn.Cancel(context.Background(), codexacp.CancelRequest(sessionID, activeTurnNonce))
 			}
 
 			return nil
@@ -1509,6 +1513,7 @@ func handleInputEvent(
 	conn agentConnection,
 	ui *chatUI,
 	sessionID acp.SessionId,
+	turnNonce string,
 	event inputEvent,
 	running bool,
 	enqueue func(string, bool),
@@ -1518,7 +1523,7 @@ func handleInputEvent(
 		prompt := strings.TrimSpace(event.text)
 		if quitCommand(prompt) {
 			if running {
-				_ = conn.Cancel(context.Background(), acp.CancelNotification{SessionId: sessionID})
+				_ = conn.Cancel(context.Background(), codexacp.CancelRequest(sessionID, turnNonce))
 			}
 
 			return inputControl{exit: true}
@@ -1532,14 +1537,14 @@ func handleInputEvent(
 			return inputControl{}
 		}
 
-		if err := conn.Cancel(ctx, acp.CancelNotification{SessionId: sessionID}); err != nil {
+		if err := conn.Cancel(ctx, codexacp.CancelRequest(sessionID, turnNonce)); err != nil {
 			return inputControl{err: err}
 		}
 
 		ui.writeNotice("interrupt", "requested")
 	case inputExit:
 		if running {
-			_ = conn.Cancel(context.Background(), acp.CancelNotification{SessionId: sessionID})
+			_ = conn.Cancel(context.Background(), codexacp.CancelRequest(sessionID, turnNonce))
 		}
 
 		return inputControl{exit: true}
@@ -1725,11 +1730,12 @@ func runPrompt(
 	conn agentConnection,
 	ui *chatUI,
 	sessionID acp.SessionId,
+	turnNonce string,
 	prompt string,
 ) error {
 	ui.beginAgentTurn(prompt)
 
-	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(sessionID, prompt))
+	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(sessionID, turnNonce, prompt))
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			ui.endAgentTurn(acp.StopReasonCancelled)

@@ -29,6 +29,45 @@ type ConcurrencyLimits struct {
 	MaxConcurrentClientCalls int
 }
 
+// RuntimeResourceKind identifies the reason an adapter-owned native process or
+// scratch root is being acquired. Hosts use it to enforce independent global
+// resource bounds without coupling the adapter to a particular registry.
+type RuntimeResourceKind string
+
+const (
+	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
+	RuntimeResourceSession   RuntimeResourceKind = "session"
+	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
+	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
+)
+
+type RuntimeProcessKind string
+
+const (
+	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
+	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
+)
+
+type RuntimeStartupStage string
+
+const (
+	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
+	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
+	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
+	RuntimeStartupSession       RuntimeStartupStage = "session"
+)
+
+// RuntimeResourceHooks let an embedding host account for native roots and
+// adapter-created scratch roots at their exact lifetime boundaries. A nil
+// callback selects standalone, sibling-owned unbounded accounting.
+type RuntimeResourceHooks struct {
+	AcquireNativeRoot      func(context.Context, RuntimeResourceKind) (release func(), err error)
+	ReserveScratchRoot     func(context.Context, RuntimeResourceKind) (release func(), err error)
+	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
+	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
+	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
+}
+
 // Options configures the ACP agent process and Codex sessions it starts.
 type Options struct {
 	// AgentName is the protocol identifier advertised during ACP initialize.
@@ -87,8 +126,12 @@ type Options struct {
 	MeterProvider metric.MeterProvider
 	// TextMapPropagator extracts ACP trace metadata and injects Codex process env.
 	TextMapPropagator propagation.TextMapPropagator
+	// RuntimeResourceHooks account for native roots and scratch roots at their
+	// exact creation/deletion boundaries.
+	RuntimeResourceHooks RuntimeResourceHooks
 
-	clientFactory func(context.Context, codex.Options) (codex.Client, error)
+	clientFactory       func(context.Context, codex.Options) (codex.Client, error)
+	customClientFactory bool
 }
 
 func applyOptions(opts []Option) Options {
@@ -112,6 +155,7 @@ func applyOptions(opts []Option) Options {
 func withClientFactory(factory func(context.Context, codex.Options) (codex.Client, error)) Option {
 	return func(options *Options) {
 		options.clientFactory = factory
+		options.customClientFactory = true
 	}
 }
 
@@ -213,6 +257,14 @@ func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 func WithTurnTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.TurnTimeout = timeout
+	}
+}
+
+// WithRuntimeResourceHooks configures exact-lifetime native-root and scratch-
+// root accounting for an embedding host. Rejection is propagated fail closed.
+func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
+	return func(options *Options) {
+		options.RuntimeResourceHooks = hooks
 	}
 }
 

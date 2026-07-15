@@ -1,9 +1,30 @@
 package codexacp
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
+
+func (a *Agent) materializeStoredRollout(ctx context.Context, entries []SessionStoreEntry) (string, func(), error) {
+	if len(entries) == 0 {
+		return "", func() {}, nil
+	}
+
+	release, err := a.reserveScratchRoot(ctx, RuntimeResourceSession)
+	if err != nil {
+		return "", nil, err
+	}
+
+	path, err := materializeRollout(a.options.ScratchDir, entries)
+	if err != nil {
+		release()
+
+		return "", nil, err
+	}
+
+	return path, release, nil
+}
 
 type materializedRolloutFile interface {
 	Name() string

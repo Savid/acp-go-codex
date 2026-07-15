@@ -260,7 +260,7 @@ func (c *PlaceholderClient) CollaborationModeList(context.Context) (Collaboratio
 	}, nil
 }
 
-func (c *PlaceholderClient) MCPServerStatusList(context.Context) (MCPServerStatusListResponse, error) {
+func (c *PlaceholderClient) MCPServerStatusList(context.Context, string) (MCPServerStatusListResponse, error) {
 	return MCPServerStatusListResponse{Raw: map[string]any{valuePlaceholder: true}}, nil
 }
 

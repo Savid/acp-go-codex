@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 	codexacp "github.com/savid/acp-go-codex"
 )
 
@@ -45,6 +46,7 @@ func TestCodexCLIRawExtensionNotifications(t *testing.T) {
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_RAW_OK and no punctuation.")},
 		})
@@ -102,6 +104,7 @@ func TestCodexCLIStructuredOutput(t *testing.T) {
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{acp.TextBlock(
 				`Reply with exactly {"ok":true,"label":"acp-structured"} and no markdown.`,
@@ -167,6 +170,7 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: first.SessionId,
 			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply exactly ACP_RESUME_SEED.")},
 		})
@@ -197,6 +201,7 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 	client.resetRecordedOutput()
 	resp = promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: acp.SessionId(threadID),
 			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply exactly ACP_RESUME_OK.")},
 		})
@@ -239,6 +244,7 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 	} {
 		go func() {
 			_, promptErr := conn.Prompt(ctx, acp.PromptRequest{
+				Meta:      newTurnRouteMeta(),
 				SessionId: item.session,
 				Prompt:    []acp.ContentBlock{acp.TextBlock("Reply exactly " + item.text + ".")},
 			})
@@ -273,6 +279,7 @@ func TestCodexCLIFailurePaths(t *testing.T) {
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 
 	if _, err := conn.Prompt(ctx, acp.PromptRequest{
+		Meta:      newTurnRouteMeta(),
 		SessionId: "missing-session",
 		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
 	}); err == nil {
@@ -325,6 +332,7 @@ func TestCodexCLIPermissionAllowForSessionAndReplay(t *testing.T) {
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{acp.TextBlock(
 				"Create a file named permission_one.txt containing ACP_PERMISSION_ONE. " +
@@ -346,6 +354,7 @@ func TestCodexCLIPermissionAllowForSessionAndReplay(t *testing.T) {
 
 	resp = promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{acp.TextBlock(
 				"Create a file named permission_two.txt containing ACP_PERMISSION_TWO. " +
@@ -385,8 +394,10 @@ func TestCodexCLICancelPendingPermissionRequest(t *testing.T) {
 
 	respCh := make(chan acp.PromptResponse, 1)
 	errCh := make(chan error, 1)
+	turnNonce := uuid.NewString()
 	go func() {
 		resp, promptErr := conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      turnRouteMeta(turnNonce),
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{acp.TextBlock(
 				"Create a file named permission_cancel.txt containing ACP_PERMISSION_CANCEL. Do not use any other tool.",
@@ -411,7 +422,7 @@ func TestCodexCLICancelPendingPermissionRequest(t *testing.T) {
 		t.Fatalf("context ended before permission request: %v", ctx.Err())
 	}
 
-	if err := conn.Cancel(ctx, acp.CancelNotification{SessionId: session.SessionId}); err != nil {
+	if err := conn.Cancel(ctx, acp.CancelNotification{SessionId: session.SessionId, Meta: turnRouteMeta(turnNonce)}); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -471,6 +482,7 @@ func TestCodexCLIMultimodalPrompt(t *testing.T) {
 		client.resetRecordedOutput()
 
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{
 				acp.TextBlock("The attached image is intentionally tiny. Reply exactly ACP_MULTIMODAL_OK."),
@@ -527,6 +539,7 @@ func TestCodexCLIMCPStdioTool(t *testing.T) {
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
 			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{acp.TextBlock(
 				"Use the acp_stdio MCP server's echo tool with message ACP_MCP_STDIO_OK. " +

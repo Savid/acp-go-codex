@@ -89,15 +89,18 @@ refresh, guarded logout, and OpenTelemetry providers.
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume, and
   fork.
-- Codex app-server subprocess management and JSON-RPC request routing.
+- One shared Codex app-server per Agent with thread-scoped session routing,
+  crash fencing, all-thread restore, and bounded MCP readiness canaries.
 - Prompt streaming for messages, reasoning, plans, tool calls, diffs, usage, and
   session metadata.
 - Structured output through session-level JSON Schema on `turn/start`.
 - Command, file, and generic permission prompts, tool user input, and MCP
   elicitation bridging.
-- MCP stdio and streamable HTTP configuration; other MCP transports are rejected.
-- Codex account status, terminal login passthrough, external ChatGPT token
-  login/refresh, and guarded logout for adapter-owned `CODEX_HOME` directories.
+- Thread-scoped MCP stdio and streamable HTTP configuration, including
+  per-thread re-supply after runtime replacement; other transports are rejected.
+- Codex account status, contained and writable-home-exclusive terminal login,
+  external ChatGPT token login/refresh, and guarded logout for adapter-owned
+  `CODEX_HOME` directories.
 - Durable mirroring through a host-provided `SessionStore`; stored rows are Codex
   rollout JSONL keyed by `{SessionID, Subpath}`.
 - Optional raw Codex rollout extension notifications through `_codex/rawEvent`.
