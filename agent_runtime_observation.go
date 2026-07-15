@@ -10,12 +10,14 @@ import (
 )
 
 type providerProcessSnapshotTracker struct {
-	mu     sync.Mutex
-	hooks  RuntimeResourceHooks
-	nextID uint64
-	roots  map[uint64]providerProcessRootSnapshot
-	last   int
-	set    bool
+	mu         sync.Mutex
+	hooks      RuntimeResourceHooks
+	nextID     uint64
+	roots      map[uint64]providerProcessRootSnapshot
+	last       int
+	set        bool
+	publishing bool
+	dirty      bool
 }
 
 type providerProcessRootSnapshot struct {
@@ -45,7 +47,7 @@ func (a *Agent) newProcessSnapshotObserver(ctx context.Context) internalcodex.Pr
 	}
 }
 
-func (t *providerProcessSnapshotTracker) start(context.Context) *providerProcessRootObservation {
+func (t *providerProcessSnapshotTracker) start(ctx context.Context) *providerProcessRootObservation {
 	if t == nil {
 		return nil
 	}
@@ -54,7 +56,12 @@ func (t *providerProcessSnapshotTracker) start(context.Context) *providerProcess
 	t.nextID++
 	id := t.nextID
 	t.roots[id] = providerProcessRootSnapshot{}
+	publish := t.markDirtyLocked()
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(ctx)
+	}
 
 	return &providerProcessRootObservation{tracker: t, id: id}
 }
@@ -77,8 +84,12 @@ func (o *providerProcessRootObservation) snapshot(ctx context.Context, count int
 	root.known = true
 	root.count = count
 	t.roots[o.id] = root
-	t.publishKnownLocked(ctx)
+	publish := t.markDirtyLocked()
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(ctx)
+	}
 }
 
 func (o *providerProcessRootObservation) quiescent(ctx context.Context) {
@@ -95,13 +106,12 @@ func (o *providerProcessRootObservation) quiescent(ctx context.Context) {
 	}
 
 	delete(t.roots, o.id)
-
-	if len(t.roots) == 0 {
-		t.publishLocked(ctx, 0)
-	} else {
-		t.publishKnownLocked(ctx)
-	}
+	publish := t.markDirtyLocked()
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(ctx)
+	}
 }
 
 func (o *providerProcessRootObservation) unproven() {
@@ -111,35 +121,79 @@ func (o *providerProcessRootObservation) unproven() {
 
 	t := o.tracker
 	t.mu.Lock()
+	publish := false
+
 	if root, ok := t.roots[o.id]; ok {
 		root.known = false
 		t.roots[o.id] = root
+		publish = t.markDirtyLocked()
 	}
 	t.mu.Unlock()
+
+	if publish {
+		t.publishLoop(context.Background())
+	}
 }
 
-func (t *providerProcessSnapshotTracker) publishKnownLocked(ctx context.Context) {
+func (t *providerProcessSnapshotTracker) markDirtyLocked() bool {
+	t.dirty = true
+
+	if t.publishing {
+		return false
+	}
+
+	t.publishing = true
+
+	return true
+}
+
+func (t *providerProcessSnapshotTracker) publishLoop(ctx context.Context) {
+	for {
+		t.mu.Lock()
+		if !t.dirty {
+			t.publishing = false
+			t.mu.Unlock()
+
+			return
+		}
+
+		t.dirty = false
+		count, available := t.snapshotLocked()
+		observe := t.hooks.ObserveProcessSnapshot
+
+		publish := available && observe != nil && (!t.set || t.last != count)
+		if publish {
+			t.last = count
+			t.set = true
+		}
+		t.mu.Unlock()
+
+		if publish {
+			observe(ctx, RuntimeProcessProviderDescendant, count)
+		}
+	}
+}
+
+func (t *providerProcessSnapshotTracker) snapshotLocked() (int, bool) {
+	if len(t.roots) == 0 {
+		return 0, true
+	}
+
 	total := 0
 
 	for _, root := range t.roots {
 		if !root.known {
-			return
+			return 0, false
 		}
 
 		total += root.count
 	}
 
-	t.publishLocked(ctx, total)
-}
-
-func (t *providerProcessSnapshotTracker) publishLocked(ctx context.Context, count int) {
-	if t.set && t.last == count {
-		return
+	if total == 0 {
+		return 0, false
 	}
 
-	t.last = count
-	t.set = true
-	observeRuntimeProcessSnapshot(ctx, t.hooks, RuntimeProcessProviderDescendant, count)
+	return total, true
 }
 
 func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observer.Observer) RuntimeResourceHooks {

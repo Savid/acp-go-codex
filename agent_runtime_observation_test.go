@@ -89,6 +89,27 @@ func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
 	require.Equal(t, 0, snapshots[len(snapshots)-1])
 }
 
+func TestProviderProcessSnapshotTrackerHookReentryPublishesFreshAggregate(t *testing.T) {
+	var snapshots []int
+	var reentered bool
+	var second *providerProcessRootObservation
+
+	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{})
+	tracker.hooks.ObserveProcessSnapshot = func(ctx context.Context, _ RuntimeProcessKind, count int) {
+		snapshots = append(snapshots, count)
+		if !reentered {
+			reentered = true
+			second = tracker.start(ctx)
+			second.snapshot(ctx, 3)
+		}
+	}
+
+	first := tracker.start(t.Context())
+	first.snapshot(t.Context(), 2)
+	require.NotNil(t, second)
+	require.Equal(t, []int{2, 5}, snapshots)
+}
+
 func TestProviderProcessSnapshotTrackerDefensiveAndDuplicateBoundaries(t *testing.T) {
 	ctx := t.Context()
 	var nilTracker *providerProcessSnapshotTracker
