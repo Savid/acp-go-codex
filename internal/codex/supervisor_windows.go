@@ -25,6 +25,15 @@ type livenessContainment struct {
 	job windows.Handle
 }
 
+func (c *livenessContainment) DescendantCount() (int, bool) {
+	active, err := activeJobProcesses(c.job)
+	if err != nil {
+		return 0, false
+	}
+
+	return int(active), true
+}
+
 type jobBasicAccounting struct {
 	TotalUserTime             int64
 	TotalKernelTime           int64

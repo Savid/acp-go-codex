@@ -96,12 +96,12 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
 
-	if key.SessionID == "" {
-		return fmt.Errorf("session id is required")
-	}
-
 	if len(entries) == 0 {
 		return nil
+	}
+
+	if key.SessionID == "" {
+		return fmt.Errorf("session id is required")
 	}
 
 	s.mu.Lock()

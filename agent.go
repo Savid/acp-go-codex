@@ -102,14 +102,15 @@ type Agent struct {
 	observe    *observer.Observer
 	optionsErr error
 
-	mu            sync.Mutex
-	closed        bool
-	conn          agentClient
-	sessions      map[acp.SessionId]*session
-	deleted       map[acp.SessionId]struct{}
-	explicitStore bool
-	clientCalls   chan struct{}
-	authTokens    *ChatGPTAuthTokens
+	mu                sync.Mutex
+	closed            bool
+	conn              agentClient
+	sessions          map[acp.SessionId]*session
+	deleted           map[acp.SessionId]struct{}
+	explicitStore     bool
+	clientCalls       chan struct{}
+	authTokens        *ChatGPTAuthTokens
+	providerProcesses *providerProcessSnapshotTracker
 
 	runtimeClient         codex.Client
 	runtimeEpoch          uint64
@@ -168,16 +169,18 @@ func NewAgent(opts ...Option) *Agent {
 		Version:        options.AgentVersion,
 	})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
+	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks)
 
 	return &Agent{
-		options:       options,
-		log:           log,
-		optionsErr:    optionsErr,
-		observe:       observe,
-		sessions:      make(map[acp.SessionId]*session),
-		deleted:       make(map[acp.SessionId]struct{}),
-		explicitStore: options.SessionStore != nil,
-		clientCalls:   make(chan struct{}, clientCallLimit),
+		options:           options,
+		log:               log,
+		optionsErr:        optionsErr,
+		observe:           observe,
+		sessions:          make(map[acp.SessionId]*session),
+		deleted:           make(map[acp.SessionId]struct{}),
+		explicitStore:     options.SessionStore != nil,
+		clientCalls:       make(chan struct{}, clientCallLimit),
+		providerProcesses: providerProcesses,
 	}
 }
 
@@ -441,6 +444,7 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 		ObserveProcess: func(processCtx context.Context, kind string, delta int64) {
 			observeRuntimeProcess(processCtx, a.options.RuntimeResourceHooks, RuntimeProcessKind(kind), delta)
 		},
+		NewProcessSnapshotObserver: a.newProcessSnapshotObserver,
 		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
 			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
 			if observe != nil {

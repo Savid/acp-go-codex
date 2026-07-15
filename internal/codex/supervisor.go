@@ -30,16 +30,17 @@ const (
 )
 
 type supervisorConfig struct {
-	NativePath    string   `json:"nativePath"`
-	NativeArgs    []string `json:"nativeArgs"`
-	NativeEnv     []string `json:"nativeEnv"`
-	Home          string   `json:"home"`
-	Scratch       string   `json:"scratch"`
-	JobName       string   `json:"jobName,omitempty"`
-	Started       string   `json:"started"`
-	Completion    string   `json:"completion"`
-	NativePIDFile string   `json:"nativePidFile"`
-	FramedInput   bool     `json:"framedInput"`
+	NativePath       string   `json:"nativePath"`
+	NativeArgs       []string `json:"nativeArgs"`
+	NativeEnv        []string `json:"nativeEnv"`
+	Home             string   `json:"home"`
+	Scratch          string   `json:"scratch"`
+	JobName          string   `json:"jobName,omitempty"`
+	Started          string   `json:"started"`
+	Completion       string   `json:"completion"`
+	NativePIDFile    string   `json:"nativePidFile"`
+	ProviderSnapshot string   `json:"providerSnapshot"`
+	FramedInput      bool     `json:"framedInput"`
 }
 
 type supervisorReady struct {
@@ -56,14 +57,18 @@ var supervisorEncodeConfig = func(writer io.Writer, config supervisorConfig) err
 }
 var supervisorNewGuardianContainment = newGuardianContainment
 var supervisorOpenLivenessContainment = openLivenessContainment
+var supervisorDescendantCount = func(containment *livenessContainment) (int, bool) {
+	return containment.DescendantCount()
+}
 var supervisorInput io.Reader = os.Stdin
 var supervisorOutput io.Writer = os.Stdout
 var supervisorError io.Writer = os.Stderr
 var supervisorExit = os.Exit
 
 type supervisorProof struct {
-	started    string
-	completion string
+	started          string
+	completion       string
+	providerSnapshot string
 }
 
 // init turns the embedding command itself into either member of the
@@ -178,6 +183,7 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 	config.Started = filepath.Join(config.Scratch, "supervisor-started-"+markerNonce)
 	config.Completion = filepath.Join(config.Scratch, "supervisor-complete-"+markerNonce)
 	config.NativePIDFile = filepath.Join(config.Scratch, "supervisor-native-pid-"+markerNonce)
+	config.ProviderSnapshot = filepath.Join(config.Scratch, "supervisor-provider-snapshot-"+markerNonce)
 
 	path, err := writeSupervisorConfig(config.Scratch, config)
 	if err != nil {
@@ -194,7 +200,29 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 	cmd := execCommandContext(ctx, executable)
 	cmd.Env = supervisorEnv(supervisorModeGuardian, path)
 
-	return cmd, &supervisorProof{started: config.Started, completion: config.Completion}, nil
+	return cmd, &supervisorProof{
+		started:          config.Started,
+		completion:       config.Completion,
+		providerSnapshot: config.ProviderSnapshot,
+	}, nil
+}
+
+func (p *supervisorProof) readProviderSnapshot() (int, bool) {
+	if p == nil || p.providerSnapshot == "" {
+		return 0, false
+	}
+
+	raw, err := os.ReadFile(p.providerSnapshot)
+	if err != nil {
+		return 0, false
+	}
+
+	var count int
+	if _, err := fmt.Sscanf(string(raw), "%d", &count); err != nil || count < 0 {
+		return 0, false
+	}
+
+	return count, true
 }
 
 func supervisorNonce() (string, error) {
@@ -452,6 +480,8 @@ func runLiveness(config supervisorConfig) error {
 		return fmt.Errorf("start contained native root: %w", startErr)
 	}
 
+	publishProviderProcessSnapshot(config.ProviderSnapshot, containment)
+
 	// Reap concurrently with containment. On Unix a killed, unreaped process
 	// remains visible to kill(-pgid, 0), so waiting only after the quiescence
 	// probe would deadlock every post-start error path on its own zombie.
@@ -515,6 +545,14 @@ func runLiveness(config supervisorConfig) error {
 		<-waitDone
 
 		return nil
+	}
+}
+
+func publishProviderProcessSnapshot(path string, containment *livenessContainment) {
+	if count, available := supervisorDescendantCount(containment); available {
+		// Failure to persist the optional observation makes the inventory
+		// unavailable; it must not turn into a fabricated zero or fail launch.
+		_ = os.WriteFile(path, []byte(fmt.Sprintf("%d\n", count)), 0o600)
 	}
 }
 

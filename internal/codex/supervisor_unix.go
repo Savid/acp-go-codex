@@ -14,6 +14,8 @@ type guardianContainment struct{}
 
 type livenessContainment struct{}
 
+func (*livenessContainment) DescendantCount() (int, bool) { return 0, false }
+
 func newGuardianContainment() (*guardianContainment, error) {
 	return &guardianContainment{}, nil
 }

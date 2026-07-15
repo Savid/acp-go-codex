@@ -279,8 +279,8 @@ func TestInMemorySessionStoreEmptySessionIDKeys(t *testing.T) {
 	if err := store.Append(ctx, SessionKey{}, []SessionStoreEntry{SessionStoreEntry(`{"a":1}`)}); err == nil || !strings.Contains(err.Error(), "session id is required") {
 		t.Fatalf("Append with empty session id = %v, want session id is required", err)
 	}
-	if err := store.Append(ctx, SessionKey{}, nil); err == nil || err.Error() != "session id is required" {
-		t.Fatalf("empty Append with empty session id = %v, want exact error", err)
+	if err := store.Append(ctx, SessionKey{}, nil); err != nil {
+		t.Fatalf("empty Append with empty session id = %v, want pure no-op", err)
 	}
 	if err := store.Replace(ctx, SessionKey{}, nil); err == nil || err.Error() != "session id is required" {
 		t.Fatalf("Replace with empty session id = %v, want exact error", err)

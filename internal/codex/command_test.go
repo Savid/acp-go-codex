@@ -191,6 +191,7 @@ while read line; do :; done
 	t.Setenv("TEST_ARGS", logPath)
 	var logBuffer bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	var processSnapshotsQuiescent int
 	client, err := NewAppServerClient(context.Background(), Options{
 		CLIPath:        script,
 		CodexHome:      t.TempDir(),
@@ -199,11 +200,17 @@ while read line; do :; done
 		ExtraArgs:      []string{"--extra"},
 		Logger:         logger,
 		LaunchTimeout:  5 * time.Second,
+		NewProcessSnapshotObserver: func(context.Context) ProcessSnapshotObserver {
+			return ProcessSnapshotObserver{Quiescent: func(context.Context) { processSnapshotsQuiescent++ }}
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewAppServerClient with config returned error: %v", err)
 	}
 	_ = client.Close(context.Background())
+	if processSnapshotsQuiescent != 1 {
+		t.Fatalf("process snapshot quiescence callbacks = %d, want 1", processSnapshotsQuiescent)
+	}
 	rawArgs, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read args: %v", err)

@@ -87,6 +87,9 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, nil)
 
 	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, supervisor: supervisor, observeProcess: options.ObserveProcess}
+	if options.NewProcessSnapshotObserver != nil {
+		proc.processSnapshot = options.NewProcessSnapshotObserver(ctx)
+	}
 
 	return newLineTransport(stdout, stdin, proc), cmd, version, nil
 }
@@ -312,10 +315,11 @@ type process struct {
 	processExited       bool
 	supervisorsObserved bool
 	observeProcess      func(context.Context, string, int64)
+	processSnapshot     ProcessSnapshotObserver
 }
 
 func (p *process) markSupervisorsReady(ctx context.Context) {
-	if p == nil || p.supervisor == nil || p.observeProcess == nil {
+	if p == nil || p.supervisor == nil {
 		return
 	}
 
@@ -328,7 +332,40 @@ func (p *process) markSupervisorsReady(ctx context.Context) {
 
 	p.supervisorsObserved = true
 	p.observationMu.Unlock()
-	p.observeProcess(ctx, "home_lock_supervisor", 2)
+
+	if p.observeProcess != nil {
+		p.observeProcess(ctx, "home_lock_supervisor", 2)
+	}
+
+	p.observeProviderSnapshot(ctx)
+}
+
+func (p *process) observeProviderSnapshot(ctx context.Context) {
+	if p == nil || p.supervisor == nil || p.processSnapshot.Observe == nil {
+		return
+	}
+
+	if count, available := p.supervisor.readProviderSnapshot(); available {
+		p.processSnapshot.Observe(ctx, count)
+	}
+}
+
+func (p *process) finishProviderSnapshot(ctx context.Context, err error) {
+	if p == nil {
+		return
+	}
+
+	if errors.Is(err, ErrProcessTreeUnproven) {
+		if p.processSnapshot.Unproven != nil {
+			p.processSnapshot.Unproven()
+		}
+
+		return
+	}
+
+	if p.processSnapshot.Quiescent != nil {
+		p.processSnapshot.Quiescent(ctx)
+	}
 }
 
 func (p *process) markExited() {
@@ -411,8 +448,10 @@ func (p *process) Close() error {
 
 	if p.supervisor != nil {
 		<-p.waitDone
+		closeErr := processCloseError(p.waitErr)
+		p.finishProviderSnapshot(context.Background(), closeErr)
 
-		return processCloseError(p.waitErr)
+		return closeErr
 	}
 
 	// Escalate: stdin EOF → SIGTERM → SIGKILL. The first grace window lets

@@ -12,6 +12,8 @@ import (
 type guardianContainment struct{}
 type livenessContainment struct{}
 
+func (*livenessContainment) DescendantCount() (int, bool) { return 0, false }
+
 func unsupportedContainment() error {
 	return fmt.Errorf("Codex runtime containment is unsupported on %s", runtime.GOOS)
 }
