@@ -237,6 +237,182 @@ func TestSessionPromptDedupesDeltas(t *testing.T) {
 	}
 }
 
+func TestPromptPublishesDurableNativeIdentityAndReplayMatches(t *testing.T) {
+	const (
+		turnID              = "019f664f-e8bb-75c2-8110-f9a9cd2b65eb"
+		intermediateMessage = "msg_intermediate"
+		terminalMessage     = "msg_0add2dc109f9369e016a57a208bfe48191be93609f76b2a063"
+	)
+
+	entries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"019f664f-e81a-7f51-9641-23dea9def926"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"` + turnID + `"}}`),
+		SessionStoreEntry(`{"type":"turn_context","payload":{"turn_id":"` + turnID + `"}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","id":"` + intermediateMessage + `","role":"assistant","content":[{"type":"output_text","text":"before tool"}]}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","id":"` + terminalMessage + `","role":"assistant","content":[{"type":"output_text","text":"done"}]}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"done"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"` + turnID + `"}}`),
+	}
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	requireNoError(t, os.WriteFile(rollout, nil, 0o600))
+	store := NewInMemorySessionStore()
+	agent := NewAgent(WithSessionStore(store))
+	liveConn := newRecordingAgentClient()
+	agent.setAgentClient(liveConn)
+	live := &session{
+		agent:         agent,
+		id:            "native-identity",
+		cwd:           t.TempDir(),
+		codexThreadID: "thread",
+		rolloutPath:   rollout,
+		client: &rolloutWritingRunClient{
+			runEventsClient: runEventsClient{events: []codex.Event{
+				{Kind: codex.EventAgentMessageDelta, TurnID: turnID, ItemID: intermediateMessage, Text: "before tool", Completed: true},
+				{Kind: codex.EventToolStarted, TurnID: turnID, Tool: codex.ToolEvent{ID: "tool", Title: "tool"}},
+				{Kind: codex.EventToolCompleted, TurnID: turnID, Tool: codex.ToolEvent{ID: "tool", Title: "tool"}},
+				{Kind: codex.EventAgentMessageDelta, TurnID: turnID, ItemID: terminalMessage, Text: "done", Completed: true},
+				{Kind: codex.EventCompleted, TurnID: turnID},
+			}},
+			path:    rollout,
+			entries: entries,
+		},
+	}
+
+	response, err := live.Prompt(context.Background(), TextPromptRequest(live.id, "test-turn", "run"))
+	requireNoError(t, err)
+	want := nativeTurnIdentity{turnID: turnID, messageID: terminalMessage}
+	if got := nativeIdentityFromMeta(response.Meta); got != want {
+		t.Fatalf("prompt native identity = %#v, want %#v; meta=%#v", got, want, response.Meta)
+	}
+	if got := lastNotificationNativeIdentity(liveConn.updates); got != want {
+		t.Fatalf("live update native identity = %#v, want %#v; updates=%#v", got, want, liveConn.updates)
+	}
+
+	durable, err := store.Load(context.Background(), SessionKey{SessionID: string(live.id)})
+	requireNoError(t, err)
+	if got := rolloutNativeTerminalIdentity(durable); got != want {
+		t.Fatalf("durable native identity = %#v, want %#v", got, want)
+	}
+
+	replayConn := newRecordingAgentClient()
+	replayAgent := NewAgent()
+	replayAgent.setAgentClient(replayConn)
+	replayed := &session{agent: replayAgent, id: live.id}
+	requireNoError(t, replayed.replayRollout(context.Background(), durable))
+	if got := lastNotificationNativeIdentity(replayConn.updates); got != want {
+		t.Fatalf("replay native identity = %#v, want %#v; updates=%#v", got, want, replayConn.updates)
+	}
+}
+
+func TestPromptPublishesTurnIdentityWithoutAssistantText(t *testing.T) {
+	tests := []struct {
+		name    string
+		events  []codex.Event
+		message string
+	}{
+		{
+			name:   "completion only",
+			events: []codex.Event{{Kind: codex.EventCompleted, TurnID: "turn-only"}},
+		},
+		{
+			name: "empty terminal assistant",
+			events: []codex.Event{
+				{Kind: codex.EventAgentMessageDelta, TurnID: "turn-empty", ItemID: "msg-empty", Completed: true},
+				{Kind: codex.EventCompleted, TurnID: "turn-empty"},
+			},
+			message: "msg-empty",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agent := NewAgent()
+			conn := newRecordingAgentClient()
+			agent.setAgentClient(conn)
+			s := &session{
+				agent: agent, id: acp.SessionId(test.name), cwd: t.TempDir(), codexThreadID: "thread",
+				client: &runEventsClient{events: test.events},
+			}
+
+			response, err := s.Prompt(context.Background(), TextPromptRequest(s.id, "test-turn", "run"))
+			requireNoError(t, err)
+			want := nativeTurnIdentity{turnID: test.events[len(test.events)-1].TurnID, messageID: test.message}
+			if got := nativeIdentityFromMeta(response.Meta); got != want {
+				t.Fatalf("response identity = %#v, want %#v", got, want)
+			}
+			if got := lastNotificationNativeIdentity(conn.updates); got != want {
+				t.Fatalf("terminal update identity = %#v, want %#v; updates=%#v", got, want, conn.updates)
+			}
+		})
+	}
+}
+
+func TestNativeIdentityMetaPreservesStructuredOutput(t *testing.T) {
+	meta := mergePromptResponseMeta(
+		structuredOutputMeta(`{"ok":true}`, map[string]any{"type": "object"}),
+		nativeTurnIdentity{turnID: "turn", messageID: "message"},
+	)
+	codexMeta, _ := meta[codexMetaKey].(map[string]any)
+	structured, _ := codexMeta[structuredOutputMetaKey].(map[string]any)
+	if structured["ok"] != true || codexMeta[codexTurnIDMetaKey] != "turn" || codexMeta[codexMessageIDMetaKey] != "message" {
+		t.Fatalf("merged prompt response meta = %#v", meta)
+	}
+}
+
+type rolloutWritingRunClient struct {
+	runEventsClient
+	path    string
+	entries []SessionStoreEntry
+}
+
+func (c *rolloutWritingRunClient) RunTurn(
+	ctx context.Context,
+	req codex.TurnStartRequest,
+) (<-chan codex.Event, error) {
+	var content strings.Builder
+	for _, entry := range c.entries {
+		content.Write(entry)
+		content.WriteByte('\n')
+	}
+	if err := os.WriteFile(c.path, []byte(content.String()), 0o600); err != nil {
+		return nil, err
+	}
+
+	return c.runEventsClient.RunTurn(ctx, req)
+}
+
+func nativeIdentityFromMeta(meta map[string]any) nativeTurnIdentity {
+	codexMeta, _ := meta[codexMetaKey].(map[string]any)
+
+	return nativeTurnIdentity{
+		turnID:    stringFromAny(codexMeta[codexTurnIDMetaKey]),
+		messageID: stringFromAny(codexMeta[codexMessageIDMetaKey]),
+	}
+}
+
+func lastNotificationNativeIdentity(notifications []acp.SessionNotification) nativeTurnIdentity {
+	var identity nativeTurnIdentity
+	for _, notification := range notifications {
+		current := nativeIdentityFromMeta(notification.Meta)
+		if current.turnID != "" {
+			identity.turnID = current.turnID
+		}
+		if current.messageID != "" {
+			identity.messageID = current.messageID
+		}
+	}
+
+	return identity
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessionPromptUsageUpdates(t *testing.T) {
 	usageAgent := NewAgent()
 	usageConn := newRecordingAgentClient()
@@ -344,8 +520,10 @@ func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
 	writeErr := make(chan error, 1)
 	time.AfterFunc(20*time.Millisecond, func() {
 		writeErr <- os.WriteFile(rollout, []byte(
-			`{"type":"event_msg","payload":{"type":"agent_message","message":"1 + 1 = 2"}}`+"\n"+
-				`{"type":"event_msg","payload":{"type":"task_complete"}}`+"\n",
+			`{"type":"event_msg","payload":{"type":"task_started","turn_id":"fallback-turn"}}`+"\n"+
+				`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"fallback-message","content":[{"type":"output_text","text":"1 + 1 = 2"}]}}`+"\n"+
+				`{"type":"event_msg","payload":{"type":"agent_message","message":"1 + 1 = 2"}}`+"\n"+
+				`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"fallback-turn"}}`+"\n",
 		), 0o600)
 	})
 	defer func() {
@@ -368,10 +546,17 @@ func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
 	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
 		t.Fatalf("fallback prompt resp=%#v err=%v", resp, err)
 	}
-	if len(conn.updates) != 1 || conn.updates[0].Update.AgentMessageChunk == nil {
+	if len(conn.updates) != 2 || conn.updates[0].Update.AgentMessageChunk == nil {
 		t.Fatalf("fallback updates = %#v", conn.updates)
 	}
-	if session.completionRows != 2 || session.visibleRows != 2 {
+	wantIdentity := nativeTurnIdentity{turnID: "fallback-turn", messageID: "fallback-message"}
+	if got := nativeIdentityFromMeta(resp.Meta); got != wantIdentity {
+		t.Fatalf("fallback response identity = %#v, want %#v", got, wantIdentity)
+	}
+	if got := lastNotificationNativeIdentity(conn.updates); got != wantIdentity {
+		t.Fatalf("fallback update identity = %#v, want %#v", got, wantIdentity)
+	}
+	if session.completionRows != 4 || session.visibleRows != 4 {
 		t.Fatalf("rollout cursors completion=%d visible=%d", session.completionRows, session.visibleRows)
 	}
 }
@@ -445,6 +630,41 @@ func TestPromptReturnsRolloutEventUpdateError(t *testing.T) {
 	defer cancel()
 	if _, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "show it")); err == nil {
 		t.Fatal("rollout event update error was ignored")
+	}
+}
+
+func TestPromptReturnsTerminalRolloutIdentityUpdateError(t *testing.T) {
+	withRolloutCompletionFallback(t, time.Millisecond)
+
+	updateErr := errors.New("identity update failed")
+	agent := NewAgent()
+	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
+		t.Fatalf("write empty rollout: %v", err)
+	}
+	writeErr := make(chan error, 1)
+	time.AfterFunc(20*time.Millisecond, func() {
+		writeErr <- os.WriteFile(rollout, []byte(
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"empty-message","content":[]}}`+"\n"+
+				`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"identity-turn"}}`+"\n",
+		), 0o600)
+	})
+	defer func() {
+		if err := <-writeErr; err != nil {
+			t.Fatalf("write rollout rows: %v", err)
+		}
+	}()
+
+	s := &session{
+		agent: agent, id: "identity-error", cwd: t.TempDir(), codexThreadID: "thread",
+		rolloutPath: rollout, client: &openRunEventsClient{},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := s.Prompt(ctx, TextPromptRequest(s.id, "test-turn", "run")); !errors.Is(err, updateErr) {
+		t.Fatalf("Prompt error = %v, want %v", err, updateErr)
 	}
 }
 

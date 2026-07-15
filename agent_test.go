@@ -564,7 +564,7 @@ func (c *spyCodexClient) ListThreads(context.Context, codex.ThreadListRequest) (
 }
 
 func (c *spyCodexClient) ReadThread(context.Context, codex.ThreadReadRequest) (codex.ThreadHistory, error) {
-	return codex.ThreadHistory{Thread: c.thread, Items: []map[string]any{{"type": "agentMessage", "text": "history"}}}, nil
+	return codex.ThreadHistory{Thread: c.thread, Items: []map[string]any{{"type": valueAgentMessageCamel, "text": "history"}}}, nil
 }
 
 func (c *spyCodexClient) ListTurns(_ context.Context, req codex.ThreadTurnsListRequest) (codex.ThreadTurnsListResponse, error) {

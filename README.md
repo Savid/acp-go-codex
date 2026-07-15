@@ -92,7 +92,8 @@ refresh, guarded logout, and OpenTelemetry providers.
 - One shared Codex app-server per Agent with thread-scoped session routing,
   crash fencing, all-thread restore, and bounded MCP readiness canaries.
 - Prompt streaming for messages, reasoning, plans, tool calls, diffs, usage, and
-  session metadata.
+  session metadata, including durable native turn and terminal assistant
+  identities.
 - Structured output through session-level JSON Schema on `turn/start`.
 - Command, file, and generic permission prompts, tool user input, and MCP
   elicitation bridging.

@@ -21,6 +21,12 @@ Codex `app-server` events are mapped to ACP session updates:
 | usage update | usage events |
 | session metadata update | account changes |
 
+The adapter also emits an identity-bearing session metadata update for the
+native turn checkpoint. Its notification metadata contains the native
+`_meta.codex.turnId` and, when the turn has a terminal assistant item, the
+final `_meta.codex.messageId`. This update is emitted even when the terminal
+assistant item has no text. The prompt response carries the same pair.
+
 Raw, unmapped rollout rows are emitted only through
 [`_codex/rawEvent`](/docs/features/raw-events) when a session opts in with
 `_meta.codex.rawEvent.enabled`.

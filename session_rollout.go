@@ -30,6 +30,10 @@ func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
 }
 
 func (s *session) prepareRolloutLiveCursors() {
+	s.mirrorMu.Lock()
+	s.rolloutIdentity = nativeTurnIdentity{}
+	s.mirrorMu.Unlock()
+
 	rows, err := countRolloutRows(s.rolloutPath)
 	if err != nil {
 		return
@@ -135,6 +139,8 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 		rows[index] = rolloutMirrorRow{index: startRow + index, entry: entry}
 	}
 
+	s.mergeRolloutIdentity(rolloutNativeTerminalIdentity(clean))
+
 	if store != nil {
 		durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
 		if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, durableEntries); err != nil {
@@ -155,6 +161,23 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 	}
 
 	return nil
+}
+
+func (s *session) mergeRolloutIdentity(next nativeTurnIdentity) {
+	if next.turnID != "" && next.turnID != s.rolloutIdentity.turnID {
+		s.rolloutIdentity = nativeTurnIdentity{turnID: next.turnID}
+	}
+
+	if next.messageID != "" {
+		s.rolloutIdentity.messageID = next.messageID
+	}
+}
+
+func (s *session) rolloutIdentitySnapshot() nativeTurnIdentity {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	return s.rolloutIdentity
 }
 
 func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, int, error) {

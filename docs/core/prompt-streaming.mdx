@@ -26,6 +26,12 @@ silently dropped.
 | usage | usage update |
 | account change | session metadata update |
 
+At the terminal fence, a standard session metadata update carries the native
+turn checkpoint at `_meta.codex.turnId` plus the final assistant response-item
+identity at `_meta.codex.messageId` when one exists. The same metadata is
+returned by `session/prompt`; an empty assistant completion still emits its
+identity-bearing update.
+
 Raw, unmapped rollout rows are never placed on the ACP wire; they are available
 only through the [`_codex/rawEvent`](/docs/features/raw-events) opt-in.
 

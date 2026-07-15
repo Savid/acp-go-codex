@@ -219,11 +219,22 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, err
 	}
 
+	// A rollout task_complete can be the terminal fence when app-server closes
+	// without forwarding turn/completed. Publish the final native pair after
+	// the durable mirror in either path, including a turn with an empty final
+	// assistant item.
+	if err := s.finalizePromptNativeIdentity(context.WithoutCancel(turnCtx), state); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
 	return acp.PromptResponse{
 		StopReason:    state.stopReason,
 		Usage:         state.usage,
 		UserMessageId: params.MessageId,
-		Meta:          structuredOutputMeta(agentText.String(), snapshot.outputSchema),
+		Meta: mergePromptResponseMeta(
+			structuredOutputMeta(agentText.String(), snapshot.outputSchema),
+			state.nativeIdentity,
+		),
 	}, nil
 }
 
@@ -240,6 +251,9 @@ type promptEventState struct {
 	usage      *acp.Usage
 	stopReason acp.StopReason
 	completed  bool
+
+	nativeIdentity        nativeTurnIdentity
+	emittedNativeIdentity nativeTurnIdentity
 }
 
 func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, state *promptEventState) error {
@@ -250,6 +264,8 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 	if event.Kind == codex.EventAccountUpdated {
 		s.setAccount(redactedAccountMeta(event.Account))
 	}
+
+	state.nativeIdentity = nativeIdentityFromEvent(event, state.nativeIdentity)
 
 	if err := s.emitRawCodexEvent(turnCtx, event); err != nil {
 		s.recordRawEmitFailure(turnCtx, err)
@@ -302,19 +318,25 @@ func (s *session) recordRawEmitFailure(ctx context.Context, err error) {
 }
 
 func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, visibleEvent codex.Event, state *promptEventState) error {
-	for _, update := range eventUpdates(visibleEvent) {
-		if err := s.emitUpdates(turnCtx, update); err != nil {
+	updates := eventUpdates(visibleEvent)
+	updates = append(updates, usageUpdatesForEvent(event, &state.streamedUsage, &state.streamedThreadUsage, &state.streamedUsageContextWindow)...)
+
+	checkpointIdentity := nativeTurnIdentity{turnID: state.nativeIdentity.turnID}
+	if nativeIdentityChanged(checkpointIdentity, state.emittedNativeIdentity) {
+		if len(updates) == 0 {
+			updates = []acp.SessionUpdate{{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}}}
+		}
+
+		if err := s.emitUpdatesWithNativeIdentity(turnCtx, checkpointIdentity, updates...); err != nil {
 			return err
 		}
+
+		state.emittedNativeIdentity = checkpointIdentity
+
+		return nil
 	}
 
-	for _, update := range usageUpdatesForEvent(event, &state.streamedUsage, &state.streamedThreadUsage, &state.streamedUsageContextWindow) {
-		if err := s.emitUpdates(turnCtx, update); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return s.emitUpdates(turnCtx, updates...)
 }
 
 func (s *session) applyPromptUsage(event codex.Event, state *promptEventState) {

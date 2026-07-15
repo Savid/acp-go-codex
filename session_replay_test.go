@@ -70,6 +70,111 @@ func TestRolloutNativeThreadID(t *testing.T) {
 	}
 }
 
+func TestRolloutTerminalIdentityUsesFinalAssistantAndReplaysEmptyAssistant(t *testing.T) {
+	entries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"message-before","content":[{"type":"output_text","text":"before"}]}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"message-empty","content":[]}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`),
+	}
+	want := nativeTurnIdentity{turnID: "turn-1", messageID: "message-empty"}
+	if got := rolloutNativeTerminalIdentity(entries); got != want {
+		t.Fatalf("terminal identity = %#v, want %#v", got, want)
+	}
+	trailingTurnID := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"message-trailing"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-trailing"}}`),
+	}
+	if got := rolloutNativeTerminalIdentity(trailingTurnID); got != (nativeTurnIdentity{turnID: "turn-trailing", messageID: "message-trailing"}) {
+		t.Fatalf("trailing turn identity = %#v", got)
+	}
+	completionOnlyAfterMessage := append(cloneStoreEntries(entries),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}`),
+	)
+	if got := rolloutNativeTerminalIdentity(completionOnlyAfterMessage); got != (nativeTurnIdentity{turnID: "turn-2"}) {
+		t.Fatalf("completion-only identity = %#v", got)
+	}
+
+	agent := NewAgent()
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	s := &session{agent: agent, id: "replay"}
+	if err := s.replayRollout(context.Background(), entries); err != nil {
+		t.Fatalf("replayRollout returned error: %v", err)
+	}
+	if got := lastNotificationNativeIdentity(conn.updates); got != want {
+		t.Fatalf("replayed terminal identity = %#v, want %#v; updates=%#v", got, want, conn.updates)
+	}
+
+	errorAgent := NewAgent()
+	updateErr := errors.New("identity update failed")
+	errorAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
+	errorSession := &session{agent: errorAgent, id: "replay-error"}
+	errorEntries := []SessionStoreEntry{
+		SessionStoreEntry(`bad`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"empty","content":[]}}`),
+	}
+	if got := rolloutNativeTerminalIdentity(errorEntries); got.messageID != "empty" {
+		t.Fatalf("terminal inspection after invalid row = %#v", got)
+	}
+	if err := errorSession.replayRollout(context.Background(), errorEntries); err == nil {
+		// The invalid first row exercises tolerant terminal inspection, while
+		// strict replay decoding still rejects the source before any update.
+		t.Fatal("replayRollout accepted invalid source")
+	}
+	if err := errorSession.replayRollout(context.Background(), errorEntries[1:]); !errors.Is(err, updateErr) {
+		t.Fatalf("identity replay update error = %v, want %v", err, updateErr)
+	}
+}
+
+func TestThreadHistoryReplayPublishesTerminalNativeIdentity(t *testing.T) {
+	history := codex.ThreadHistory{
+		Raw: map[string]any{"turnId": "turn-before"},
+		Items: []map[string]any{
+			{"type": valueAgentMessageCamel, "turnId": "turn-final", "id": "message-final"},
+		},
+	}
+	want := nativeTurnIdentity{turnID: "turn-final", messageID: "message-final"}
+	if got := threadHistoryNativeTerminalIdentity(history); got != want {
+		t.Fatalf("thread history identity = %#v, want %#v", got, want)
+	}
+
+	agent := NewAgent()
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	s := &session{
+		agent: agent, id: "history", codexThreadID: "thread",
+		client: &threadHistoryClient{Client: newSpyCodexClient(), history: history},
+	}
+	if err := s.replayThreadHistory(context.Background()); err != nil {
+		t.Fatalf("replayThreadHistory returned error: %v", err)
+	}
+	if got := lastNotificationNativeIdentity(conn.updates); got != want {
+		t.Fatalf("replayed history identity = %#v, want %#v; updates=%#v", got, want, conn.updates)
+	}
+
+	updateErr := errors.New("history identity update failed")
+	errorAgent := NewAgent()
+	errorAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
+	errorSession := &session{
+		agent: errorAgent, id: "history-error", codexThreadID: "thread",
+		client: &threadHistoryClient{Client: newSpyCodexClient(), history: history},
+	}
+	if err := errorSession.replayThreadHistory(context.Background()); !errors.Is(err, updateErr) {
+		t.Fatalf("history identity update error = %v, want %v", err, updateErr)
+	}
+}
+
+type threadHistoryClient struct {
+	codex.Client
+	history codex.ThreadHistory
+}
+
+func (c *threadHistoryClient) ReadThread(context.Context, codex.ThreadReadRequest) (codex.ThreadHistory, error) {
+	return c.history, nil
+}
+
 func TestThreadHistoryReplayUpdates(t *testing.T) {
 	items := []map[string]any{
 		{"type": "userMessage", "text": "user"},

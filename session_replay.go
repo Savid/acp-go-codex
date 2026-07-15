@@ -15,7 +15,10 @@ import (
 type rolloutRow struct {
 	Type    string         `json:"type"`
 	Payload map[string]any `json:"payload"`
+	raw     map[string]any
 }
+
+const valueAgentMessageCamel = "agentMessage"
 
 func rolloutNativeThreadID(entries []SessionStoreEntry) string {
 	for _, entry := range entries {
@@ -44,6 +47,14 @@ func (s *session) replayRollout(ctx context.Context, entries []SessionStoreEntry
 		}
 	}
 
+	if identity := rolloutNativeTerminalIdentity(entries); nativeIdentityChanged(identity, nativeTurnIdentity{}) {
+		if err := s.emitUpdatesWithNativeIdentity(ctx, identity, acp.SessionUpdate{
+			SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
+		}); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -63,7 +74,37 @@ func (s *session) replayThreadHistory(ctx context.Context) error {
 		}
 	}
 
+	if identity := threadHistoryNativeTerminalIdentity(history); nativeIdentityChanged(identity, nativeTurnIdentity{}) {
+		if err := s.emitUpdatesWithNativeIdentity(ctx, identity, acp.SessionUpdate{
+			SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
+		}); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+func threadHistoryNativeTerminalIdentity(history codex.ThreadHistory) nativeTurnIdentity {
+	identity := nativeTurnIdentity{
+		turnID: firstNonEmpty(
+			rolloutIdentityString(history.Raw, codexTurnIDMetaKey, "turn_id", "turnID"),
+			rolloutIdentityString(history.Thread.Raw, codexTurnIDMetaKey, "turn_id", "turnID"),
+		),
+	}
+	for _, item := range history.Items {
+		if turnID := rolloutIdentityString(item, codexTurnIDMetaKey, "turn_id", "turnID"); turnID != "" && turnID != identity.turnID {
+			identity = nativeTurnIdentity{turnID: turnID}
+		}
+
+		if rolloutAssistantPayload(item) {
+			if messageID := rolloutIdentityString(item, "id", "itemId", codexMessageIDMetaKey, "uuid"); messageID != "" {
+				identity.messageID = messageID
+			}
+		}
+	}
+
+	return identity
 }
 
 func threadHistoryReplayUpdates(items []map[string]any) []acp.SessionUpdate {
@@ -74,7 +115,7 @@ func threadHistoryReplayUpdates(items []map[string]any) []acp.SessionUpdate {
 			if text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item[jsonFieldMessage]), responseItemText(item)); text != "" {
 				updates = append(updates, acp.UpdateUserMessageText(text))
 			}
-		case "agentMessage", valueAgentMessage, roleAssistant, jsonFieldMessage:
+		case valueAgentMessageCamel, valueAgentMessage, roleAssistant, jsonFieldMessage:
 			role := stringFromAny(item["role"])
 
 			text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item[jsonFieldMessage]), responseItemText(item))
@@ -162,9 +203,15 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 		return rolloutRow{}, errors.New(validationRequired)
 	}
 
-	var row rolloutRow
-	if err := json.Unmarshal(trimmed, &row); err != nil {
+	var raw map[string]any
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
 		return rolloutRow{}, err
+	}
+
+	row := rolloutRow{
+		Type:    stringFromAny(raw[jsonFieldType]),
+		Payload: mapFromAny(raw["payload"]),
+		raw:     raw,
 	}
 
 	if row.Type == "" {

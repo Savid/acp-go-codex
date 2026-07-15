@@ -57,6 +57,12 @@ Rows are stored in the `codex-rollout-jsonl-v1` format. The main session lives
 at the empty subpath (`SessionStoreMainSubpath`); additional subpaths hold
 related generations.
 
+The adapter derives the terminal native checkpoint from these unmodified rows:
+the last turn's `turn_id` and the final assistant `response_item.id` are exposed
+as `_meta.codex.turnId` and `_meta.codex.messageId`. Store-backed
+`session/load` emits an identity-bearing replay update even when that final
+assistant item has empty content.
+
 ## Generations and deletion
 
 `Replace` writes one complete committed generation for a session: the main key

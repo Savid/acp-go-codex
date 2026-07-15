@@ -17,6 +17,8 @@
 // session ID and subpath, can back session/list, and can hydrate rollout JSONL
 // into a temporary file for session/load or session/resume when the local Codex
 // thread state is absent.
+// Terminal prompt responses and replay updates expose the native Codex turn ID
+// and final assistant response-item ID under _meta.codex.
 //
 // Hosts that need structured output can attach [CodexOptions] with
 // [WithSessionCodexOptions] or use [WithSessionOutputSchema]. The schema is

@@ -55,6 +55,7 @@ type session struct {
 	rawEventSequence int64
 	completionRows   int
 	visibleRows      int
+	rolloutIdentity  nativeTurnIdentity
 }
 
 type sessionInteraction struct {

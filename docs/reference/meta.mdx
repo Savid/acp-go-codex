@@ -1,10 +1,10 @@
 ---
 title: "Metadata"
-description: "The _meta.codex vocabulary for session options, initialize capabilities, and the rules that gate it."
+description: "The _meta.codex vocabulary for session options, capabilities, and native turn identity."
 ---
 
 The adapter reserves the `_meta.codex` namespace for its extension vocabulary.
-This page lists what the adapter reads.
+This page lists the metadata it reads and writes.
 
 ## Session options
 
@@ -54,3 +54,26 @@ under `_meta.codex`.
 
 Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are not commands
 and are not projected as `AvailableCommand` entries.
+
+## Native turn identity
+
+Successful native turns expose their durable Codex correlation under
+`_meta.codex` on a standard `session/update` notification and on the terminal
+`session/prompt` response:
+
+```json
+{
+  "_meta": {
+    "codex": {
+      "turnId": "<native turn id>",
+      "messageId": "<final assistant response-item id>"
+    }
+  }
+}
+```
+
+`turnId` comes from the Codex app-server turn. `messageId`, when present, is
+the final assistant `response_item.id` from that turn; it is not an
+adapter-generated ACP message id. A completion with no assistant item carries
+`turnId` alone. Store-backed `session/load` replays the same terminal identity
+from the mirrored rollout.
