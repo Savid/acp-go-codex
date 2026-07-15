@@ -66,15 +66,6 @@ func decodedRawEvent(raw json.RawMessage) map[string]any {
 	return out
 }
 
-func (s *session) nextRawEventSequence() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.rawEventSequence++
-
-	return s.rawEventSequence
-}
-
 func capRawEventPayload(payload map[string]any) map[string]any {
 	encoded, err := json.Marshal(payload)
 	if err == nil && len(encoded) <= rawEventMaxBytes {

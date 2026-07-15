@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,6 +119,8 @@ type Agent struct {
 	runtimeScratchRoot    string
 	runtimeScratchRelease func()
 	runtimeCleanupErr     error
+	runtimeEnv            map[string]string
+	runtimeEnvSet         bool
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -144,6 +148,7 @@ var (
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
+	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
 	options.ConcurrencyLimits = limits
 
 	clientCallLimit := limits.MaxConcurrentClientCalls
@@ -174,6 +179,50 @@ func NewAgent(opts ...Option) *Agent {
 		explicitStore: options.SessionStore != nil,
 		clientCalls:   make(chan struct{}, clientCallLimit),
 	}
+}
+
+func validateCodexConfigOverrides(config map[string]any) error {
+	for key := range config {
+		if codexConfigRootKey(key) == "mcp_servers" {
+			return fmt.Errorf("%s config override %q is reserved for session-scoped MCP", codexMetaKey, key)
+		}
+	}
+
+	return nil
+}
+
+func codexConfigRootKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+
+	switch key[0] {
+	case '\'':
+		if end := strings.IndexByte(key[1:], '\''); end >= 0 {
+			return key[1 : end+1]
+		}
+	case '"':
+		for index := 1; index < len(key); index++ {
+			if key[index] != '"' || key[index-1] == '\\' {
+				continue
+			}
+
+			if root, err := strconv.Unquote(key[:index+1]); err == nil {
+				return root
+			}
+
+			break
+		}
+	default:
+		if end := strings.IndexAny(key, ". \t\r\n"); end >= 0 {
+			return key[:end]
+		}
+
+		return key
+	}
+
+	return key
 }
 
 func (a *Agent) setAgentClient(conn agentClient) {
@@ -345,6 +394,8 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 }
 
 func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string) (codex.Client, error) {
+	env, _ := a.pinRuntimeEnvironment(nil)
+
 	factory := a.options.clientFactory
 	if factory == nil {
 		factory = func(ctx context.Context, options codex.Options) (codex.Client, error) {
@@ -359,7 +410,7 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 		return nil, err
 	}
 
-	otelConfig, err := a.codexOTELConfig(nil)
+	otelConfig, err := a.codexOTELConfig(env)
 	if err != nil {
 		observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, err)
 
@@ -371,13 +422,12 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 	a.observe.RecordCodexProcessStart(ctx)
 	eventSink := &codexClientEventSink{agent: a, epoch: epoch}
 
-	env := cloneStringMap(a.options.Env)
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, nil)
 
 	client, err := factory(ctx, codex.Options{
 		CLIPath:        a.options.ExecutablePath,
 		CodexHome:      a.options.Home,
-		WritableHome:   a.resolvedCodexHome(),
+		WritableHome:   a.resolvedCodexHomeForEnv(env),
 		SupervisorRoot: supervisorRoot,
 		DefaultModel:   a.options.DefaultModel,
 		Env:            a.observe.InjectTraceEnv(ctx, env),
@@ -611,7 +661,7 @@ func (a *Agent) storeStartedSession(session *session) error {
 }
 
 func newAgentClosedError() *acp.RequestError {
-	return acp.NewInternalError(map[string]any{jsonFieldError: "agent is closed"})
+	return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent is closed"})
 }
 
 func (a *Agent) removeSession(id acp.SessionId) *session {

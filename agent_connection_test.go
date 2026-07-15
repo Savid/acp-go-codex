@@ -41,6 +41,30 @@ func TestLocalAgentConnectionHandleBranches(t *testing.T) {
 	}
 }
 
+func TestLocalAgentConnectionClosedWinsBeforeDispatchAndDecode(t *testing.T) {
+	agent := NewAgent()
+	if err := agent.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	conn := &localAgentConnection{agent: agent}
+	for name, test := range map[string]struct {
+		method string
+		params json.RawMessage
+	}{
+		"initialize malformed": {method: acp.AgentMethodInitialize, params: json.RawMessage(`{`)},
+		"known malformed":      {method: acp.AgentMethodSessionList, params: json.RawMessage(`{`)},
+		"unknown stable":       {method: "missing/method", params: json.RawMessage(`{}`)},
+		"unknown extension":    {method: "_codex/missing", params: json.RawMessage(`{`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, reqErr := conn.handle(context.Background(), test.method, test.params); reqErr == nil || reqErr.Code != -32600 {
+				t.Fatalf("closed request error = %#v, want -32600", reqErr)
+			}
+		})
+	}
+}
+
 func TestLocalAgentConnectionOutboundClientCalls(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

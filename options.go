@@ -284,9 +284,10 @@ func WithSeedFiles(files map[string]string) Option {
 
 // WithCodexConfigOverrides sets TOML config overrides passed to `codex
 // app-server` as `-c key=value`. Keys may be dotted paths for nested values
-// (e.g. model_providers.litellm.base_url); string values are TOML-quoted
-// automatically. Nothing is written to disk, so it is non-destructive and safe
-// against a real ~/.codex. The input map is cloned.
+// (e.g. model_providers.litellm.base_url). The session-scoped mcp_servers
+// keyspace is reserved and causes Initialize to fail closed. String values are
+// TOML-quoted automatically. Nothing is written to disk, so it is
+// non-destructive and safe against a real ~/.codex. The input map is cloned.
 func WithCodexConfigOverrides(overrides map[string]any) Option {
 	return func(options *Options) {
 		options.Config = make(map[string]any, len(overrides))

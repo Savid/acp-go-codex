@@ -410,6 +410,34 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 			t.Fatalf("Initialize accepted invalid limits %#v", limits)
 		}
 	}
+	for _, key := range []string{
+		"mcp_servers",
+		"mcp_servers.tools",
+		"mcp_servers . tools",
+		`"mcp_servers".tools`,
+		`"mcp\u005fservers".tools`,
+		`'mcp_servers'.tools`,
+	} {
+		agent := NewAgent(WithCodexConfigOverrides(map[string]any{key: "forbidden"}))
+		if _, err := agent.Initialize(ctx, acp.InitializeRequest{}); err == nil {
+			t.Fatalf("Initialize accepted process-global MCP override %q", key)
+		}
+	}
+	for key, want := range map[string]string{
+		"":                   "",
+		" model.provider ":   "model",
+		"plain":              "plain",
+		`"model_provider".x`: "model_provider",
+		`'model_provider'.x`: "model_provider",
+		`'unterminated`:      `'unterminated`,
+		`"unterminated`:      `"unterminated`,
+		`"bad\q".provider`:   `"bad\q".provider`,
+		`"escaped\\\"key".x`: `escaped\"key`,
+	} {
+		if got := codexConfigRootKey(key); got != want {
+			t.Fatalf("codexConfigRootKey(%q) = %q, want %q", key, got, want)
+		}
+	}
 	if got := selectPositionEncoding([]acp.PositionEncodingKind{acp.PositionEncodingKindUtf16}); got != acp.PositionEncodingKindUtf16 {
 		t.Fatalf("selectPositionEncoding = %q", got)
 	}

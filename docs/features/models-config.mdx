@@ -61,6 +61,12 @@ is never clobbered.
 Keep secrets out of the seeded file: set the API key with `WithEnv` (or the
 process environment) and reference it from the config with `env_key`.
 
+Session builders also expose `WithCodexEnv`. The first runtime construction
+pins the effective process `WithEnv` plus session overlay for that Agent-owned
+runtime key. Empty or identical env on peer sessions inherits that process; a
+conflicting peer env fails before Codex creates a thread. A distinct effective
+environment therefore requires a distinct Agent/runtime key.
+
 ## Config overrides
 
 `WithCodexConfigOverrides` (CLI `-config <key>=<value>`, repeatable) passes TOML
@@ -69,6 +75,10 @@ paths that set nested config, string values are TOML-quoted automatically, and
 **nothing is written to disk** — so it is non-destructive and safe against a real
 `~/.codex`. This is the config mechanism for the app-server, which has no
 config-file overlay flag.
+
+The `mcp_servers` key and its dotted children are reserved for session-scoped
+MCP configuration. Supplying them as process config overrides makes ACP
+initialization fail closed.
 
 Point Codex at a [LiteLLM](https://docs.litellm.ai/) gateway entirely through
 overrides:

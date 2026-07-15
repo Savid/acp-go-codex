@@ -19,6 +19,7 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 	schema := map[string]any{"type": "object"}
 	meta := CodexOptions{
 		Model:               "gpt",
+		Env:                 map[string]string{"A": "B"},
 		Effort:              "medium",
 		ServiceTier:         "flex",
 		Personality:         "friendly",
@@ -31,18 +32,23 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessionMetaFromLifecycle returned error: %v", err)
 	}
-	if parsed.Model != "gpt" || parsed.ReasoningEffort != "medium" || parsed.OutputSchema == nil || parsed.MCPToolApprovalMode != "approve" {
+	if parsed.Model != "gpt" || parsed.Env["A"] != "B" || parsed.ReasoningEffort != "medium" || parsed.OutputSchema == nil || parsed.MCPToolApprovalMode != "approve" {
 		t.Fatalf("parsed meta = %#v", parsed)
 	}
 	if parsed.ApprovalPolicy != "never" || asType[map[string]any](t, parsed.SandboxPolicy)["type"] != "workspaceWrite" {
 		t.Fatalf("parsed Codex runtime options = %#v", parsed)
+	}
+	parsedAnyEnv, err := sessionMetaFromLifecycle(map[string]any{
+		codexMetaKey: map[string]any{"options": map[string]any{"env": map[string]any{"C": "D"}}},
+	})
+	if err != nil || parsedAnyEnv.Env["C"] != "D" {
+		t.Fatalf("parsed map env = %#v err=%v", parsedAnyEnv.Env, err)
 	}
 
 	cases := []map[string]any{
 		{codexMetaKey: "bad"},
 		{codexMetaKey: map[string]any{"options": "bad"}},
 		{codexMetaKey: map[string]any{"options": map[string]any{"old": true}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"env": map[string]any{"A": "B"}}}},
 		{codexMetaKey: map[string]any{"rawEvent": "bad"}},
 		{codexMetaKey: map[string]any{"rawEvent": map[string]any{"enabled": "yes"}}},
 		{codexMetaKey: map[string]any{"rawEvent": map[string]any{"extra": true}}},

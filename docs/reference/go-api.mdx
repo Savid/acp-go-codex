@@ -45,7 +45,7 @@ runtime and its resources quarantined.
 | `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |
 | `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
-| `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk. |
+| `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk, and the session-scoped `mcp_servers` keyspace is rejected. |
 | `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh callback. |
 | `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout to mutate adapter-owned Codex auth. |
 | `WithAgentName(name)` | Protocol identifier advertised at initialize. |
@@ -102,6 +102,7 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `WithSessionRawEvents` | Enable `_codex/rawEvent`. |
 | `WithSessionOutputSchema` | Configure structured output. |
 | `WithSessionCodexOptions` | Merge `_meta.codex.options`. |
+| `WithCodexEnv` | Contribute to the immutable environment pinned by the first runtime construction; conflicting peer env fails closed. |
 | `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and turn nonce. |
 | `CancelRequest` | Build an active-turn cancellation with the same mandatory route. |
 

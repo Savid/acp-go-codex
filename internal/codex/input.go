@@ -107,6 +107,15 @@ func resourceInput(resource acp.EmbeddedResourceResource) UserInput {
 	case resource.BlobResourceContents != nil:
 		contents := resource.BlobResourceContents
 
+		mimeType := ""
+		if contents.MimeType != nil {
+			mimeType = *contents.MimeType
+		}
+
+		if strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+			return UserInput{fieldType: inputImage, inputURL: imageDataURL(mimeType, contents.Blob)}
+		}
+
 		return UserInput{fieldType: inputText, inputText: fmt.Sprintf("[resource: %s]", contents.Uri)}
 	default:
 		return UserInput{fieldType: inputText, inputText: "[resource]"}

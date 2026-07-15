@@ -13,6 +13,7 @@ const (
 	metaEffortKey              = "effort"
 	metaServiceTierKey         = "serviceTier"
 	metaPersonalityKey         = "personality"
+	metaEnvKey                 = "env"
 	metaApprovalPolicyKey      = "approvalPolicy"
 	metaSandboxPolicyKey       = "sandboxPolicy"
 	metaOutputSchemaKey        = "outputSchema"
@@ -32,6 +33,8 @@ type CodexOptions struct {
 	ServiceTier string `json:"serviceTier,omitempty"`
 	// Personality selects the Codex personality setting for turns in this session.
 	Personality string `json:"personality,omitempty"`
+	// Env contributes to the immutable process environment of this runtime key.
+	Env map[string]string `json:"env,omitempty"`
 	// ApprovalPolicy configures Codex approval behavior for this session.
 	ApprovalPolicy any `json:"approvalPolicy,omitempty"`
 	// SandboxPolicy configures Codex sandbox behavior for turns in this session.
@@ -61,6 +64,10 @@ func (options CodexOptions) Meta() map[string]any {
 
 	if options.Personality != "" {
 		values[string(configPersonality)] = options.Personality
+	}
+
+	if len(options.Env) > 0 {
+		values[metaEnvKey] = cloneStringMap(options.Env)
 	}
 
 	if options.ApprovalPolicy != nil {
@@ -391,6 +398,16 @@ func WithCodexPersonality(personality string) CodexOption {
 	}
 }
 
+// WithCodexEnv contributes to the immutable Codex runtime-key environment.
+// Empty env inherits the pinned environment; conflicting peer env fails closed.
+func WithCodexEnv(env map[string]string) CodexOption {
+	cloned := cloneStringMap(env)
+
+	return func(options *CodexOptions) {
+		options.Env = cloneStringMap(cloned)
+	}
+}
+
 // WithCodexApprovalPolicy configures Codex approval behavior.
 func WithCodexApprovalPolicy(policy any) CodexOption {
 	cloned := cloneAny(policy)
@@ -432,6 +449,7 @@ func cloneCodexOptions(options CodexOptions) CodexOptions {
 		Effort:       options.Effort,
 		ServiceTier:  options.ServiceTier,
 		Personality:  options.Personality,
+		Env:          cloneStringMap(options.Env),
 		ApprovalPolicy: cloneAny(
 			options.ApprovalPolicy,
 		),

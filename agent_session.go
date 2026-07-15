@@ -26,7 +26,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
 		return acp.NewSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -308,7 +308,7 @@ func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsReq
 				codexMetaKey: map[string]any{
 					codexThreadIDMetaKey: thread.ID,
 					valueStored:          true,
-					jsonFieldSource:      "codex",
+					jsonFieldSource:      codexMetaKey,
 				},
 			},
 		}
@@ -396,6 +396,7 @@ func codexMetaFingerprint(meta sessionMeta) codexMetaForHash {
 		ReasoningEffort: meta.ReasoningEffort,
 		ServiceTier:     meta.ServiceTier,
 		Personality:     meta.Personality,
+		Env:             cloneStringMap(meta.Env),
 		ApprovalPolicy:  cloneAny(meta.ApprovalPolicy),
 		SandboxPolicy:   cloneAny(meta.SandboxPolicy),
 		OutputSchema:    cloneAny(meta.OutputSchema),
@@ -498,7 +499,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, newUnknownSession()
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -587,7 +588,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -684,7 +685,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, newUnknownSession()
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -819,7 +820,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, err
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -996,7 +997,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, pathErr
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, lifecycleMetaError(err)
 	}

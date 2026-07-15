@@ -96,12 +96,12 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
 
-	if len(entries) == 0 {
-		return nil
-	}
-
 	if key.SessionID == "" {
 		return fmt.Errorf("session id is required")
+	}
+
+	if len(entries) == 0 {
+		return nil
 	}
 
 	s.mu.Lock()
@@ -178,7 +178,7 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	}
 
 	if main.SessionID == "" {
-		return fmt.Errorf("main session id is required")
+		return fmt.Errorf("session id is required")
 	}
 
 	if main.Subpath != SessionStoreMainSubpath {

@@ -59,6 +59,19 @@ func TestPromptToUserInputImageSources(t *testing.T) {
 	}
 }
 
+func TestPromptToUserInputEmbeddedImageResource(t *testing.T) {
+	mimeType := "image/png"
+	input, err := PromptToUserInput([]acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{
+		BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://image", MimeType: &mimeType, Blob: "aW1hZ2U="},
+	})})
+	if err != nil {
+		t.Fatalf("PromptToUserInput returned error: %v", err)
+	}
+	if len(input) != 1 || input[0]["type"] != "image" || input[0]["url"] != "data:image/png;base64,aW1hZ2U=" {
+		t.Fatalf("embedded image input = %#v", input)
+	}
+}
+
 func TestPromptToUserInputFailsClosedOnUnknownBlocks(t *testing.T) {
 	if _, err := PromptToUserInput([]acp.ContentBlock{{}}); !errors.Is(err, ErrUnsupportedContentBlock) {
 		t.Fatalf("empty block error = %v, want ErrUnsupportedContentBlock", err)

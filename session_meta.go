@@ -13,6 +13,7 @@ type sessionMeta struct {
 	ReasoningEffort     string
 	ServiceTier         string
 	Personality         string
+	Env                 map[string]string
 	ApprovalPolicy      any
 	SandboxPolicy       any
 	OutputSchema        any
@@ -35,6 +36,7 @@ func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
 		ReasoningEffort:     codexOptions.ReasoningEffort,
 		ServiceTier:         codexOptions.ServiceTier,
 		Personality:         codexOptions.Personality,
+		Env:                 codexOptions.Env,
 		ApprovalPolicy:      codexOptions.ApprovalPolicy,
 		SandboxPolicy:       codexOptions.SandboxPolicy,
 		OutputSchema:        codexOptions.OutputSchema,
@@ -48,6 +50,7 @@ type codexOptions struct {
 	ReasoningEffort     string
 	ServiceTier         string
 	Personality         string
+	Env                 map[string]string
 	ApprovalPolicy      any
 	SandboxPolicy       any
 	OutputSchema        any
@@ -102,6 +105,15 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 		}
 
 		options.Personality = personality
+	}
+
+	if rawEnv, ok := optionsMap[metaEnvKey]; ok {
+		env, envErr := stringMapFromMeta(rawEnv)
+		if envErr != nil {
+			return codexOptions{}, envErr
+		}
+
+		options.Env = env
 	}
 
 	if policy, ok := optionsMap[metaApprovalPolicyKey]; ok {
@@ -177,7 +189,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 
 			for optionKey := range optionsMap {
 				switch optionKey {
-				case metaModelKey, metaOutputSchemaKey, metaEffortKey, metaServiceTierKey, metaPersonalityKey, metaApprovalPolicyKey, metaSandboxPolicyKey, metaMCPToolApprovalModeKey:
+				case metaModelKey, metaEnvKey, metaOutputSchemaKey, metaEffortKey, metaServiceTierKey, metaPersonalityKey, metaApprovalPolicyKey, metaSandboxPolicyKey, metaMCPToolApprovalModeKey:
 				default:
 					return unsupportedField("_meta.codex.options." + optionKey)
 				}
@@ -204,6 +216,27 @@ func validateLifecycleMeta(meta map[string]any) error {
 	}
 
 	return nil
+}
+
+func stringMapFromMeta(value any) (map[string]string, error) {
+	switch typed := value.(type) {
+	case map[string]string:
+		return cloneStringMap(typed), nil
+	case map[string]any:
+		out := make(map[string]string, len(typed))
+		for key, raw := range typed {
+			str, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("_meta.codex.options.env.%s must be a string", key)
+			}
+
+			out[key] = str
+		}
+
+		return out, nil
+	default:
+		return nil, fmt.Errorf("_meta.codex.options.env must be an object")
+	}
 }
 
 func unsupportedField(path string) error {

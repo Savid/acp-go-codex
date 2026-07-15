@@ -13,6 +13,7 @@ The adapter sends each session's servers only through
 process-global `-c mcp_servers.*` arguments. HTTP headers and stdio environment
 values therefore stay inside the app-server JSON-RPC stream instead of process
 arguments, the app-server environment, the workspace, or the rollout store.
+The process config override API rejects the complete `mcp_servers` keyspace.
 
 ## Configure MCP servers
 

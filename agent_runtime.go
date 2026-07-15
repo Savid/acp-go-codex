@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
@@ -269,12 +271,77 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 	}
 }
 
+// pinRuntimeEnvironment fixes the immutable process environment for this
+// Agent-owned runtime key. Empty peer session env inherits the pinned value;
+// an explicit peer env must resolve to the same effective environment.
+func (a *Agent) pinRuntimeEnvironment(sessionEnv map[string]string) (map[string]string, error) {
+	desired := cloneStringMap(a.options.Env)
+	if desired == nil {
+		desired = map[string]string{}
+	}
+
+	for key, value := range sessionEnv {
+		desired[key] = value
+	}
+
+	if len(desired) == 0 {
+		desired = nil
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.runtimeEnvSet {
+		a.runtimeEnv = cloneStringMap(desired)
+		a.runtimeEnvSet = true
+
+		return cloneStringMap(a.runtimeEnv), nil
+	}
+
+	if len(sessionEnv) == 0 || maps.Equal(a.runtimeEnv, desired) {
+		return cloneStringMap(a.runtimeEnv), nil
+	}
+
+	return nil, acp.NewInvalidParams(map[string]any{
+		jsonFieldError: "session env conflicts with the immutable Codex runtime environment",
+		jsonFieldField: "_meta.codex.options.env",
+	})
+}
+
+func (a *Agent) canonicalizeSessionMeta(meta *sessionMeta) error {
+	env, err := a.pinRuntimeEnvironment(meta.Env)
+	if err != nil {
+		return err
+	}
+
+	meta.Env = env
+
+	return nil
+}
+
+func (a *Agent) sessionMetaForLifecycle(values map[string]any) (sessionMeta, error) {
+	meta, err := sessionMetaFromLifecycle(values)
+	if err != nil {
+		return sessionMeta{}, err
+	}
+
+	if err := a.canonicalizeSessionMeta(&meta); err != nil {
+		return sessionMeta{}, err
+	}
+
+	return meta, nil
+}
+
 func (a *Agent) resolvedCodexHome() string {
+	return a.resolvedCodexHomeForEnv(a.options.Env)
+}
+
+func (a *Agent) resolvedCodexHomeForEnv(env map[string]string) string {
 	if a.options.Home != "" {
 		return filepath.Clean(a.options.Home)
 	}
 
-	if value := a.options.Env["CODEX_HOME"]; value != "" {
+	if value := env["CODEX_HOME"]; value != "" {
 		return filepath.Clean(value)
 	}
 

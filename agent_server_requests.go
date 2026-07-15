@@ -53,13 +53,30 @@ func (a *Agent) handleCodexServerRequest(ctx context.Context, req codex.ServerRe
 		return nil, fmt.Errorf("unsupported Codex server request %q", req.Method)
 	}
 
-	if err == nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if cancellation, ok := codexPermissionCancellationResponse(req.Method, params); ok {
+			return cancellation, nil
 		}
+
+		return nil, ctxErr
 	}
 
 	return result, err
+}
+
+func codexPermissionCancellationResponse(method string, params map[string]any) (any, bool) {
+	switch method {
+	case codex.RequestCommandApproval, codex.RequestFileChangeApproval:
+		return codex.ApprovalCancelResponse(), true
+	case codex.RequestPermissionsApproval:
+		return codex.PermissionsDeniedResponse(), true
+	case codex.RequestMCPElicitation:
+		if codex.IsMCPToolApproval(params) {
+			return codex.ElicitationCancelResponse(), true
+		}
+	}
+
+	return nil, false
 }
 
 func (a *Agent) handleCodexAuthTokenRefresh(ctx context.Context) (any, error) {

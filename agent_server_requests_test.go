@@ -213,13 +213,97 @@ func TestServerRequestLateApprovalIsDetachedOnCancel(t *testing.T) {
 	<-blocking.started
 	session.cancelTurn()
 	close(blocking.release)
-	if result := <-resultCh; result != nil {
-		t.Fatalf("late canceled approval returned result: %#v", result)
+	result := <-resultCh
+	if decision := asType[map[string]any](t, result)["decision"]; decision != "cancel" {
+		t.Fatalf("late canceled approval result = %#v", result)
 	}
-	if err := <-errCh; !errors.Is(err, context.Canceled) {
+	if err := <-errCh; err != nil {
 		t.Fatalf("late canceled approval error = %v", err)
 	}
 	session.finishTurn()
+}
+
+func TestServerRequestPendingApprovalIsAnsweredCancelledOnShutdown(t *testing.T) {
+	ctx := context.Background()
+	agent, session, _ := newServerRequestSession(t)
+	blocking := &blockingPermissionAgentClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		started:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+	agent.setAgentClient(blocking)
+	resultCh := make(chan any, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+			ID:     json.RawMessage("approval-shutdown"),
+			Method: codex.RequestCommandApproval,
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","approvalId":"approval-shutdown","command":"ls"}`),
+		})
+		resultCh <- result
+		errCh <- err
+	}()
+	<-blocking.started
+	if err := agent.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	close(blocking.release)
+
+	result := <-resultCh
+	if decision := asType[map[string]any](t, result)["decision"]; decision != "cancel" {
+		t.Fatalf("shutdown approval result = %#v", result)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("shutdown approval error = %v", err)
+	}
+}
+
+func TestCodexPermissionCancellationResponses(t *testing.T) {
+	for name, test := range map[string]struct {
+		method string
+		params map[string]any
+		field  string
+		want   any
+		ok     bool
+	}{
+		"command":     {method: codex.RequestCommandApproval, field: "decision", want: "cancel", ok: true},
+		"file":        {method: codex.RequestFileChangeApproval, field: "decision", want: "cancel", ok: true},
+		"permissions": {method: codex.RequestPermissionsApproval, field: "scope", want: "turn", ok: true},
+		"mcp tool": {
+			method: codex.RequestMCPElicitation,
+			params: map[string]any{"_meta": map[string]any{"codex": map[string]any{"_meta": map[string]any{"codex_approval_kind": "mcp_tool_call"}}}},
+			field:  "action",
+			want:   "cancel",
+			ok:     true,
+		},
+		"mcp user": {method: codex.RequestMCPElicitation},
+		"unknown":  {method: "unknown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response, ok := codexPermissionCancellationResponse(test.method, test.params)
+			if ok != test.ok {
+				t.Fatalf("ok = %t, want %t", ok, test.ok)
+			}
+			if !ok {
+				return
+			}
+
+			if got := asType[map[string]any](t, response)[test.field]; got != test.want {
+				t.Fatalf("response = %#v, want %s=%v", response, test.field, test.want)
+			}
+		})
+	}
+
+	agent, session, _ := newServerRequestSession(t)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := agent.handleCodexServerRequest(canceled, codex.ServerRequest{
+		Method: codex.RequestToolUserInput,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[]}`),
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled non-permission request error = %v", err)
+	}
 }
 
 func TestServerRequestsApprovalElicitationAndRefresh(t *testing.T) {

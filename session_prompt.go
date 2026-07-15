@@ -465,9 +465,14 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 		return nil
 	}
 
+	s.rawEventMu.Lock()
+	defer s.rawEventMu.Unlock()
+
+	sequence := s.rawEventSequence + 1
+
 	payload := map[string]any{
 		jsonFieldSessionID: s.id,
-		jsonFieldSequence:  s.nextRawEventSequence(),
+		jsonFieldSequence:  sequence,
 		jsonFieldSource:    "codex-app-server",
 		jsonFieldEvent:     raw,
 	}
@@ -475,7 +480,13 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 		payload["_meta"] = meta
 	}
 
-	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))
+	if err := conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload)); err != nil {
+		return err
+	}
+
+	s.rawEventSequence = sequence
+
+	return nil
 }
 
 func eventUpdates(event codex.Event) []acp.SessionUpdate {

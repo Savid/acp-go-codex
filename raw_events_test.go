@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,21 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 )
+
+type failThenRecordRawClient struct {
+	*recordingAgentClient
+	failures int
+}
+
+func (c *failThenRecordRawClient) NotifyExtension(ctx context.Context, method string, params any) error {
+	if c.failures > 0 {
+		c.failures--
+
+		return errors.New("raw notification failed")
+	}
+
+	return c.recordingAgentClient.NotifyExtension(ctx, method, params)
+}
 
 func TestRawMessageConfigFromMeta(t *testing.T) {
 	meta := map[string]any{codexMetaKey: map[string]any{
@@ -141,6 +157,31 @@ func TestRawEventsContiguousSequence(t *testing.T) {
 		payload := rawEventPayload(t, note)
 		if payload[jsonFieldSequence] != int64(i+1) {
 			t.Fatalf("sequence[%d] = %v, want %d", i, payload[jsonFieldSequence], i+1)
+		}
+	}
+}
+
+func TestRawEventDeliveryFailureDoesNotConsumeSequence(t *testing.T) {
+	agent := NewAgent()
+	conn := &failThenRecordRawClient{recordingAgentClient: newRecordingAgentClient(), failures: 1}
+	agent.setAgentClient(conn)
+	session := &session{agent: agent, id: "seq", rawMessages: rawMessageConfig{enabled: true}}
+
+	if err := session.emitRawCodexEvent(context.Background(), rawEventFor("raw", false)); err == nil {
+		t.Fatal("failed raw delivery succeeded")
+	}
+	if session.rawEventSequence != 0 {
+		t.Fatalf("failed delivery consumed sequence %d", session.rawEventSequence)
+	}
+	for range 2 {
+		if err := session.emitRawCodexEvent(context.Background(), rawEventFor("raw", false)); err != nil {
+			t.Fatalf("successful raw delivery returned error: %v", err)
+		}
+	}
+
+	for index, note := range conn.extensions {
+		if sequence := rawEventPayload(t, note)[jsonFieldSequence]; sequence != int64(index+1) {
+			t.Fatalf("sequence[%d] = %v, want %d", index, sequence, index+1)
 		}
 	}
 }
