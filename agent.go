@@ -528,8 +528,25 @@ func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, 
 			a.cacheRateLimits(*event.RateLimits)
 		}
 	case codex.EventError:
-		a.markRuntimeDead(client)
+		// Native error notifications also carry ordinary turn failures such as
+		// provider quota exhaustion. Only errors that prove the app-server
+		// transport or process died may poison the shared runtime generation;
+		// treating a provider rejection as process death needlessly relaunches
+		// the app-server and attempts to resume every otherwise-live thread.
+		if codexRuntimeDied(event.Err) {
+			a.markRuntimeDead(client)
+		}
 	}
+}
+
+func codexRuntimeDied(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var processExit *codex.ProcessExitError
+
+	return errors.Is(err, codex.ErrConnectionClosed) || errors.As(err, &processExit)
 }
 
 // cacheRateLimits records the latest harness-reported rate-limit snapshot.

@@ -835,6 +835,41 @@ func TestRuntimeRemainingCanaryAndObserverBranches(t *testing.T) {
 	launcher.applyCodexClientEvent(ctx, newSpyCodexClient(), codex.Event{Kind: codex.EventError})
 }
 
+// A provider turn failure is terminal for that turn, not for the shared
+// app-server. In particular, quota exhaustion must not force the next
+// session/new through generation recovery and stale-thread resume.
+func TestProviderErrorEventDoesNotPoisonSharedRuntime(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	runtimeClient := newSpyCodexClient()
+	agent := NewAgent()
+	loaded := &session{
+		agent: agent, id: "session-1", codexThreadID: "thread-1", client: runtimeClient,
+	}
+	agent.sessions[loaded.id] = loaded
+	agent.runtimeClient = runtimeClient
+
+	agent.applyCodexClientEvent(ctx, runtimeClient, codex.Event{
+		Kind: codex.EventError,
+		// The app-server's raw `error` notification carries only text; the
+		// provider classification happens later at the ACP prompt boundary.
+		Err: errors.New("usage limit reached"),
+	})
+
+	require.False(t, agent.runtimeDead)
+	require.False(t, loaded.clientDead)
+	got, err := agent.sharedRuntime(ctx)
+	require.NoError(t, err)
+	require.Same(t, runtimeClient, got)
+
+	transportErr := fmt.Errorf("%w: peer closed", codex.ErrConnectionClosed)
+	agent.applyCodexClientEvent(ctx, runtimeClient, codex.Event{Kind: codex.EventError, Err: transportErr})
+	require.True(t, agent.runtimeDead)
+	require.True(t, loaded.clientDead)
+	require.True(t, codexRuntimeDied(&codex.ProcessExitError{Err: errors.New("exit")}))
+}
+
 func TestRemainingRouteConnectionAndRequestBranches(t *testing.T) {
 	ctx := context.Background()
 	meta, err := stampElicitationRoute(nil, elicitationScope{SessionID: "session", TurnNonce: "turn", ToolCallID: "tool"})
