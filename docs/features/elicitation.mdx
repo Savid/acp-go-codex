@@ -11,7 +11,10 @@ the client is able to answer them.
 
 During a turn, a Codex `app-server` request that requires user input is mapped
 onto an ACP elicitation call to the client. The client's response is passed back
-to Codex so the turn can continue.
+to Codex so the turn can continue. Native `item/tool/requestUserInput` requests
+MUST carry the non-empty `turnId` of the currently active native turn. Missing,
+stale, and post-turn requests receive an empty native answer without invoking
+the client.
 
 Codex also uses `mcpServer/elicitation/request` for MCP tool approval. The
 hard-cutover native shape marks those requests with

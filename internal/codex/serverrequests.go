@@ -516,8 +516,8 @@ func MCPUserElicitationToolCallID(params map[string]any) string {
 	)
 }
 
-// MCPUserElicitationTurnID returns the native turn that delivered the request.
-func MCPUserElicitationTurnID(params map[string]any) string {
+// RequestTurnID returns the native turn that delivered a server request.
+func RequestTurnID(params map[string]any) string {
 	return strings.TrimSpace(stringValue(params, fieldTurnID))
 }
 

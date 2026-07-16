@@ -320,7 +320,7 @@ func TestPermissionBeforeNativeStartRoutesSyntheticPendingForEveryClass(t *testi
 		},
 		{
 			name: "mcp", method: codex.RequestMCPElicitation, id: "mcp-before-start",
-			params: `,"turnId":"native-permission-turn","serverName":"wagie","message":"Allow tool?","_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"Execute"}`,
+			params: `,"serverName":"wagie","message":"Allow tool?","_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"Execute"}`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -329,7 +329,7 @@ func TestPermissionBeforeNativeStartRoutesSyntheticPendingForEveryClass(t *testi
 			response, err := agent.handleCodexServerRequest(context.Background(), codex.ServerRequest{
 				ID:     json.RawMessage(`"` + test.id + `"`),
 				Method: test.method,
-				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `"` + test.params + `}`),
+				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn"` + test.params + `}`),
 			})
 			require.NoError(t, err)
 			require.NotNil(t, response)
@@ -390,7 +390,7 @@ func TestCommandFileAndProfilePermissionsUsePublishedNonterminalIDs(t *testing.T
 			_, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
 				ID:     json.RawMessage(`"` + test.requestID + `"`),
 				Method: test.method,
-				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `"` + test.params + `}`),
+				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn"` + test.params + `}`),
 			})
 			require.NoError(t, err)
 
@@ -523,7 +523,7 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 	permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		ID:     json.RawMessage(`"permissions-outside-turn"`),
 		Method: codex.RequestPermissionsApproval,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"profile","permissions":{"filesystem":{"write":true}}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-outside","itemId":"profile","permissions":{"filesystem":{"write":true}}}`),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, permissions)

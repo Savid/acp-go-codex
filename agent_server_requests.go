@@ -102,6 +102,10 @@ func (a *Agent) handleCodexApproval(ctx context.Context, req codex.ServerRequest
 		return codex.ApprovalCancelResponse(), nil
 	}
 
+	if _, active := session.activeTurnNonceForNativeTurn(codex.RequestTurnID(params)); !active {
+		return codex.ApprovalCancelResponse(), nil
+	}
+
 	conn := a.connection()
 	if conn == nil {
 		return codex.ApprovalCancelResponse(), nil
@@ -143,6 +147,10 @@ func (a *Agent) handleCodexPermissionsApproval(ctx context.Context, req codex.Se
 
 	session := a.sessionByCodexThread(codex.RequestThreadID(params))
 	if session == nil {
+		return codex.PermissionsDeniedResponse(), nil
+	}
+
+	if _, active := session.activeTurnNonceForNativeTurn(codex.RequestTurnID(params)); !active {
 		return codex.PermissionsDeniedResponse(), nil
 	}
 
@@ -191,6 +199,11 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 		return codex.EmptyToolUserInputResponse(), nil
 	}
 
+	turnNonce, active := session.activeTurnNonceForNativeTurn(codex.RequestTurnID(params))
+	if !active {
+		return codex.EmptyToolUserInputResponse(), nil
+	}
+
 	conn := a.connection()
 	if conn == nil {
 		return codex.EmptyToolUserInputResponse(), nil
@@ -204,7 +217,7 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 		Form: codex.ToolUserInputForm(params, map[string]any{codexMetaKey: params}),
 	}, elicitationScope{
 		SessionID:  session.id,
-		TurnNonce:  session.activeTurnNonce(),
+		TurnNonce:  turnNonce,
 		ToolCallID: acp.ToolCallId(codex.ToolUserInputToolCallID(req, params)),
 	})
 	if err != nil {
@@ -233,7 +246,7 @@ func (a *Agent) handleCodexMCPToolApproval(ctx context.Context, req codex.Server
 		return codex.ElicitationCancelResponse(), nil
 	}
 
-	if _, active := session.activeTurnNonceForNativeTurn(codex.MCPUserElicitationTurnID(params)); !active {
+	if _, active := session.activeTurnNonceForNativeTurn(codex.RequestTurnID(params)); !active {
 		return codex.ElicitationCancelResponse(), nil
 	}
 
@@ -288,7 +301,7 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 		return codex.ElicitationCancelResponse(), nil
 	}
 
-	turnNonce, active := session.activeTurnNonceForNativeTurn(codex.MCPUserElicitationTurnID(params))
+	turnNonce, active := session.activeTurnNonceForNativeTurn(codex.RequestTurnID(params))
 	if !active {
 		return codex.ElicitationCancelResponse(), nil
 	}

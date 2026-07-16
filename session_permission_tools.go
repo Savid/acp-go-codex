@@ -76,12 +76,8 @@ func (s *session) requestPermissionForTool(
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
-	turnNonce, active := s.activeTurnNonceSnapshot()
-
-	if class == permissionToolMCP {
-		params, _ := request.ToolCall.RawInput.(map[string]any)
-		turnNonce, active = s.activeTurnNonceForNativeTurn(codex.MCPUserElicitationTurnID(params))
-	}
+	params, _ := request.ToolCall.RawInput.(map[string]any)
+	turnNonce, active := s.activeTurnNonceForNativeTurn(codex.RequestTurnID(params))
 
 	if !active || ctx.Err() != nil {
 		return acp.RequestPermissionResponse{}, false, nil
@@ -165,7 +161,7 @@ func (s *session) createElicitationForMCPTool(
 	s.mu.Lock()
 	turnNonce := s.turnNonce
 	turnID := s.turnID
-	active := s.turnDone != nil && turnNonce != "" && turnID != "" && turnID == codex.MCPUserElicitationTurnID(params)
+	active := s.turnDone != nil && turnNonce != "" && turnID != "" && turnID == codex.RequestTurnID(params)
 	s.mu.Unlock()
 
 	if !active || ctx.Err() != nil {

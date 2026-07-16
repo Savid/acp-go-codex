@@ -129,13 +129,13 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 	agent.setAgentClient(errConn)
 	if _, fileErr := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestFileChangeApproval,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","grantRoot":"/repo"}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","grantRoot":"/repo"}`),
 	}); fileErr == nil {
 		t.Fatal("file approval with permission error succeeded")
 	}
 	if _, permErr := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestPermissionsApproval,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","permissions":{"fs":true}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","permissions":{"fs":true}}`),
 	}); permErr == nil {
 		t.Fatal("permissions approval with permission error succeeded")
 	}
@@ -152,7 +152,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 	}
 	if _, inputErr := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestToolUserInput,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[{"id":"name"}]}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","questions":[{"id":"name"}]}`),
 	}); inputErr == nil {
 		t.Fatal("tool input with elicitation error succeeded")
 	}
@@ -176,7 +176,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 	agent.setAgentClient(declineConn)
 	permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestPermissionsApproval,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","permissions":{"fs":true}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","permissions":{"fs":true}}`),
 	})
 	if err != nil || asType[map[string]any](t, permissions)["scope"] != "turn" {
 		t.Fatalf("declined permissions = %#v err=%v", permissions, err)
@@ -222,7 +222,7 @@ func TestServerRequestLateApprovalIsDetachedOnCancel(t *testing.T) {
 		result, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 			ID:     json.RawMessage("approval-1"),
 			Method: codex.RequestCommandApproval,
-			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","approvalId":"approval-1","command":"ls"}`),
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","approvalId":"approval-1","command":"ls"}`),
 		})
 		resultCh <- result
 		errCh <- err
@@ -255,7 +255,7 @@ func TestServerRequestPendingApprovalIsAnsweredCancelledOnShutdown(t *testing.T)
 		result, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 			ID:     json.RawMessage("approval-shutdown"),
 			Method: codex.RequestCommandApproval,
-			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","approvalId":"approval-shutdown","command":"ls"}`),
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","approvalId":"approval-shutdown","command":"ls"}`),
 		})
 		resultCh <- result
 		errCh <- err
@@ -312,14 +312,117 @@ func TestCodexPermissionCancellationResponses(t *testing.T) {
 	}
 
 	agent, session, _ := newServerRequestSession(t)
+	agent.setAgentClient(newRecordingAgentClient())
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
+
+	for name, request := range map[string]codex.ServerRequest{
+		"command": {
+			Method: codex.RequestCommandApproval,
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","itemId":"command"}`),
+		},
+		"permissions": {
+			Method: codex.RequestPermissionsApproval,
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","itemId":"permissions","permissions":{}}`),
+		},
+		"mcp": {
+			Method: codex.RequestMCPElicitation,
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","_meta":{"codex_approval_kind":"mcp_tool_call"}}`),
+		},
+	} {
+		t.Run("canceled "+name, func(t *testing.T) {
+			response, err := agent.handleCodexServerRequest(canceled, request)
+			if err != nil || response == nil {
+				t.Fatalf("canceled %s response = %#v err=%v", name, response, err)
+			}
+		})
+	}
+
 	_, err := agent.handleCodexServerRequest(canceled, codex.ServerRequest{
 		Method: codex.RequestToolUserInput,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[]}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","questions":[]}`),
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled non-permission request error = %v", err)
+	}
+}
+
+func TestTurnScopedServerRequestsRejectMissingOrStaleNativeTurn(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		method string
+		params string
+		check  func(*testing.T, any)
+	}{
+		{
+			name: "command approval", method: codex.RequestCommandApproval,
+			params: `,"itemId":"command-item","command":"pwd"`,
+			check: func(t *testing.T, response any) {
+				t.Helper()
+				if got := asType[map[string]any](t, response)["decision"]; got != "cancel" {
+					t.Fatalf("command decision = %#v", got)
+				}
+			},
+		},
+		{
+			name: "file approval", method: codex.RequestFileChangeApproval,
+			params: `,"itemId":"file-item","grantRoot":"/repo"`,
+			check: func(t *testing.T, response any) {
+				t.Helper()
+				if got := asType[map[string]any](t, response)["decision"]; got != "cancel" {
+					t.Fatalf("file decision = %#v", got)
+				}
+			},
+		},
+		{
+			name: "permission profile", method: codex.RequestPermissionsApproval,
+			params: `,"itemId":"permissions-item","permissions":{"filesystem":{"write":true}}`,
+			check: func(t *testing.T, response any) {
+				t.Helper()
+				result := asType[map[string]any](t, response)
+				if result["scope"] != "turn" || len(asType[map[string]any](t, result["permissions"])) != 0 {
+					t.Fatalf("permissions response = %#v", result)
+				}
+			},
+		},
+		{
+			name: "tool user input", method: codex.RequestToolUserInput,
+			params: `,"itemId":"input-item","questions":[{"id":"answer","question":"Continue?"}]`,
+			check: func(t *testing.T, response any) {
+				t.Helper()
+				answers := asType[map[string]any](t, asType[map[string]any](t, response)["answers"])
+				if len(answers) != 0 {
+					t.Fatalf("tool input answers = %#v", answers)
+				}
+			},
+		},
+	} {
+		for turnName, turnField := range map[string]string{
+			"missing": "",
+			"stale":   `,"turnId":"native-turn-stale"`,
+		} {
+			t.Run(test.name+"/"+turnName, func(t *testing.T) {
+				agent, session, ctx := newServerRequestSession(t)
+				conn := newRecordingAgentClient()
+				conn.elicitation = acp.NewUnstableCreateElicitationResponseAccept()
+				agent.setAgentClient(conn)
+				enableClientElicitation(agent, true, true)
+
+				response, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+					ID:     json.RawMessage(`"turn-mismatch"`),
+					Method: test.method,
+					Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `"` + turnField + test.params + `}`),
+				})
+				if err != nil {
+					t.Fatalf("server request returned error: %v", err)
+				}
+
+				test.check(t, response)
+				if len(conn.permissions) != 0 || len(conn.elicitations) != 0 || len(conn.updates) != 0 {
+					t.Fatalf("stale request reached client: permissions=%d elicitations=%d updates=%d", len(conn.permissions), len(conn.elicitations), len(conn.updates))
+				}
+			})
+		}
 	}
 }
 
@@ -350,10 +453,13 @@ func TestServerRequestsApprovalElicitationAndRefresh(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 	session, _ := agent.session(resp.SessionId)
+	_ = session.beginTurn(ctx, "turn-1")
+	session.setTurnID("native-turn-1")
+	defer session.finishTurn()
 
 	approval, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestCommandApproval,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"item-1","command":"git status","availableDecisions":[{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["git status"]}}]}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","itemId":"item-1","command":"git status","availableDecisions":[{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["git status"]}}]}`),
 	})
 	if err != nil {
 		t.Fatalf("approval returned error: %v", err)
@@ -365,7 +471,7 @@ func TestServerRequestsApprovalElicitationAndRefresh(t *testing.T) {
 
 	elicit, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestToolUserInput,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"input-1","questions":[{"id":"name","question":"Name?"}]}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","itemId":"input-1","questions":[{"id":"name","question":"Name?"}]}`),
 	})
 	if err != nil {
 		t.Fatalf("tool input returned error: %v", err)
@@ -422,7 +528,7 @@ func TestServerRequestsPermissionsAndMCPElicitation(t *testing.T) {
 
 	permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		Method: codex.RequestPermissionsApproval,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"perm-1","reason":"need fs","permissions":{"filesystem":{"write":true}}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","itemId":"perm-1","reason":"need fs","permissions":{"filesystem":{"write":true}}}`),
 	})
 	if err != nil {
 		t.Fatalf("permissions approval returned error: %v", err)
@@ -539,17 +645,17 @@ func TestServerRequestFallbackAndElicitationBranches(t *testing.T) {
 
 	nilPerm := &nilPermissionClient{recordingAgentClient: newRecordingAgentClient()}
 	agent.setAgentClient(nilPerm)
-	if decision, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestCommandApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `"}`)}); err != nil || asType[map[string]any](t, decision)["decision"] != "cancel" {
+	if decision, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestCommandApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1"}`)}); err != nil || asType[map[string]any](t, decision)["decision"] != "cancel" {
 		t.Fatalf("nil selected approval = %#v err=%v", decision, err)
 	}
-	if permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestPermissionsApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","permissions":{"fs":true}}`)}); err != nil || asType[map[string]any](t, permissions)["scope"] != "turn" {
+	if permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestPermissionsApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","permissions":{"fs":true}}`)}); err != nil || asType[map[string]any](t, permissions)["scope"] != "turn" {
 		t.Fatalf("nil selected permissions = %#v err=%v", permissions, err)
 	}
 	agent.setAgentClient(nil)
-	if decision, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestCommandApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `"}`)}); err != nil || asType[map[string]any](t, decision)["decision"] != "cancel" {
+	if decision, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestCommandApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1"}`)}); err != nil || asType[map[string]any](t, decision)["decision"] != "cancel" {
 		t.Fatalf("no client approval = %#v err=%v", decision, err)
 	}
-	if permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestPermissionsApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","permissions":{"fs":true}}`)}); err != nil || asType[map[string]any](t, permissions)["scope"] != "turn" {
+	if permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestPermissionsApproval, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","permissions":{"fs":true}}`)}); err != nil || asType[map[string]any](t, permissions)["scope"] != "turn" {
 		t.Fatalf("no client permissions = %#v err=%v", permissions, err)
 	}
 	if mcpApproval, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","_meta":{"codex_approval_kind":"mcp_tool_call"}}`)}); err != nil || asType[map[string]any](t, mcpApproval)["action"] != "cancel" {
@@ -558,7 +664,7 @@ func TestServerRequestFallbackAndElicitationBranches(t *testing.T) {
 	if mcpUser, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{ID: json.RawMessage(`"mcp-user"`), Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","mode":"form"}`)}); err != nil || asType[map[string]any](t, mcpUser)["action"] != "cancel" {
 		t.Fatalf("no client MCP user elicitation = %#v err=%v", mcpUser, err)
 	}
-	if input, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[{"id":"answer"}]}`)}); err != nil || len(asType[map[string]any](t, asType[map[string]any](t, input)["answers"])) != 0 {
+	if input, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","questions":[{"id":"answer"}]}`)}); err != nil || len(asType[map[string]any](t, asType[map[string]any](t, input)["answers"])) != 0 {
 		t.Fatalf("no client tool input = %#v err=%v", input, err)
 	}
 }
@@ -568,7 +674,7 @@ func TestServerRequestElicitationCapabilityBranches(t *testing.T) {
 
 	noCapConn := newRecordingAgentClient()
 	agent.setAgentClient(noCapConn)
-	input, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[{"id":"answer"}]}`)})
+	input, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","questions":[{"id":"answer"}]}`)})
 	if err != nil || len(asType[map[string]any](t, asType[map[string]any](t, input)["answers"])) != 0 || len(noCapConn.elicitations) != 0 {
 		t.Fatalf("tool input without form capability = %#v err=%v elicitations=%#v", input, err, noCapConn.elicitations)
 	}
@@ -584,7 +690,7 @@ func TestServerRequestElicitationCapabilityBranches(t *testing.T) {
 	acceptConn := &acceptElicitationClient{recordingAgentClient: newRecordingAgentClient()}
 	agent.setAgentClient(acceptConn)
 	enableClientElicitation(agent, true, true)
-	input, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[{"header":"Name","question":"Your name?"},{"question":"skip"}]}`)})
+	input, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","questions":[{"header":"Name","question":"Your name?"},{"question":"skip"}]}`)})
 	if err != nil || asType[map[string]any](t, input)["answers"] == nil {
 		t.Fatalf("accepted tool input = %#v err=%v", input, err)
 	}
@@ -601,7 +707,7 @@ func TestServerRequestElicitationCapabilityBranches(t *testing.T) {
 	}
 	cancelInputConn := newRecordingAgentClient()
 	agent.setAgentClient(cancelInputConn)
-	input, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[{"id":"answer"}]}`)})
+	input, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","questions":[{"id":"answer"}]}`)})
 	if err != nil || len(asType[map[string]any](t, asType[map[string]any](t, input)["answers"])) != 0 {
 		t.Fatalf("canceled tool input = %#v err=%v", input, err)
 	}

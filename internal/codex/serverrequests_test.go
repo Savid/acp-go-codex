@@ -182,6 +182,9 @@ func TestServerRequestConversionHelpers(t *testing.T) {
 	if params := ServerRequestParams(ServerRequest{Params: json.RawMessage(`{"threadId":"t1"}`)}); RequestThreadID(params) != "t1" {
 		t.Fatalf("server request params = %#v", params)
 	}
+	if turnID := RequestTurnID(map[string]any{"turnId": " native-turn "}); turnID != "native-turn" {
+		t.Fatalf("server request turn ID = %q", turnID)
+	}
 	if ServerRequestParams(ServerRequest{}) != nil {
 		t.Fatal("empty server request params decoded to a map")
 	}

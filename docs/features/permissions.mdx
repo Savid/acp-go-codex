@@ -42,9 +42,9 @@ session.
 ## How approvals reach the host
 
 <Warning>
-  Codex permission requests are bridged onto ACP `session/request_permission` and
-  are never silently auto-approved — the request reaches the client. Elicitation
-  requests are forwarded only when the client advertised the matching capability
-  at initialize; otherwise the underlying server request is rejected rather than
-  attempted against an unsupporting client.
+  Native command, file-change, permission-profile, and MCP approval requests MUST
+  carry the non-empty `turnId` of the currently active native turn. Missing,
+  stale, and post-turn requests are denied locally before any client callback.
+  Current-turn permission requests are bridged onto ACP
+  `session/request_permission` and are never silently auto-approved.
 </Warning>
