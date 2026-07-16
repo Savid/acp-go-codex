@@ -412,8 +412,8 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 		recovering := oldClient != nil || a.runtimeDead
 
 		sessions := make([]*session, 0, len(a.sessions))
-		for _, session := range a.sessions {
-			sessions = append(sessions, session)
+		if recovering {
+			sessions = a.lockRuntimeRecoverySessions()
 		}
 
 		a.runtimeClient = nil
@@ -437,6 +437,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 
 			close(wait)
 			a.mu.Unlock()
+			releaseRuntimeRecoverySessions(sessions)
 
 			return nil, cleanupErr
 		}
@@ -502,12 +503,45 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 
 		close(wait)
 		a.mu.Unlock()
+		releaseRuntimeRecoverySessions(sessions)
 
 		if err != nil {
 			return nil, err
 		}
 
 		return client, nil
+	}
+}
+
+// lockRuntimeRecoverySessions is called with Agent.mu held. TryRLock excludes
+// an already-admitted close without creating a lock-order cycle, while Agent.mu
+// prevents a new close admission until every selected lifecycle lease is held.
+func (a *Agent) lockRuntimeRecoverySessions() []*session {
+	sessions := make([]*session, 0, len(a.sessions))
+	for _, session := range a.sessions {
+		if !session.lifecycle.TryRLock() {
+			continue
+		}
+
+		session.mu.Lock()
+		closing := session.closing
+		session.mu.Unlock()
+
+		if closing {
+			session.lifecycle.RUnlock()
+
+			continue
+		}
+
+		sessions = append(sessions, session)
+	}
+
+	return sessions
+}
+
+func releaseRuntimeRecoverySessions(sessions []*session) {
+	for i := len(sessions) - 1; i >= 0; i-- {
+		sessions[i].lifecycle.RUnlock()
 	}
 }
 

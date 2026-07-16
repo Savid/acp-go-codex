@@ -28,6 +28,10 @@ or resume can reattach the thread without assigning its live native identity to
 a newly materialized rollout. Close, resume, and delete admission is serialized
 per session; the retained record either moves once into the new active session
 or is released when native thread/runtime ownership ends.
+After a cancellation fence has already retired the generation, `session/close`
+waits for that containment proof and releases the dead logical binding without
+calling the closed native connection. A later `session/resume` rematerializes
+the thread from the configured store on the replacement generation.
 
 One Agent owns one Codex `app-server` and multiplexes all of its ACP sessions as
 independent native threads. Working directory, model, approval/sandbox policy,

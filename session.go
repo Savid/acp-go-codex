@@ -391,11 +391,11 @@ func (s *session) accountMetaSnapshot() map[string]any {
 	return cloneAnyMap(s.accountMeta)
 }
 
-func (s *session) closeState() (codex.Client, string) {
+func (s *session) closeState() (codex.Client, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.client, s.codexThreadID
+	return s.client, s.codexThreadID, s.clientDead
 }
 
 func (s *session) cancelTurn() {
@@ -498,16 +498,33 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 
 func (s *session) unsubscribe(ctx context.Context) error {
 	s.cancelTurn()
-	client, codexThreadID := s.closeState()
+	client, codexThreadID, clientDead := s.closeState()
 
 	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
 
-	if client != nil && codexThreadID != "" {
-		return client.UnsubscribeThread(closeCtx, codexThreadID)
+	if client == nil || codexThreadID == "" {
+		return nil
 	}
 
-	return nil
+	if clientDead {
+		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
+	}
+
+	unsubscribeErr := client.UnsubscribeThread(closeCtx, codexThreadID)
+	if unsubscribeErr == nil {
+		return nil
+	}
+
+	// Cancellation may retire the generation concurrently with unsubscribe.
+	// Once that transition owns the client, its containment proof supersedes a
+	// connection-closed unsubscribe result.
+	current, _, nowDead := s.closeState()
+	if current == client && nowDead {
+		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
+	}
+
+	return unsubscribeErr
 }
 
 func (s *session) releaseMaterialized() error {

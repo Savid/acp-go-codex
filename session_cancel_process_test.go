@@ -88,3 +88,64 @@ func TestCancelQuiescesDescendantsBeforeReturnAndRebindsSession(t *testing.T) {
 	require.False(t, session.clientDead)
 	require.Equal(t, fakeCodexThreadID, session.snapshot().codexThreadID)
 }
+
+func TestCancelThenCloseAndResumeReconcilesOnReplacementRuntime(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	scratch := filepath.Join(root, "scratch")
+	childStarted := filepath.Join(root, "child-started")
+	cancelReturned := filepath.Join(root, "cancel-returned")
+	childSentinel := filepath.Join(root, "child-sentinel")
+	require.NoError(t, os.MkdirAll(home, 0o700))
+	require.NoError(t, os.MkdirAll(scratch, 0o700))
+
+	agent := NewAgent(
+		WithExecutablePath(os.Args[0]),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithEnv(map[string]string{
+			fakeCodexModeEnv:           fakeCodexCancelTreeMode,
+			fakeCodexChildStartedEnv:   childStarted,
+			fakeCodexCancelReturnedEnv: cancelReturned,
+			fakeCodexChildSentinelEnv:  childSentinel,
+		}),
+	)
+	agent.setAgentClient(newRecordingAgentClient())
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	created, err := agent.NewSession(ctx, NewSessionRequest(root))
+	require.NoError(t, err)
+
+	blocking := make(chan promptResult, 1)
+	go func() {
+		response, promptErr := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "blocking-nonce", fakeCodexBlockingPrompt))
+		blocking <- promptResult{response: response, err: promptErr}
+	}()
+
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(childStarted)
+		active := agent.activeSession(created.SessionId)
+
+		return statErr == nil && active != nil && active.activeTurnID() == fakeCodexBlockingTurnID
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, agent.Cancel(ctx, CancelRequest(created.SessionId, "blocking-nonce")))
+	require.NoError(t, os.WriteFile(cancelReturned, []byte("returned"), 0o600))
+	time.Sleep(fakeCodexChildObservationWait)
+	require.NoFileExists(t, childSentinel)
+
+	result := <-blocking
+	require.NoError(t, result.err)
+	require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	require.Nil(t, agent.activeSession(created.SessionId))
+
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, root))
+	require.NoError(t, err)
+	replacement, err := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "replacement-nonce", fakeCodexReplacementPrompt))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, replacement.StopReason)
+	require.Equal(t, fakeCodexThreadID, agent.activeSession(created.SessionId).snapshot().codexThreadID)
+}

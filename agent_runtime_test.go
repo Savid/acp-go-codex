@@ -550,6 +550,34 @@ func TestCancelRuntimeQuiescenceWaitsForExistingTransitionAndLatchesUnprovenTree
 	})
 }
 
+func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
+	oldClient := newSpyCodexClient()
+	newClient := &blockingLifecycleCodexClient{spyCodexClient: newSpyCodexClient()}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return newClient, nil
+	}))
+	active := newSession(agent, "closing", "/tmp/project", nil, codex.Thread{ID: "thread-closing"}, oldClient, sessionMeta{}, nil)
+	agent.sessions[active.id] = active
+	agent.runtimeClient = oldClient
+	agent.runtimeDead = true
+	active.setClientDead(true)
+
+	active.lifecycle.Lock()
+	active.mu.Lock()
+	active.closing = true
+	active.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := agent.sharedRuntime(ctx)
+	require.NoError(t, err)
+	require.Same(t, newClient, client)
+	require.Zero(t, newClient.resumeCallCount(), "an admitted close must never be rebound")
+
+	active.lifecycle.Unlock()
+	require.NoError(t, agent.Close())
+}
+
 func TestSharedRuntimeGenerationCleanupFailureBranches(t *testing.T) {
 	ordinaryCloseErr := errors.New("ordinary prior generation close failure")
 	ordinary := NewAgent()
