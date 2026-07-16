@@ -13,6 +13,16 @@ During a turn, a Codex `app-server` request that requires user input is mapped
 onto an ACP elicitation call to the client. The client's response is passed back
 to Codex so the turn can continue.
 
+Codex also uses `mcpServer/elicitation/request` for MCP tool approval. The
+hard-cutover native shape marks those requests with
+`_meta.codex_approval_kind = "mcp_tool_call"` directly in the flattened `_meta`
+object. They are permission requests, not user elicitations, and correlate
+through the active tool ledger to the exact published nonterminal ACP tool-call
+ID. Nested metadata shapes are rejected. Both approval and user
+elicitation requests MUST carry the non-empty native `turnId` of the currently
+active ACP turn. Missing, stale, or post-turn requests are cancelled locally
+before any host callback or tool-ledger match.
+
 The initialize response advertises route-envelope version 1 at
 `_meta["acp-go.dev/route"].versions`. Every form and URL elicitation preserves
 its native metadata and adds one complete reserved route object containing
@@ -23,10 +33,15 @@ reserved key is rejected rather than overwritten or merged.
 An MCP user elicitation that names a native `toolCallId` or `itemId` is
 associated with a tool already published in the active turn. The adapter maps
 that native identifier to the exact nonterminal ACP tool-call ID before issuing
-the elicitation. Missing, completed, or ambiguous associations are cancelled;
-they are never forwarded with an invented tool identity. Standalone MCP
-elicitations instead use the native JSON-RPC request ID (or the URL-flow
-elicitation ID when no request ID exists) as `requestId`.
+the elicitation. Missing, completed, or ambiguous explicit associations are
+cancelled; they are never forwarded with an invented tool identity. Native MCP
+elicitation requests without an explicit tool identifier remain standalone,
+even when Codex reports the active `turnId` and `serverName`: those fields do
+not establish MCP tool-item ownership. Standalone requests use the native
+JSON-RPC request ID, represented as a non-empty route string, or the URL-flow
+elicitation ID as `requestId`. The adapter mints a random string correlation
+when neither is usable. Numeric request-ID union values are never written to
+the route, and null, empty, or multi-variant route values are rejected.
 
 ## Capability gating
 

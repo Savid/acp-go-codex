@@ -30,3 +30,12 @@ func newSessionID() (string, error) {
 
 	return string(out[:]), nil
 }
+
+func newElicitationRequestID() (string, error) {
+	id, err := newSessionID()
+	if err != nil {
+		return "", err
+	}
+
+	return "codex-elicitation-" + id, nil
+}

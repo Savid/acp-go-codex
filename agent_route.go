@@ -107,8 +107,13 @@ func stampElicitationRoute(meta map[string]any, scope elicitationScope) (map[str
 	}
 
 	if scope.RequestID != nil {
+		requestID, err := elicitationRouteRequestID(scope.RequestID)
+		if err != nil {
+			return nil, err
+		}
+
 		correlations++
-		route[routeRequestIDKey] = *scope.RequestID
+		route[routeRequestIDKey] = requestID
 	}
 
 	if correlations != 1 {
@@ -123,6 +128,27 @@ func stampElicitationRoute(meta map[string]any, scope elicitationScope) (map[str
 	out[routeMetaKey] = route
 
 	return out, nil
+}
+
+func elicitationRouteRequestID(requestID *acp.RequestId) (string, error) {
+	variants := 0
+	if requestID.Null != nil {
+		variants++
+	}
+
+	if requestID.Number != nil {
+		variants++
+	}
+
+	if requestID.Str != nil {
+		variants++
+	}
+
+	if variants != 1 || requestID.Str == nil || strings.TrimSpace(string(*requestID.Str)) == "" {
+		return "", fmt.Errorf("elicitation route requestId must contain exactly one non-empty string variant")
+	}
+
+	return string(*requestID.Str), nil
 }
 
 func routeInvalidParams(err error) error {

@@ -320,6 +320,15 @@ func (s *session) activeTurnNonce() string {
 	return s.turnNonce
 }
 
+func (s *session) activeTurnNonceForNativeTurn(nativeTurnID string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	active := s.turnDone != nil && s.turnNonce != "" && s.turnID != "" && s.turnID == nativeTurnID
+
+	return s.turnNonce, active
+}
+
 func (s *session) hasActiveTurn() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

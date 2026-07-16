@@ -67,8 +67,16 @@ func TestElicitationRouteStampingPreservesMetadataAndRejectsCollision(t *testing
 	require.Equal(t, float64(1), route[routeVersionKey])
 	require.Equal(t, "session", route[jsonFieldSessionID])
 	require.Equal(t, "turn", route[routeTurnNonceKey])
-	require.Contains(t, route, routeRequestIDKey)
+	require.Equal(t, "native-request", route[routeRequestIDKey])
 	require.NotContains(t, route, routeToolCallIDKey)
+
+	var wirePayload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &wirePayload))
+	var wireMeta map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wirePayload[jsonFieldMeta], &wireMeta))
+	var wireRoute map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wireMeta[routeMetaKey], &wireRoute))
+	require.Equal(t, `"native-request"`, string(wireRoute[routeRequestIDKey]))
 
 	_, err = scopedElicitationParams(acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
@@ -82,6 +90,30 @@ func TestElicitationRouteStampingPreservesMetadataAndRejectsCollision(t *testing
 		Url: &acp.UnstableCreateElicitationUrl{Mode: "url"},
 	}, elicitationScope{SessionID: "session", TurnNonce: "turn", ToolCallID: "tool", RequestID: &requestID})
 	require.ErrorContains(t, err, "exactly one")
+}
+
+func TestElicitationRouteRejectsNonStringRequestIDUnions(t *testing.T) {
+	numberValue := acp.RequestIdNumber(7)
+	nullValue := acp.RequestIdNull{}
+	emptyString := acp.RequestIdStr(" ")
+	validString := acp.RequestIdStr("request")
+
+	for name, requestID := range map[string]acp.RequestId{
+		"numeric":     {Number: &numberValue},
+		"null":        {Null: &nullValue},
+		"empty union": {},
+		"empty string": {
+			Str: &emptyString,
+		},
+		"dual": {Number: &numberValue, Str: &validString},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := stampElicitationRoute(nil, elicitationScope{
+				SessionID: "session", TurnNonce: "turn", RequestID: &requestID,
+			})
+			require.ErrorContains(t, err, "exactly one non-empty string variant")
+		})
+	}
 }
 
 func TestPromptAndCancelBuildersStampExactInboundRoute(t *testing.T) {

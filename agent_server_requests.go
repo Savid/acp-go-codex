@@ -233,6 +233,10 @@ func (a *Agent) handleCodexMCPToolApproval(ctx context.Context, req codex.Server
 		return codex.ElicitationCancelResponse(), nil
 	}
 
+	if _, active := session.activeTurnNonceForNativeTurn(codex.MCPUserElicitationTurnID(params)); !active {
+		return codex.ElicitationCancelResponse(), nil
+	}
+
 	conn := a.connection()
 	if conn == nil {
 		return codex.ElicitationCancelResponse(), nil
@@ -284,6 +288,11 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 		return codex.ElicitationCancelResponse(), nil
 	}
 
+	turnNonce, active := session.activeTurnNonceForNativeTurn(codex.MCPUserElicitationTurnID(params))
+	if !active {
+		return codex.ElicitationCancelResponse(), nil
+	}
+
 	conn := a.connection()
 	if conn == nil {
 		return codex.ElicitationCancelResponse(), nil
@@ -314,12 +323,18 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 	} else {
 		requestID := codex.MCPUserElicitationRequestID(req, params)
 		if requestID == nil {
-			return codex.ElicitationCancelResponse(), nil
+			adapterID, idErr := newElicitationRequestID()
+			if idErr != nil {
+				return nil, idErr
+			}
+
+			requestIDValue := acp.RequestIdStr(adapterID)
+			requestID = &acp.RequestId{Str: &requestIDValue}
 		}
 
 		resp, err = conn.CreateElicitation(ctx, request, elicitationScope{
 			SessionID: session.id,
-			TurnNonce: session.activeTurnNonce(),
+			TurnNonce: turnNonce,
 			RequestID: requestID,
 		})
 	}

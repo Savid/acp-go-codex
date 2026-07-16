@@ -121,6 +121,7 @@ func newStrictPermissionSession(t *testing.T) (*Agent, *session, *strictPermissi
 	require.NoError(t, err)
 	session := agent.sessionMust(response.SessionId)
 	turnCtx := session.beginTurn(ctx, "permission-turn")
+	session.setTurnID("native-permission-turn")
 	t.Cleanup(session.finishTurn)
 
 	return agent, session, conn, turnCtx
@@ -166,9 +167,9 @@ func TestMCPPermissionCorrelatesLiveShapedApprovalToPublishedExecID(t *testing.T
 	})
 
 	result, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
-		ID:     json.RawMessage(`"native-approval-ctc-02b134"`),
+		ID:     json.RawMessage(`80`),
 		Method: codex.RequestMCPElicitation,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","message":"Allow the wagie MCP server to run tool \"execute\"?","tool_params":{"code":"return api.request({})"},"_meta":{"codex":{"serverName":"wagie","_meta":{"codex_approval_kind":"mcp_tool_call","tool_title":"Execute"}}}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn","serverName":"wagie","message":"Allow the wagie MCP server to run tool \"execute\"?","tool_params":{"code":"return api.request({})"},"_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"Execute"}}`),
 	})
 	require.NoError(t, err)
 	require.Equal(t, "accept", asType[map[string]any](t, result)["action"])
@@ -184,13 +185,52 @@ func TestMCPPermissionCorrelatesLiveShapedApprovalToPublishedExecID(t *testing.T
 	}, order)
 }
 
+func TestMCPPermissionRejectsStaleNativeTurnBeforeLedgerMatch(t *testing.T) {
+	agent, session, conn, turnCtx := newStrictPermissionSession(t)
+	emitNativePermissionToolEvent(t, session, turnCtx, codex.Event{
+		Kind: codex.EventToolStarted,
+		Tool: codex.ToolEvent{
+			ID: "exec-current", Kind: toolKindMcpToolCall,
+			Raw: map[string]any{"server": "wagie", "tool": "execute"},
+		},
+	})
+
+	response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+		ID:     json.RawMessage(`84`),
+		Method: codex.RequestMCPElicitation,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"stale-native-turn","serverName":"wagie","message":"Allow tool?","_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"Execute"}}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "cancel", asType[map[string]any](t, response)["action"])
+
+	_, permissions := conn.snapshot()
+	require.Empty(t, permissions)
+
+	_, requested, err := session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{
+		ToolCall: acp.ToolCallUpdate{
+			ToolCallId: "exec-current",
+			RawInput: map[string]any{
+				"turnId":     "stale-native-turn",
+				"serverName": "wagie",
+				"_meta": map[string]any{
+					"tool_name": "execute",
+				},
+			},
+		},
+	}, permissionToolMCP)
+	require.NoError(t, err)
+	require.False(t, requested)
+	_, permissions = conn.snapshot()
+	require.Empty(t, permissions)
+}
+
 func TestPermissionPublishesPendingBeforeCallbackAndDedupesNativeStart(t *testing.T) {
 	agent, session, conn, turnCtx := newStrictPermissionSession(t)
 
 	result, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
 		ID:     json.RawMessage(`"approval-before-start"`),
 		Method: codex.RequestMCPElicitation,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","message":"Allow the wagie MCP server to run tool \"execute\"?","tool_params":{"code":"return 1"},"_meta":{"codex":{"serverName":"wagie","_meta":{"codex_approval_kind":"mcp_tool_call","tool_title":"Execute"}}}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn","serverName":"wagie","message":"Allow the wagie MCP server to run tool \"execute\"?","tool_params":{"code":"return 1"},"_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"Execute"}}`),
 	})
 	require.NoError(t, err)
 	require.Equal(t, "accept", asType[map[string]any](t, result)["action"])
@@ -273,20 +313,31 @@ func TestCommandFileAndProfilePermissionsUsePublishedNonterminalIDs(t *testing.T
 
 func TestPermissionCorrelationFailureAndHelperBranches(t *testing.T) {
 	agent, session, conn, turnCtx := newStrictPermissionSession(t)
+	liveMCPParams := map[string]any{"turnId": "native-permission-turn"}
 
 	inactive := newSession(agent, "inactive", "/tmp/project", nil, codex.Thread{ID: "inactive-thread"}, newSpyCodexClient(), sessionMeta{}, nil)
 	_, requested, err := inactive.requestPermissionForTool(context.Background(), conn, acp.RequestPermissionRequest{}, permissionToolMCP)
 	require.NoError(t, err)
 	require.False(t, requested)
 
+	_, requested, err = session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{
+		ToolCall: acp.ToolCallUpdate{RawInput: "malformed"},
+	}, permissionToolMCP)
+	require.NoError(t, err)
+	require.False(t, requested)
+
 	canceled, cancel := context.WithCancel(turnCtx)
 	cancel()
-	_, requested, err = session.requestPermissionForTool(canceled, conn, acp.RequestPermissionRequest{}, permissionToolMCP)
+	_, requested, err = session.requestPermissionForTool(canceled, conn, acp.RequestPermissionRequest{
+		ToolCall: acp.ToolCallUpdate{RawInput: liveMCPParams},
+	}, permissionToolMCP)
 	require.NoError(t, err)
 	require.False(t, requested)
 
 	session.permissionTools.reset()
-	_, requested, err = session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{}, permissionToolMCP)
+	_, requested, err = session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{
+		ToolCall: acp.ToolCallUpdate{RawInput: liveMCPParams},
+	}, permissionToolMCP)
 	require.NoError(t, err)
 	require.False(t, requested)
 
@@ -296,7 +347,7 @@ func TestPermissionCorrelationFailureAndHelperBranches(t *testing.T) {
 	}
 	session.permissionTools.aliases = map[string]acp.ToolCallId{"approval": "finished-record"}
 	_, requested, err = session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{
-		ToolCall: acp.ToolCallUpdate{ToolCallId: "approval"},
+		ToolCall: acp.ToolCallUpdate{ToolCallId: "approval", RawInput: liveMCPParams},
 	}, permissionToolMCP)
 	require.NoError(t, err)
 	require.False(t, requested)
@@ -304,7 +355,7 @@ func TestPermissionCorrelationFailureAndHelperBranches(t *testing.T) {
 	session.permissionTools.reset()
 	session.permissionTools.aliases = map[string]acp.ToolCallId{"approval": "missing"}
 	_, requested, err = session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{
-		ToolCall: acp.ToolCallUpdate{ToolCallId: "approval"},
+		ToolCall: acp.ToolCallUpdate{ToolCallId: "approval", RawInput: liveMCPParams},
 	}, permissionToolMCP)
 	require.NoError(t, err)
 	require.False(t, requested)
@@ -315,7 +366,7 @@ func TestPermissionCorrelationFailureAndHelperBranches(t *testing.T) {
 		"two": {id: "two", class: permissionToolMCP},
 	}
 	_, requested, err = session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{
-		ToolCall: acp.ToolCallUpdate{ToolCallId: "unmatched"},
+		ToolCall: acp.ToolCallUpdate{ToolCallId: "unmatched", RawInput: liveMCPParams},
 	}, permissionToolMCP)
 	require.NoError(t, err)
 	require.False(t, requested)
@@ -327,7 +378,7 @@ func TestPermissionCorrelationFailureAndHelperBranches(t *testing.T) {
 	agent.setAgentClient(emitFailure)
 	session.permissionTools.reset()
 	_, requested, err = session.requestPermissionForTool(turnCtx, emitFailure, acp.RequestPermissionRequest{
-		ToolCall: acp.ToolCallUpdate{ToolCallId: "awaiting-start"},
+		ToolCall: acp.ToolCallUpdate{ToolCallId: "awaiting-start", RawInput: liveMCPParams},
 	}, permissionToolMCP)
 	require.ErrorContains(t, err, "pending start failed")
 	require.False(t, requested)
@@ -370,10 +421,12 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	agent.setAgentClient(newStrictPermissionClient())
+	conn := newStrictPermissionClient()
+	agent.setAgentClient(conn)
 	created, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 	session := agent.sessionMust(created.SessionId)
+	session.setTurnID("native-outside")
 	enableClientElicitation(agent, true, true)
 
 	permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
@@ -387,18 +440,29 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		ID:     json.RawMessage(`"mcp-outside-turn"`),
 		Method: codex.RequestMCPElicitation,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","message":"Allow tool?","_meta":{"codex":{"serverName":"wagie","_meta":{"codex_approval_kind":"mcp_tool_call","tool_title":"execute"}}}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-outside","serverName":"wagie","message":"Allow tool?","_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"execute"}}`),
 	})
 	require.NoError(t, err)
 	require.Equal(t, "cancel", asType[map[string]any](t, mcp)["action"])
 
 	userElicitation, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
-		ID:     json.RawMessage(`"mcp-user-outside-turn"`),
+		ID:     json.RawMessage(`71`),
 		Method: codex.RequestMCPElicitation,
-		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"exec-outside-turn","mode":"form","message":"Need input","_meta":{"codex":{"serverName":"wagie","toolName":"execute"}}}`),
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-outside","serverName":"wagie","mode":"form","message":"Need input"}`),
 	})
 	require.NoError(t, err)
 	require.Equal(t, "cancel", asType[map[string]any](t, userElicitation)["action"])
+	require.Empty(t, conn.scopes)
+
+	_, associated, err := session.createElicitationForMCPTool(
+		ctx,
+		conn,
+		codex.MCPElicitationRequest(map[string]any{"mode": "form"}, nil),
+		"exec-outside-turn",
+		map[string]any{"turnId": "native-outside", "serverName": "wagie"},
+	)
+	require.NoError(t, err)
+	require.False(t, associated)
 }
 
 func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
@@ -431,7 +495,7 @@ func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
 		response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
 			ID:     json.RawMessage(`"mcp-user-elicitation"`),
 			Method: codex.RequestMCPElicitation,
-			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"ctc-native-mismatch","mode":"form","message":"Need input","requestedSchema":{"type":"object"},"_meta":{"codex":{"serverName":"wagie","toolName":"execute"}}}`),
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn","itemId":"ctc-native-mismatch","mode":"form","message":"Need input","requestedSchema":{"type":"object"},"_meta":{"serverName":"wagie","toolName":"execute"}}`),
 		})
 		result <- struct {
 			response any
@@ -467,6 +531,142 @@ func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
 
 	require.True(t, session.permissionTools.mu.TryLock())
 	session.permissionTools.mu.Unlock()
+}
+
+func TestMCPUserElicitationLiveShapeUsesStringRequestCorrelation(t *testing.T) {
+	agent, session, _, turnCtx := newStrictPermissionSession(t)
+	session.setTurnID("turn-live")
+
+	for _, event := range []codex.Event{
+		{
+			Kind: codex.EventToolStarted,
+			Tool: codex.ToolEvent{
+				ID: "exec-decoy", Kind: toolKindMcpToolCall,
+				Raw: map[string]any{"server": "other", "tool": "execute"},
+			},
+		},
+		{
+			Kind: codex.EventToolStarted,
+			Tool: codex.ToolEvent{
+				ID: "exec-8876236c-canonical", Kind: toolKindMcpToolCall,
+				Raw: map[string]any{"server": "wagie", "tool": "execute"},
+			},
+		},
+	} {
+		emitNativePermissionToolEvent(t, session, turnCtx, event)
+	}
+
+	conn := newRecordingAgentClient()
+	conn.elicitation = acp.UnstableCreateElicitationResponse{
+		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept"},
+	}
+	agent.setAgentClient(conn)
+	enableClientElicitation(agent, true, true)
+
+	response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+		ID:     json.RawMessage(`81`),
+		Method: codex.RequestMCPElicitation,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"turn-live","serverName":"wagie","mode":"form","message":"Need input","requestedSchema":{"type":"object","properties":{}}}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "accept", asType[map[string]any](t, response)["action"])
+	require.Len(t, conn.scopes, 1)
+	require.Empty(t, conn.scopes[0].ToolCallID)
+	require.NotNil(t, conn.scopes[0].RequestID)
+	require.NotNil(t, conn.scopes[0].RequestID.Str)
+	require.Equal(t, acp.RequestIdStr("81"), *conn.scopes[0].RequestID.Str)
+	require.Nil(t, conn.scopes[0].RequestID.Number)
+
+	wire, err := scopedElicitationParams(conn.elicitations[0], conn.scopes[0])
+	require.NoError(t, err)
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wire, &payload))
+	var meta map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(payload[jsonFieldMeta], &meta))
+	var route map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(meta[routeMetaKey], &route))
+	require.Equal(t, `"81"`, string(route[routeRequestIDKey]))
+	require.NotContains(t, route, routeToolCallIDKey)
+}
+
+func TestMCPUserElicitationMintsMissingRequestCorrelation(t *testing.T) {
+	agent, session, _, turnCtx := newStrictPermissionSession(t)
+	conn := newRecordingAgentClient()
+	conn.elicitation = acp.UnstableCreateElicitationResponse{
+		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept"},
+	}
+	agent.setAgentClient(conn)
+	enableClientElicitation(agent, true, true)
+
+	response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+		Method: codex.RequestMCPElicitation,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn","serverName":"wagie","mode":"form","message":"Need input","requestedSchema":{"type":"object","properties":{}}}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "accept", asType[map[string]any](t, response)["action"])
+	require.Len(t, conn.scopes, 1)
+	require.Empty(t, conn.scopes[0].ToolCallID)
+	require.NotNil(t, conn.scopes[0].RequestID)
+	require.NotNil(t, conn.scopes[0].RequestID.Str)
+	require.Regexp(t, `^codex-elicitation-[0-9a-f-]{36}$`, string(*conn.scopes[0].RequestID.Str))
+}
+
+func TestMCPUserElicitationRejectsMissingOrStaleNativeTurn(t *testing.T) {
+	for name, turn := range map[string]string{
+		"null":  `null`,
+		"stale": `"stale-native-turn"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent, session, _, turnCtx := newStrictPermissionSession(t)
+			conn := newRecordingAgentClient()
+			conn.elicitation = acp.UnstableCreateElicitationResponse{
+				Accept: &acp.UnstableCreateElicitationAccept{Action: "accept"},
+			}
+			agent.setAgentClient(conn)
+			enableClientElicitation(agent, true, true)
+
+			response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+				ID:     json.RawMessage(`72`),
+				Method: codex.RequestMCPElicitation,
+				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":` + turn + `,"serverName":"wagie","mode":"form","message":"Need input"}`),
+			})
+			require.NoError(t, err)
+			require.Equal(t, "cancel", asType[map[string]any](t, response)["action"])
+			require.Empty(t, conn.scopes)
+		})
+	}
+}
+
+func TestMCPUserElicitationURLRemainsStandaloneDuringActiveTool(t *testing.T) {
+	agent, session, _, turnCtx := newStrictPermissionSession(t)
+	session.setTurnID("turn-live")
+	emitNativePermissionToolEvent(t, session, turnCtx, codex.Event{
+		Kind: codex.EventToolStarted,
+		Tool: codex.ToolEvent{
+			ID: "exec-active", Kind: toolKindMcpToolCall,
+			Raw: map[string]any{"server": "wagie", "tool": "execute"},
+		},
+	})
+
+	conn := newRecordingAgentClient()
+	conn.elicitation = acp.UnstableCreateElicitationResponse{
+		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept"},
+	}
+	agent.setAgentClient(conn)
+	enableClientElicitation(agent, true, true)
+
+	response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+		ID:     json.RawMessage(`83`),
+		Method: codex.RequestMCPElicitation,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"turn-live","serverName":"wagie","mode":"url","message":"Open","url":"https://example.test","elicitationId":"standalone-url"}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "accept", asType[map[string]any](t, response)["action"])
+	require.Len(t, conn.scopes, 1)
+	require.Empty(t, conn.scopes[0].ToolCallID)
+	require.NotNil(t, conn.scopes[0].RequestID)
+	require.NotNil(t, conn.scopes[0].RequestID.Str)
+	require.Equal(t, acp.RequestIdStr("83"), *conn.scopes[0].RequestID.Str)
 }
 
 func TestMCPUserElicitationCorrelationFailsClosed(t *testing.T) {
@@ -508,7 +708,7 @@ func TestMCPUserElicitationCorrelationFailsClosed(t *testing.T) {
 			response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
 				ID:     json.RawMessage(`"mcp-user-fail-closed"`),
 				Method: codex.RequestMCPElicitation,
-				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"ctc-unresolved","mode":"form","message":"Need input","_meta":{"codex":{"serverName":"wagie","toolName":"execute"}}}`),
+				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn","itemId":"ctc-unresolved","mode":"form","message":"Need input","_meta":{"serverName":"wagie","toolName":"execute"}}`),
 			})
 			require.NoError(t, err)
 			require.Equal(t, "cancel", asType[map[string]any](t, response)["action"])

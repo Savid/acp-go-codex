@@ -76,7 +76,14 @@ func (s *session) requestPermissionForTool(
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
-	if !s.hasActiveTurn() || ctx.Err() != nil {
+	active := s.hasActiveTurn()
+
+	if class == permissionToolMCP {
+		params, _ := request.ToolCall.RawInput.(map[string]any)
+		_, active = s.activeTurnNonceForNativeTurn(codex.MCPUserElicitationTurnID(params))
+	}
+
+	if !active || ctx.Err() != nil {
 		return acp.RequestPermissionResponse{}, false, nil
 	}
 
@@ -157,7 +164,8 @@ func (s *session) createElicitationForMCPTool(
 
 	s.mu.Lock()
 	turnNonce := s.turnNonce
-	active := s.turnDone != nil && turnNonce != ""
+	turnID := s.turnID
+	active := s.turnDone != nil && turnNonce != "" && turnID != "" && turnID == codex.MCPUserElicitationTurnID(params)
 	s.mu.Unlock()
 
 	if !active || ctx.Err() != nil {
@@ -371,7 +379,7 @@ func bestPermissionTool(
 func permissionFingerprint(title *string, raw any, class permissionToolClass) permissionToolFingerprint {
 	fingerprint := permissionToolFingerprint{
 		server: normalizePermissionToolValue(deepPermissionString(raw, "serverName", "server")),
-		tool:   normalizePermissionToolValue(deepPermissionString(raw, "toolName", "tool", "tool_title")),
+		tool:   normalizePermissionToolValue(deepPermissionString(raw, "toolName", "tool_name", "tool", "tool_title")),
 	}
 	if title != nil {
 		fingerprint.title = normalizePermissionToolValue(*title)

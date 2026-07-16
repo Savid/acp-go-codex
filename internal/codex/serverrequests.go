@@ -3,6 +3,7 @@ package codex
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -43,27 +44,26 @@ const (
 	keyAcceptWithExecpolicyAmendment = "acceptWithExecpolicyAmendment"
 	defaultPermissionTitle           = "Codex permission request"
 
-	fieldDecision      = "decision"
-	fieldPermissions   = "permissions"
-	fieldScope         = "scope"
-	fieldAnswers       = "answers"
-	fieldAction        = "action"
-	fieldContent       = "content"
-	fieldMetaObject    = "_meta"
-	fieldMode          = "mode"
-	fieldURL           = "url"
-	fieldTitle         = "title"
-	fieldDescription   = "description"
-	fieldReason        = "reason"
-	fieldApprovalID    = "approvalId"
-	fieldItemID        = "itemId"
-	fieldElicitationID = "elicitationId"
-	fieldToolCallID    = "toolCallId"
-	fieldGrantRoot     = "grantRoot"
-	fieldCommand       = "command"
-	fieldQuestions     = "questions"
-	metaVendorKey      = "codex"
-
+	fieldDecision               = "decision"
+	fieldPermissions            = "permissions"
+	fieldScope                  = "scope"
+	fieldAnswers                = "answers"
+	fieldAction                 = "action"
+	fieldContent                = "content"
+	fieldMetaObject             = "_meta"
+	fieldMode                   = "mode"
+	fieldURL                    = "url"
+	fieldTitle                  = "title"
+	fieldDescription            = "description"
+	fieldReason                 = "reason"
+	fieldApprovalID             = "approvalId"
+	fieldItemID                 = "itemId"
+	fieldElicitationID          = "elicitationId"
+	fieldToolCallID             = "toolCallId"
+	fieldTurnID                 = "turnId"
+	fieldGrantRoot              = "grantRoot"
+	fieldCommand                = "command"
+	fieldQuestions              = "questions"
 	defaultToolUserInputMessage = "Codex needs input"
 	schemaTypeString            = "string"
 
@@ -380,25 +380,10 @@ func IsMCPToolApproval(params map[string]any) bool {
 }
 
 func mcpMeta(params map[string]any) map[string]any {
-	meta := mapValue(params, fieldMetaObject)
-	if codexMeta := mapValue(meta, metaVendorKey); codexMeta != nil {
-		return codexMeta
-	}
-
-	if codexMeta := mapValue(params, metaVendorKey); codexMeta != nil {
-		return codexMeta
-	}
-
-	return nil
+	return mapValue(params, fieldMetaObject)
 }
 
 func mcpMetaString(meta map[string]any, key string) string {
-	if detail := mapValue(meta, fieldMetaObject); detail != nil {
-		if value := stringValue(detail, key); value != "" {
-			return value
-		}
-	}
-
 	return stringValue(meta, key)
 }
 
@@ -418,6 +403,10 @@ func MCPToolApprovalToolCallID(req ServerRequest, params map[string]any) string 
 func MCPToolApprovalTitle(params map[string]any) string {
 	meta := mcpMeta(params)
 	if title := mcpMetaString(meta, mcpApprovalToolTitleKey); title != "" {
+		return title
+	}
+
+	if title := mcpMetaString(meta, "tool_name"); title != "" {
 		return title
 	}
 
@@ -442,7 +431,7 @@ func MCPToolApprovalContent(params map[string]any) []acp.ToolCallContent {
 		parts = append(parts, message)
 	}
 
-	if serverName := stringValue(meta, "serverName"); serverName != "" {
+	if serverName := firstNonEmpty(stringValue(params, "serverName"), stringValue(meta, "serverName")); serverName != "" {
 		parts = append(parts, "Server: "+serverName)
 	}
 
@@ -527,16 +516,35 @@ func MCPUserElicitationToolCallID(params map[string]any) string {
 	)
 }
 
+// MCPUserElicitationTurnID returns the native turn that delivered the request.
+func MCPUserElicitationTurnID(params map[string]any) string {
+	return strings.TrimSpace(stringValue(params, fieldTurnID))
+}
+
 // MCPUserElicitationRequestID returns the request correlation for a standalone
-// MCP elicitation. The native JSON-RPC request ID is authoritative; URL-flow
-// elicitation IDs are the fallback when no JSON-RPC ID is available.
+// MCP elicitation. Native string IDs are preserved and native integer IDs are
+// represented canonically as strings because route-envelope correlations are
+// string-only. URL-flow elicitation IDs are the fallback.
 func MCPUserElicitationRequestID(req ServerRequest, params map[string]any) *acp.RequestId {
-	if requestID := RequestIDFromRaw(req.ID); requestID != nil {
-		return requestID
+	if nativeRequestID := RequestIDFromRaw(req.ID); nativeRequestID != nil {
+		var value string
+
+		switch {
+		case nativeRequestID.Str != nil:
+			value = string(*nativeRequestID.Str)
+		case nativeRequestID.Number != nil:
+			value = strconv.FormatInt(int64(*nativeRequestID.Number), 10)
+		}
+
+		if strings.TrimSpace(value) != "" {
+			requestIDValue := acp.RequestIdStr(value)
+
+			return &acp.RequestId{Str: &requestIDValue}
+		}
 	}
 
 	value := stringValue(params, fieldElicitationID)
-	if value == "" {
+	if strings.TrimSpace(value) == "" {
 		return nil
 	}
 

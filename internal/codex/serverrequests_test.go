@@ -96,29 +96,29 @@ func TestServerRequestSchemaAndMCPHelpers(t *testing.T) {
 		t.Fatalf("default tool schema props=%#v required=%#v", props, required)
 	}
 	mcpApprovalParams := map[string]any{
-		"_meta": map[string]any{metaVendorKey: map[string]any{
-			"_meta":      map[string]any{mcpApprovalKindKey: mcpToolApprovalKind, mcpApprovalToolTitleKey: "Execute"},
-			"serverName": "remote",
-		}},
+		"serverName": "remote",
+		"_meta": map[string]any{
+			mcpApprovalKindKey: mcpToolApprovalKind, mcpApprovalToolTitleKey: "Execute", "tool_name": "execute",
+		},
 	}
 	if !IsMCPToolApproval(mcpApprovalParams) {
 		t.Fatal("MCP tool approval marker was not detected")
 	}
-	if IsMCPToolApproval(map[string]any{"_meta": map[string]any{metaVendorKey: map[string]any{"_meta": map[string]any{mcpApprovalKindKey: "other"}}}}) {
+	if IsMCPToolApproval(map[string]any{"_meta": map[string]any{mcpApprovalKindKey: "other"}}) {
 		t.Fatal("non-approval MCP elicitation was detected as tool approval")
 	}
-	directMCPApprovalParams := map[string]any{"_meta": map[string]any{metaVendorKey: map[string]any{mcpApprovalKindKey: mcpToolApprovalKind, mcpApprovalToolTitleKey: "Direct"}}}
-	if !IsMCPToolApproval(directMCPApprovalParams) {
-		t.Fatal("direct MCP tool approval marker was not detected")
+	nestedLegacyParams := map[string]any{"_meta": map[string]any{"codex": map[string]any{mcpApprovalKindKey: mcpToolApprovalKind}}}
+	if IsMCPToolApproval(nestedLegacyParams) {
+		t.Fatal("non-native nested MCP marker was accepted")
 	}
 	if title := MCPToolApprovalTitle(mcpApprovalParams); title != "Execute" {
 		t.Fatalf("MCP tool approval title = %q", title)
 	}
-	if title := MCPToolApprovalTitle(directMCPApprovalParams); title != "Direct" {
-		t.Fatalf("direct MCP tool approval title = %q", title)
+	if title := MCPToolApprovalTitle(map[string]any{"_meta": map[string]any{"tool_name": "execute"}}); title != "execute" {
+		t.Fatalf("MCP tool-name approval title = %q", title)
 	}
-	if value := mcpMetaString(map[string]any{"_meta": map[string]any{mcpApprovalToolTitleKey: ""}, mcpApprovalToolTitleKey: "fallback"}, mcpApprovalToolTitleKey); value != "fallback" {
-		t.Fatalf("MCP meta fallback value = %q", value)
+	if value := mcpMetaString(map[string]any{mcpApprovalToolTitleKey: "direct"}, mcpApprovalToolTitleKey); value != "direct" {
+		t.Fatalf("MCP direct meta value = %q", value)
 	}
 	choiceProps, _ := schemaFromToolQuestions([]map[string]any{{
 		"id":       "choice",
@@ -134,7 +134,7 @@ func TestServerRequestSchemaAndMCPHelpers(t *testing.T) {
 	if !ok || choice["format"] != "password" || len(oneOf) != 1 {
 		t.Fatalf("tool question property = %#v", choice)
 	}
-	if meta := mcpMeta(map[string]any{metaVendorKey: map[string]any{"serverName": "direct"}}); stringValue(meta, "serverName") != "direct" {
+	if meta := mcpMeta(map[string]any{"_meta": map[string]any{"serverName": "direct"}}); stringValue(meta, "serverName") != "direct" {
 		t.Fatalf("direct MCP meta = %#v", meta)
 	}
 	if meta := mcpMeta(map[string]any{}); meta != nil {
@@ -305,9 +305,9 @@ func TestMCPElicitationBuilders(t *testing.T) {
 	}
 
 	content := MCPToolApprovalContent(map[string]any{
+		"serverName": "remote",
 		"message":    "Approve?",
 		"toolParams": map[string]any{"code": "x"},
-		"_meta":      map[string]any{metaVendorKey: map[string]any{"serverName": "remote"}},
 	})
 	if len(content) != 1 {
 		t.Fatalf("mcp approval content = %#v", content)
@@ -391,6 +391,15 @@ func TestMCPUserElicitationCorrelationBuilders(t *testing.T) {
 	}
 	if got := MCPUserElicitationRequestID(req, nil); got == nil || got.Str == nil || *got.Str != "mcp-9" {
 		t.Fatalf("mcp elicitation request id = %#v", got)
+	}
+	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`9`)}, nil); got == nil || got.Str == nil || *got.Str != "9" || got.Number != nil {
+		t.Fatalf("numeric mcp elicitation request id = %#v", got)
+	}
+	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`" "`)}, nil); got != nil {
+		t.Fatalf("empty mcp elicitation request id = %#v", got)
+	}
+	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`9`)}, map[string]any{"elicitationId": "e1"}); got == nil || got.Str == nil || *got.Str != "9" {
+		t.Fatalf("mcp elicitation authoritative request id = %#v", got)
 	}
 	if got := MCPUserElicitationRequestID(ServerRequest{}, map[string]any{"elicitationId": "e1"}); got == nil || got.Str == nil || *got.Str != "e1" {
 		t.Fatalf("mcp elicitation fallback request id = %#v", got)
