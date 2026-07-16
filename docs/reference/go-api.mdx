@@ -103,8 +103,8 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `WithSessionOutputSchema` | Configure structured output. |
 | `WithSessionCodexOptions` | Merge `_meta.codex.options`. |
 | `WithCodexEnv` | Contribute to the immutable environment pinned by the first runtime construction; conflicting peer env fails closed. |
-| `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and turn nonce. |
-| `CancelRequest` | Build an active-turn cancellation with the same mandatory route. |
+| `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and a nonblank turn nonce of at most 4096 bytes; invalid input omits route metadata so the agent rejects it. |
+| `CancelRequest` | Build an active-turn cancellation with the same bounded route; invalid input likewise fails closed. |
 
 `RuntimeResourceHooks` exposes `AcquireNativeRoot`, `ReserveScratchRoot`,
 `ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.

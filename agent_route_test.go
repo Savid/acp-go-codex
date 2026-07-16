@@ -97,6 +97,11 @@ func TestElicitationRouteStampingPreservesMetadataAndRejectsCollision(t *testing
 		Url: &acp.UnstableCreateElicitationUrl{Mode: "url"},
 	}, elicitationScope{SessionID: "session", TurnNonce: "turn", ToolCallID: "tool", RequestID: &requestID})
 	require.ErrorContains(t, err, "exactly one")
+
+	_, err = stampElicitationRoute(nil, elicitationScope{
+		SessionID: "session", TurnNonce: strings.Repeat("n", routeTurnNonceMaxBytes+1), ToolCallID: "tool",
+	})
+	require.ErrorContains(t, err, "maximum size")
 }
 
 func TestElicitationRouteRejectsNonStringRequestIDUnions(t *testing.T) {
@@ -128,6 +133,11 @@ func TestPromptAndCancelBuildersStampExactInboundRoute(t *testing.T) {
 	require.Equal(t, inboundRouteMeta("nonce"), prompt.Meta)
 	cancel := CancelRequest("session", "nonce")
 	require.Equal(t, inboundRouteMeta("nonce"), cancel.Meta)
+
+	boundary := strings.Repeat("n", routeTurnNonceMaxBytes)
+	require.Equal(t, inboundRouteMeta(boundary), PromptRequest("session", boundary).Meta)
+	require.Nil(t, PromptRequest("session", strings.Repeat("n", routeTurnNonceMaxBytes+1)).Meta)
+	require.Nil(t, CancelRequest("session", " ").Meta)
 }
 
 func TestTurnScopedNotificationsCarryExactRoute(t *testing.T) {

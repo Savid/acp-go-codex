@@ -267,7 +267,7 @@ func PromptRequest(sessionID acp.SessionId, turnNonce string, blocks ...acp.Cont
 	return acp.PromptRequest{
 		SessionId: sessionID,
 		Prompt:    append([]acp.ContentBlock{}, blocks...),
-		Meta:      inboundRouteMeta(turnNonce),
+		Meta:      requestInboundRouteMeta(turnNonce),
 	}
 }
 
@@ -280,7 +280,7 @@ func TextPromptRequest(sessionID acp.SessionId, turnNonce, text string) acp.Prom
 // CancelRequest constructs a session/cancel notification bound to the exact
 // active turn nonce. An unstamped or stale cancellation is rejected.
 func CancelRequest(sessionID acp.SessionId, turnNonce string) acp.CancelNotification {
-	return acp.CancelNotification{SessionId: sessionID, Meta: inboundRouteMeta(turnNonce)}
+	return acp.CancelNotification{SessionId: sessionID, Meta: requestInboundRouteMeta(turnNonce)}
 }
 
 // SetConfigOptionRequest constructs a session/set_config_option value-id request.

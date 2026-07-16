@@ -32,6 +32,18 @@ func inboundRouteMeta(turnNonce string) map[string]any {
 	}}
 }
 
+func requestInboundRouteMeta(turnNonce string) map[string]any {
+	if !validRouteTurnNonce(turnNonce) {
+		return nil
+	}
+
+	return inboundRouteMeta(turnNonce)
+}
+
+func validRouteTurnNonce(turnNonce string) bool {
+	return strings.TrimSpace(turnNonce) != "" && len(turnNonce) <= routeTurnNonceMaxBytes
+}
+
 func withTurnRoute(ctx context.Context, turnNonce string) context.Context {
 	return context.WithValue(ctx, turnRouteContextKey{}, turnNonce)
 }
@@ -97,6 +109,10 @@ func stampElicitationRoute(meta map[string]any, scope elicitationScope) (map[str
 
 	if scope.SessionID == "" || strings.TrimSpace(scope.TurnNonce) == "" {
 		return nil, fmt.Errorf("elicitation route requires sessionId and turnNonce")
+	}
+
+	if len(scope.TurnNonce) > routeTurnNonceMaxBytes {
+		return nil, fmt.Errorf("elicitation route turnNonce exceeds the maximum size")
 	}
 
 	correlations := 0
