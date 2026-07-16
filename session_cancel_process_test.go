@@ -19,28 +19,34 @@ type promptResult struct {
 
 // The fake app-server reproduces the native behavior observed through Wagie:
 // turn/interrupt returns success while a command descendant remains alive.
-// Cancellation must synchronously retire the app-server containment, preserve
-// the logical ACP session, and resume that thread for the replacement turn.
-func TestCancelQuiescesDescendantsBeforeReturnAndRebindsSession(t *testing.T) {
+// Cancellation must synchronously terminate the target thread's descendants,
+// preserve the shared app-server, and keep the logical session usable.
+func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	scratch := filepath.Join(root, "scratch")
 	childStarted := filepath.Join(root, "child-started")
 	cancelReturned := filepath.Join(root, "cancel-returned")
 	childSentinel := filepath.Join(root, "child-sentinel")
+	rolloutPath := filepath.Join(root, "rollout.jsonl")
+	tailStopped := filepath.Join(root, "tail-stopped")
 	require.NoError(t, os.MkdirAll(home, 0o700))
 	require.NoError(t, os.MkdirAll(scratch, 0o700))
 
+	store := NewInMemorySessionStore()
 	agent := NewAgent(
 		WithExecutablePath(os.Args[0]),
 		WithHome(home),
 		WithScratchDir(scratch),
-		WithEnv(map[string]string{
-			fakeCodexModeEnv:           fakeCodexCancelTreeMode,
-			fakeCodexChildStartedEnv:   childStarted,
-			fakeCodexCancelReturnedEnv: cancelReturned,
-			fakeCodexChildSentinelEnv:  childSentinel,
-		}),
+		WithSessionStore(store),
+		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+			Mode:           fakeCodexCancelTreeMode,
+			ChildStarted:   childStarted,
+			CancelReturned: cancelReturned,
+			ChildSentinel:  childSentinel,
+			RolloutPath:    rolloutPath,
+			TailStopped:    tailStopped,
+		})),
 	)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
@@ -50,9 +56,22 @@ func TestCancelQuiescesDescendantsBeforeReturnAndRebindsSession(t *testing.T) {
 
 	client, err := agent.sharedRuntime(ctx)
 	require.NoError(t, err)
+	require.NoError(t, appendFakeCodexRolloutRow(
+		rolloutPath,
+		`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
+	))
 
 	sessionID := acp.SessionId("cancel-tree-session")
-	session := newSession(agent, sessionID, root, nil, codex.Thread{ID: fakeCodexThreadID}, client, sessionMeta{}, nil)
+	session := newSession(
+		agent,
+		sessionID,
+		root,
+		nil,
+		codex.Thread{ID: fakeCodexThreadID, Path: rolloutPath},
+		client,
+		sessionMeta{},
+		nil,
+	)
 	agent.mu.Lock()
 	agent.sessions[sessionID] = session
 	agent.mu.Unlock()
@@ -69,7 +88,13 @@ func TestCancelQuiescesDescendantsBeforeReturnAndRebindsSession(t *testing.T) {
 		return statErr == nil && session.activeTurnID() == fakeCodexBlockingTurnID
 	}, 5*time.Second, 10*time.Millisecond)
 
-	require.NoError(t, agent.Cancel(ctx, CancelRequest(sessionID, "blocking-nonce")))
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- agent.Cancel(ctx, CancelRequest(sessionID, "blocking-nonce")) }()
+	result := <-blocking
+	require.NoError(t, result.err)
+	require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+	require.NoError(t, os.WriteFile(tailStopped, []byte("stopped"), 0o600))
+	require.NoError(t, <-cancelDone)
 	// If the descendant is still alive after Cancel returns, this marker makes
 	// it publish the violation sentinel immediately. Its independent delayed
 	// write catches a survivor that misses the marker race.
@@ -77,10 +102,10 @@ func TestCancelQuiescesDescendantsBeforeReturnAndRebindsSession(t *testing.T) {
 	time.Sleep(fakeCodexChildObservationWait)
 	require.NoFileExists(t, childSentinel)
 
-	result := <-blocking
-	require.NoError(t, result.err)
-	require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
-	require.True(t, session.clientDead)
+	require.False(t, session.clientDead)
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(sessionID)})
+	require.NoError(t, err)
+	require.Contains(t, string(joinSessionStoreEntries(entries)), fakeCodexLateAbortRolloutRow)
 
 	replacement, err := agent.Prompt(ctx, TextPromptRequest(sessionID, "replacement-nonce", fakeCodexReplacementPrompt))
 	require.NoError(t, err)
@@ -89,26 +114,32 @@ func TestCancelQuiescesDescendantsBeforeReturnAndRebindsSession(t *testing.T) {
 	require.Equal(t, fakeCodexThreadID, session.snapshot().codexThreadID)
 }
 
-func TestCancelThenCloseAndResumeReconcilesOnReplacementRuntime(t *testing.T) {
+func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	scratch := filepath.Join(root, "scratch")
 	childStarted := filepath.Join(root, "child-started")
 	cancelReturned := filepath.Join(root, "cancel-returned")
 	childSentinel := filepath.Join(root, "child-sentinel")
+	rolloutPath := filepath.Join(root, "rollout.jsonl")
+	tailStopped := filepath.Join(root, "tail-stopped")
 	require.NoError(t, os.MkdirAll(home, 0o700))
 	require.NoError(t, os.MkdirAll(scratch, 0o700))
 
+	store := NewInMemorySessionStore()
 	agent := NewAgent(
 		WithExecutablePath(os.Args[0]),
 		WithHome(home),
 		WithScratchDir(scratch),
-		WithEnv(map[string]string{
-			fakeCodexModeEnv:           fakeCodexCancelTreeMode,
-			fakeCodexChildStartedEnv:   childStarted,
-			fakeCodexCancelReturnedEnv: cancelReturned,
-			fakeCodexChildSentinelEnv:  childSentinel,
-		}),
+		WithSessionStore(store),
+		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+			Mode:           fakeCodexCancelTreeMode,
+			ChildStarted:   childStarted,
+			CancelReturned: cancelReturned,
+			ChildSentinel:  childSentinel,
+			RolloutPath:    rolloutPath,
+			TailStopped:    tailStopped,
+		})),
 	)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
@@ -117,6 +148,21 @@ func TestCancelThenCloseAndResumeReconcilesOnReplacementRuntime(t *testing.T) {
 	defer cancel()
 	created, err := agent.NewSession(ctx, NewSessionRequest(root))
 	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	require.NotNil(t, active)
+	stalePeer := newSession(
+		agent,
+		acp.SessionId("stale-peer"),
+		root,
+		nil,
+		codex.Thread{ID: fakeCodexStalePeerThreadID},
+		active.client,
+		sessionMeta{},
+		nil,
+	)
+	agent.mu.Lock()
+	agent.sessions[stalePeer.id] = stalePeer
+	agent.mu.Unlock()
 
 	blocking := make(chan promptResult, 1)
 	go func() {
@@ -130,22 +176,51 @@ func TestCancelThenCloseAndResumeReconcilesOnReplacementRuntime(t *testing.T) {
 
 		return statErr == nil && active != nil && active.activeTurnID() == fakeCodexBlockingTurnID
 	}, 5*time.Second, 10*time.Millisecond)
-	require.NoError(t, agent.Cancel(ctx, CancelRequest(created.SessionId, "blocking-nonce")))
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- agent.Cancel(ctx, CancelRequest(created.SessionId, "blocking-nonce")) }()
+	result := <-blocking
+	require.NoError(t, result.err)
+	require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+	require.NoError(t, os.WriteFile(tailStopped, []byte("stopped"), 0o600))
+	require.NoError(t, <-cancelDone)
 	require.NoError(t, os.WriteFile(cancelReturned, []byte("returned"), 0o600))
 	time.Sleep(fakeCodexChildObservationWait)
 	require.NoFileExists(t, childSentinel)
 
-	result := <-blocking
-	require.NoError(t, result.err)
-	require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+	entries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"` + fakeCodexThreadID + `","cwd":"` + root + `"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"before interrupt"}}`),
+	}
+	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: string(created.SessionId)},
+		Entries: entries,
+	}}))
+	stored, err := store.Load(ctx, SessionKey{SessionID: string(created.SessionId)})
+	require.NoError(t, err)
+	require.Equal(t, entries, stored)
+
 	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
 	require.NoError(t, err)
 	require.Nil(t, agent.activeSession(created.SessionId))
+	stored, err = store.Load(ctx, SessionKey{SessionID: string(created.SessionId)})
+	require.NoError(t, err)
+	require.Equal(t, entries, stored)
 
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, root))
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(created.SessionId, root))
 	require.NoError(t, err)
 	replacement, err := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "replacement-nonce", fakeCodexReplacementPrompt))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, replacement.StopReason)
 	require.Equal(t, fakeCodexThreadID, agent.activeSession(created.SessionId).snapshot().codexThreadID)
+	require.False(t, stalePeer.clientDead, "target cancellation must not fence an unrelated peer")
+}
+
+func joinSessionStoreEntries(entries []SessionStoreEntry) []byte {
+	var joined []byte
+	for _, entry := range entries {
+		joined = append(joined, entry...)
+		joined = append(joined, '\n')
+	}
+
+	return joined
 }

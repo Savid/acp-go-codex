@@ -12,28 +12,30 @@ import (
 )
 
 const (
-	methodInitialize            = "initialize"
-	methodInitialized           = "initialized"
-	methodThreadStart           = "thread/start"
-	methodThreadResume          = "thread/resume"
-	methodThreadFork            = "thread/fork"
-	methodThreadList            = "thread/list"
-	methodThreadRead            = "thread/read"
-	methodThreadTurnsList       = "thread/turns/list"
-	methodThreadDelete          = "thread/delete"
-	methodThreadUnsubscribe     = "thread/unsubscribe"
-	methodThreadCompact         = "thread/compact/start"
-	methodTurnStart             = "turn/start"
-	methodTurnSteer             = "turn/steer"
-	methodTurnInterrupt         = "turn/interrupt"
-	methodReviewStart           = "review/start"
-	methodCollaborationList     = "collaborationMode/list"
-	methodMCPStatusList         = "mcpServerStatus/list"
-	methodModelList             = "model/list"
-	methodAccountRead           = "account/read"
-	methodAccountLoginStart     = "account/login/start"
-	methodAccountLogout         = "account/logout"
-	methodAccountRateLimitsRead = "account/rateLimits/read"
+	methodInitialize                  = "initialize"
+	methodInitialized                 = "initialized"
+	methodThreadStart                 = "thread/start"
+	methodThreadResume                = "thread/resume"
+	methodThreadFork                  = "thread/fork"
+	methodThreadList                  = "thread/list"
+	methodThreadRead                  = "thread/read"
+	methodThreadTurnsList             = "thread/turns/list"
+	methodBackgroundTerminalList      = "thread/backgroundTerminals/list"
+	methodBackgroundTerminalTerminate = "thread/backgroundTerminals/terminate"
+	methodThreadDelete                = "thread/delete"
+	methodThreadUnsubscribe           = "thread/unsubscribe"
+	methodThreadCompact               = "thread/compact/start"
+	methodTurnStart                   = "turn/start"
+	methodTurnSteer                   = "turn/steer"
+	methodTurnInterrupt               = "turn/interrupt"
+	methodReviewStart                 = "review/start"
+	methodCollaborationList           = "collaborationMode/list"
+	methodMCPStatusList               = "mcpServerStatus/list"
+	methodModelList                   = "model/list"
+	methodAccountRead                 = "account/read"
+	methodAccountLoginStart           = "account/login/start"
+	methodAccountLogout               = "account/logout"
+	methodAccountRateLimitsRead       = "account/rateLimits/read"
 )
 
 const (
@@ -42,6 +44,7 @@ const (
 	fieldType             = "type"
 	fieldPath             = "path"
 	fieldID               = "id"
+	fieldProcessID        = "processId"
 	fieldStatus           = "status"
 	fieldChatGPTAccountID = "chatgptAccountId"
 	fieldChatGPTPlanType  = "chatgptPlanType"
@@ -85,6 +88,7 @@ type AppServerClient struct {
 }
 
 var _ Client = (*AppServerClient)(nil)
+var _ BackgroundTerminalClient = (*AppServerClient)(nil)
 
 const turnEventBuffer = 1024
 
@@ -279,6 +283,98 @@ func (c *AppServerClient) ListTurns(ctx context.Context, req ThreadTurnsListRequ
 		NextCursor: firstNonEmpty(stringValue(resp, "nextCursor"), stringValue(resp, "cursor")),
 		Raw:        resp,
 	}, nil
+}
+
+func (c *AppServerClient) ListBackgroundTerminals(
+	ctx context.Context,
+	req BackgroundTerminalListRequest,
+) (BackgroundTerminalListResponse, error) {
+	if req.ThreadID == "" {
+		return BackgroundTerminalListResponse{}, errors.New("list Codex background terminals: threadId is required")
+	}
+
+	params := map[string]any{fieldThreadID: req.ThreadID}
+	setNonEmpty(params, "cursor", req.Cursor)
+
+	if req.Limit > 0 {
+		params["limit"] = req.Limit
+	}
+
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodBackgroundTerminalList, params, &resp); err != nil {
+		return BackgroundTerminalListResponse{}, normalizeThreadError(err)
+	}
+
+	raw := mapSlice(resp, "data")
+
+	terminals := make([]BackgroundTerminal, 0, len(raw))
+	for _, item := range raw {
+		processID := stringValue(item, fieldProcessID)
+		if processID == "" {
+			return BackgroundTerminalListResponse{}, errors.New(
+				"list Codex background terminals: response item is missing processId",
+			)
+		}
+
+		terminals = append(terminals, BackgroundTerminal{
+			ItemID:    stringValue(item, "itemId"),
+			ProcessID: processID,
+			OSPID:     optionalInt64Value(item, "osPid"),
+			Raw:       item,
+		})
+	}
+
+	return BackgroundTerminalListResponse{
+		Terminals:  terminals,
+		NextCursor: stringValue(resp, "nextCursor"),
+	}, nil
+}
+
+func (c *AppServerClient) TerminateBackgroundTerminal(
+	ctx context.Context,
+	req BackgroundTerminalTerminateRequest,
+) (bool, error) {
+	if req.ThreadID == "" {
+		return false, errors.New("terminate Codex background terminal: threadId is required")
+	}
+
+	if req.ProcessID == "" {
+		return false, errors.New("terminate Codex background terminal: processId is required")
+	}
+
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodBackgroundTerminalTerminate, map[string]any{
+		fieldThreadID:  req.ThreadID,
+		fieldProcessID: req.ProcessID,
+	}, &resp); err != nil {
+		return false, normalizeThreadError(err)
+	}
+
+	terminated, _ := resp["terminated"].(bool)
+
+	return terminated, nil
+}
+
+func optionalInt64Value(value map[string]any, key string) *int64 {
+	raw, ok := value[key]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	var result int64
+
+	switch typed := raw.(type) {
+	case float64:
+		result = int64(typed)
+	case int64:
+		result = typed
+	case int:
+		result = int64(typed)
+	default:
+		return nil
+	}
+
+	return &result
 }
 
 func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-chan Event, error) {

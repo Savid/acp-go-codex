@@ -62,7 +62,7 @@ privacy defaults.
 | Session start fails with "codex CLI ... is too old; need >= 0.144.1" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
 | Session start or terminal auth reports unapproved filesystem lock semantics | `CODEX_HOME` is on a network, overlay, or unknown filesystem. Move it to a supported local filesystem. |
 | Terminal login/logout reports a writable-home claim failure | Another cooperating runtime or terminal account command still owns that home. Quiesce it before retrying. |
-| A peer turn reports a transport failure immediately after another session is cancelled | Cancellation retires the shared app-server generation so no command descendant can outlive the cancellation response. Retry the peer turn; its logical session will resume on the replacement generation. |
+| Cancellation reports a background-terminal containment error | Codex did not prove the target thread's terminal set empty, so the adapter retired the shared runtime generation as a containment fallback. Inspect the native app-server error, then retry; logical sessions resume lazily on a replacement generation. |
 | `session/prompt` fails with `codex_turn_failed` `cause: "timeout"` | The turn exceeded [`WithTurnTimeout`](/docs/core/sessions#turn-deadlines). Raise or clear the timeout; the session stays usable. |
 | `session/prompt` fails with authentication-required (`-32000`) | Codex credentials are missing or expired. Run `acp-go-codex login` or supply a token refresher. |
 | ACP logout is refused | Logout is gated. Start with `-codex-allow-account-logout` for an adapter-owned `CODEX_HOME`. |

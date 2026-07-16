@@ -392,19 +392,24 @@ func TestMCPUserElicitationCorrelationBuilders(t *testing.T) {
 	if got := MCPUserElicitationToolCallID(nil); got != "" {
 		t.Fatalf("unassociated mcp elicitation tool id = %q", got)
 	}
-	if got := MCPUserElicitationRequestID(req, nil); got == nil || got.Str == nil || *got.Str != "mcp-9" {
+	if got := MCPUserElicitationRequestID(req, nil); got == nil || got.Str == nil || *got.Str != "jsonrpc:string:bWNwLTk" {
 		t.Fatalf("mcp elicitation request id = %#v", got)
 	}
-	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`9`)}, nil); got == nil || got.Str == nil || *got.Str != "9" || got.Number != nil {
+	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`9`)}, nil); got == nil || got.Str == nil || *got.Str != "jsonrpc:number:9" || got.Number != nil {
 		t.Fatalf("numeric mcp elicitation request id = %#v", got)
+	}
+	numeric := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`81`)}, nil)
+	stringID := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`"81"`)}, nil)
+	if numeric == nil || numeric.Str == nil || stringID == nil || stringID.Str == nil || *numeric.Str == *stringID.Str {
+		t.Fatalf("numeric and string JSON-RPC request ids collided: numeric=%#v string=%#v", numeric, stringID)
 	}
 	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`" "`)}, nil); got != nil {
 		t.Fatalf("empty mcp elicitation request id = %#v", got)
 	}
-	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`9`)}, map[string]any{"elicitationId": "e1"}); got == nil || got.Str == nil || *got.Str != "9" {
+	if got := MCPUserElicitationRequestID(ServerRequest{ID: json.RawMessage(`9`)}, map[string]any{"elicitationId": "e1"}); got == nil || got.Str == nil || *got.Str != "jsonrpc:number:9" {
 		t.Fatalf("mcp elicitation authoritative request id = %#v", got)
 	}
-	if got := MCPUserElicitationRequestID(ServerRequest{}, map[string]any{"elicitationId": "e1"}); got == nil || got.Str == nil || *got.Str != "e1" {
+	if got := MCPUserElicitationRequestID(ServerRequest{}, map[string]any{"elicitationId": "e1"}); got == nil || got.Str == nil || *got.Str != "mcp:elicitation:ZTE" {
 		t.Fatalf("mcp elicitation fallback request id = %#v", got)
 	}
 	if got := MCPUserElicitationRequestID(ServerRequest{}, nil); got != nil {

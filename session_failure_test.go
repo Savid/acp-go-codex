@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -372,9 +373,12 @@ func TestTurnFailureTimeout(t *testing.T) {
 	}
 }
 
-func TestTurnFailureTimeoutIncludesRuntimeQuiescenceFailure(t *testing.T) {
-	closeErr := errors.New("runtime quiescence failed")
-	interrupt := &recordingCancelClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}
+func TestTurnFailureTimeoutIncludesTerminalContainmentFailure(t *testing.T) {
+	containErr := errors.New("terminal containment failed")
+	interrupt := &terminalCleanupErrorClient{
+		recordingCancelClient: recordingCancelClient{spyCodexClient: newSpyCodexClient()},
+		err:                   containErr,
+	}
 	agent := NewAgent(WithTurnTimeout(time.Nanosecond))
 	timeoutSession := &session{
 		agent:         agent,
@@ -392,8 +396,43 @@ func TestTurnFailureTimeoutIncludesRuntimeQuiescenceFailure(t *testing.T) {
 		TextPromptRequest(timeoutSession.id, "test-turn", "hi"),
 	)
 	require.True(t, isTurnFailure(err, codex.CauseTimeout))
-	require.ErrorContains(t, err, closeErr.Error())
+	require.ErrorContains(t, err, containErr.Error())
 	require.True(t, timeoutSession.clientDead)
+	interrupt.mu.Lock()
+	require.True(t, interrupt.closed, "failed targeted containment must fence the shared runtime")
+	interrupt.mu.Unlock()
+}
+
+func TestTurnTimeoutMirrorsRowsWrittenDuringRuntimeQuiescence(t *testing.T) {
+	root := t.TempDir()
+	rolloutPath := filepath.Join(root, "rollout.jsonl")
+	require.NoError(t, appendFakeCodexRolloutRow(
+		rolloutPath,
+		`{"type":"session_meta","payload":{"id":"thread"}}`,
+	))
+
+	store := NewInMemorySessionStore()
+	interrupt := &lateRolloutCloseClient{
+		recordingCancelClient: recordingCancelClient{spyCodexClient: newSpyCodexClient()},
+		rolloutPath:           rolloutPath,
+	}
+	agent := NewAgent(WithTurnTimeout(time.Nanosecond), WithSessionStore(store))
+	timeoutSession := &session{
+		agent: agent, id: "timeout-late-rollout", cwd: root,
+		codexThreadID: "thread", rolloutPath: rolloutPath, client: interrupt,
+	}
+	agent.setAgentClient(newRecordingAgentClient())
+	agent.sessions[timeoutSession.id] = timeoutSession
+	agent.runtimeClient = interrupt
+
+	_, err := timeoutSession.Prompt(
+		context.Background(),
+		TextPromptRequest(timeoutSession.id, "test-turn", "hi"),
+	)
+	require.True(t, isTurnFailure(err, codex.CauseTimeout))
+	entries, loadErr := store.Load(context.Background(), SessionKey{SessionID: string(timeoutSession.id)})
+	require.NoError(t, loadErr)
+	require.Contains(t, string(joinSessionStoreEntries(entries)), fakeCodexLateAbortRolloutRow)
 }
 
 // recordingCancelClient hangs the turn until its context is cancelled and
@@ -402,6 +441,55 @@ type recordingCancelClient struct {
 	*spyCodexClient
 	cancelled bool
 	closeErr  error
+}
+
+type lateRolloutCloseClient struct {
+	recordingCancelClient
+	rolloutPath string
+	terminated  bool
+}
+
+func (c *lateRolloutCloseClient) ListBackgroundTerminals(
+	context.Context,
+	codex.BackgroundTerminalListRequest,
+) (codex.BackgroundTerminalListResponse, error) {
+	if c.terminated {
+		return codex.BackgroundTerminalListResponse{}, nil
+	}
+
+	return codex.BackgroundTerminalListResponse{
+		Terminals: []codex.BackgroundTerminal{{ProcessID: "late-rollout-terminal"}},
+	}, nil
+}
+
+func (c *lateRolloutCloseClient) TerminateBackgroundTerminal(
+	context.Context,
+	codex.BackgroundTerminalTerminateRequest,
+) (bool, error) {
+	c.terminated = true
+
+	return true, appendFakeCodexRolloutRow(c.rolloutPath, fakeCodexLateAbortRolloutRow)
+}
+
+type terminalCleanupErrorClient struct {
+	recordingCancelClient
+	err error
+}
+
+func (c *terminalCleanupErrorClient) ListBackgroundTerminals(
+	context.Context,
+	codex.BackgroundTerminalListRequest,
+) (codex.BackgroundTerminalListResponse, error) {
+	return codex.BackgroundTerminalListResponse{
+		Terminals: []codex.BackgroundTerminal{{ProcessID: "target-process"}},
+	}, nil
+}
+
+func (c *terminalCleanupErrorClient) TerminateBackgroundTerminal(
+	context.Context,
+	codex.BackgroundTerminalTerminateRequest,
+) (bool, error) {
+	return false, c.err
 }
 
 func (c *recordingCancelClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (<-chan codex.Event, error) {
@@ -429,7 +517,13 @@ func (c *recordingCancelClient) interrupted() bool {
 	return c.cancelled
 }
 
-func (c *recordingCancelClient) Close(context.Context) error { return c.closeErr }
+func (c *recordingCancelClient) Close(context.Context) error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+
+	return c.closeErr
+}
 
 func (c *recordingCancelClient) UnsubscribeThread(context.Context, string) error { return nil }
 func (c *recordingCancelClient) DeleteThread(context.Context, codex.ThreadDeleteRequest) error {

@@ -550,7 +550,7 @@ func TestServerRequestsPermissionsAndMCPElicitation(t *testing.T) {
 	if !ok || formMap["action"] != "accept" {
 		t.Fatalf("form elicitation response = %#v", form)
 	}
-	if len(conn.scopes) == 0 || conn.scopes[len(conn.scopes)-1].SessionID != session.id || conn.scopes[len(conn.scopes)-1].TurnNonce != "turn-1" || conn.scopes[len(conn.scopes)-1].RequestID == nil || conn.scopes[len(conn.scopes)-1].RequestID.Str == nil || *conn.scopes[len(conn.scopes)-1].RequestID.Str != "mcp-form-1" || conn.scopes[len(conn.scopes)-1].ToolCallID != "" {
+	if len(conn.scopes) == 0 || conn.scopes[len(conn.scopes)-1].SessionID != session.id || conn.scopes[len(conn.scopes)-1].TurnNonce != "turn-1" || conn.scopes[len(conn.scopes)-1].RequestID == nil || conn.scopes[len(conn.scopes)-1].RequestID.Str == nil || *conn.scopes[len(conn.scopes)-1].RequestID.Str != "jsonrpc:string:bWNwLWZvcm0tMQ" || conn.scopes[len(conn.scopes)-1].ToolCallID != "" {
 		t.Fatalf("MCP form scope = %#v", conn.scopes)
 	}
 

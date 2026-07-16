@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSessionInteractionCancellationBranches(t *testing.T) {
@@ -201,4 +202,127 @@ func TestEnsureLiveClientRelaunchFailures(t *testing.T) {
 	if _, err := resumeFails.Prompt(ctx, TextPromptRequest("relaunch-resume", "test-turn", "hi")); !isTurnFailure(err, codex.CauseTransport) {
 		t.Fatalf("prompt after failed relaunch = %v, want transport failure", err)
 	}
+}
+
+func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
+	t.Run("canonical resumed rollout path", func(t *testing.T) {
+		replacement := newSpyCodexClient()
+		replacement.thread.Path = "/replacement/rollout.jsonl"
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+			return replacement, nil
+		}))
+		old := newSpyCodexClient()
+		active := &session{
+			agent: agent, id: "path", cwd: "/tmp/project",
+			codexThreadID: "thread-1", client: old, clientDead: true,
+		}
+		agent.sessions[active.id] = active
+		agent.runtimeClient = old
+		agent.runtimeDead = true
+
+		require.NoError(t, active.ensureLiveClient(context.Background()))
+		require.Equal(t, "/replacement/rollout.jsonl", active.rolloutPath)
+		require.NoError(t, agent.Close())
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Agent, *session)
+		check  func(*testing.T, error)
+	}{
+		{
+			name: "logical session removed",
+			mutate: func(agent *Agent, active *session) {
+				agent.mu.Lock()
+				delete(agent.sessions, active.id)
+				agent.mu.Unlock()
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+
+				require.ErrorContains(t, err, "unknown session")
+			},
+		},
+		{
+			name: "runtime generation retired",
+			mutate: func(agent *Agent, _ *session) {
+				agent.mu.Lock()
+				agent.runtimeDead = true
+				agent.mu.Unlock()
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+
+				require.ErrorIs(t, err, codex.ErrConnectionClosed)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			replacement := &blockingLifecycleCodexClient{
+				spyCodexClient: newSpyCodexClient(),
+				resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
+				resumeRelease:  make(chan struct{}),
+			}
+			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+				return replacement, nil
+			}))
+			old := newSpyCodexClient()
+			active := &session{
+				agent: agent, id: acp.SessionId(test.name), cwd: "/tmp/project",
+				codexThreadID: "thread-1", client: old, clientDead: true,
+			}
+			agent.sessions[active.id] = active
+			agent.runtimeClient = old
+			agent.runtimeDead = true
+
+			done := make(chan error, 1)
+			go func() { done <- active.ensureLiveClient(context.Background()) }()
+			<-replacement.resumeStarted
+			test.mutate(agent, active)
+			close(replacement.resumeRelease)
+			test.check(t, <-done)
+			require.True(t, active.clientDead)
+			require.NoError(t, agent.Close())
+		})
+	}
+}
+
+type blockingUnsubscribeErrorClient struct {
+	*errorCodexClient
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingUnsubscribeErrorClient) UnsubscribeThread(ctx context.Context, _ string) error {
+	close(c.started)
+
+	select {
+	case <-c.release:
+		return errors.New("retired connection")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestUnsubscribeAcceptsConcurrentRuntimeRetirementProof(t *testing.T) {
+	client := &blockingUnsubscribeErrorClient{
+		errorCodexClient: &errorCodexClient{spyCodexClient: newSpyCodexClient()},
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	agent := NewAgent()
+	active := &session{
+		agent: agent, id: "unsubscribe-race", codexThreadID: "thread-1", client: client,
+	}
+	agent.sessions[active.id] = active
+	agent.runtimeClient = client
+
+	done := make(chan error, 1)
+	go func() { done <- active.unsubscribe(context.Background()) }()
+	<-client.started
+	active.setClientDead(true)
+	close(client.release)
+
+	require.NoError(t, <-done)
+	require.True(t, agent.runtimeDead)
 }

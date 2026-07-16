@@ -169,7 +169,7 @@ func TestAuthErrorBranches(t *testing.T) {
 	}
 
 	agent := NewAgent()
-	if _, err := agent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: "terminal"}); err == nil {
+	if _, err := agent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: authMethodTypeTerminal}); err == nil {
 		t.Fatal("Authenticate accepted unsupported method")
 	}
 	if _, err := agent.Authenticate(ctx, acp.AuthenticateRequest{MethodId: authMethodChatGPTAuthTokens, Meta: map[string]any{}}); err == nil {

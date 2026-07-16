@@ -364,8 +364,9 @@ func (a *Agent) releaseRetainedRuntimeThreads(client codex.Client, epoch uint64)
 }
 
 // sharedRuntime returns the one app-server owned by this Agent. A dead runtime
-// is replaced as one atomic generation: every loaded thread is resumed with
-// its own MCP config before any thread becomes visible again.
+// is replaced as one atomic generation. Logical sessions remain marked dead
+// and resume independently on first use, so one stale peer cannot prevent an
+// unrelated session from loading or starting on the replacement generation.
 func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 	for {
 		a.mu.Lock()
@@ -409,13 +410,6 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 		oldRelease := a.runtimeNativeRelease
 		oldScratchRoot := a.runtimeScratchRoot
 		oldScratchRelease := a.runtimeScratchRelease
-		recovering := oldClient != nil || a.runtimeDead
-
-		sessions := make([]*session, 0, len(a.sessions))
-		if recovering {
-			sessions = a.lockRuntimeRecoverySessions()
-		}
-
 		a.runtimeClient = nil
 		a.runtimeNativeRelease = nil
 		a.runtimeScratchRoot = ""
@@ -437,7 +431,6 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 
 			close(wait)
 			a.mu.Unlock()
-			releaseRuntimeRecoverySessions(sessions)
 
 			return nil, cleanupErr
 		}
@@ -468,16 +461,6 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			}
 		}
 
-		if err == nil && recovering && len(sessions) > 0 {
-			err = a.resumeRuntimeSessions(ctx, client, sessions)
-			if err != nil {
-				closeErr := client.Close(context.Background())
-				err = finalizeRuntimeResources(
-					errors.Join(err, closeErr), release, scratchRoot, scratchRelease,
-				)
-			}
-		}
-
 		a.mu.Lock()
 		if err == nil && !a.closed && a.runtimeEpoch == epoch {
 			a.runtimeClient = client
@@ -485,10 +468,6 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			a.runtimeScratchRoot = scratchRoot
 			a.runtimeScratchRelease = scratchRelease
 			a.runtimeDead = false
-
-			for _, session := range sessions {
-				session.setClient(client, false)
-			}
 		} else if err == nil {
 			closeErr := client.Close(context.Background())
 			cleanupErr := finalizeRuntimeResources(closeErr, release, scratchRoot, scratchRelease)
@@ -503,45 +482,12 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 
 		close(wait)
 		a.mu.Unlock()
-		releaseRuntimeRecoverySessions(sessions)
 
 		if err != nil {
 			return nil, err
 		}
 
 		return client, nil
-	}
-}
-
-// lockRuntimeRecoverySessions is called with Agent.mu held. TryRLock excludes
-// an already-admitted close without creating a lock-order cycle, while Agent.mu
-// prevents a new close admission until every selected lifecycle lease is held.
-func (a *Agent) lockRuntimeRecoverySessions() []*session {
-	sessions := make([]*session, 0, len(a.sessions))
-	for _, session := range a.sessions {
-		if !session.lifecycle.TryRLock() {
-			continue
-		}
-
-		session.mu.Lock()
-		closing := session.closing
-		session.mu.Unlock()
-
-		if closing {
-			session.lifecycle.RUnlock()
-
-			continue
-		}
-
-		sessions = append(sessions, session)
-	}
-
-	return sessions
-}
-
-func releaseRuntimeRecoverySessions(sessions []*session) {
-	for i := len(sessions) - 1; i >= 0; i-- {
-		sessions[i].lifecycle.RUnlock()
 	}
 }
 
@@ -705,25 +651,28 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 	return cleanupErr
 }
 
-func (a *Agent) resumeRuntimeSessions(ctx context.Context, client codex.Client, sessions []*session) error {
-	for _, session := range sessions {
-		req, err := session.resumeRequest()
-		if err != nil {
-			return err
-		}
-
-		if _, err := client.ResumeThread(ctx, req); err != nil {
-			return codexThreadACPError(err, session.accountMetaSnapshot())
-		}
+func (a *Agent) resumeRuntimeSession(ctx context.Context, client codex.Client, session *session) (codex.Thread, error) {
+	request, err := session.resumeRequest()
+	if err != nil {
+		return codex.Thread{}, err
 	}
 
-	for _, session := range sessions {
-		if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
-			return err
-		}
+	thread, err := client.ResumeThread(ctx, request)
+	if err != nil {
+		return codex.Thread{}, codexThreadACPError(err, session.accountMetaSnapshot())
 	}
 
-	return nil
+	if thread.ID != "" && thread.ID != request.ThreadID {
+		return codex.Thread{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex resumed a different thread during runtime recovery",
+		})
+	}
+
+	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		return codex.Thread{}, err
+	}
+
+	return thread, nil
 }
 
 func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, session *session) error {

@@ -31,6 +31,14 @@ type Client interface {
 	Close(context.Context) error
 }
 
+// BackgroundTerminalClient is the optional experimental provider surface used
+// to contain native command processes without retiring the shared app-server
+// generation. Callers must scope every operation to the owning Codex thread.
+type BackgroundTerminalClient interface {
+	ListBackgroundTerminals(context.Context, BackgroundTerminalListRequest) (BackgroundTerminalListResponse, error)
+	TerminateBackgroundTerminal(context.Context, BackgroundTerminalTerminateRequest) (bool, error)
+}
+
 type RequestHandler func(context.Context, ServerRequest) (any, error)
 
 type ServerRequest struct {
@@ -84,6 +92,29 @@ type ThreadTurnsListResponse struct {
 	Turns      []map[string]any
 	NextCursor string
 	Raw        map[string]any
+}
+
+type BackgroundTerminalListRequest struct {
+	ThreadID string
+	Cursor   string
+	Limit    int
+}
+
+type BackgroundTerminalListResponse struct {
+	Terminals  []BackgroundTerminal
+	NextCursor string
+}
+
+type BackgroundTerminalTerminateRequest struct {
+	ThreadID  string
+	ProcessID string
+}
+
+type BackgroundTerminal struct {
+	ItemID    string
+	ProcessID string
+	OSPID     *int64
+	Raw       map[string]any
 }
 
 type Thread struct {

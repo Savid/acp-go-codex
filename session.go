@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -148,19 +149,42 @@ func (s *session) ensureLiveClient(ctx context.Context) error {
 		return err
 	}
 
+	thread, err := s.agent.resumeRuntimeSession(ctx, client, s)
+	if err != nil {
+		return err
+	}
+
+	// Publish the rebound client only if this is still the current runtime
+	// generation and the logical session was not closed while native resume was
+	// in flight. Agent.mu before session.mu preserves the lifecycle lock order.
+	s.agent.mu.Lock()
+	current := s.agent.sessions[s.id]
+	runtimeCurrent := s.agent.runtimeClient == client && !s.agent.runtimeDead && !s.agent.closed
+
 	s.mu.Lock()
-	s.client = client
-	s.clientDead = false
+
+	closing := s.closing
+	if current == s && runtimeCurrent && !closing {
+		s.client = client
+
+		s.clientDead = false
+
+		if thread.Path != "" {
+			s.rolloutPath = thread.Path
+		}
+	}
 	s.mu.Unlock()
+	s.agent.mu.Unlock()
+
+	if current != s || closing {
+		return newUnknownSession()
+	}
+
+	if !runtimeCurrent {
+		return fmt.Errorf("%w: Codex runtime generation changed during session recovery", codex.ErrConnectionClosed)
+	}
 
 	return nil
-}
-
-func (s *session) setClient(client codex.Client, dead bool) {
-	s.mu.Lock()
-	s.client = client
-	s.clientDead = dead
-	s.mu.Unlock()
 }
 
 func (s *session) setClientDead(dead bool) {

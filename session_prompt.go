@@ -301,9 +301,9 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 	return nil
 }
 
-// abortTurnAfterTimeout interrupts the in-flight native Codex turn, then uses
-// the same process-tree fence as explicit cancellation. The logical session is
-// retained for lazy resume on the replacement runtime generation.
+// abortTurnAfterTimeout interrupts the in-flight native Codex turn, then
+// contains only background terminals owned by this thread. Peer sessions keep
+// using the shared app-server generation.
 func (s *session) abortTurnAfterTimeout(ctx context.Context) error {
 	client, threadID, turnID := s.activeTurnTarget()
 
@@ -312,12 +312,7 @@ func (s *session) abortTurnAfterTimeout(ctx context.Context) error {
 
 	cancelInterrupt()
 
-	quiesceCtx, cancelQuiesce := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-	quiesceErr := s.agent.quiesceRuntimeAfterCancel(quiesceCtx, client)
-
-	cancelQuiesce()
-
-	return errors.Join(interruptErr, quiesceErr)
+	return s.containCancelledTurn(ctx, client, threadID, interruptErr)
 }
 
 func (s *session) recordRawEmitFailure(ctx context.Context, err error) {

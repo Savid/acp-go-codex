@@ -665,7 +665,7 @@ func TestMCPUserElicitationLiveShapeUsesStringRequestCorrelation(t *testing.T) {
 	require.Empty(t, conn.scopes[0].ToolCallID)
 	require.NotNil(t, conn.scopes[0].RequestID)
 	require.NotNil(t, conn.scopes[0].RequestID.Str)
-	require.Equal(t, acp.RequestIdStr("81"), *conn.scopes[0].RequestID.Str)
+	require.Equal(t, acp.RequestIdStr("jsonrpc:number:81"), *conn.scopes[0].RequestID.Str)
 	require.Nil(t, conn.scopes[0].RequestID.Number)
 
 	wire, err := scopedElicitationParams(conn.elicitations[0], conn.scopes[0])
@@ -676,7 +676,7 @@ func TestMCPUserElicitationLiveShapeUsesStringRequestCorrelation(t *testing.T) {
 	require.NoError(t, json.Unmarshal(payload[jsonFieldMeta], &meta))
 	var route map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(meta[routeMetaKey], &route))
-	require.Equal(t, `"81"`, string(route[routeRequestIDKey]))
+	require.Equal(t, `"jsonrpc:number:81"`, string(route[routeRequestIDKey]))
 	require.NotContains(t, route, routeToolCallIDKey)
 }
 
@@ -757,7 +757,7 @@ func TestMCPUserElicitationURLRemainsStandaloneDuringActiveTool(t *testing.T) {
 	require.Empty(t, conn.scopes[0].ToolCallID)
 	require.NotNil(t, conn.scopes[0].RequestID)
 	require.NotNil(t, conn.scopes[0].RequestID.Str)
-	require.Equal(t, acp.RequestIdStr("83"), *conn.scopes[0].RequestID.Str)
+	require.Equal(t, acp.RequestIdStr("jsonrpc:number:83"), *conn.scopes[0].RequestID.Str)
 }
 
 func TestMCPUserElicitationCorrelationFailsClosed(t *testing.T) {

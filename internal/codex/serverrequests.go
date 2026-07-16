@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -522,18 +523,25 @@ func RequestTurnID(params map[string]any) string {
 }
 
 // MCPUserElicitationRequestID returns the request correlation for a standalone
-// MCP elicitation. Native string IDs are preserved and native integer IDs are
-// represented canonically as strings because route-envelope correlations are
-// string-only. URL-flow elicitation IDs are the fallback.
+// MCP elicitation. Route-envelope correlations are type-tagged so JSON-RPC
+// number 81, JSON-RPC string "81", and an MCP elicitationId "81" remain
+// distinct. The raw ServerRequest ID is retained separately for the native
+// response and is never replaced by this route-only correlation.
 func MCPUserElicitationRequestID(req ServerRequest, params map[string]any) *acp.RequestId {
 	if nativeRequestID := RequestIDFromRaw(req.ID); nativeRequestID != nil {
 		var value string
 
 		switch {
 		case nativeRequestID.Str != nil:
-			value = string(*nativeRequestID.Str)
+			if strings.TrimSpace(string(*nativeRequestID.Str)) == "" {
+				return nil
+			}
+
+			value = "jsonrpc:string:" + base64.RawURLEncoding.EncodeToString(
+				[]byte(string(*nativeRequestID.Str)),
+			)
 		case nativeRequestID.Number != nil:
-			value = strconv.FormatInt(int64(*nativeRequestID.Number), 10)
+			value = "jsonrpc:number:" + strconv.FormatInt(int64(*nativeRequestID.Number), 10)
 		}
 
 		if strings.TrimSpace(value) != "" {
@@ -548,7 +556,9 @@ func MCPUserElicitationRequestID(req ServerRequest, params map[string]any) *acp.
 		return nil
 	}
 
-	requestIDValue := acp.RequestIdStr(value)
+	requestIDValue := acp.RequestIdStr(
+		"mcp:elicitation:" + base64.RawURLEncoding.EncodeToString([]byte(value)),
+	)
 	requestID := acp.RequestId{Str: &requestIDValue}
 
 	return &requestID

@@ -16,6 +16,7 @@ const (
 	authMetaCodexAuth             = "codexAuth"
 	authChatGPTAuthTokensMetaPath = "chatgptAuthTokens" // #nosec G101 -- metadata field name, not a token.
 	authMetaAuthKey               = "auth"
+	authMethodTypeTerminal        = "terminal"
 )
 
 func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
@@ -39,7 +40,7 @@ func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 			Id:          authMethodCodexLogin,
 			Name:        "Codex Login",
 			Description: acp.Ptr("Authenticate with the local Codex CLI"),
-			Type:        "terminal",
+			Type:        authMethodTypeTerminal,
 			Args:        args,
 		}
 		methods = append(methods, acp.AuthMethod{Terminal: &method})

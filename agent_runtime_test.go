@@ -26,6 +26,15 @@ type runtimeFailureClient struct {
 	events    []codex.Event
 }
 
+type mismatchedResumeClient struct{ *runtimeRecordingClient }
+
+func (c *mismatchedResumeClient) ResumeThread(
+	context.Context,
+	codex.ThreadResumeRequest,
+) (codex.Thread, error) {
+	return codex.Thread{ID: "different-thread"}, nil
+}
+
 func (c *runtimeFailureClient) ResumeThread(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
 	if c.resumeErr != nil {
 		return codex.Thread{}, c.resumeErr
@@ -292,7 +301,7 @@ func TestAgentSharesOneRuntimeAcrossThreadsAndReleasesItAtAgentClose(t *testing.
 	require.Equal(t, 1, client.closeCount)
 }
 
-func TestRuntimeReplacementResumesEveryConfigBeforeAnyCanary(t *testing.T) {
+func TestRuntimeReplacementResumesEachSessionLazilyWithItsOwnConfig(t *testing.T) {
 	first := newRuntimeRecordingClient()
 	replacement := newRuntimeRecordingClient()
 	clients := []codex.Client{first, replacement}
@@ -309,19 +318,32 @@ func TestRuntimeReplacementResumesEveryConfigBeforeAnyCanary(t *testing.T) {
 	serverB := HTTPMCPServer("marker", "https://b.example/mcp", map[string]string{"Authorization": "Bearer B"})
 	a, err := agent.NewSession(context.Background(), NewSessionRequest("/work/a", WithSessionMCPServers(serverA)))
 	require.NoError(t, err)
-	_, err = agent.NewSession(context.Background(), NewSessionRequest("/work/b", WithSessionMCPServers(serverB)))
+	b, err := agent.NewSession(context.Background(), NewSessionRequest("/work/b", WithSessionMCPServers(serverB)))
 	require.NoError(t, err)
 
 	agent.markRuntimeDead(first)
 	_, err = agent.Prompt(context.Background(), TextPromptRequest(a.SessionId, "turn-a", "hello"))
 	require.NoError(t, err)
 	require.Equal(t, 2, launch)
+	require.Len(t, replacement.resumes, 1)
+	require.Len(t, replacement.order, 2)
+	require.True(t, strings.HasPrefix(replacement.order[0], "resume:"), replacement.order)
+	require.True(t, strings.HasPrefix(replacement.order[1], "canary:"), replacement.order)
+	bSession := agent.activeSession(b.SessionId)
+	require.NotNil(t, bSession)
+	require.True(t, bSession.clientDead)
+
+	_, err = agent.Prompt(context.Background(), TextPromptRequest(b.SessionId, "turn-b", "hello"))
+	require.NoError(t, err)
+	require.Equal(t, 2, launch)
 	require.Len(t, replacement.resumes, 2)
 	require.Len(t, replacement.order, 4)
-	require.True(t, strings.HasPrefix(replacement.order[0], "resume:"), replacement.order)
-	require.True(t, strings.HasPrefix(replacement.order[1], "resume:"), replacement.order)
-	require.True(t, strings.HasPrefix(replacement.order[2], "canary:"), replacement.order)
-	require.True(t, strings.HasPrefix(replacement.order[3], "canary:"), replacement.order)
+	require.Equal(t, []string{
+		"resume:thread-1",
+		"canary:thread-1",
+		"resume:thread-2",
+		"canary:thread-2",
+	}, replacement.order)
 
 	configs := map[string]map[string]any{}
 	for _, resume := range replacement.resumes {
@@ -766,11 +788,17 @@ func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {
 	invalid := &session{agent: agent, mcpApprovalMode: "invalid"}
 	_, err := invalid.resumeRequest()
 	require.Error(t, err)
-	require.Error(t, agent.resumeRuntimeSessions(ctx, newSpyCodexClient(), []*session{invalid}))
+	_, err = agent.resumeRuntimeSession(ctx, newSpyCodexClient(), invalid)
+	require.Error(t, err)
 
 	valid := &session{agent: agent, id: "s", codexThreadID: "thread", cwd: "/work"}
 	resumeFailure := &runtimeFailureClient{runtimeRecordingClient: newRuntimeRecordingClient(), resumeErr: errors.New("resume")}
-	require.Error(t, agent.resumeRuntimeSessions(ctx, resumeFailure, []*session{valid}))
+	_, err = agent.resumeRuntimeSession(ctx, resumeFailure, valid)
+	require.Error(t, err)
+
+	mismatch := &mismatchedResumeClient{runtimeRecordingClient: newRuntimeRecordingClient()}
+	_, err = agent.resumeRuntimeSession(ctx, mismatch, valid)
+	require.ErrorContains(t, err, "different thread")
 
 	require.NoError(t, agent.runtimeReadyCanary(ctx, newSpyCodexClient(), valid))
 	valid.mcpServers = []acp.McpServer{HTTPMCPServer("marker", "https://example/mcp", nil)}
@@ -865,7 +893,8 @@ func TestRuntimeRemainingCanaryAndObserverBranches(t *testing.T) {
 		runtimeRecordingClient: newRuntimeRecordingClient(),
 		events:                 []codex.Event{{Kind: codex.EventError}},
 	}
-	require.Error(t, agent.resumeRuntimeSessions(ctx, noMarker, []*session{valid}))
+	_, err := agent.resumeRuntimeSession(ctx, noMarker, valid)
+	require.Error(t, err)
 	oldDeadline := runtimeReadyDeadline
 	t.Cleanup(func() { runtimeReadyDeadline = oldDeadline })
 	runtimeReadyDeadline = time.Nanosecond
@@ -886,7 +915,7 @@ func TestRuntimeRemainingCanaryAndObserverBranches(t *testing.T) {
 			return newSpyCodexClient(), nil
 		}),
 	)
-	_, err := launcher.launchRuntimeClient(ctx, 1, "")
+	_, err = launcher.launchRuntimeClient(ctx, 1, "")
 	require.NoError(t, err)
 	gotOptions.ObserveProcess(ctx, string(RuntimeProcessProviderDescendant), 1)
 	gotOptions.ObserveStartupStage(ctx, string(RuntimeResourceRuntime), string(RuntimeStartupSpawn), time.Millisecond, nil)

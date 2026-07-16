@@ -1092,6 +1092,13 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 	if _, mcpErr := client.MCPServerStatusList(ctx, thread.ID); mcpErr != nil {
 		t.Fatalf("MCPServerStatusList returned error: %v", mcpErr)
 	}
+	terminals, terminalsErr := client.ListBackgroundTerminals(ctx, BackgroundTerminalListRequest{ThreadID: thread.ID})
+	if terminalsErr != nil {
+		t.Fatalf("ListBackgroundTerminals returned error: %v", terminalsErr)
+	}
+	if len(terminals.Terminals) != 0 {
+		t.Fatalf("new thread unexpectedly has background terminals: %#v", terminals.Terminals)
+	}
 	t.Cleanup(func() {
 		if unsubErr := client.UnsubscribeThread(context.Background(), thread.ID); unsubErr != nil {
 			t.Fatalf("UnsubscribeThread returned error: %v", unsubErr)

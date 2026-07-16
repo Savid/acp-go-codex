@@ -53,7 +53,8 @@ does. Any other value is rejected with invalid params.
   with an invalid-params error at session start.
 </Note>
 
-After native-process replacement, every loaded thread is configured before any
-thread runs its bounded `runtime_ready` canary. This ordering is required even
-when two threads use the same MCP server name with different endpoints or
-credentials.
+After native-process replacement, only the addressed thread is resumed. Its own
+MCP configuration is attached before it runs the bounded `runtime_ready`
+canary; other logical sessions remain unavailable until independently used.
+This keeps threads with the same MCP server name but different endpoints or
+credentials isolated, and a stale peer cannot block recovery.
