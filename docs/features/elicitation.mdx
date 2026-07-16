@@ -20,6 +20,14 @@ its native metadata and adds one complete reserved route object containing
 `toolCallId` or `requestId`. A native or MCP payload that already contains the
 reserved key is rejected rather than overwritten or merged.
 
+An MCP user elicitation that names a native `toolCallId` or `itemId` is
+associated with a tool already published in the active turn. The adapter maps
+that native identifier to the exact nonterminal ACP tool-call ID before issuing
+the elicitation. Missing, completed, or ambiguous associations are cancelled;
+they are never forwarded with an invented tool identity. Standalone MCP
+elicitations instead use the native JSON-RPC request ID (or the URL-flow
+elicitation ID when no request ID exists) as `requestId`.
+
 ## Capability gating
 
 Elicitation is gated on the capability the client advertised at initialize:

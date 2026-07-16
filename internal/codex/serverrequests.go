@@ -517,15 +517,33 @@ func IsURLElicitation(params map[string]any) bool {
 	return stringValue(params, fieldMode) == modeURL
 }
 
-// MCPElicitationToolCallID chooses the ACP tool-call ID for an MCP user
-// elicitation request.
-func MCPElicitationToolCallID(req ServerRequest, params map[string]any) string {
+// MCPUserElicitationToolCallID returns only an explicit native tool/item
+// association. JSON-RPC request IDs and standalone elicitation IDs are request
+// correlations, never ACP tool-call identities.
+func MCPUserElicitationToolCallID(params map[string]any) string {
 	return firstNonEmpty(
 		stringValue(params, fieldToolCallID),
 		stringValue(params, fieldItemID),
-		stringValue(params, fieldElicitationID),
-		ServerRequestID(req.ID),
 	)
+}
+
+// MCPUserElicitationRequestID returns the request correlation for a standalone
+// MCP elicitation. The native JSON-RPC request ID is authoritative; URL-flow
+// elicitation IDs are the fallback when no JSON-RPC ID is available.
+func MCPUserElicitationRequestID(req ServerRequest, params map[string]any) *acp.RequestId {
+	if requestID := RequestIDFromRaw(req.ID); requestID != nil {
+		return requestID
+	}
+
+	value := stringValue(params, fieldElicitationID)
+	if value == "" {
+		return nil
+	}
+
+	requestIDValue := acp.RequestIdStr(value)
+	requestID := acp.RequestId{Str: &requestIDValue}
+
+	return &requestID
 }
 
 // MCPElicitationRequest renders a native MCP elicitation as an ACP

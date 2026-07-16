@@ -329,8 +329,6 @@ func TestMCPElicitationBuilders(t *testing.T) {
 }
 
 func TestMCPElicitationRequestBuilders(t *testing.T) {
-	req := ServerRequest{ID: json.RawMessage(`"mcp-9"`), Method: RequestMCPElicitation}
-
 	if got := ElicitationCancelResponse(); got[fieldAction] != "cancel" {
 		t.Fatalf("cancel response = %#v", got)
 	}
@@ -347,16 +345,6 @@ func TestMCPElicitationRequestBuilders(t *testing.T) {
 	if !IsURLElicitation(map[string]any{"mode": "url"}) || IsURLElicitation(map[string]any{"mode": "form"}) {
 		t.Fatal("IsURLElicitation mode detection failed")
 	}
-	if got := MCPElicitationToolCallID(req, map[string]any{"toolCallId": "t1", "itemId": "i1"}); got != "t1" {
-		t.Fatalf("mcp elicitation id = %q", got)
-	}
-	if got := MCPElicitationToolCallID(req, map[string]any{"itemId": "i1"}); got != "i1" {
-		t.Fatalf("mcp elicitation id itemId = %q", got)
-	}
-	if got := MCPElicitationToolCallID(req, nil); got != "mcp-9" {
-		t.Fatalf("mcp elicitation id request fallback = %q", got)
-	}
-
 	urlReq := MCPElicitationRequest(map[string]any{"mode": "url", "url": "https://example.com", "elicitationId": "e1"}, map[string]any{"m": true})
 	if urlReq.Url == nil || urlReq.Url.Url != "https://example.com" || urlReq.Url.Message != "MCP server needs input" {
 		t.Fatalf("url elicitation request = %#v", urlReq)
@@ -386,6 +374,29 @@ func TestMCPElicitationRequestBuilders(t *testing.T) {
 	}
 	if answers := stringAnswersFromAny("solo"); len(answers) != 1 || answers[0] != "solo" {
 		t.Fatalf("scalar answers = %#v", answers)
+	}
+}
+
+func TestMCPUserElicitationCorrelationBuilders(t *testing.T) {
+	req := ServerRequest{ID: json.RawMessage(`"mcp-9"`), Method: RequestMCPElicitation}
+
+	if got := MCPUserElicitationToolCallID(map[string]any{"toolCallId": "t1", "itemId": "i1"}); got != "t1" {
+		t.Fatalf("mcp elicitation id = %q", got)
+	}
+	if got := MCPUserElicitationToolCallID(map[string]any{"itemId": "i1"}); got != "i1" {
+		t.Fatalf("mcp elicitation id itemId = %q", got)
+	}
+	if got := MCPUserElicitationToolCallID(nil); got != "" {
+		t.Fatalf("unassociated mcp elicitation tool id = %q", got)
+	}
+	if got := MCPUserElicitationRequestID(req, nil); got == nil || got.Str == nil || *got.Str != "mcp-9" {
+		t.Fatalf("mcp elicitation request id = %#v", got)
+	}
+	if got := MCPUserElicitationRequestID(ServerRequest{}, map[string]any{"elicitationId": "e1"}); got == nil || got.Str == nil || *got.Str != "e1" {
+		t.Fatalf("mcp elicitation fallback request id = %#v", got)
+	}
+	if got := MCPUserElicitationRequestID(ServerRequest{}, nil); got != nil {
+		t.Fatalf("empty mcp elicitation request id = %#v", got)
 	}
 }
 

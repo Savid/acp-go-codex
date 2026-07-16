@@ -279,6 +279,11 @@ func permissionToolClassForApprovalKind(kind acp.ToolKind) permissionToolClass {
 }
 
 func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.ServerRequest, params map[string]any) (any, error) {
+	session := a.sessionByCodexThread(codex.RequestThreadID(params))
+	if session == nil {
+		return codex.ElicitationCancelResponse(), nil
+	}
+
 	conn := a.connection()
 	if conn == nil {
 		return codex.ElicitationCancelResponse(), nil
@@ -292,19 +297,33 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 		return codex.ElicitationDeclineResponse(), nil
 	}
 
-	scope := elicitationScope{
-		ToolCallID: acp.ToolCallId(codex.MCPElicitationToolCallID(req, params)),
-	}
-	if session := a.sessionByCodexThread(codex.RequestThreadID(params)); session != nil {
-		scope.SessionID = session.id
-		scope.TurnNonce = session.activeTurnNonce()
+	request := codex.MCPElicitationRequest(params, map[string]any{codexMetaKey: params})
+	nativeToolID := codex.MCPUserElicitationToolCallID(params)
+
+	var resp acp.UnstableCreateElicitationResponse
+
+	var err error
+
+	if nativeToolID != "" {
+		var associated bool
+
+		resp, associated, err = session.createElicitationForMCPTool(ctx, conn, request, nativeToolID, params)
+		if !associated && err == nil {
+			return codex.ElicitationCancelResponse(), nil
+		}
+	} else {
+		requestID := codex.MCPUserElicitationRequestID(req, params)
+		if requestID == nil {
+			return codex.ElicitationCancelResponse(), nil
+		}
+
+		resp, err = conn.CreateElicitation(ctx, request, elicitationScope{
+			SessionID: session.id,
+			TurnNonce: session.activeTurnNonce(),
+			RequestID: requestID,
+		})
 	}
 
-	if scope.ToolCallID == "" {
-		scope.RequestID = codex.RequestIDFromRaw(req.ID)
-	}
-
-	resp, err := conn.CreateElicitation(ctx, codex.MCPElicitationRequest(params, map[string]any{codexMetaKey: params}), scope)
 	if err != nil {
 		return nil, err
 	}

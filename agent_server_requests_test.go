@@ -143,6 +143,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 		t.Fatal("tool input with elicitation error succeeded")
 	}
 	if _, mcpErr := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+		ID:     json.RawMessage(`"mcp-error"`),
 		Method: codex.RequestMCPElicitation,
 		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"form"}`),
 	}); mcpErr == nil {
@@ -167,6 +168,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 		t.Fatalf("declined permissions = %#v err=%v", permissions, err)
 	}
 	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+		ID:     json.RawMessage(`"mcp-cancel"`),
 		Method: codex.RequestMCPElicitation,
 		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"form"}`),
 	})
@@ -426,7 +428,7 @@ func TestServerRequestsPermissionsAndMCPElicitation(t *testing.T) {
 	if !ok || formMap["action"] != "accept" {
 		t.Fatalf("form elicitation response = %#v", form)
 	}
-	if len(conn.scopes) == 0 || conn.scopes[len(conn.scopes)-1].SessionID != session.id || conn.scopes[len(conn.scopes)-1].TurnNonce != "turn-1" || conn.scopes[len(conn.scopes)-1].ToolCallID == "" {
+	if len(conn.scopes) == 0 || conn.scopes[len(conn.scopes)-1].SessionID != session.id || conn.scopes[len(conn.scopes)-1].TurnNonce != "turn-1" || conn.scopes[len(conn.scopes)-1].RequestID == nil || conn.scopes[len(conn.scopes)-1].RequestID.Str == nil || *conn.scopes[len(conn.scopes)-1].RequestID.Str != "mcp-form-1" || conn.scopes[len(conn.scopes)-1].ToolCallID != "" {
 		t.Fatalf("MCP form scope = %#v", conn.scopes)
 	}
 
@@ -536,6 +538,9 @@ func TestServerRequestFallbackAndElicitationBranches(t *testing.T) {
 	if mcpApproval, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","_meta":{"codex":{"_meta":{"codex_approval_kind":"mcp_tool_call"}}}}`)}); err != nil || asType[map[string]any](t, mcpApproval)["action"] != "cancel" {
 		t.Fatalf("no client MCP approval = %#v err=%v", mcpApproval, err)
 	}
+	if mcpUser, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{ID: json.RawMessage(`"mcp-user"`), Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"form"}`)}); err != nil || asType[map[string]any](t, mcpUser)["action"] != "cancel" {
+		t.Fatalf("no client MCP user elicitation = %#v err=%v", mcpUser, err)
+	}
 	if input, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestToolUserInput, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","questions":[{"id":"answer"}]}`)}); err != nil || len(asType[map[string]any](t, asType[map[string]any](t, input)["answers"])) != 0 {
 		t.Fatalf("no client tool input = %#v err=%v", input, err)
 	}
@@ -566,14 +571,14 @@ func TestServerRequestElicitationCapabilityBranches(t *testing.T) {
 	if err != nil || asType[map[string]any](t, input)["answers"] == nil {
 		t.Fatalf("accepted tool input = %#v err=%v", input, err)
 	}
-	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"url","url":"https://example.com","message":"Open"}`)})
+	mcp, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{ID: json.RawMessage(`"mcp-url-accept"`), Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","mode":"url","url":"https://example.com","message":"Open"}`)})
 	if err != nil || asType[map[string]any](t, mcp)["action"] != "accept" {
 		t.Fatalf("accepted MCP URL = %#v err=%v", mcp, err)
 	}
 	declineConn := newRecordingAgentClient()
 	declineConn.elicitation = acp.NewUnstableCreateElicitationResponseDecline()
 	agent.setAgentClient(declineConn)
-	mcp, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","requestedSchema":{"title":"T","description":"D","required":["x"],"properties":{"x":{"type":"string"}}}}`)})
+	mcp, err = agent.handleCodexServerRequest(ctx, codex.ServerRequest{ID: json.RawMessage(`"mcp-form-decline"`), Method: codex.RequestMCPElicitation, Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","requestedSchema":{"title":"T","description":"D","required":["x"],"properties":{"x":{"type":"string"}}}}`)})
 	if err != nil || asType[map[string]any](t, mcp)["action"] != "decline" {
 		t.Fatalf("declined MCP form = %#v err=%v", mcp, err)
 	}

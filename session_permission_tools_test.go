@@ -25,6 +25,31 @@ type strictPermissionClient struct {
 	permissions []acp.RequestPermissionRequest
 }
 
+type blockingElicitationAgentClient struct {
+	*recordingAgentClient
+	entered chan elicitationScope
+	release chan struct{}
+}
+
+func (c *blockingElicitationAgentClient) CreateElicitation(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+) (acp.UnstableCreateElicitationResponse, error) {
+	c.elicitations = append(c.elicitations, request)
+	c.scopes = append(c.scopes, scope)
+	c.entered <- scope
+
+	select {
+	case <-c.release:
+		return acp.UnstableCreateElicitationResponse{
+			Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{"value": "ok"}},
+		}, nil
+	case <-ctx.Done():
+		return acp.UnstableCreateElicitationResponse{}, ctx.Err()
+	}
+}
+
 func newStrictPermissionClient() *strictPermissionClient {
 	return &strictPermissionClient{
 		recordingAgentClient: newRecordingAgentClient(),
@@ -349,6 +374,7 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 	created, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 	session := agent.sessionMust(created.SessionId)
+	enableClientElicitation(agent, true, true)
 
 	permissions, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		ID:     json.RawMessage(`"permissions-outside-turn"`),
@@ -365,4 +391,128 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "cancel", asType[map[string]any](t, mcp)["action"])
+
+	userElicitation, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+		ID:     json.RawMessage(`"mcp-user-outside-turn"`),
+		Method: codex.RequestMCPElicitation,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"exec-outside-turn","mode":"form","message":"Need input","_meta":{"codex":{"serverName":"wagie","toolName":"execute"}}}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "cancel", asType[map[string]any](t, userElicitation)["action"])
+}
+
+func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
+	agent, session, _, turnCtx := newStrictPermissionSession(t)
+	emitNativePermissionToolEvent(t, session, turnCtx, codex.Event{
+		Kind: codex.EventToolStarted,
+		Tool: codex.ToolEvent{
+			ID:    "exec-74d34bc0-canonical",
+			Title: "wagie execute",
+			Kind:  toolKindMcpToolCall,
+			Raw: map[string]any{
+				"id": "exec-74d34bc0-canonical", "server": "wagie", "tool": "execute",
+			},
+		},
+	})
+
+	conn := &blockingElicitationAgentClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		entered:              make(chan elicitationScope, 1),
+		release:              make(chan struct{}),
+	}
+	agent.setAgentClient(conn)
+	enableClientElicitation(agent, true, true)
+
+	result := make(chan struct {
+		response any
+		err      error
+	}, 1)
+	go func() {
+		response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+			ID:     json.RawMessage(`"mcp-user-elicitation"`),
+			Method: codex.RequestMCPElicitation,
+			Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"ctc-native-mismatch","mode":"form","message":"Need input","requestedSchema":{"type":"object"},"_meta":{"codex":{"serverName":"wagie","toolName":"execute"}}}`),
+		})
+		result <- struct {
+			response any
+			err      error
+		}{response: response, err: err}
+	}()
+
+	scope := <-conn.entered
+	require.Equal(t, acp.ToolCallId("exec-74d34bc0-canonical"), scope.ToolCallID)
+	require.Nil(t, scope.RequestID)
+	require.False(t, session.permissionTools.mu.TryLock(), "tool completion could race elicitation establishment")
+
+	completion := make(chan error, 1)
+	go func() {
+		state := &promptEventState{snapshot: session.snapshot()}
+		event := codex.Event{
+			Kind: codex.EventToolCompleted,
+			Tool: codex.ToolEvent{
+				ID:   "exec-74d34bc0-canonical",
+				Kind: toolKindMcpToolCall,
+				Raw:  map[string]any{"server": "wagie", "tool": "execute"},
+			},
+		}
+		completion <- session.emitPromptUpdates(turnCtx, event, event, state)
+	}()
+
+	close(conn.release)
+	completed := <-result
+	require.NoError(t, completed.err)
+	require.Equal(t, "accept", asType[map[string]any](t, completed.response)["action"])
+	require.NoError(t, <-completion)
+	require.True(t, session.permissionTools.tools["exec-74d34bc0-canonical"].terminal)
+
+	require.True(t, session.permissionTools.mu.TryLock())
+	session.permissionTools.mu.Unlock()
+}
+
+func TestMCPUserElicitationCorrelationFailsClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []codex.Event
+	}{
+		{name: "missing"},
+		{
+			name: "completed association",
+			events: []codex.Event{
+				{Kind: codex.EventToolStarted, Tool: codex.ToolEvent{ID: "exec-terminal", Kind: toolKindMcpToolCall, Raw: map[string]any{"server": "wagie", "tool": "execute"}}},
+				{Kind: codex.EventToolCompleted, Tool: codex.ToolEvent{ID: "exec-terminal", Kind: toolKindMcpToolCall, Raw: map[string]any{"server": "wagie", "tool": "execute"}}},
+			},
+		},
+		{
+			name: "ambiguous",
+			events: []codex.Event{
+				{Kind: codex.EventToolStarted, Tool: codex.ToolEvent{ID: "exec-one", Kind: toolKindMcpToolCall, Raw: map[string]any{"server": "wagie", "tool": "execute"}}},
+				{Kind: codex.EventToolStarted, Tool: codex.ToolEvent{ID: "exec-two", Kind: toolKindMcpToolCall, Raw: map[string]any{"server": "wagie", "tool": "execute"}}},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agent, session, _, turnCtx := newStrictPermissionSession(t)
+			for _, event := range test.events {
+				emitNativePermissionToolEvent(t, session, turnCtx, event)
+			}
+
+			conn := newRecordingAgentClient()
+			conn.elicitation = acp.UnstableCreateElicitationResponse{
+				Accept: &acp.UnstableCreateElicitationAccept{Action: "accept"},
+			}
+			agent.setAgentClient(conn)
+			enableClientElicitation(agent, true, true)
+
+			response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+				ID:     json.RawMessage(`"mcp-user-fail-closed"`),
+				Method: codex.RequestMCPElicitation,
+				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","itemId":"ctc-unresolved","mode":"form","message":"Need input","_meta":{"codex":{"serverName":"wagie","toolName":"execute"}}}`),
+			})
+			require.NoError(t, err)
+			require.Equal(t, "cancel", asType[map[string]any](t, response)["action"])
+			require.Empty(t, conn.scopes)
+		})
+	}
 }

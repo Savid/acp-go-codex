@@ -140,6 +140,48 @@ func (s *session) requestPermissionForTool(
 	return response, true, err
 }
 
+// createElicitationForMCPTool resolves a native MCP item/tool association to
+// the exact published ACP tool ID. The registry stays locked until the client
+// call returns so item/completed cannot make that ID terminal between
+// correlation and request establishment.
+func (s *session) createElicitationForMCPTool(
+	ctx context.Context,
+	conn agentClient,
+	request acp.UnstableCreateElicitationRequest,
+	nativeToolID string,
+	params map[string]any,
+) (acp.UnstableCreateElicitationResponse, bool, error) {
+	registry := &s.permissionTools
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+
+	s.mu.Lock()
+	turnNonce := s.turnNonce
+	active := s.turnDone != nil && turnNonce != ""
+	s.mu.Unlock()
+
+	if !active || ctx.Err() != nil {
+		return acp.UnstableCreateElicitationResponse{}, false, nil
+	}
+
+	registry.ensure()
+
+	fingerprint := permissionFingerprint(nil, params, permissionToolMCP)
+
+	record, valid := registry.matchPermissionTool(acp.ToolCallId(nativeToolID), permissionToolMCP, fingerprint)
+	if !valid || record == nil {
+		return acp.UnstableCreateElicitationResponse{}, false, nil
+	}
+
+	response, err := conn.CreateElicitation(ctx, request, elicitationScope{
+		SessionID:  s.id,
+		TurnNonce:  turnNonce,
+		ToolCallID: record.id,
+	})
+
+	return response, true, err
+}
+
 func (r *permissionToolRegistry) matchPermissionTool(
 	id acp.ToolCallId,
 	class permissionToolClass,

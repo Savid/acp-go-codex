@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -1719,6 +1720,49 @@ func TestSessionLifecycleGuardBranches(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, released)
 	require.NoFileExists(t, materialized)
+}
+
+func TestAcquireSessionLifecycleRevalidatesAfterWaiting(t *testing.T) {
+	agent := NewAgent()
+	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, newSpyCodexClient(), sessionMeta{}, nil)
+	agent.sessions[active.id] = active
+
+	// Hold both locks that follow the initial Agent lookup. Observing Agent.mu
+	// held proves the acquisition goroutine passed that lookup and is waiting
+	// on session.mu; holding lifecycle keeps it from revalidating too early.
+	active.lifecycle.Lock()
+	active.mu.Lock()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := agent.acquireSessionLifecycle(active.id)
+		result <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		if agent.mu.TryLock() {
+			agent.mu.Unlock()
+
+			return false
+		}
+
+		return true
+	}, time.Second, time.Millisecond)
+
+	active.mu.Unlock()
+	require.Eventually(t, func() bool {
+		if !agent.mu.TryLock() {
+			return false
+		}
+
+		delete(agent.sessions, active.id)
+		agent.mu.Unlock()
+
+		return true
+	}, time.Second, time.Millisecond)
+
+	active.lifecycle.Unlock()
+	require.ErrorContains(t, <-result, "unknown session")
 }
 
 func TestRetainedResumeRollbackUnsubscribeFailureStaysClaimed(t *testing.T) {
