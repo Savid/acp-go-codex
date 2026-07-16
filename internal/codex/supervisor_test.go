@@ -174,15 +174,13 @@ func TestSupervisorStreamAndQuiescenceHelpers(t *testing.T) {
 	require.Equal(t, "data", output.String())
 
 	attempts := 0
-	awaitQuiescence(func() error {
+	require.NoError(t, awaitQuiescence(func() error {
 		attempts++
-		if attempts == 1 {
-			return errors.New("not yet")
-		}
 
 		return nil
-	})
-	require.Equal(t, 2, attempts)
+	}))
+	require.Equal(t, 1, attempts)
+	require.ErrorIs(t, awaitQuiescence(func() error { return errors.New("unproven") }), ErrProcessTreeUnproven)
 }
 
 func testSupervisorConfig(t *testing.T, root string, nativePath string, args []string) supervisorConfig {

@@ -1,4 +1,4 @@
-//go:build linux || darwin || freebsd || openbsd
+//go:build linux
 
 package codex
 
@@ -211,15 +211,12 @@ func TestSupervisorMarkerPIDReadyAndCopyUtilities(t *testing.T) {
 	require.True(t, buffer.closed)
 
 	tries := 0
-	awaitQuiescence(func() error {
+	require.NoError(t, awaitQuiescence(func() error {
 		tries++
-		if tries < 2 {
-			return errors.New("not yet")
-		}
 
 		return nil
-	})
-	require.Equal(t, 2, tries)
+	}))
+	require.Equal(t, 1, tries)
 }
 
 func TestRunLivenessControlEOFAndNativeFailure(t *testing.T) {
@@ -312,7 +309,7 @@ func TestSupervisorBootstrapAndUnixContainmentBranches(t *testing.T) {
 
 	guardian, err := newGuardianContainment()
 	require.NoError(t, err)
-	require.Empty(t, guardian.Name())
+	require.Equal(t, "linux-subreaper", guardian.Name())
 	require.NoError(t, guardian.Close())
 	liveness, err := openLivenessContainment("")
 	require.NoError(t, err)
@@ -322,30 +319,12 @@ func TestSupervisorBootstrapAndUnixContainmentBranches(t *testing.T) {
 	configureIndependentSupervisor(cmd)
 	require.True(t, cmd.SysProcAttr.Setpgid)
 
-	require.ErrorContains(t, quiesceProcessGroup(0, time.Second), "required")
 	oldKill := killProcessID
 	t.Cleanup(func() { killProcessID = oldKill })
 	killProcessID = func(int, syscall.Signal) error { return syscall.ESRCH }
 	require.NoError(t, signalProcessGroup(123, syscall.SIGTERM))
-	alive, err := processGroupAlive(123)
-	require.NoError(t, err)
-	require.False(t, alive)
-	require.NoError(t, quiesceProcessGroup(123, time.Second))
-
-	killProcessID = func(_ int, signal syscall.Signal) error {
-		if signal == 0 {
-			return syscall.EPERM
-		}
-
-		return nil
-	}
-	alive, err = processGroupAlive(123)
-	require.NoError(t, err)
-	require.True(t, alive)
 
 	killProcessID = func(int, syscall.Signal) error { return errors.New("probe failed") }
-	_, err = processGroupAlive(123)
-	require.ErrorContains(t, err, "probe native process group")
 	require.Error(t, signalProcessGroup(123, syscall.SIGTERM))
 }
 
@@ -450,36 +429,11 @@ func TestRunLivenessPipeAndExitFailures(t *testing.T) {
 
 func TestUnixQuiescenceSignalEscalationAndTimeout(t *testing.T) {
 	oldKill := killProcessID
-	oldGetpgid := getProcessGroupID
 	t.Cleanup(func() {
 		killProcessID = oldKill
-		getProcessGroupID = oldGetpgid
 	})
 
-	probes := 0
-	killProcessID = func(_ int, signal syscall.Signal) error {
-		if signal == 0 {
-			probes++
-			if probes > 1 {
-				return syscall.ESRCH
-			}
-		}
-
-		return nil
-	}
-	require.NoError(t, quiesceProcessGroup(123, time.Second))
-
-	killProcessID = func(_ int, signal syscall.Signal) error {
-		if signal == 0 {
-			return nil
-		}
-
-		return nil
-	}
-	require.ErrorContains(t, quiesceProcessGroup(123, time.Millisecond), "did not become quiescent")
-
 	command := &exec.Cmd{Process: &os.Process{Pid: 123}}
-	getProcessGroupID = func(int) (int, error) { return 123, nil }
 	killProcessID = func(int, syscall.Signal) error { return syscall.ESRCH }
 	require.NoError(t, terminateIndependentSupervisor(command))
 
@@ -488,11 +442,10 @@ func TestUnixQuiescenceSignalEscalationAndTimeout(t *testing.T) {
 	command = exec.Command("/bin/true")
 	require.NoError(t, liveness.Start(command))
 	require.NoError(t, command.Wait())
-	killProcessID = func(int, syscall.Signal) error { return syscall.ESRCH }
-	require.NoError(t, liveness.Quiesce(command.Process.Pid, time.Second))
+	require.NoError(t, liveness.Quiesce(0, time.Second))
 	guardian, err := newGuardianContainment()
 	require.NoError(t, err)
-	require.NoError(t, guardian.Quiesce(command.Process.Pid, time.Second))
+	require.NotNil(t, guardian)
 }
 
 func TestSupervisorInjectedFilesystemAndContainmentFailures(t *testing.T) {
@@ -560,6 +513,7 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	config.NativePIDFile = filepath.Join(root, "pid")
 	path, err = writeSupervisorConfig(root, config)
 	require.NoError(t, err)
+	supervisorInput = strings.NewReader("")
 	t.Setenv(supervisorModeEnv, supervisorModeLiveness)
 	t.Setenv(supervisorConfigEnv, path)
 	supervisorBootstrap()
@@ -811,46 +765,12 @@ func TestSupervisorFramedInputBranches(t *testing.T) {
 	})
 }
 
-func TestUnixQuiescenceRemainingProbeBranches(t *testing.T) {
+func TestUnixSignalProcessGroupBranches(t *testing.T) {
 	oldKill := killProcessID
 	t.Cleanup(func() { killProcessID = oldKill })
 
-	killProcessID = func(_ int, signal syscall.Signal) error {
-		if signal == 0 {
-			return errors.New("term probe failed")
-		}
-
-		return nil
-	}
-	require.ErrorContains(t, quiesceProcessGroup(123, time.Second), "term probe failed")
-
-	killed := false
-	killProcessID = func(_ int, signal syscall.Signal) error {
-		if signal == syscall.SIGKILL {
-			killed = true
-		}
-		if signal == 0 && killed {
-			return errors.New("kill probe failed")
-		}
-
-		return nil
-	}
-	require.ErrorContains(t, quiesceProcessGroup(123, 600*time.Millisecond), "kill probe failed")
-
-	killed = false
-	killProbes := 0
-	killProcessID = func(_ int, signal syscall.Signal) error {
-		if signal == syscall.SIGKILL {
-			killed = true
-		}
-		if signal == 0 && killed {
-			killProbes++
-			if killProbes > 1 {
-				return syscall.ESRCH
-			}
-		}
-
-		return nil
-	}
-	require.NoError(t, quiesceProcessGroup(123, 600*time.Millisecond))
+	killProcessID = func(int, syscall.Signal) error { return syscall.ESRCH }
+	require.NoError(t, signalProcessGroup(123, syscall.SIGTERM))
+	killProcessID = func(int, syscall.Signal) error { return errors.New("signal failed") }
+	require.ErrorContains(t, signalProcessGroup(123, syscall.SIGKILL), "signal failed")
 }

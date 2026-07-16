@@ -83,9 +83,7 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(childStarted)
-
-		return statErr == nil && session.activeTurnID() == fakeCodexBlockingTurnID
+		return fakeCodexChildIsDetached(childStarted) && session.activeTurnID() == fakeCodexBlockingTurnID
 	}, 5*time.Second, 10*time.Millisecond)
 
 	cancelDone := make(chan error, 1)
@@ -179,9 +177,7 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(childStarted)
-
-		return statErr == nil && session.activeTurnID() == fakeCodexBlockingTurnID
+		return fakeCodexChildIsDetached(childStarted) && session.activeTurnID() == fakeCodexBlockingTurnID
 	}, 5*time.Second, 10*time.Millisecond)
 
 	result := <-blocking
@@ -258,10 +254,9 @@ func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(childStarted)
 		active := agent.activeSession(created.SessionId)
 
-		return statErr == nil && active != nil && active.activeTurnID() == fakeCodexBlockingTurnID
+		return fakeCodexChildIsDetached(childStarted) && active != nil && active.activeTurnID() == fakeCodexBlockingTurnID
 	}, 5*time.Second, 10*time.Millisecond)
 	cancelDone := make(chan error, 1)
 	go func() { cancelDone <- agent.Cancel(ctx, CancelRequest(created.SessionId, "blocking-nonce")) }()

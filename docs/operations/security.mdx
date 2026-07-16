@@ -20,17 +20,25 @@ The adapter takes two mode-0600, never-unlinked files in that home —
 `acp-go-codex-runtime.liveness.lock` — with build-tagged Unix `flock` or Windows
 `LockFileEx` backends. A guardian process owns only the claim lock; its separate
 liveness supervisor owns only the liveness lock and directly parents the native
-root. The native process never inherits either descriptor. Unix contains the
-root and descendants in a process group; Windows starts the root suspended,
-assigns it to a named Job Object with `KILL_ON_JOB_CLOSE`, and only then resumes
-it. Both supervisors can terminate the containment and prove its process count
-empty if the other supervisor dies. Adapter/control EOF does the same. Only
-after that proof does shutdown release liveness and then claim, so a second
-claimant fails closed while any old tree can still write the home.
+root. The native process never inherits either descriptor. Linux initially
+places the root and descendants in a process group; Windows starts the root
+suspended, assigns it to a named Job Object with `KILL_ON_JOB_CLOSE`, and only
+then resumes it. On Linux, each dedicated supervisor is also a child subreaper.
+It kills and reaps adopted descendants even when they escape the original
+process group with `setsid`, then requires a non-reaping
+`waitid(..., WNOWAIT)` `ECHILD` result as
+the kernel proof that no child remains. Windows requires the Job Object's active
+process count to reach zero. If either supervisor dies, the survivor performs
+the same containment; adapter/control EOF does too. Only after that proof does
+shutdown release liveness and then claim, so a second claimant fails closed
+while any old tree can still write the home.
+
+Linux and Windows are the only runtime-containment platforms. Darwin, FreeBSD,
+OpenBSD, and all other platforms fail closed before starting Codex because a
+process group alone cannot prove containment of a session-escaped descendant.
 
 Lock admission also validates the filesystem containing the opened lock file.
-Linux accepts ext2, ext3, ext4, XFS, Btrfs, F2FS, and tmpfs; Darwin/FreeBSD/OpenBSD accept
-only their enumerated local APFS/HFS/UFS/ZFS/FFS/tmpfs families; Windows accepts
+Linux accepts ext2, ext3, ext4, XFS, Btrfs, F2FS, and tmpfs; Windows accepts
 fixed or RAM drives formatted as NTFS or ReFS. Network mounts, overlay
 filesystems, unknown filesystem types, and platforms without a proved backend
 fail closed before either native runtime or terminal account mutation starts.

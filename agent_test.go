@@ -1258,7 +1258,7 @@ func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
 		case "turn/start":
 			rawParams, _ := json.Marshal(msg["params"])
 			if strings.Contains(string(rawParams), fakeCodexBlockingPrompt) {
-				backgroundChild = exec.Command(os.Args[0], fakeCodexDelayedChildArg) // #nosec G204 -- fixed test binary and fixed argument.
+				backgroundChild = newFakeCodexDelayedChildCommand()
 				backgroundChild.Env = os.Environ()
 				if err := backgroundChild.Start(); err != nil {
 					os.Exit(2)
@@ -1349,6 +1349,8 @@ func appendFakeCodexRolloutRow(path string, row string) error {
 }
 
 func runFakeCodexDelayedChild(mode fakeCodexMode) {
+	ignoreFakeCodexChildTerminationSignals()
+
 	started := mode.ChildStarted
 	cancelReturned := mode.CancelReturned
 	sentinel := mode.ChildSentinel
@@ -1356,7 +1358,11 @@ func runFakeCodexDelayedChild(mode fakeCodexMode) {
 		os.Exit(3)
 	}
 
-	if err := os.WriteFile(started, []byte("started"), 0o600); err != nil {
+	identity, err := json.Marshal(currentFakeCodexChildIdentity())
+	if err != nil {
+		os.Exit(4)
+	}
+	if err := os.WriteFile(started, identity, 0o600); err != nil {
 		os.Exit(4)
 	}
 

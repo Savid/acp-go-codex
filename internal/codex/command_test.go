@@ -303,6 +303,30 @@ func TestCommandWaitJoinsSupervisorCompletion(t *testing.T) {
 	}
 }
 
+func TestCommandWaitRequiresCompletionAfterSuccessfulGuardianExit(t *testing.T) {
+	cmd := exec.Command("/bin/true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start successful command: %v", err)
+	}
+
+	root := t.TempDir()
+	started := filepath.Join(root, "started")
+	if err := writeSupervisorMarker(started); err != nil {
+		t.Fatalf("write supervisor start marker: %v", err)
+	}
+
+	proc := &process{cmd: cmd, supervisor: &supervisorProof{
+		started:        started,
+		completion:     filepath.Join(root, "missing-completion"),
+		completionWait: 20 * time.Millisecond,
+	}}
+	proc.beginWait()
+	<-proc.waitDone
+	if !errors.Is(proc.waitErr, ErrProcessTreeUnproven) {
+		t.Fatalf("successful guardian without completion error = %v", proc.waitErr)
+	}
+}
+
 func TestCommandProcessKillBranches(t *testing.T) {
 	exited := exec.Command("/bin/sh", "-c", "exit 0")
 	if err := exited.Run(); err != nil {

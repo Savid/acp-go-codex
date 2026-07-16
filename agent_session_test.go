@@ -760,6 +760,87 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}
 }
 
+func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
+	for _, lifecycle := range []struct {
+		name string
+		run  func(context.Context, *Agent, acp.SessionId, ...SessionRequestOption) error
+	}{
+		{
+			name: "resume",
+			run: func(ctx context.Context, agent *Agent, id acp.SessionId, opts ...SessionRequestOption) error {
+				_, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, "/tmp/project", opts...))
+
+				return err
+			},
+		},
+		{
+			name: "load",
+			run: func(ctx context.Context, agent *Agent, id acp.SessionId, opts ...SessionRequestOption) error {
+				_, err := agent.LoadSession(ctx, LoadSessionRequest(id, "/tmp/project", opts...))
+
+				return err
+			},
+		},
+	} {
+		t.Run(lifecycle.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := NewInMemorySessionStore()
+			client := newRuntimeRecordingClient()
+			agent := NewAgent(
+				WithSessionStore(store),
+				withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+			)
+			t.Cleanup(func() { require.NoError(t, agent.Close()) })
+			server := HTTPMCPServer("marker", "https://marker.example.test/mcp", map[string]string{
+				"Authorization": "Bearer marker",
+			})
+
+			created, err := agent.NewSession(ctx, NewSessionRequest(
+				"/tmp/project",
+				WithSessionMCPServers(server),
+				WithSessionCodexOptions(NewCodexOptions(WithCodexMCPToolApprovalMode("auto"))),
+			))
+			require.NoError(t, err)
+			require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+				Key: SessionKey{SessionID: string(created.SessionId)},
+				Entries: []SessionStoreEntry{SessionStoreEntry(
+					`{"type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp/project"}}`,
+				)},
+			}}))
+
+			client.mu.Lock()
+			client.resumes = nil
+			client.mu.Unlock()
+
+			err = lifecycle.run(
+				ctx,
+				agent,
+				created.SessionId,
+				WithSessionMCPServers(server),
+				WithSessionCodexOptions(NewCodexOptions(WithCodexMCPToolApprovalMode("prompt"))),
+			)
+			require.NoError(t, err)
+
+			client.mu.Lock()
+			resumes := append([]codex.ThreadResumeRequest(nil), client.resumes...)
+			client.mu.Unlock()
+			require.Len(t, resumes, 1, "mode-only lifecycle change skipped thread/resume")
+			require.Equal(t, "thread-1", resumes[0].ThreadID)
+			servers, ok := resumes[0].Config["mcp_servers"].(map[string]any)
+			require.True(t, ok)
+			marker, ok := servers["marker"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "prompt", marker["default_tools_approval_mode"])
+			active := agent.activeSession(created.SessionId)
+			require.NotNil(t, active)
+			active.mu.Lock()
+			approvalMode := active.mcpApprovalMode
+			active.mu.Unlock()
+			require.Equal(t, "prompt", approvalMode)
+		})
+	}
+}
+
 func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	ctx := context.Background()
 	store := &configurableStore{}

@@ -402,7 +402,7 @@ func (p *process) beginWait() {
 			defer p.markExited()
 
 			p.waitErr = p.cmd.Wait()
-			if p.waitErr != nil && p.supervisor != nil {
+			if p.supervisor != nil {
 				p.waitErr = errors.Join(p.waitErr, p.supervisor.awaitCompletion())
 			}
 

@@ -69,6 +69,7 @@ type supervisorProof struct {
 	started          string
 	completion       string
 	providerSnapshot string
+	completionWait   time.Duration
 }
 
 // init turns the embedding command itself into either member of the
@@ -239,7 +240,7 @@ func supervisorNonce() (string, error) {
 // native tree empty. If no liveness process ever started, the guardian could
 // not have launched a native root and the short startup observation expires.
 func (p *supervisorProof) awaitCompletion() error {
-	if p == nil {
+	if p == nil || (p.started == "" && p.completion == "") {
 		return nil
 	}
 
@@ -265,11 +266,22 @@ func (p *supervisorProof) awaitCompletion() error {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	completionWait := p.completionWait
+	if completionWait <= 0 {
+		completionWait = supervisorQuiesceWindow + time.Second
+	}
+
+	completionDeadline := time.Now().Add(completionWait)
+
 	for {
 		if _, err := os.Stat(p.completion); err == nil {
 			return nil
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w: stat liveness completion proof: %v", ErrProcessTreeUnproven, err)
+		}
+
+		if time.Now().After(completionDeadline) {
+			return fmt.Errorf("%w: liveness supervisor started but did not publish completion within %s", ErrProcessTreeUnproven, completionWait)
 		}
 
 		time.Sleep(10 * time.Millisecond)
@@ -366,36 +378,28 @@ func runGuardian(config supervisorConfig) error {
 		waitErr := cmd.Wait()
 		_, _ = io.Copy(errorOutput, control)
 
+		var proofErr error
+
 		if _, completeErr := os.Stat(config.Completion); completeErr != nil {
 			if !errors.Is(completeErr, os.ErrNotExist) {
 				return errors.Join(waitErr, completeErr)
 			}
 
 			if _, startedErr := os.Stat(config.Started); startedErr == nil {
-				for {
-					nativePID, pidErr := readNativePID(config.NativePIDFile)
-					if pidErr == nil {
-						awaitQuiescence(func() error {
-							return containment.Quiesce(nativePID, supervisorQuiesceWindow)
-						})
+				nativePID, _ := readNativePID(config.NativePIDFile)
 
-						_ = writeSupervisorMarker(config.Completion)
-
-						break
-					}
-
-					if _, completionErr := os.Stat(config.Completion); completionErr == nil {
-						break
-					}
-
-					time.Sleep(10 * time.Millisecond)
+				proofErr = awaitQuiescence(func() error {
+					return containment.Quiesce(nativePID, supervisorQuiesceWindow)
+				})
+				if proofErr == nil {
+					proofErr = writeSupervisorMarker(config.Completion)
 				}
 			} else if !errors.Is(startedErr, os.ErrNotExist) {
 				return errors.Join(waitErr, startedErr)
 			}
 		}
 
-		return errors.Join(fmt.Errorf("liveness supervisor failed before readiness: %w", errors.Join(readyErr, parseErr)), waitErr)
+		return errors.Join(fmt.Errorf("liveness supervisor failed before readiness: %w", errors.Join(readyErr, parseErr)), waitErr, proofErr)
 	}
 
 	copyDone := make(chan struct{}, 3)
@@ -411,9 +415,12 @@ func runGuardian(config supervisorConfig) error {
 	waitErr := cmd.Wait()
 	_ = stdin.Close()
 
-	awaitQuiescence(func() error {
+	proofErr := awaitQuiescence(func() error {
 		return containment.Quiesce(ready.NativePID, supervisorQuiesceWindow)
 	})
+	if proofErr != nil {
+		return errors.Join(waitErr, proofErr)
+	}
 
 	if err := writeSupervisorMarker(config.Completion); err != nil {
 		return err
@@ -432,7 +439,6 @@ func runLiveness(config supervisorConfig) error {
 	if err := writeSupervisorMarker(config.Started); err != nil {
 		return err
 	}
-	defer func() { _ = writeSupervisorMarker(config.Completion) }()
 
 	liveness, err := homelock.AcquireLiveness(config.Home)
 	if err != nil {
@@ -489,26 +495,34 @@ func runLiveness(config supervisorConfig) error {
 	go func() { waitDone <- cmd.Wait() }()
 
 	if pidErr := writeNativePID(config.NativePIDFile, cmd.Process.Pid); pidErr != nil {
-		awaitQuiescence(func() error {
+		proofErr := awaitQuiescence(func() error {
 			return containment.Quiesce(cmd.Process.Pid, supervisorQuiesceWindow)
 		})
 
 		<-waitDone
 
-		return pidErr
+		if proofErr == nil {
+			proofErr = writeSupervisorMarker(config.Completion)
+		}
+
+		return errors.Join(pidErr, proofErr)
 	}
 
 	// This fixed, integer-only object has no JSON encoding failure mode.
 	ready := fmt.Appendf(nil, "{\"nativePid\":%d}", cmd.Process.Pid)
 
 	if _, err := fmt.Fprintln(errorOutput, supervisorReadyPrefix+string(ready)); err != nil {
-		awaitQuiescence(func() error {
+		proofErr := awaitQuiescence(func() error {
 			return containment.Quiesce(cmd.Process.Pid, supervisorQuiesceWindow)
 		})
 
 		<-waitDone
 
-		return fmt.Errorf("publish supervisor readiness: %w", err)
+		if proofErr == nil {
+			proofErr = writeSupervisorMarker(config.Completion)
+		}
+
+		return errors.Join(fmt.Errorf("publish supervisor readiness: %w", err), proofErr)
 	}
 
 	controlDone := make(chan struct{})
@@ -529,9 +543,18 @@ func runLiveness(config supervisorConfig) error {
 
 	select {
 	case waitErr := <-waitDone:
-		awaitQuiescence(func() error {
-			return containment.Quiesce(cmd.Process.Pid, supervisorQuiesceWindow)
+		proofErr := awaitQuiescence(func() error {
+			// The root has already been reaped, so do not signal its numeric
+			// process-group ID after it may have become reusable.
+			return containment.Quiesce(0, supervisorQuiesceWindow)
 		})
+		if proofErr == nil {
+			proofErr = writeSupervisorMarker(config.Completion)
+		}
+
+		if proofErr != nil {
+			return errors.Join(waitErr, proofErr)
+		}
 
 		if waitErr != nil {
 			return fmt.Errorf("native root exited: %w", waitErr)
@@ -539,12 +562,17 @@ func runLiveness(config supervisorConfig) error {
 
 		return nil
 	case <-controlDone:
-		awaitQuiescence(func() error {
+		proofErr := awaitQuiescence(func() error {
 			return containment.Quiesce(cmd.Process.Pid, supervisorQuiesceWindow)
 		})
+
 		<-waitDone
 
-		return nil
+		if proofErr == nil {
+			proofErr = writeSupervisorMarker(config.Completion)
+		}
+
+		return proofErr
 	}
 }
 
@@ -556,14 +584,13 @@ func publishProviderProcessSnapshot(path string, containment *livenessContainmen
 	}
 }
 
-func awaitQuiescence(probe func() error) {
-	for {
-		if probe() == nil {
-			return
-		}
-
-		time.Sleep(100 * time.Millisecond)
+func awaitQuiescence(probe func() error) error {
+	err := probe()
+	if err == nil || errors.Is(err, ErrProcessTreeUnproven) {
+		return err
 	}
+
+	return fmt.Errorf("%w: %v", ErrProcessTreeUnproven, err)
 }
 
 func writeSupervisorMarker(path string) error {

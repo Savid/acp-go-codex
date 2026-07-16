@@ -1,45 +1,50 @@
-//go:build linux || darwin || freebsd || openbsd
+//go:build darwin || freebsd || openbsd
 
 package codex
 
 import (
-	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"syscall"
 	"time"
 )
 
+// Process groups are not an authoritative tree-containment primitive: a
+// descendant can call setsid(2) and escape. These platforms must remain
+// unavailable until they have a kernel-backed containment and no-child proof.
 type guardianContainment struct{}
 
 type livenessContainment struct{}
 
 func (*livenessContainment) DescendantCount() (int, bool) { return 0, false }
 
+func unsupportedContainment() error {
+	return fmt.Errorf("Codex runtime containment is unsupported on %s", runtime.GOOS)
+}
+
 func newGuardianContainment() (*guardianContainment, error) {
-	return &guardianContainment{}, nil
+	return nil, unsupportedContainment()
 }
 
 func (*guardianContainment) Name() string { return "" }
 
 func (*guardianContainment) Close() error { return nil }
 
-func (*guardianContainment) Quiesce(nativePID int, timeout time.Duration) error {
-	return quiesceProcessGroup(nativePID, timeout)
+func (*guardianContainment) Quiesce(int, time.Duration) error {
+	return unsupportedContainment()
 }
 
 func openLivenessContainment(string) (*livenessContainment, error) {
-	return &livenessContainment{}, nil
+	return nil, unsupportedContainment()
 }
 
-func (*livenessContainment) Start(cmd *exec.Cmd) error {
-	return startProcess(cmd)
-}
+func (*livenessContainment) Start(*exec.Cmd) error { return unsupportedContainment() }
 
 func (*livenessContainment) Close() error { return nil }
 
-func (*livenessContainment) Quiesce(nativePID int, timeout time.Duration) error {
-	return quiesceProcessGroup(nativePID, timeout)
+func (*livenessContainment) Quiesce(int, time.Duration) error {
+	return unsupportedContainment()
 }
 
 func configureIndependentSupervisor(cmd *exec.Cmd) {
@@ -48,68 +53,4 @@ func configureIndependentSupervisor(cmd *exec.Cmd) {
 
 func terminateIndependentSupervisor(cmd *exec.Cmd) error {
 	return signalProcess(cmd, syscall.SIGKILL)
-}
-
-func quiesceProcessGroup(nativePID int, timeout time.Duration) error {
-	if nativePID <= 0 {
-		return errors.New("native process group ID is required")
-	}
-
-	deadline := time.Now().Add(timeout)
-	_ = signalProcessGroup(nativePID, syscall.SIGTERM)
-
-	termDeadline := time.Now().Add(500 * time.Millisecond)
-	if termDeadline.After(deadline) {
-		termDeadline = deadline
-	}
-
-	for time.Now().Before(termDeadline) {
-		alive, err := processGroupAlive(nativePID)
-		if err != nil {
-			return err
-		}
-
-		if !alive {
-			return nil
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	_ = signalProcessGroup(nativePID, syscall.SIGKILL)
-	for time.Now().Before(deadline) {
-		alive, err := processGroupAlive(nativePID)
-		if err != nil {
-			return err
-		}
-
-		if !alive {
-			return nil
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	return fmt.Errorf("native process group %d did not become quiescent", nativePID)
-}
-
-func signalProcessGroup(nativePID int, signal syscall.Signal) error {
-	err := killProcessID(-nativePID, signal)
-	if errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-
-	return err
-}
-
-func processGroupAlive(nativePID int) (bool, error) {
-	err := killProcessID(-nativePID, 0)
-	switch {
-	case err == nil, errors.Is(err, syscall.EPERM):
-		return true, nil
-	case errors.Is(err, syscall.ESRCH):
-		return false, nil
-	default:
-		return false, fmt.Errorf("probe native process group %d: %w", nativePID, err)
-	}
 }

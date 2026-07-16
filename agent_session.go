@@ -347,28 +347,30 @@ func codexSessionStartFingerprint(start codexSessionStart) string {
 }
 
 type codexMetaForHash struct {
-	Model           string            `json:"model,omitempty"`
-	ReasoningEffort string            `json:"reasoningEffort,omitempty"`
-	ServiceTier     string            `json:"serviceTier,omitempty"`
-	Personality     string            `json:"personality,omitempty"`
-	Env             map[string]string `json:"env,omitempty"`
-	ApprovalPolicy  any               `json:"approvalPolicy,omitempty"`
-	SandboxPolicy   any               `json:"sandboxPolicy,omitempty"`
-	OutputSchema    any               `json:"outputSchema,omitempty"`
-	RawMessages     rawMessageConfig  `json:"rawMessages,omitzero"`
+	Model               string            `json:"model,omitempty"`
+	ReasoningEffort     string            `json:"reasoningEffort,omitempty"`
+	ServiceTier         string            `json:"serviceTier,omitempty"`
+	Personality         string            `json:"personality,omitempty"`
+	Env                 map[string]string `json:"env,omitempty"`
+	ApprovalPolicy      any               `json:"approvalPolicy,omitempty"`
+	SandboxPolicy       any               `json:"sandboxPolicy,omitempty"`
+	OutputSchema        any               `json:"outputSchema,omitempty"`
+	RawMessages         rawMessageConfig  `json:"rawMessages,omitzero"`
+	MCPToolApprovalMode string            `json:"mcpToolApprovalMode,omitempty"`
 }
 
 func codexMetaFingerprint(meta sessionMeta) codexMetaForHash {
 	return codexMetaForHash{
-		Model:           meta.Model,
-		ReasoningEffort: meta.ReasoningEffort,
-		ServiceTier:     meta.ServiceTier,
-		Personality:     meta.Personality,
-		Env:             cloneStringMap(meta.Env),
-		ApprovalPolicy:  cloneAny(meta.ApprovalPolicy),
-		SandboxPolicy:   cloneAny(meta.SandboxPolicy),
-		OutputSchema:    cloneAny(meta.OutputSchema),
-		RawMessages:     meta.RawMessages,
+		Model:               meta.Model,
+		ReasoningEffort:     meta.ReasoningEffort,
+		ServiceTier:         meta.ServiceTier,
+		Personality:         meta.Personality,
+		Env:                 cloneStringMap(meta.Env),
+		ApprovalPolicy:      cloneAny(meta.ApprovalPolicy),
+		SandboxPolicy:       cloneAny(meta.SandboxPolicy),
+		OutputSchema:        cloneAny(meta.OutputSchema),
+		RawMessages:         meta.RawMessages,
+		MCPToolApprovalMode: meta.MCPToolApprovalMode,
 	}
 }
 
