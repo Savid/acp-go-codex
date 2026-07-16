@@ -114,6 +114,93 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	require.Equal(t, fakeCodexThreadID, session.snapshot().codexThreadID)
 }
 
+// Timeout uses the same thread-scoped containment boundary as explicit
+// cancellation. The fake app-server acknowledges interrupt while retaining a
+// real delayed child, so Prompt must not return its timeout failure until that
+// child can no longer publish a side effect.
+func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	scratch := filepath.Join(root, "scratch")
+	childStarted := filepath.Join(root, "child-started")
+	timeoutReturned := filepath.Join(root, "timeout-returned")
+	childSentinel := filepath.Join(root, "child-sentinel")
+	rolloutPath := filepath.Join(root, "rollout.jsonl")
+	require.NoError(t, os.MkdirAll(home, 0o700))
+	require.NoError(t, os.MkdirAll(scratch, 0o700))
+
+	store := NewInMemorySessionStore()
+	agent := NewAgent(
+		WithExecutablePath(os.Args[0]),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
+		WithTurnTimeout(250*time.Millisecond),
+		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+			Mode:           fakeCodexCancelTreeMode,
+			ChildStarted:   childStarted,
+			CancelReturned: timeoutReturned,
+			ChildSentinel:  childSentinel,
+			RolloutPath:    rolloutPath,
+		})),
+	)
+	agent.setAgentClient(newRecordingAgentClient())
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	client, err := agent.sharedRuntime(ctx)
+	require.NoError(t, err)
+	require.NoError(t, appendFakeCodexRolloutRow(
+		rolloutPath,
+		`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
+	))
+
+	sessionID := acp.SessionId("timeout-tree-session")
+	session := newSession(
+		agent,
+		sessionID,
+		root,
+		nil,
+		codex.Thread{ID: fakeCodexThreadID, Path: rolloutPath},
+		client,
+		sessionMeta{},
+		nil,
+	)
+	agent.mu.Lock()
+	agent.sessions[sessionID] = session
+	agent.mu.Unlock()
+
+	blocking := make(chan promptResult, 1)
+	go func() {
+		response, promptErr := agent.Prompt(ctx, TextPromptRequest(sessionID, "timeout-nonce", fakeCodexBlockingPrompt))
+		blocking <- promptResult{response: response, err: promptErr}
+	}()
+
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(childStarted)
+
+		return statErr == nil && session.activeTurnID() == fakeCodexBlockingTurnID
+	}, 5*time.Second, 10*time.Millisecond)
+
+	result := <-blocking
+	require.Empty(t, result.response.StopReason)
+	require.True(t, isTurnFailure(result.err, codex.CauseTimeout), "timeout error = %v", result.err)
+
+	// The child observes this marker immediately if Prompt returned before
+	// containment, while its own delayed write catches a marker race.
+	require.NoError(t, os.WriteFile(timeoutReturned, []byte("returned"), 0o600))
+	time.Sleep(fakeCodexChildObservationWait)
+	require.NoFileExists(t, childSentinel)
+
+	require.False(t, session.clientDead)
+	replacement, err := agent.Prompt(ctx, TextPromptRequest(sessionID, "replacement-nonce", fakeCodexReplacementPrompt))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, replacement.StopReason)
+	require.False(t, session.clientDead)
+}
+
 func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
