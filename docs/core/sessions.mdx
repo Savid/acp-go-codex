@@ -70,11 +70,13 @@ updates remain outside a turn epoch and omit the envelope.
 
 ## Load, resume, and fork
 
-`session/load` and `session/resume` resolve a session in a fixed order: active
-in-memory sessions first, then the configured
-[`SessionStore`](/docs/features/session-store), then native Codex thread state.
-This lets a host restore a session whose local Codex thread state is gone as
-long as the rollout rows were mirrored to a store.
+`session/resume` reuses an exact active in-memory binding when one exists;
+otherwise it resolves only through the configured
+[`SessionStore`](/docs/features/session-store). `session/load` always requires
+committed store rows because its replay is store-authoritative, even when the
+wrapper is active. Native `thread/list`/`thread/read` state is never a fallback:
+a residual Codex thread absent from the default or configured store is unknown
+and is not adopted.
 
 When a lifecycle request refreshes configuration for a session whose native
 thread is still owned by the current app-server, the adapter rebinds that same

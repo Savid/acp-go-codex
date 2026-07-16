@@ -12,11 +12,12 @@
 // host explicitly supplies external ChatGPT auth tokens through ACP
 // authenticate and [WithCodexChatGPTAuthTokenRefresher].
 //
-// Hosts that need durable remote resume can provide [WithSessionStore]. A
-// session store receives Codex rollout JSONL rows keyed by the ACP-visible
-// session ID and subpath, can back session/list, and can hydrate rollout JSONL
-// into a temporary file for session/load or session/resume when the local Codex
-// thread state is absent.
+// Every Agent uses a [SessionStore], defaulting to an in-memory implementation.
+// The store receives Codex rollout JSONL rows keyed by the ACP-visible session
+// ID and subpath and is the authority for inactive session/list, session/load,
+// and session/resume. Native threads absent from the store are never adopted.
+// Hosts that need sessions to survive Agent restart can replace the default
+// with [WithSessionStore].
 // Terminal prompt responses and replay updates expose the native Codex turn ID
 // and final assistant response-item ID under _meta.codex.
 //

@@ -39,7 +39,7 @@ runtime and its resources quarantined.
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
 | `WithEnv(env)` | Environment variables merged into launched Codex processes. |
 | `WithLogger(logger)` | `*slog.Logger` for structured adapter diagnostics. |
-| `WithSessionStore(store)` | Durable Codex rollout JSONL store. |
+| `WithSessionStore(store)` | Replace the default in-memory lifecycle authority with a durable Codex rollout JSONL store. |
 | `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |
 | `WithConcurrencyLimits(limits)` | Bounds active sessions, prompts, and client calls. |
 | `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |

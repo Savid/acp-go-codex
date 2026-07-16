@@ -128,67 +128,7 @@ func TestRolloutTerminalIdentityUsesFinalAssistantAndReplaysEmptyAssistant(t *te
 	}
 }
 
-func TestThreadHistoryReplayPublishesTerminalNativeIdentity(t *testing.T) {
-	history := codex.ThreadHistory{
-		Raw: map[string]any{"turnId": "turn-before"},
-		Items: []map[string]any{
-			{"type": valueAgentMessageCamel, "turnId": "turn-final", "id": "message-final"},
-		},
-	}
-	want := nativeTurnIdentity{turnID: "turn-final", messageID: "message-final"}
-	if got := threadHistoryNativeTerminalIdentity(history); got != want {
-		t.Fatalf("thread history identity = %#v, want %#v", got, want)
-	}
-
-	agent := NewAgent()
-	conn := newRecordingAgentClient()
-	agent.setAgentClient(conn)
-	s := &session{
-		agent: agent, id: "history", codexThreadID: "thread",
-		client: &threadHistoryClient{Client: newSpyCodexClient(), history: history},
-	}
-	if err := s.replayThreadHistory(context.Background()); err != nil {
-		t.Fatalf("replayThreadHistory returned error: %v", err)
-	}
-	if got := lastNotificationNativeIdentity(conn.updates); got != want {
-		t.Fatalf("replayed history identity = %#v, want %#v; updates=%#v", got, want, conn.updates)
-	}
-
-	updateErr := errors.New("history identity update failed")
-	errorAgent := NewAgent()
-	errorAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
-	errorSession := &session{
-		agent: errorAgent, id: "history-error", codexThreadID: "thread",
-		client: &threadHistoryClient{Client: newSpyCodexClient(), history: history},
-	}
-	if err := errorSession.replayThreadHistory(context.Background()); !errors.Is(err, updateErr) {
-		t.Fatalf("history identity update error = %v, want %v", err, updateErr)
-	}
-}
-
-type threadHistoryClient struct {
-	codex.Client
-	history codex.ThreadHistory
-}
-
-func (c *threadHistoryClient) ReadThread(context.Context, codex.ThreadReadRequest) (codex.ThreadHistory, error) {
-	return c.history, nil
-}
-
-func TestThreadHistoryReplayUpdates(t *testing.T) {
-	items := []map[string]any{
-		{"type": "userMessage", "text": "user"},
-		{"type": "message", "role": "assistant", "content": []any{map[string]any{"text": "assistant"}}},
-		{"type": "reasoning", "summary": "why"},
-		{"type": "commandExecution", "id": "cmd", "title": "Run", "output": "ok"},
-	}
-	updates := threadHistoryReplayUpdates(items)
-	if len(updates) != 4 {
-		t.Fatalf("updates = %#v", updates)
-	}
-	if updates[0].UserMessageChunk == nil || updates[1].AgentMessageChunk == nil || updates[2].AgentThoughtChunk == nil || updates[3].ToolCall == nil {
-		t.Fatalf("unexpected typed replay updates = %#v", updates)
-	}
+func TestReplayCommandAndTextHelpers(t *testing.T) {
 	if commandText([]any{"a", "b"}) != "a b" || commandText([]string{"c", "d"}) != "c d" || commandText("x") != "x" || commandText(1) != "" {
 		t.Fatal("commandText failed")
 	}
@@ -209,16 +149,6 @@ func TestReplayAdditionalBranches(t *testing.T) {
 		t.Fatalf("rolloutReplayUpdates invalid row updates=%#v err=%v", updates, err)
 	}
 
-	items := []map[string]any{
-		{"type": "message", "role": "user", "content": []any{map[string]any{"text": "user"}}},
-		{"type": "message"},
-		{"type": "reasoning", "content": []any{"why"}},
-		{"type": "commandExecution", "id": "cmd", "title": "Run", "status": "pending"},
-		{"type": "unknown"},
-	}
-	if updates := threadHistoryReplayUpdates(items); len(updates) != 3 {
-		t.Fatalf("thread history updates = %#v", updates)
-	}
 	if replayEventMsg(map[string]any{"type": "context_compacted"})[0].AgentThoughtChunk == nil {
 		t.Fatal("context_compacted fallback did not emit thought")
 	}
@@ -269,19 +199,6 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	errorSession := &session{agent: errorAgent, id: "s"}
 	if err := errorSession.replayRollout(context.Background(), []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}`)}); !errors.Is(err, updateErr) {
 		t.Fatalf("replayRollout update error = %v", err)
-	}
-	if err := replaySession.replayThreadHistory(context.Background()); err != nil {
-		t.Fatalf("replayThreadHistory without client returned error: %v", err)
-	}
-	replaySession.client = &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("unused")}
-	replaySession.codexThreadID = "thread"
-	replaySession.client = readErrorClient{Client: replaySession.client}
-	if err := replaySession.replayThreadHistory(context.Background()); err == nil {
-		t.Fatal("replayThreadHistory read error succeeded")
-	}
-	historySession := &session{agent: errorAgent, id: "s", client: newSpyCodexClient(), codexThreadID: "thread-1"}
-	if err := historySession.replayThreadHistory(context.Background()); !errors.Is(err, updateErr) {
-		t.Fatalf("replayThreadHistory update error = %v", err)
 	}
 }
 
@@ -336,21 +253,6 @@ func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 	}
 	if !sawUser || !sawAgent || !sawThought || !sawTool || !sawToolOutput {
 		t.Fatalf("missing replay update types: user=%v agent=%v thought=%v tool=%v output=%v updates=%#v", sawUser, sawAgent, sawThought, sawTool, sawToolOutput, conn.updates)
-	}
-}
-
-func TestLoadSessionFallsBackToTypedThreadHistory(t *testing.T) {
-	client := newSpyCodexClient()
-	client.thread.ID = "typed-thread"
-	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	conn := newRecordingAgentClient()
-	agent.setAgentClient(conn)
-
-	if _, err := agent.LoadSession(context.Background(), LoadSessionRequest("typed-thread", "/tmp/project")); err != nil {
-		t.Fatalf("LoadSession returned error: %v", err)
-	}
-	if len(conn.updates) == 0 {
-		t.Fatal("typed thread history was not replayed")
 	}
 }
 

@@ -385,7 +385,6 @@ func TestMainUsesRunAndExitOnlyOnFailure(t *testing.T) {
 	}
 }
 
-//nolint:gocyclo // This end-to-end command harness keeps every exit/signal case under one shared executable fixture.
 func TestRunCodexCLI(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
@@ -452,9 +451,10 @@ exit 2
 		t.Fatalf("write signal script: %v", writeSignalErr)
 	}
 	t.Setenv("TEST_READY_LOG", readyPath)
+	accountSignals := make(chan os.Signal, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runCodexCLI(context.Background(), signalScript, "", "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
 	}()
 	waitUntil(t, func() bool {
 		_, statErr := os.Stat(readyPath)
@@ -465,13 +465,7 @@ exit 2
 	if lockErr == nil {
 		t.Fatal("terminal logout did not hold both writable-home locks")
 	}
-	proc, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("find self: %v", err)
-	}
-	if signalErr := proc.Signal(syscall.SIGHUP); signalErr != nil {
-		t.Fatalf("signal self: %v", signalErr)
-	}
+	accountSignals <- syscall.SIGHUP
 	if runErr := <-errCh; runErr == nil || commandExitCode(runErr) <= 0 {
 		t.Fatalf("runCodexCLI signal containment returned err=%v code=%d", runErr, commandExitCode(runErr))
 	}

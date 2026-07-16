@@ -242,7 +242,6 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 	a.mu.Lock()
 	active := make([]*session, 0, len(a.sessions))
-	activeThreadIDs := map[string]struct{}{}
 
 	for _, session := range a.sessions {
 		if params.Cwd != nil && session.cwd != *params.Cwd {
@@ -250,7 +249,6 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		}
 
 		active = append(active, session)
-		activeThreadIDs[session.codexThreadID] = struct{}{}
 	}
 	a.mu.Unlock()
 
@@ -272,17 +270,6 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 	a.retryDeletedNativeCodexSessions(ctx)
 
-	if a.nativeSessionFallbackEnabled() {
-		codexSessions, nativeErr := a.listCodexThreads(ctx, params, seen, activeThreadIDs)
-		if nativeErr != nil {
-			return acp.ListSessionsResponse{}, nativeErr
-		}
-
-		for _, session := range codexSessions {
-			addSessionInfo(&sessions, seen, session)
-		}
-	}
-
 	paged, nextCursor, err := paginateSessionInfos(sessions, params.Cursor)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
@@ -290,77 +277,6 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 	return acp.ListSessionsResponse{Sessions: paged, NextCursor: nextCursor}, nil
 }
-
-func (a *Agent) listCodexThreads(ctx context.Context, params acp.ListSessionsRequest, activeIDs map[acp.SessionId]struct{}, activeThreadIDs map[string]struct{}) ([]acp.SessionInfo, error) {
-	cwd := ""
-
-	if params.Cwd != nil {
-		if err := validateRequiredAbsolutePath(jsonFieldCwd, *params.Cwd); err != nil {
-			return nil, err
-		}
-
-		cwd = *params.Cwd
-	}
-
-	client, err := a.sharedRuntime(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	threads, err := client.ListThreads(ctx, codex.ThreadListRequest{Cwd: cwd})
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]acp.SessionInfo, 0, len(threads))
-	for i := range threads {
-		thread := &threads[i]
-
-		id := acp.SessionId(firstNonEmpty(thread.SessionID, thread.ID))
-		if id == "" {
-			continue
-		}
-
-		if a.isDeleted(id) {
-			continue
-		}
-
-		if _, ok := activeIDs[id]; ok {
-			continue
-		}
-
-		if _, ok := activeThreadIDs[thread.ID]; ok {
-			continue
-		}
-
-		title := firstNonEmpty(thread.Title, "Codex session "+string(id))
-		updatedAt := thread.UpdatedAt
-
-		info := acp.SessionInfo{
-			SessionId: id,
-			Cwd:       firstNonEmpty(thread.Cwd, cwd),
-			Title:     &title,
-			UpdatedAt: &updatedAt,
-			Meta: map[string]any{
-				codexMetaKey: map[string]any{
-					codexThreadIDMetaKey: thread.ID,
-					valueStored:          true,
-					jsonFieldSource:      codexMetaKey,
-				},
-			},
-		}
-		if thread.Model != "" {
-			if codexMeta, ok := info.Meta[codexMetaKey].(map[string]any); ok {
-				codexMeta["model"] = thread.Model
-			}
-		}
-
-		out = append(out, info)
-	}
-
-	return out, nil
-}
-
 func (a *Agent) isDeleted(id acp.SessionId) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -579,7 +495,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		}, nil
 	}
 
-	storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId, params.Cwd)
+	storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId)
 	if loadErr != nil {
 		return acp.ResumeSessionResponse{}, loadErr
 	}
@@ -588,57 +504,11 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return a.resumeMaterializedSession(ctx, params, storeEntries)
 	}
 
-	if !a.nativeSessionFallbackEnabled() {
+	if a.activeSession(params.SessionId) == nil {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
-
-		return acp.ResumeSessionResponse{}, newUnknownSession()
 	}
 
-	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, err
-	}
-
-	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
-
-	client, err := a.sharedRuntime(ctx)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, err
-	}
-
-	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: string(params.SessionId),
-		Cwd:      params.Cwd,
-		Config:   config,
-	})
-	if err != nil {
-		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
-	}
-
-	id := params.SessionId
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
-	session.fingerprint = codexSessionStartFingerprint(start)
-	session.setAccount(clientAccountMeta(ctx, client))
-
-	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
-		_ = session.Close(context.Background())
-
-		return acp.ResumeSessionResponse{}, err
-	}
-
-	if err := a.storeStartedSession(session); err != nil {
-		_ = session.Close(context.Background())
-
-		return acp.ResumeSessionResponse{}, err
-	}
-
-	models := modelList(ctx, client)
-	snapshot := session.snapshot()
-
-	return acp.ResumeSessionResponse{
-		Meta:          sessionResponseMeta(snapshot),
-		ConfigOptions: sessionConfigOptions(session, models),
-	}, nil
+	return acp.ResumeSessionResponse{}, newUnknownSession()
 }
 
 func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.ResumeSessionRequest, entries []SessionStoreEntry) (acp.ResumeSessionResponse, error) {
@@ -974,18 +844,17 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		ResumeID:              string(params.SessionId),
 	}
 	if existing := a.activeSessionForStart(params.SessionId, start); existing != nil {
-		storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId, params.Cwd)
-		switch {
-		case loadErr != nil:
+		storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId)
+		if loadErr != nil {
 			return acp.LoadSessionResponse{}, loadErr
-		case len(storeEntries) > 0:
-			if replayErr := existing.replayRollout(ctx, storeEntries); replayErr != nil {
-				return acp.LoadSessionResponse{}, replayErr
-			}
-		default:
-			if replayErr := existing.replayThreadHistory(ctx); replayErr != nil {
-				return acp.LoadSessionResponse{}, replayErr
-			}
+		}
+
+		if len(storeEntries) == 0 {
+			return acp.LoadSessionResponse{}, newUnknownSession()
+		}
+
+		if replayErr := existing.replayRollout(ctx, storeEntries); replayErr != nil {
+			return acp.LoadSessionResponse{}, replayErr
 		}
 
 		models := modelList(ctx, existing.client)
@@ -997,7 +866,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		}, nil
 	}
 
-	storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId, params.Cwd)
+	storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId)
 	if loadErr != nil {
 		return acp.LoadSessionResponse{}, loadErr
 	}
@@ -1006,24 +875,11 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return a.loadMaterializedSession(ctx, params, storeEntries)
 	}
 
-	if !a.nativeSessionFallbackEnabled() {
+	if a.activeSession(params.SessionId) == nil {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
-
-		return acp.LoadSessionResponse{}, newUnknownSession()
 	}
 
-	resp, err := a.ResumeSession(ctx, acp.ResumeSessionRequest(params))
-	if err != nil {
-		return acp.LoadSessionResponse{}, err
-	}
-
-	if session, err := a.session(params.SessionId); err == nil {
-		if replayErr := session.replayThreadHistory(ctx); replayErr != nil {
-			return acp.LoadSessionResponse{}, replayErr
-		}
-	}
-
-	return acp.LoadSessionResponse(resp), nil
+	return acp.LoadSessionResponse{}, newUnknownSession()
 }
 
 // listStoredSessions lists store-backed session summaries unconditionally.
@@ -1079,7 +935,7 @@ func (a *Agent) listStoredSessions(ctx context.Context, cwd *string, activeIDs m
 	return out, nil
 }
 
-func (a *Agent) loadStoredSession(ctx context.Context, sessionID acp.SessionId, cwd string) ([]SessionStoreEntry, error) {
+func (a *Agent) loadStoredSession(ctx context.Context, sessionID acp.SessionId) ([]SessionStoreEntry, error) {
 	loadCtx, cancel := a.sessionStoreContext(ctx)
 	defer cancel()
 
@@ -1225,10 +1081,6 @@ func (a *Agent) sessionStoreContext(ctx context.Context) (context.Context, conte
 	}
 
 	return context.WithTimeout(ctx, timeout)
-}
-
-func (a *Agent) nativeSessionFallbackEnabled() bool {
-	return !a.explicitStore
 }
 
 func (a *Agent) retryDeletedNativeCodexSessions(ctx context.Context) {

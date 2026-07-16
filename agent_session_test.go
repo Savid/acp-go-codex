@@ -537,21 +537,14 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	}
 }
 
-func TestListAndNativeSessionBranches(t *testing.T) {
+func TestListSessionsUsesActiveAndStoreAuthority(t *testing.T) {
 	ctx := context.Background()
 	store := &configurableStore{summaries: []SessionSummary{
 		{SessionID: "active", Cwd: "/tmp/project", UpdatedAtUnixMilli: 100, Title: "Active"},
 		{SessionID: "stored", Cwd: "/tmp/project", UpdatedAtUnixMilli: 200, Title: "Stored", Meta: map[string]any{"origin": "test"}},
 		{SessionID: "other", Cwd: "/tmp/other", UpdatedAtUnixMilli: 300},
 	}}
-	client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{
-		{},
-		{ID: "active-thread", SessionID: "active", Cwd: "/tmp/project", Title: "Active native"},
-		{ID: "skip-thread", SessionID: "skip-session", Cwd: "/tmp/project", Title: "Skip active thread"},
-		{ID: "deleted-thread", SessionID: "deleted", Cwd: "/tmp/project", Title: "Deleted"},
-		{ID: "native", Cwd: "", UpdatedAt: "2026-01-01T00:00:00Z"},
-		{ID: "native-model", SessionID: "native-model-session", Cwd: "/tmp/project", Title: "Native model", Model: "gpt"},
-	}}
+	client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listErr: errors.New("native list must not be lifecycle authority")}
 	agent := NewAgent(
 		WithSessionStore(store),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
@@ -564,50 +557,33 @@ func TestListAndNativeSessionBranches(t *testing.T) {
 	if err := agent.storeStartedSession(activeOther); err != nil {
 		t.Fatalf("store other active: %v", err)
 	}
-	agent.deleted["deleted"] = struct{}{}
 	cwd := "/tmp/project"
 	list, err := agent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd})
 	if err != nil {
 		t.Fatalf("ListSessions returned error: %v", err)
 	}
 	if len(list.Sessions) != 2 {
-		t.Fatalf("ListSessions explicit store sessions = %#v", list.Sessions)
+		t.Fatalf("ListSessions active/store sessions = %#v", list.Sessions)
 	}
 
-	nativeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	nativeAgent.deleted["deleted"] = struct{}{}
-	native, err := nativeAgent.listCodexThreads(ctx, acp.ListSessionsRequest{Cwd: &cwd}, map[acp.SessionId]struct{}{"active": {}}, map[string]struct{}{"active-thread": {}, "skip-thread": {}})
+	residualClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{{
+		ID: "residual-thread", SessionID: "residual", Cwd: "/tmp/project", Title: "Residual native thread",
+	}}}
+	nativeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return residualClient, nil }))
+	native, err := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd})
 	if err != nil {
-		t.Fatalf("listCodexThreads returned error: %v", err)
+		t.Fatalf("ListSessions with residual native thread returned error: %v", err)
 	}
-	if len(native) != 2 {
-		t.Fatalf("native sessions = %#v", native)
-	}
-	if _, noCwdErr := nativeAgent.listCodexThreads(ctx, acp.ListSessionsRequest{}, nil, nil); noCwdErr != nil {
-		t.Fatalf("listCodexThreads without cwd returned error: %v", noCwdErr)
+	if len(native.Sessions) != 0 {
+		t.Fatalf("ListSessions adopted residual native threads: %#v", native.Sessions)
 	}
 	badCwd := "relative"
 	if _, badCwdErr := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &badCwd}); badCwdErr == nil {
 		t.Fatal("ListSessions accepted relative cwd")
 	}
-	if _, badCwdThreadsErr := nativeAgent.listCodexThreads(ctx, acp.ListSessionsRequest{Cwd: &badCwd}, nil, nil); badCwdThreadsErr == nil {
-		t.Fatal("listCodexThreads accepted relative cwd")
-	}
 	badCursor := "%%%"
 	if _, badCursorErr := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cursor: &badCursor}); badCursorErr == nil {
 		t.Fatal("ListSessions accepted invalid cursor")
-	}
-	factoryErrNative := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return nil, errors.New("factory failed")
-	}))
-	if _, factoryErr := factoryErrNative.listCodexThreads(ctx, acp.ListSessionsRequest{}, nil, nil); factoryErr == nil {
-		t.Fatal("listCodexThreads ignored factory error")
-	}
-	listErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), listErr: errors.New("list failed")}, nil
-	}))
-	if _, listErr := listErrAgent.ListSessions(ctx, acp.ListSessionsRequest{}); listErr == nil {
-		t.Fatal("ListSessions ignored native list error")
 	}
 	storeErrAgent := NewAgent(WithSessionStore(&configurableStore{listErr: errors.New("store list")}))
 	if _, storeListErr := storeErrAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd}); storeListErr == nil {
@@ -678,32 +654,37 @@ func TestResumeLoadAndMaterializedBranches(t *testing.T) {
 		t.Fatal("LoadSession explicit empty store succeeded")
 	}
 
-	resumePrepareAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }))
-	if _, err := resumePrepareAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/tmp/project", WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}))); err == nil {
-		t.Fatal("ResumeSession accepted unsupported MCP")
+	resumeClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{{ID: "native", SessionID: "native"}}}
+	resumeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return resumeClient, nil }))
+	if resumeAgent.options.SessionStore == nil {
+		t.Fatal("NewAgent did not install the default in-memory session store")
 	}
-	resumeFactoryAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return nil, errors.New("factory failed")
-	}))
-	if _, err := resumeFactoryAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/tmp/project")); err == nil {
-		t.Fatal("ResumeSession ignored factory error")
+	if _, err := resumeAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/tmp/project")); err == nil {
+		t.Fatal("ResumeSession adopted a residual native thread absent from the default store")
 	}
-	resumeThreadAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: codex.ErrThreadNotFound}, nil
-	}))
-	if _, err := resumeThreadAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/tmp/project")); err == nil {
-		t.Fatal("ResumeSession ignored native resume error")
+	if resumeAgent.activeSession("native") != nil {
+		t.Fatal("ResumeSession installed a residual native thread")
 	}
-	resumeLimitAgent := NewAgent(
-		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
-		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
-	)
-	occupied := newSession(resumeLimitAgent, "occupied", "/tmp/project", nil, codex.Thread{ID: "occupied"}, newSpyCodexClient(), sessionMeta{}, nil)
-	if err := resumeLimitAgent.storeStartedSession(occupied); err != nil {
-		t.Fatalf("store occupied: %v", err)
+	resumeClient.mu.Lock()
+	resumeReq := resumeClient.resume
+	resumeClient.mu.Unlock()
+	if resumeReq.ThreadID != "" {
+		t.Fatalf("ResumeSession called native resume for an unknown store session: %#v", resumeReq)
 	}
-	if _, err := resumeLimitAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/tmp/project")); err == nil {
-		t.Fatal("ResumeSession ignored store backpressure")
+
+	loadClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{{ID: "native-load", SessionID: "native-load"}}}
+	loadAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return loadClient, nil }))
+	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("native-load", "/tmp/project")); err == nil {
+		t.Fatal("LoadSession adopted native history absent from the default store")
+	}
+	if loadAgent.activeSession("native-load") != nil {
+		t.Fatal("LoadSession installed a residual native thread")
+	}
+	loadClient.mu.Lock()
+	loadResumeReq := loadClient.resume
+	loadClient.mu.Unlock()
+	if loadResumeReq.ThreadID != "" {
+		t.Fatalf("LoadSession called native resume for an unknown store session: %#v", loadResumeReq)
 	}
 }
 
@@ -722,8 +703,38 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	if _, err := activeAgent.ResumeSession(ctx, ResumeSessionRequest(activeID, "/tmp/project")); err != nil {
 		t.Fatalf("ResumeSession active returned error: %v", err)
 	}
+	if _, err := activeAgent.ResumeSession(ctx, ResumeSessionRequest(activeID, "/tmp/project", WithSessionAdditionalDirectories("/tmp/different"))); err == nil {
+		t.Fatal("ResumeSession changed active binding without store rows succeeded")
+	}
+	if activeAgent.activeSession(activeID) != activeSession {
+		t.Fatal("ResumeSession changed active binding removed the usable session")
+	}
+	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
+		t.Fatal("LoadSession active session without store rows succeeded")
+	}
+	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project", WithSessionAdditionalDirectories("/tmp/different"))); err == nil {
+		t.Fatal("LoadSession changed active binding without store rows succeeded")
+	}
+	if activeAgent.activeSession(activeID) != activeSession {
+		t.Fatal("LoadSession changed active binding removed the usable session")
+	}
+	if deleted := activeClient.deletedThreadSnapshot(); len(deleted) != 0 {
+		t.Fatalf("store-missing active lifecycle deleted native threads: %#v", deleted)
+	}
+	defaultStore, ok := activeAgent.options.SessionStore.(*InMemorySessionStore)
+	if !ok {
+		t.Fatalf("default session store = %T, want *InMemorySessionStore", activeAgent.options.SessionStore)
+	}
+	if err := defaultStore.Replace(ctx, SessionKey{SessionID: string(activeID)}, []SessionStoreReplacement{{
+		Key: SessionKey{SessionID: string(activeID)},
+		Entries: []SessionStoreEntry{SessionStoreEntry(
+			`{"type":"event_msg","payload":{"type":"agent_message","message":"stored history"}}`,
+		)},
+	}}); err != nil {
+		t.Fatalf("seed active store: %v", err)
+	}
 	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err != nil {
-		t.Fatalf("LoadSession active returned error: %v", err)
+		t.Fatalf("LoadSession active with store rows returned error: %v", err)
 	}
 
 	activeLoadErrAgent := NewAgent(WithSessionStore(&configurableStore{loadErr: errors.New("active load failed")}))
@@ -746,29 +757,6 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}
 	if _, err := activeReplayErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
 		t.Fatal("LoadSession active ignored rollout replay error")
-	}
-
-	activeHistoryErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return activeClient, nil }))
-	activeHistoryErrSession := newSession(activeHistoryErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, readErrorClient{Client: activeClient}, sessionMeta{}, nil)
-	activeHistoryErrSession.fingerprint = codexSessionStartFingerprint(activeStart)
-	if err := activeHistoryErrAgent.storeStartedSession(activeHistoryErrSession); err != nil {
-		t.Fatalf("store active history err session: %v", err)
-	}
-	if _, err := activeHistoryErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
-		t.Fatal("LoadSession active ignored thread history error")
-	}
-
-	loadResumeErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return nil, errors.New("load resume failed")
-	}))
-	if _, err := loadResumeErrAgent.LoadSession(ctx, LoadSessionRequest("native", "/tmp/project")); err == nil {
-		t.Fatal("LoadSession ignored ResumeSession error")
-	}
-	loadReplayErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), readErr: errors.New("read failed")}, nil
-	}))
-	if _, err := loadReplayErrAgent.LoadSession(ctx, LoadSessionRequest("thread-1", "/tmp/project")); err == nil {
-		t.Fatal("LoadSession ignored post-resume replay error")
 	}
 }
 

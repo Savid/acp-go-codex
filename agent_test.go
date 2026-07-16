@@ -134,8 +134,8 @@ func TestPlaceholderSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSessions after close returned error: %v", err)
 	}
-	if len(listResp.Sessions) != 1 {
-		t.Fatalf("listed resumable native sessions after logical release = %d, want 1", len(listResp.Sessions))
+	if len(listResp.Sessions) != 0 {
+		t.Fatalf("listed session absent from default store after logical release = %#v, want none", listResp.Sessions)
 	}
 }
 
@@ -886,7 +886,6 @@ type errorCodexClient struct {
 	steerErr         error
 	compactErr       error
 	reviewErr        error
-	readErr          error
 	turnsErr         error
 	collaborationErr error
 	mcpStatusErr     error
@@ -930,14 +929,6 @@ func (c *errorCodexClient) ListThreads(ctx context.Context, req codex.ThreadList
 	}
 
 	return c.spyCodexClient.ListThreads(ctx, req)
-}
-
-func (c *errorCodexClient) ReadThread(ctx context.Context, req codex.ThreadReadRequest) (codex.ThreadHistory, error) {
-	if c.readErr != nil {
-		return codex.ThreadHistory{}, c.readErr
-	}
-
-	return c.spyCodexClient.ReadThread(ctx, req)
 }
 
 func (c *errorCodexClient) ListTurns(ctx context.Context, req codex.ThreadTurnsListRequest) (codex.ThreadTurnsListResponse, error) {
@@ -1086,14 +1077,6 @@ func (c *blockingPermissionAgentClient) RequestPermission(context.Context, acp.R
 	<-c.release
 
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("accept")}, nil
-}
-
-type readErrorClient struct {
-	codex.Client
-}
-
-func (c readErrorClient) ReadThread(context.Context, codex.ThreadReadRequest) (codex.ThreadHistory, error) {
-	return codex.ThreadHistory{}, errors.New("read failed")
 }
 
 func TestMain(m *testing.M) {

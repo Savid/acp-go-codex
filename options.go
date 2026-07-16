@@ -228,7 +228,8 @@ func WithEnv(env map[string]string) Option {
 	}
 }
 
-// WithSessionStore configures durable storage for Codex rollout JSONL rows.
+// WithSessionStore replaces the default in-memory authority for Codex rollout
+// JSONL rows and inactive session lifecycle operations.
 func WithSessionStore(store SessionStore) Option {
 	return func(options *Options) {
 		options.SessionStore = store

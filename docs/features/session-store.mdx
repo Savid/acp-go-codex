@@ -1,19 +1,21 @@
 ---
 title: "Session Store"
-description: "Mirror Codex rollout rows so sessions survive loss of local thread state."
+description: "Use Codex rollout rows as the authority for inactive session lifecycle."
 ---
 
-A `SessionStore` lets a host mirror Codex rollout rows to durable storage and
-later [load or resume](/docs/core/sessions#load-resume-and-fork) a session even
-when the local Codex thread state is gone. Without a store, sessions live only
-as long as their native Codex thread.
+Every Agent has a `SessionStore`. It mirrors Codex rollout rows and is the sole
+authority for inactive `session/list`, `session/load`, and `session/resume`.
+The default implementation is in-memory; a host can replace it with durable
+storage so sessions survive Agent restart or move between hosts. A native Codex
+thread that has no store entry is unknown and is never listed or adopted.
 
 ## When to wire a store
 
 Provide a store when sessions must outlive a single process or move between
 hosts — for example a remote service that restores a user's session on a fresh
-machine. If you leave it unset, the adapter uses an in-process store and
-restore is limited to native Codex thread state.
+machine. If you leave it unset, the adapter uses a volatile in-process store;
+there is no fallback to app-server `thread/list`, `thread/read`, or direct
+resume of a residual native thread.
 
 ## Host wiring
 
@@ -63,12 +65,14 @@ as `_meta.codex.turnId` and `_meta.codex.messageId`. Store-backed
 `session/load` emits an identity-bearing replay update even when that final
 assistant item has empty content.
 
-Store hydration is only used when the current app-server does not already own
-the native thread. For an active session or a thread retained after
-`session/close`, `session/load` and `session/resume` keep the native rollout
-path authoritative and require the stored `session_meta` thread ID as an exact
-identity check. Missing or mismatched identity is rejected; stored rows cannot
-redirect one logical session to another native thread or rollout path.
+An already-active wrapper remains usable for prompt, cancel, close, and
+`session/resume`; that resume reuses the existing binding and adopts nothing.
+`session/load` always requires committed store rows, including for an active
+wrapper, because replay is store-authoritative. When the current app-server
+still owns the stored thread, load/resume keep its native rollout path and
+require the stored `session_meta` thread ID as an exact identity check. Missing
+or mismatched identity is rejected; stored rows cannot redirect one logical
+session to another native thread or rollout path.
 One resume/load request claims retained ownership before making a native call.
 Concurrent resume, load, or delete requests fail closed until that claim is
 committed or rolled back; a failed native rebind is unsubscribed before the
@@ -79,7 +83,8 @@ claim becomes retryable.
 `Replace` writes one complete committed generation for a session: the main key
 must be present exactly once, and unlisted subpaths are hidden atomically.
 `Delete` writes a tombstone first; deleting the main subpath cascades to every
-subpath and hides the session from list, load, and resume.
+subpath and hides the session from list, load, and resume before residual native
+cleanup is attempted.
 
 Keys with an empty `SessionID` are rejected by `Append` and `Replace` with a
 "session id is required" error; `Delete` of such a key is a pure no-op and

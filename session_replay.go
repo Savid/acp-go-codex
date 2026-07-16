@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 type rolloutRow struct {
@@ -56,96 +55,6 @@ func (s *session) replayRollout(ctx context.Context, entries []SessionStoreEntry
 	}
 
 	return nil
-}
-
-func (s *session) replayThreadHistory(ctx context.Context) error {
-	if s.client == nil || s.codexThreadID == "" {
-		return nil
-	}
-
-	history, err := s.client.ReadThread(ctx, codex.ThreadReadRequest{ThreadID: s.codexThreadID})
-	if err != nil {
-		return codexThreadACPError(err, s.accountMetaSnapshot())
-	}
-
-	for _, update := range threadHistoryReplayUpdates(history.Items) {
-		if err := s.emitUpdates(ctx, update); err != nil {
-			return err
-		}
-	}
-
-	if identity := threadHistoryNativeTerminalIdentity(history); nativeIdentityChanged(identity, nativeTurnIdentity{}) {
-		if err := s.emitUpdatesWithNativeIdentity(ctx, identity, acp.SessionUpdate{
-			SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
-		}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func threadHistoryNativeTerminalIdentity(history codex.ThreadHistory) nativeTurnIdentity {
-	identity := nativeTurnIdentity{
-		turnID: firstNonEmpty(
-			rolloutIdentityString(history.Raw, codexTurnIDMetaKey, "turn_id", "turnID"),
-			rolloutIdentityString(history.Thread.Raw, codexTurnIDMetaKey, "turn_id", "turnID"),
-		),
-	}
-	for _, item := range history.Items {
-		if turnID := rolloutIdentityString(item, codexTurnIDMetaKey, "turn_id", "turnID"); turnID != "" && turnID != identity.turnID {
-			identity = nativeTurnIdentity{turnID: turnID}
-		}
-
-		if rolloutAssistantPayload(item) {
-			if messageID := rolloutIdentityString(item, "id", "itemId", codexMessageIDMetaKey, "uuid"); messageID != "" {
-				identity.messageID = messageID
-			}
-		}
-	}
-
-	return identity
-}
-
-func threadHistoryReplayUpdates(items []map[string]any) []acp.SessionUpdate {
-	updates := make([]acp.SessionUpdate, 0, len(items))
-	for _, item := range items {
-		switch firstNonEmpty(stringFromAny(item[jsonFieldType]), stringFromAny(item["kind"])) {
-		case "userMessage", eventUserMessage, roleUser:
-			if text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item[jsonFieldMessage]), responseItemText(item)); text != "" {
-				updates = append(updates, acp.UpdateUserMessageText(text))
-			}
-		case valueAgentMessageCamel, valueAgentMessage, roleAssistant, jsonFieldMessage:
-			role := stringFromAny(item["role"])
-
-			text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item[jsonFieldMessage]), responseItemText(item))
-			if text == "" {
-				continue
-			}
-
-			if role == roleUser {
-				updates = append(updates, acp.UpdateUserMessageText(text))
-			} else {
-				updates = append(updates, acp.UpdateAgentMessageText(text))
-			}
-		case valueReasoning, "agentReasoning", valueAgentReasoning:
-			if text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item["summary"]), responseItemText(item)); text != "" {
-				updates = append(updates, acp.UpdateAgentThoughtText(text))
-			}
-		case toolKindCommandExecution, toolKindFileChange, toolKindMcpToolCall, toolKindDynamicToolCall, "function_call", "custom_tool_call":
-			title := firstNonEmpty(stringFromAny(item[jsonFieldTitle]), stringFromAny(item[jsonFieldName]), stringFromAny(item[jsonFieldType]))
-			kind := toolKind(codex.ToolEvent{Kind: firstNonEmpty(stringFromAny(item[jsonFieldType]), stringFromAny(item["kind"]))})
-
-			update := replayToolStart(item, title, kind, acp.ToolCallStatusCompleted, item)
-			if text := firstNonEmpty(stringFromAny(item["output"]), stringFromAny(item[jsonFieldResult]), stringFromAny(item[jsonFieldMessage])); text != "" && update.ToolCall != nil {
-				update.ToolCall.Content = []acp.ToolCallContent{textToolContent(text)}
-			}
-
-			updates = append(updates, update)
-		}
-	}
-
-	return updates
 }
 
 func rolloutReplayUpdates(entries []SessionStoreEntry) ([]acp.SessionUpdate, error) {

@@ -36,11 +36,11 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name string
-		run  func(context.Context, *acp.ClientSideConnection) error
+		run  func(context.Context, *acp.ClientSideConnection, SessionStore) error
 	}{
 		{
 			name: "new",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection) error {
+			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
 				_, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
 
 				return err
@@ -48,7 +48,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 		},
 		{
 			name: "resume",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection) error {
+			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
 				session, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
 				if err != nil {
 					return err
@@ -60,8 +60,17 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 		},
 		{
 			name: "load",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection) error {
+			run: func(ctx context.Context, conn *acp.ClientSideConnection, store SessionStore) error {
 				session, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+				if err != nil {
+					return err
+				}
+				err = store.Replace(ctx, SessionKey{SessionID: string(session.SessionId)}, []SessionStoreReplacement{{
+					Key: SessionKey{SessionID: string(session.SessionId)},
+					Entries: []SessionStoreEntry{SessionStoreEntry(
+						`{"type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp/project"}}`,
+					)},
+				}})
 				if err != nil {
 					return err
 				}
@@ -72,7 +81,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 		},
 		{
 			name: "fork",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection) error {
+			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
 				session, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
 				if err != nil {
 					return err
@@ -86,11 +95,11 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			conn, client := newCommandContractConnection(t)
+			conn, client, store := newCommandContractConnection(t)
 			if _, err := conn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
 				t.Fatalf("Initialize returned error: %v", err)
 			}
-			if err := tc.run(ctx, conn); err != nil {
+			if err := tc.run(ctx, conn, store); err != nil {
 				t.Fatalf("%s lifecycle returned error: %v", tc.name, err)
 			}
 			assertNoAvailableCommandUpdates(t, client.Updates())
@@ -148,7 +157,7 @@ func TestCommandContractSkillsAreNotCommands(t *testing.T) {
 	}
 }
 
-func newCommandContractConnection(t *testing.T) (*acp.ClientSideConnection, *recordingClient) {
+func newCommandContractConnection(t *testing.T) (*acp.ClientSideConnection, *recordingClient, SessionStore) {
 	t.Helper()
 
 	c2aR, c2aW := io.Pipe()
@@ -162,13 +171,14 @@ func newCommandContractConnection(t *testing.T) (*acp.ClientSideConnection, *rec
 
 	client := &recordingClient{}
 	clientConn := acp.NewClientSideConnection(client, c2aW, a2cR)
-	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+	store := NewInMemorySessionStore()
+	agent := NewAgent(WithSessionStore(store), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newSpyCodexClient(), nil
 	}))
 	agentConn := newLocalAgentConnection(agent, a2cW, c2aR)
 	agent.setAgentClient(agentConn)
 
-	return clientConn, client
+	return clientConn, client, store
 }
 
 func assertNoAvailableCommandUpdates(t *testing.T, updates []acp.SessionNotification) {

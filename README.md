@@ -102,8 +102,10 @@ refresh, guarded logout, and OpenTelemetry providers.
 - Codex account status, contained and writable-home-exclusive terminal login,
   external ChatGPT token login/refresh, and guarded logout for adapter-owned
   `CODEX_HOME` directories.
-- Durable mirroring through a host-provided `SessionStore`; stored rows are Codex
-  rollout JSONL keyed by `{SessionID, Subpath}`.
+- Store-authoritative lifecycle through a default in-memory `SessionStore`,
+  replaceable by a host-provided durable store; stored rows are Codex rollout
+  JSONL keyed by `{SessionID, Subpath}`, and residual native threads are never
+  listed, loaded, or resumed without those rows.
 - Optional raw Codex rollout extension notifications through `_codex/rawEvent`.
 - OpenTelemetry adapter telemetry plus native Codex app-server OTLP mapping
   without recording prompt or tool secrets by default.

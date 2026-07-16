@@ -236,6 +236,21 @@ func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratc
 	signal.Notify(signals, forwardedSignals()...)
 	defer signal.Stop(signals)
 
+	return runCodexCLIWithSignals(ctx, codexPath, home, scratchDir, mode, deviceAuth, stdin, stdout, stderr, signals)
+}
+
+func runCodexCLIWithSignals(
+	ctx context.Context,
+	codexPath string,
+	home string,
+	scratchDir string,
+	mode string,
+	deviceAuth bool,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+	signals <-chan os.Signal,
+) error {
 	return codex.RunAccountCommand(ctx, codex.AccountCommandOptions{
 		CLIPath:    codexPath,
 		CodexHome:  home,

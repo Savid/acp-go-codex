@@ -108,7 +108,6 @@ type Agent struct {
 	conn              agentClient
 	sessions          map[acp.SessionId]*session
 	deleted           map[acp.SessionId]struct{}
-	explicitStore     bool
 	clientCalls       chan struct{}
 	authTokens        *ChatGPTAuthTokens
 	providerProcesses *providerProcessSnapshotTracker
@@ -150,6 +149,10 @@ var (
 // NewAgent creates an ACP agent for Codex.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
+	if options.SessionStore == nil {
+		options.SessionStore = NewInMemorySessionStore()
+	}
+
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
 	options.ConcurrencyLimits = limits
@@ -180,7 +183,6 @@ func NewAgent(opts ...Option) *Agent {
 		observe:           observe,
 		sessions:          make(map[acp.SessionId]*session),
 		deleted:           make(map[acp.SessionId]struct{}),
-		explicitStore:     options.SessionStore != nil,
 		clientCalls:       make(chan struct{}, clientCallLimit),
 		providerProcesses: providerProcesses,
 		retainedThreads:   make(map[acp.SessionId]*retainedRuntimeThread),
@@ -893,17 +895,6 @@ func (a *Agent) emitUpdate(ctx context.Context, sessionID acp.SessionId, update 
 }
 
 func (a *Agent) sessionStore() SessionStore {
-	if a.options.SessionStore != nil {
-		return a.options.SessionStore
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.options.SessionStore == nil {
-		a.options.SessionStore = NewInMemorySessionStore()
-	}
-
 	return a.options.SessionStore
 }
 

@@ -1102,7 +1102,12 @@ func TestRemainingSessionCanaryCleanupBranches(t *testing.T) {
 	}
 
 	resumeFailure := newFailureClient()
-	resumeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+	resumeStore := NewInMemorySessionStore()
+	require.NoError(t, resumeStore.Replace(ctx, SessionKey{SessionID: "native"}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: "native"},
+		Entries: entries,
+	}}))
+	resumeAgent := NewAgent(WithSessionStore(resumeStore), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return resumeFailure, nil
 	}))
 	_, err := resumeAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/work", WithSessionMCPServers(server)))
