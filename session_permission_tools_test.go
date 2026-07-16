@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -23,6 +24,8 @@ type strictPermissionClient struct {
 	states      map[acp.ToolCallId]acp.ToolCallStatus
 	order       []string
 	permissions []acp.RequestPermissionRequest
+	callbacks   []map[string]any
+	turnNonce   string
 }
 
 type blockingElicitationAgentClient struct {
@@ -50,16 +53,22 @@ func (c *blockingElicitationAgentClient) CreateElicitation(
 	}
 }
 
-func newStrictPermissionClient() *strictPermissionClient {
+func newStrictPermissionClient(turnNonce string) *strictPermissionClient {
 	return &strictPermissionClient{
 		recordingAgentClient: newRecordingAgentClient(),
 		states:               make(map[acp.ToolCallId]acp.ToolCallStatus),
+		turnNonce:            turnNonce,
 	}
 }
 
 func (c *strictPermissionClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	wantMeta := inboundRouteMeta(c.turnNonce)
+	if !reflect.DeepEqual(notification.Meta, wantMeta) {
+		return fmt.Errorf("session update route = %#v, want %#v", notification.Meta, wantMeta)
+	}
 
 	if start := notification.Update.ToolCall; start != nil {
 		c.states[start.ToolCallId] = start.Status
@@ -79,7 +88,7 @@ func (c *strictPermissionClient) SessionUpdate(_ context.Context, notification a
 }
 
 func (c *strictPermissionClient) RequestPermission(
-	_ context.Context,
+	ctx context.Context,
 	request acp.RequestPermissionRequest,
 ) (acp.RequestPermissionResponse, error) {
 	c.mu.Lock()
@@ -94,9 +103,17 @@ func (c *strictPermissionClient) RequestPermission(
 	}
 
 	c.permissions = append(c.permissions, request)
+	c.callbacks = append(c.callbacks, cloneAnyMap(turnRouteMetaFromContext(ctx)))
 	c.order = append(c.order, "permission:"+string(request.ToolCall.ToolCallId))
 
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("accept")}, nil
+}
+
+func (c *strictPermissionClient) callbackRoutes() []map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]map[string]any(nil), c.callbacks...)
 }
 
 func (c *strictPermissionClient) snapshot() ([]string, []acp.RequestPermissionRequest) {
@@ -114,7 +131,7 @@ func newStrictPermissionSession(t *testing.T) (*Agent, *session, *strictPermissi
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return client, nil
 	}))
-	conn := newStrictPermissionClient()
+	conn := newStrictPermissionClient("permission-turn")
 	agent.setAgentClient(conn)
 
 	response, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
@@ -125,6 +142,31 @@ func newStrictPermissionSession(t *testing.T) (*Agent, *session, *strictPermissi
 	t.Cleanup(session.finishTurn)
 
 	return agent, session, conn, turnCtx
+}
+
+func TestStrictPermissionClientRejectsMissingOrIncorrectNotificationRoute(t *testing.T) {
+	client := newStrictPermissionClient("turn-exact")
+
+	for name, meta := range map[string]map[string]any{
+		"missing": nil,
+		"stale":   inboundRouteMeta("turn-stale"),
+		"extra": {
+			routeMetaKey: map[string]any{
+				routeVersionKey:   routeVersion,
+				routeTurnNonceKey: "turn-exact",
+				"extra":           true,
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := client.SessionUpdate(context.Background(), acp.SessionNotification{Meta: meta})
+			require.ErrorContains(t, err, "session update route")
+		})
+	}
+
+	require.NoError(t, client.SessionUpdate(context.Background(), acp.SessionNotification{
+		Meta: inboundRouteMeta("turn-exact"),
+	}))
 }
 
 func emitNativePermissionToolEvent(
@@ -227,7 +269,7 @@ func TestMCPPermissionRejectsStaleNativeTurnBeforeLedgerMatch(t *testing.T) {
 func TestPermissionPublishesPendingBeforeCallbackAndDedupesNativeStart(t *testing.T) {
 	agent, session, conn, turnCtx := newStrictPermissionSession(t)
 
-	result, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+	result, err := agent.handleCodexServerRequest(context.Background(), codex.ServerRequest{
 		ID:     json.RawMessage(`"approval-before-start"`),
 		Method: codex.RequestMCPElicitation,
 		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn","serverName":"wagie","message":"Allow the wagie MCP server to run tool \"execute\"?","tool_params":{"code":"return 1"},"_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"Execute"}}`),
@@ -254,6 +296,55 @@ func TestPermissionPublishesPendingBeforeCallbackAndDedupesNativeStart(t *testin
 		"update:approval-before-start:in_progress",
 		"update:approval-before-start:completed",
 	}, order)
+	require.Equal(t, []map[string]any{nil}, conn.callbackRoutes())
+}
+
+func TestPermissionBeforeNativeStartRoutesSyntheticPendingForEveryClass(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		method string
+		id     string
+		params string
+	}{
+		{
+			name: "command", method: codex.RequestCommandApproval, id: "command-before-start",
+			params: `,"approvalId":"command-before-start","command":"printf live"`,
+		},
+		{
+			name: "file", method: codex.RequestFileChangeApproval, id: "file-before-start",
+			params: `,"approvalId":"file-before-start","grantRoot":"/repo"`,
+		},
+		{
+			name: "permissions", method: codex.RequestPermissionsApproval, id: "permissions-before-start",
+			params: `,"itemId":"permissions-before-start","permissions":{"filesystem":{"write":true}}`,
+		},
+		{
+			name: "mcp", method: codex.RequestMCPElicitation, id: "mcp-before-start",
+			params: `,"turnId":"native-permission-turn","serverName":"wagie","message":"Allow tool?","_meta":{"codex_approval_kind":"mcp_tool_call","codex_request_type":"approval","tool_name":"execute","tool_title":"Execute"}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			agent, session, conn, _ := newStrictPermissionSession(t)
+
+			response, err := agent.handleCodexServerRequest(context.Background(), codex.ServerRequest{
+				ID:     json.RawMessage(`"` + test.id + `"`),
+				Method: test.method,
+				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `"` + test.params + `}`),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, response)
+
+			order, permissions := conn.snapshot()
+			require.Equal(t, []string{
+				"start:" + test.id + ":pending",
+				"permission:" + test.id,
+			}, order)
+			require.Len(t, permissions, 1)
+			require.Equal(t, acp.ToolCallId(test.id), permissions[0].ToolCall.ToolCallId)
+			require.Equal(t, acp.ToolCallStatusPending, *permissions[0].ToolCall.Status)
+			require.Equal(t, []map[string]any{nil}, conn.callbackRoutes())
+		})
+	}
 }
 
 func TestCommandFileAndProfilePermissionsUsePublishedNonterminalIDs(t *testing.T) {
@@ -421,7 +512,7 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	conn := newStrictPermissionClient()
+	conn := newStrictPermissionClient("outside-turn")
 	agent.setAgentClient(conn)
 	created, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
