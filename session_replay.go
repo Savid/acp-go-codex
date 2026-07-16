@@ -132,7 +132,7 @@ func threadHistoryReplayUpdates(items []map[string]any) []acp.SessionUpdate {
 			if text := firstNonEmpty(stringFromAny(item[jsonFieldText]), stringFromAny(item["summary"]), responseItemText(item)); text != "" {
 				updates = append(updates, acp.UpdateAgentThoughtText(text))
 			}
-		case toolKindCommandExecution, toolKindFileChange, toolKindMcpToolCall, "dynamicToolCall", "function_call", "custom_tool_call":
+		case toolKindCommandExecution, toolKindFileChange, toolKindMcpToolCall, toolKindDynamicToolCall, "function_call", "custom_tool_call":
 			title := firstNonEmpty(stringFromAny(item[jsonFieldTitle]), stringFromAny(item[jsonFieldName]), stringFromAny(item[jsonFieldType]))
 			kind := toolKind(codex.ToolEvent{Kind: firstNonEmpty(stringFromAny(item[jsonFieldType]), stringFromAny(item["kind"]))})
 

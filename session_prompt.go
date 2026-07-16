@@ -30,6 +30,9 @@ const (
 	toolKindCommandExecution    = "commandExecution"
 	toolKindFileChange          = "fileChange"
 	toolKindMcpToolCall         = "mcpToolCall"
+	toolKindDynamicToolCall     = "dynamicToolCall"
+	toolKindShell               = "shell"
+	toolKindPatch               = "patch"
 
 	sandboxTypeDangerFullAccess = "dangerFullAccess"
 	sandboxTypeReadOnly         = "readOnly"
@@ -317,8 +320,11 @@ func (s *session) recordRawEmitFailure(ctx context.Context, err error) {
 	}
 }
 
-func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, visibleEvent codex.Event, state *promptEventState) error {
-	updates := eventUpdates(visibleEvent)
+func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, visibleEvent codex.Event, state *promptEventState) (err error) {
+	toolPublication := s.preparePermissionToolEvent(visibleEvent)
+	defer func() { toolPublication.finish(err == nil) }()
+
+	updates := toolPublication.updates()
 	updates = append(updates, usageUpdatesForEvent(event, &state.streamedUsage, &state.streamedThreadUsage, &state.streamedUsageContextWindow)...)
 
 	checkpointIdentity := nativeTurnIdentity{turnID: state.nativeIdentity.turnID}
@@ -327,8 +333,9 @@ func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, 
 			updates = []acp.SessionUpdate{{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}}}
 		}
 
-		if err := s.emitUpdatesWithNativeIdentity(turnCtx, checkpointIdentity, updates...); err != nil {
-			return err
+		emitErr := s.emitUpdatesWithNativeIdentity(turnCtx, checkpointIdentity, updates...)
+		if emitErr != nil {
+			return emitErr
 		}
 
 		state.emittedNativeIdentity = checkpointIdentity
@@ -336,7 +343,9 @@ func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, 
 		return nil
 	}
 
-	return s.emitUpdates(turnCtx, updates...)
+	err = s.emitUpdates(turnCtx, updates...)
+
+	return err
 }
 
 func (s *session) applyPromptUsage(event codex.Event, state *promptEventState) {
@@ -650,11 +659,11 @@ func diffContent(path string, diff string) acp.ToolCallContent {
 
 func toolKind(tool codex.ToolEvent) acp.ToolKind {
 	switch tool.Kind {
-	case toolKindCommandExecution, valueCommand, "exec", "shell":
+	case toolKindCommandExecution, valueCommand, "exec", toolKindShell:
 		return acp.ToolKindExecute
-	case toolKindFileChange, "edit", "patch":
+	case toolKindFileChange, "edit", toolKindPatch:
 		return acp.ToolKindEdit
-	case toolKindMcpToolCall, "dynamicToolCall":
+	case toolKindMcpToolCall, toolKindDynamicToolCall:
 		return acp.ToolKindOther
 	default:
 		return acp.ToolKindOther

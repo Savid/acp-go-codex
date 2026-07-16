@@ -15,7 +15,14 @@ starts a Codex turn on that thread and streams
 [ACP updates](/docs/core/prompt-streaming) until Codex completes, the turn is
 cancelled, or it fails. `session/cancel` aborts the in-flight turn;
 `session/close` unsubscribes and releases that logical thread without closing
-the shared app-server.
+the shared app-server. The logical session remains addressable when native
+unsubscribe fails. Only after unsubscribe succeeds, and while that app-server
+generation remains live, the adapter retains the closed thread's native ID and
+canonical rollout path under the same ACP session ID. A later store-backed load
+or resume can reattach the thread without assigning its live native identity to
+a newly materialized rollout. Close, resume, and delete admission is serialized
+per session; the retained record either moves once into the new active session
+or is released when native thread/runtime ownership ends.
 
 One Agent owns one Codex `app-server` and multiplexes all of its ACP sessions as
 independent native threads. Working directory, model, approval/sandbox policy,
@@ -58,10 +65,11 @@ This lets a host restore a session whose local Codex thread state is gone as
 long as the rollout rows were mirrored to a store.
 
 When a lifecycle request refreshes configuration for a session whose native
-thread is still attached to the current app-server, the adapter rebinds that
-same thread at its owned native rollout path. It never materializes the mirror
-as a second rollout or replaces the live session object. A native thread ID in
-the stored `session_meta` row must match the active thread; a mismatch is
+thread is still owned by the current app-server, the adapter rebinds that same
+thread at its owned native rollout path. This applies both to an active wrapper
+session and to a thread retained after `session/close`. It never materializes
+the mirror as a second rollout. The native thread ID in the stored
+`session_meta` row must match the active or retained thread; a mismatch is
 rejected before Codex is called.
 
 Forking is exposed as the Codex extension method `_codex/session/fork`; the

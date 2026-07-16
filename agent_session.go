@@ -132,13 +132,29 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 }
 
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
-	session, err := a.session(params.SessionId)
+	session, err := a.beginSessionClose(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
 
-	closeErr := session.Close(ctx)
-	if a.removeSessionIf(params.SessionId, session) {
+	session.lifecycle.Lock()
+	defer session.lifecycle.Unlock()
+
+	if unsubscribeErr := session.unsubscribe(ctx); unsubscribeErr != nil {
+		a.abortSessionClose(params.SessionId, session)
+
+		return acp.CloseSessionResponse{}, codexThreadACPError(unsubscribeErr, session.accountMetaSnapshot())
+	}
+
+	removed, retained := a.finishSessionCloseRetainingThread(params.SessionId, session)
+
+	var closeErr error
+
+	if removed && !retained {
+		closeErr = session.releaseMaterialized()
+	}
+
+	if removed {
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
@@ -151,6 +167,14 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
 
+	claimedRetained, err := a.claimRetainedRuntimeThreadForDelete(params.SessionId)
+	if errors.Is(err, errNoRetainedRuntimeThread) {
+		claimedRetained = nil
+	} else if err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+	defer a.releaseRetainedRuntimeThreadClaim(claimedRetained)
+
 	storeCtx, cancel := a.sessionStoreContext(ctx)
 	defer cancel()
 
@@ -160,6 +184,12 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
+
+	retained := claimedRetained
+	if retained == nil {
+		retained = a.retainedThreads[params.SessionId]
+	}
+
 	delete(a.sessions, params.SessionId)
 	a.deleted[params.SessionId] = struct{}{}
 	a.mu.Unlock()
@@ -167,10 +197,14 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	threadID := ""
 	if session != nil {
 		threadID = session.snapshot().codexThreadID
+	} else if retained != nil {
+		threadID = retained.threadID
 	}
 
 	var cleanupErr error
 	if err := a.deleteNativeCodexSession(ctx, params.SessionId, threadID); err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+	} else if err := a.endRetainedRuntimeThread(retained); err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 
@@ -508,6 +542,12 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	releaseLifecycle, err := a.acquireSessionLifecycle(params.SessionId)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	defer releaseLifecycle()
+
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
@@ -612,6 +652,19 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return a.rebindActiveStoredSession(ctx, params, entries, meta, active)
 	}
 
+	retained, err := a.claimRetainedRuntimeThreadForStore(params.SessionId, rolloutNativeThreadID(entries))
+	if errors.Is(err, errNoRetainedRuntimeThread) {
+		retained = nil
+	} else if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	if retained != nil {
+		resp, _, resumeErr := a.resumeRetainedRuntimeSession(ctx, params, meta, retained)
+
+		return resp, resumeErr
+	}
+
 	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
@@ -686,6 +739,95 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		Meta:          sessionResponseMeta(snapshot),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, nil
+}
+
+func (a *Agent) resumeRetainedRuntimeSession(
+	ctx context.Context,
+	params acp.ResumeSessionRequest,
+	meta sessionMeta,
+	retained *retainedRuntimeThread,
+) (acp.ResumeSessionResponse, *session, error) {
+	releaseClaim := true
+	defer func() {
+		if releaseClaim {
+			a.releaseRetainedRuntimeThreadClaim(retained)
+		}
+	}()
+
+	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, nil, err
+	}
+
+	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	thread, err := retained.client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: retained.threadID,
+		Path:     retained.path,
+		Cwd:      params.Cwd,
+		Config:   config,
+	})
+	if err != nil {
+		return acp.ResumeSessionResponse{}, nil, codexThreadACPError(err, nil)
+	}
+
+	rollback := func(cause error) error {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		defer cancel()
+
+		threadID := firstNonEmpty(thread.ID, retained.threadID)
+		if unsubscribeErr := retained.client.UnsubscribeThread(closeCtx, threadID); unsubscribeErr != nil {
+			releaseClaim = false
+
+			return errors.Join(cause, fmt.Errorf("rollback retained Codex resume: %w", unsubscribeErr))
+		}
+
+		return cause
+	}
+
+	if thread.ID != retained.threadID {
+		cause := acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex resumed a different retained native thread",
+		})
+
+		return acp.ResumeSessionResponse{}, nil, rollback(cause)
+	}
+
+	if thread.Path == "" {
+		thread.Path = retained.path
+	} else if retained.path != "" && thread.Path != retained.path {
+		cause := acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex resumed the retained thread at a different rollout path",
+		})
+
+		return acp.ResumeSessionResponse{}, nil, rollback(cause)
+	}
+
+	session := newSession(a, params.SessionId, params.Cwd, params.AdditionalDirectories, thread, retained.client, meta, mcpServers)
+	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            params.McpServers,
+		Meta:                  meta,
+		ResumeID:              string(params.SessionId),
+	})
+	session.setAccount(clientAccountMeta(ctx, retained.client))
+
+	if err := a.runtimeReadyCanary(ctx, retained.client, session); err != nil {
+		return acp.ResumeSessionResponse{}, nil, rollback(err)
+	}
+
+	if err := a.storeRetainedRuntimeSession(session, retained); err != nil {
+		return acp.ResumeSessionResponse{}, nil, rollback(err)
+	}
+
+	models := modelList(ctx, retained.client)
+	snapshot := session.snapshot()
+
+	return acp.ResumeSessionResponse{
+		Meta:          sessionResponseMeta(snapshot),
+		ConfigOptions: sessionConfigOptions(session, models),
+	}, session, nil
 }
 
 // rebindActiveStoredSession refreshes lifecycle configuration without
@@ -803,6 +945,12 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
+
+	releaseLifecycle, err := a.acquireSessionLifecycle(params.SessionId)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	defer releaseLifecycle()
 
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
@@ -963,6 +1111,28 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse(resp), nil
 	}
 
+	retained, err := a.claimRetainedRuntimeThreadForStore(params.SessionId, rolloutNativeThreadID(entries))
+	if errors.Is(err, errNoRetainedRuntimeThread) {
+		retained = nil
+	} else if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	if retained != nil {
+		resp, active, resumeErr := a.resumeRetainedRuntimeSession(ctx, acp.ResumeSessionRequest(params), meta, retained)
+		if resumeErr != nil {
+			return acp.LoadSessionResponse{}, resumeErr
+		}
+
+		if replayErr := active.replayRollout(ctx, entries); replayErr != nil {
+			_, closeErr := a.CloseSession(context.WithoutCancel(ctx), acp.CloseSessionRequest{SessionId: params.SessionId})
+
+			return acp.LoadSessionResponse{}, errors.Join(replayErr, closeErr)
+		}
+
+		return acp.LoadSessionResponse(resp), nil
+	}
+
 	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
@@ -1073,8 +1243,18 @@ func (a *Agent) retryDeletedNativeCodexSessions(ctx context.Context) {
 }
 
 func (a *Agent) retryDeleteNativeCodexSession(ctx context.Context, sessionID acp.SessionId, threadID string) {
+	a.mu.Lock()
+
+	retained := a.retainedThreads[sessionID]
+	if threadID == "" && retained != nil {
+		threadID = retained.threadID
+	}
+	a.mu.Unlock()
+
 	if err := a.deleteNativeCodexSession(ctx, sessionID, threadID); err != nil {
 		a.log.DebugContext(ctx, "retry delete native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
+	} else if err := a.endRetainedRuntimeThread(retained); err != nil {
+		a.log.DebugContext(ctx, "release deleted native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
 	}
 }
 

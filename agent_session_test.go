@@ -239,6 +239,77 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 	}
 }
 
+func TestDeleteRetainedRuntimeThreadReleasesOwnership(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	client := newSpyCodexClient()
+	agent := NewAgent(
+		WithSessionStore(store),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+
+	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	require.NotNil(t, active)
+	threadID := active.codexThreadID
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	require.NotNil(t, agent.retainedThreads[created.SessionId])
+
+	_, err = agent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	require.Nil(t, agent.retainedThreads[created.SessionId])
+	require.Contains(t, client.deletedThreadSnapshot(), threadID)
+}
+
+func TestRetainedDeleteAndRetryCleanupErrors(t *testing.T) {
+	ctx := context.Background()
+	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread"}}`)}
+	oldRemove := removeMaterializedRolloutFile
+	t.Cleanup(func() { removeMaterializedRolloutFile = oldRemove })
+
+	fixture := func(id acp.SessionId) (*Agent, *retainedRuntimeThread) {
+		client := newSpyCodexClient()
+		agent := NewAgent(
+			WithSessionStore(NewInMemorySessionStore()),
+			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+		)
+		agent.runtimeClient = client
+		agent.runtimeEpoch = 4
+		path, err := materializeRollout(t.TempDir(), entries)
+		require.NoError(t, err)
+		retained := &retainedRuntimeThread{
+			sessionID:        id,
+			threadID:         "thread",
+			path:             path,
+			client:           client,
+			epoch:            4,
+			materializedPath: path,
+		}
+		agent.retainedThreads[id] = retained
+
+		return agent, retained
+	}
+
+	agent, retained := fixture("delete")
+	removeMaterializedRolloutFile = func(string) error { return errors.New("retained delete cleanup failed") }
+	_, err := agent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: retained.sessionID})
+	require.ErrorContains(t, err, "retained delete cleanup failed")
+	require.True(t, retained.nativeEnded)
+	require.Same(t, retained, agent.retainedThreads[retained.sessionID])
+	removeMaterializedRolloutFile = oldRemove
+	require.NoError(t, agent.releaseRetainedRuntimeThreads(retained.client, retained.epoch))
+
+	agent, retained = fixture("retry")
+	removeMaterializedRolloutFile = func(string) error { return errors.New("retained retry cleanup failed") }
+	agent.retryDeleteNativeCodexSession(ctx, retained.sessionID, "")
+	require.True(t, retained.nativeEnded)
+	require.Same(t, retained, agent.retainedThreads[retained.sessionID])
+	removeMaterializedRolloutFile = oldRemove
+	require.NoError(t, agent.releaseRetainedRuntimeThreads(retained.client, retained.epoch))
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -858,10 +929,10 @@ func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnSta
 	return events, nil
 }
 
-// A steering interrupt leaves the native Codex thread attached to the shared
-// app-server. When the host immediately resumes from its mirrored store, the
-// active native rollout remains authoritative: the wrapper snapshot must not
-// be materialized at a second path or replace/unsubscribe the live session.
+// A steering interrupt followed by session/close removes the wrapper session
+// but leaves the native Codex thread owned by the shared app-server. A store
+// resume must retain that runtime ownership, use its canonical rollout path,
+// and reject store identities belonging to another logical session.
 func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	ctx := context.Background()
 	nativeThreadID := "thread-active"
@@ -926,6 +997,42 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	mirrored, err := store.Load(ctx, SessionKey{SessionID: string(created.SessionId)})
 	require.NoError(t, err)
 	require.Equal(t, entries, mirrored)
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	require.Nil(t, agent.activeSession(created.SessionId))
+
+	client.mu.Lock()
+	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
+	require.Zero(t, client.resumeCount)
+	client.mu.Unlock()
+
+	hijackID := acp.SessionId("other-logical-session")
+	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(hijackID)}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: string(hijackID)},
+		Entries: entries,
+	}}))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(hijackID, "/tmp/project"))
+	require.ErrorContains(t, err, "retained by another session")
+
+	missingIdentity := []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"missing identity"}}`)}
+	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: string(created.SessionId)},
+		Entries: missingIdentity,
+	}}))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	require.ErrorContains(t, err, "thread identity is required")
+
+	wrongRetainedIdentity := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-other"}}`)}
+	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: string(created.SessionId)},
+		Entries: wrongRetainedIdentity,
+	}}))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	require.ErrorContains(t, err, "does not match the retained session")
+	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: string(created.SessionId)},
+		Entries: entries,
+	}}))
 
 	resumed, err := agent.ResumeSession(ctx, ResumeSessionRequest(
 		created.SessionId,
@@ -934,14 +1041,16 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	))
 	require.NoError(t, err)
 	require.NotNil(t, resumed.Meta)
-	require.Same(t, active, agent.activeSession(created.SessionId))
+	resumedActive := agent.activeSession(created.SessionId)
+	require.NotNil(t, resumedActive)
+	require.NotSame(t, active, resumedActive)
 	require.Zero(t, sessionScratchAdmissions)
 
 	client.mu.Lock()
 	require.Equal(t, 1, client.resumeCount)
 	require.Equal(t, nativeThreadID, client.resume.ThreadID)
 	require.Equal(t, nativePath, client.resume.Path)
-	require.Empty(t, client.unsubscribed)
+	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
 	client.mu.Unlock()
 
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(
@@ -950,13 +1059,13 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 		WithSessionAdditionalDirectories("/tmp/load"),
 	))
 	require.NoError(t, err)
-	require.Same(t, active, agent.activeSession(created.SessionId))
+	require.Same(t, resumedActive, agent.activeSession(created.SessionId))
 	require.Zero(t, sessionScratchAdmissions)
 
 	client.mu.Lock()
 	require.Equal(t, 2, client.resumeCount)
 	require.Equal(t, nativePath, client.resume.Path)
-	require.Empty(t, client.unsubscribed)
+	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
 	client.mu.Unlock()
 
 	agent.setAgentClient(&errorAgentClient{
@@ -1024,6 +1133,14 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 
 		return active
 	}
+
+	t.Run("materialized dispatcher keeps active ownership", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent := NewAgent()
+		bind(agent, client)
+		_, err := agent.resumeMaterializedSession(ctx, params, entries)
+		require.NoError(t, err)
+	})
 
 	t.Run("relaunch failure", func(t *testing.T) {
 		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
@@ -1137,6 +1254,507 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
 		require.ErrorContains(t, err, "ownership changed during resume")
 	})
+}
+
+func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
+	ctx := context.Background()
+	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
+	params := ResumeSessionRequest("session", "/tmp/project")
+
+	fixture := func(client codex.Client) (*Agent, *retainedRuntimeThread) {
+		agent := NewAgent()
+		agent.runtimeClient = client
+		agent.runtimeEpoch = 9
+		retained := &retainedRuntimeThread{
+			sessionID: "session",
+			threadID:  "thread-active",
+			path:      "/native/rollout.jsonl",
+			client:    client,
+			epoch:     9,
+			claimed:   true,
+		}
+		agent.retainedThreads[retained.sessionID] = retained
+
+		return agent, retained
+	}
+
+	t.Run("MCP validation", func(t *testing.T) {
+		agent, retained := fixture(newSpyCodexClient())
+		invalid := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(acp.McpServer{
+			Sse: &acp.McpServerSseInline{Name: "removed"},
+		}))
+		_, _, err := agent.resumeRetainedRuntimeSession(ctx, invalid, sessionMeta{}, retained)
+		require.Error(t, err)
+	})
+
+	t.Run("native resume failure", func(t *testing.T) {
+		client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("retained resume failed")}
+		agent, retained := fixture(client)
+		_, _, err := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, retained)
+		require.ErrorContains(t, err, "retained resume failed")
+	})
+
+	for _, tc := range []struct {
+		name   string
+		thread codex.Thread
+		want   string
+	}{
+		{
+			name:   "wrong returned thread",
+			thread: codex.Thread{ID: "thread-other", Path: "/native/rollout.jsonl"},
+			want:   "different retained native thread",
+		},
+		{
+			name:   "wrong returned path",
+			thread: codex.Thread{ID: "thread-active", Path: "/other/rollout.jsonl"},
+			want:   "different rollout path",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &activeRebindEdgeClient{
+				spyCodexClient: newSpyCodexClient(),
+				resume: func(context.Context, codex.ThreadResumeRequest) (codex.Thread, error) {
+					return tc.thread, nil
+				},
+			}
+			agent, retained := fixture(client)
+			_, _, err := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, retained)
+			require.ErrorContains(t, err, tc.want)
+			require.False(t, retained.claimed)
+			require.Len(t, client.unsubscribed, 1)
+
+			client.resume = func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+			}
+			claimed, claimErr := agent.claimRetainedRuntimeThreadForStore("session", "thread-active")
+			require.NoError(t, claimErr)
+			require.Same(t, retained, claimed)
+			_, retried, retryErr := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, claimed)
+			require.NoError(t, retryErr)
+			require.NotNil(t, retried)
+			require.NoError(t, agent.Close())
+		})
+	}
+
+	t.Run("empty returned path keeps retained ownership", func(t *testing.T) {
+		client := &activeRebindEdgeClient{
+			spyCodexClient: newSpyCodexClient(),
+			resume: func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+				return codex.Thread{ID: req.ThreadID}, nil
+			},
+		}
+		agent, retained := fixture(client)
+		_, session, err := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, retained)
+		require.NoError(t, err)
+		require.Equal(t, "/native/rollout.jsonl", session.rolloutPath)
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("canary failure", func(t *testing.T) {
+		client := &runtimeFailureClient{
+			runtimeRecordingClient: newRuntimeRecordingClient(),
+			events:                 []codex.Event{{Kind: codex.EventCompleted}},
+		}
+		agent, retained := fixture(client)
+		withMCP := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(
+			HTTPMCPServer("marker", "https://example.test/mcp", nil),
+		))
+		_, _, err := agent.resumeRetainedRuntimeSession(ctx, withMCP, sessionMeta{}, retained)
+		require.ErrorContains(t, err, "runtime_ready")
+		require.False(t, retained.claimed)
+		require.Len(t, client.unsubscribed, 1)
+		claimed, claimErr := agent.claimRetainedRuntimeThreadForStore("session", "thread-active")
+		require.NoError(t, claimErr)
+		_, retried, retryErr := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, claimed)
+		require.NoError(t, retryErr)
+		require.NotNil(t, retried)
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("store commit failure rolls back and retries", func(t *testing.T) {
+		client := &activeRebindEdgeClient{
+			spyCodexClient: newSpyCodexClient(),
+			resume: func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+			},
+		}
+		agent, retained := fixture(client)
+		agent.options.ConcurrencyLimits.MaxActiveSessions = 1
+		agent.sessions["occupied"] = &session{id: "occupied"}
+		_, _, err := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, retained)
+		require.ErrorContains(t, err, valueBackpressure)
+		require.False(t, retained.claimed)
+		require.Len(t, client.unsubscribed, 1)
+
+		delete(agent.sessions, "occupied")
+		claimed, claimErr := agent.claimRetainedRuntimeThreadForStore("session", "thread-active")
+		require.NoError(t, claimErr)
+		_, retried, retryErr := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, claimed)
+		require.NoError(t, retryErr)
+		require.NotNil(t, retried)
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("ownership changes before commit", func(t *testing.T) {
+		client := &activeRebindEdgeClient{spyCodexClient: newSpyCodexClient()}
+		client.resume = func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+			return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+		}
+		agent, retained := fixture(client)
+		client.account = func(context.Context) (codex.Account, error) {
+			agent.mu.Lock()
+			agent.retainedThreads[retained.sessionID] = &retainedRuntimeThread{sessionID: retained.sessionID}
+			agent.mu.Unlock()
+
+			return codex.Account{}, nil
+		}
+		_, _, err := agent.resumeRetainedRuntimeSession(ctx, params, sessionMeta{}, retained)
+		require.ErrorContains(t, err, "ownership changed")
+	})
+
+	t.Run("load retained replay error and success", func(t *testing.T) {
+		loadEntries := []SessionStoreEntry{
+			SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`),
+			SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"history"}}`),
+		}
+
+		client := &activeRebindEdgeClient{
+			spyCodexClient: newSpyCodexClient(),
+			resume: func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+			},
+		}
+		agent, retained := fixture(client)
+		retained.claimed = false
+		agent.setAgentClient(&errorAgentClient{
+			recordingAgentClient: newRecordingAgentClient(),
+			updateErr:            errors.New("retained replay failed"),
+		})
+		_, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("session", "/tmp/project"), loadEntries)
+		require.ErrorContains(t, err, "retained replay failed")
+
+		client = &activeRebindEdgeClient{
+			spyCodexClient: newSpyCodexClient(),
+			resume: func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+			},
+		}
+		agent, retained = fixture(client)
+		retained.claimed = false
+		agent.setAgentClient(newRecordingAgentClient())
+		_, err = agent.loadMaterializedSession(ctx, LoadSessionRequest("session", "/tmp/project"), loadEntries)
+		require.NoError(t, err)
+	})
+
+	t.Run("load retained lookup and resume errors", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent, retained := fixture(client)
+		retained.claimed = false
+		wrong := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"wrong"}}`)}
+		_, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("session", "/tmp/project"), wrong)
+		require.ErrorContains(t, err, "does not match")
+
+		agent, retained = fixture(client)
+		retained.claimed = false
+		_, err = agent.loadMaterializedSession(ctx, LoadSessionRequest(
+			"session",
+			"/tmp/project",
+			WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "removed"}}),
+		), entries)
+		require.Error(t, err)
+	})
+}
+
+type blockingLifecycleCodexClient struct {
+	*spyCodexClient
+
+	unsubscribeStarted chan struct{}
+	unsubscribeRelease chan struct{}
+	unsubscribeOnce    sync.Once
+	resumeStarted      chan codex.ThreadResumeRequest
+	resumeRelease      chan struct{}
+	resumeMu           sync.Mutex
+	resumeCalls        int
+}
+
+func (c *blockingLifecycleCodexClient) UnsubscribeThread(ctx context.Context, threadID string) error {
+	if c.unsubscribeStarted != nil {
+		c.unsubscribeOnce.Do(func() { close(c.unsubscribeStarted) })
+		select {
+		case <-c.unsubscribeRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return c.spyCodexClient.UnsubscribeThread(ctx, threadID)
+}
+
+func (c *blockingLifecycleCodexClient) ResumeThread(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+	c.resumeMu.Lock()
+	c.resumeCalls++
+	c.resumeMu.Unlock()
+
+	if c.resumeStarted != nil {
+		select {
+		case c.resumeStarted <- req:
+		default:
+		}
+		select {
+		case <-c.resumeRelease:
+		case <-ctx.Done():
+			return codex.Thread{}, ctx.Err()
+		}
+	}
+
+	thread, err := c.spyCodexClient.ResumeThread(ctx, req)
+	if thread.Path == "" {
+		thread.Path = req.Path
+	}
+
+	return thread, err
+}
+
+func (c *blockingLifecycleCodexClient) resumeCallCount() int {
+	c.resumeMu.Lock()
+	defer c.resumeMu.Unlock()
+
+	return c.resumeCalls
+}
+
+func TestCloseSessionSerializesRetainedResume(t *testing.T) {
+	ctx := context.Background()
+	store := &configurableStore{}
+	client := &blockingLifecycleCodexClient{
+		spyCodexClient:     newSpyCodexClient(),
+		unsubscribeStarted: make(chan struct{}),
+		unsubscribeRelease: make(chan struct{}),
+	}
+	client.thread.Path = "/native/rollout.jsonl"
+	agent := NewAgent(
+		WithSessionStore(store),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+	store.entries = []SessionStoreEntry{SessionStoreEntry(fmt.Sprintf(
+		`{"type":"session_meta","payload":{"id":%q}}`, client.thread.ID,
+	))}
+
+	closeResult := make(chan error, 1)
+	go func() {
+		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
+		closeResult <- closeErr
+	}()
+	<-client.unsubscribeStarted
+
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	require.ErrorContains(t, err, "session close in progress")
+	require.Zero(t, client.resumeCallCount())
+
+	close(client.unsubscribeRelease)
+	require.NoError(t, <-closeResult)
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	require.NoError(t, err)
+	require.Equal(t, 1, client.resumeCallCount())
+	client.mu.Lock()
+	require.Equal(t, "/native/rollout.jsonl", client.resume.Path)
+	client.mu.Unlock()
+	require.NoError(t, agent.Close())
+}
+
+func TestCloseSessionUnsubscribeFailureKeepsOwnership(t *testing.T) {
+	ctx := context.Background()
+	client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), unsubscribeErr: errors.New("unsubscribe failed")}
+	client.thread.Path = "/native/rollout.jsonl"
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	materialized, err := materializeRollout(t.TempDir(), []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta"}`)})
+	require.NoError(t, err)
+	released := false
+	active.materializedPath = materialized
+	active.materializedRelease = func() { released = true }
+
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.ErrorContains(t, err, "unsubscribe failed")
+	require.Same(t, active, agent.activeSession(created.SessionId))
+	require.Empty(t, agent.retainedThreads)
+	require.FileExists(t, materialized)
+	require.False(t, released)
+	active.mu.Lock()
+	require.False(t, active.closing)
+	require.Equal(t, materialized, active.materializedPath)
+	active.mu.Unlock()
+
+	client.unsubscribeErr = nil
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	require.Nil(t, agent.activeSession(created.SessionId))
+	require.Equal(t, materialized, agent.retainedThreads[created.SessionId].materializedPath)
+	require.False(t, released)
+	require.NoError(t, agent.Close())
+	require.True(t, released)
+}
+
+func retainedConcurrencyFixture(store SessionStore, client codex.Client) (*Agent, *retainedRuntimeThread) {
+	agent := NewAgent(WithSessionStore(store))
+	agent.runtimeClient = client
+	agent.runtimeEpoch = 11
+	retained := &retainedRuntimeThread{
+		sessionID: "session",
+		threadID:  "thread-active",
+		path:      "/native/rollout.jsonl",
+		client:    client,
+		epoch:     11,
+	}
+	agent.retainedThreads[retained.sessionID] = retained
+
+	return agent, retained
+}
+
+func TestRetainedRuntimeClaimSerializesResumeAndDelete(t *testing.T) {
+	ctx := context.Background()
+	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
+	params := ResumeSessionRequest("session", "/tmp/project")
+
+	t.Run("double resume and delete lose to claimed resume", func(t *testing.T) {
+		store := &configurableStore{entries: entries}
+		client := &blockingLifecycleCodexClient{
+			spyCodexClient: newSpyCodexClient(),
+			resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
+			resumeRelease:  make(chan struct{}),
+		}
+		agent, _ := retainedConcurrencyFixture(store, client)
+
+		firstResult := make(chan error, 1)
+		go func() {
+			_, resumeErr := agent.ResumeSession(ctx, params)
+			firstResult <- resumeErr
+		}()
+		<-client.resumeStarted
+
+		_, err := agent.ResumeSession(ctx, params)
+		require.ErrorContains(t, err, "lifecycle is already in progress")
+		_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest("session"))
+		require.ErrorContains(t, err, "lifecycle is already in progress")
+		require.Equal(t, 1, client.resumeCallCount())
+		require.Empty(t, client.deletedThreadSnapshot())
+
+		close(client.resumeRelease)
+		require.NoError(t, <-firstResult)
+		require.Equal(t, 1, client.resumeCallCount())
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("resume loses to claimed delete", func(t *testing.T) {
+		store := &blockingDeleteSessionStore{
+			configurableStore: &configurableStore{entries: entries},
+			started:           make(chan struct{}),
+			release:           make(chan struct{}),
+		}
+		client := &blockingLifecycleCodexClient{spyCodexClient: newSpyCodexClient()}
+		agent, _ := retainedConcurrencyFixture(store, client)
+
+		deleteResult := make(chan error, 1)
+		go func() {
+			_, deleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest("session"))
+			deleteResult <- deleteErr
+		}()
+		<-store.started
+
+		_, err := agent.ResumeSession(ctx, params)
+		require.ErrorContains(t, err, "lifecycle is already in progress")
+		require.Zero(t, client.resumeCallCount())
+
+		close(store.release)
+		require.NoError(t, <-deleteResult)
+		deletedThreads := client.deletedThreadSnapshot()
+		require.NotEmpty(t, deletedThreads)
+		require.Contains(t, deletedThreads, "thread-active")
+		require.NoError(t, agent.Close())
+	})
+}
+
+func TestSessionLifecycleGuardBranches(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	client := newSpyCodexClient()
+	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	agent.sessions[active.id] = active
+
+	require.NoError(t, agent.validateSessionLifecycle(active.id, active))
+	agent.closed = true
+	require.ErrorContains(t, agent.validateSessionLifecycle(active.id, active), "agent is closed")
+	_, err := agent.acquireSessionLifecycle(active.id)
+	require.ErrorContains(t, err, "agent is closed")
+	_, err = agent.beginSessionClose(active.id)
+	require.ErrorContains(t, err, "agent is closed")
+	agent.closed = false
+
+	active.closing = true
+	_, err = agent.session(active.id)
+	require.ErrorContains(t, err, "session close in progress")
+	_, err = agent.acquireSessionLifecycle(active.id)
+	require.ErrorContains(t, err, "session close in progress")
+	_, err = agent.beginSessionClose(active.id)
+	require.ErrorContains(t, err, "session close in progress")
+	require.ErrorContains(t, agent.validateSessionLifecycle(active.id, active), "session close in progress")
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(active.id, "/tmp/project"))
+	require.ErrorContains(t, err, "session close in progress")
+	active.closing = false
+
+	delete(agent.sessions, active.id)
+	require.ErrorContains(t, agent.validateSessionLifecycle(active.id, active), "unknown session")
+	agent.abortSessionClose(active.id, active)
+	agent.sessions[active.id] = active
+
+	materialized, err := materializeRollout(t.TempDir(), []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta"}`)})
+	require.NoError(t, err)
+	released := false
+	active.materializedPath = materialized
+	active.materializedRelease = func() { released = true }
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: active.id})
+	require.NoError(t, err)
+	require.True(t, released)
+	require.NoFileExists(t, materialized)
+}
+
+func TestRetainedResumeRollbackUnsubscribeFailureStaysClaimed(t *testing.T) {
+	ctx := context.Background()
+	client := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(),
+		unsubscribeErr: errors.New("rollback unsubscribe failed"),
+	}
+	client.thread.Path = "/wrong/rollout.jsonl"
+	agent := NewAgent()
+	agent.runtimeClient = client
+	agent.runtimeEpoch = 4
+	retained := &retainedRuntimeThread{
+		sessionID: "session",
+		threadID:  "thread-active",
+		path:      "/native/rollout.jsonl",
+		client:    client,
+		epoch:     4,
+		claimed:   true,
+	}
+	agent.retainedThreads[retained.sessionID] = retained
+
+	_, _, err := agent.resumeRetainedRuntimeSession(
+		ctx,
+		ResumeSessionRequest(retained.sessionID, "/tmp/project"),
+		sessionMeta{},
+		retained,
+	)
+	require.ErrorContains(t, err, "different rollout path")
+	require.ErrorContains(t, err, "rollback unsubscribe failed")
+	require.True(t, retained.claimed)
+	require.Same(t, retained, agent.retainedThreads[retained.sessionID])
+
+	retained.claimed = false
+	client.unsubscribeErr = nil
+	require.NoError(t, agent.Close())
 }
 
 func TestForkSessionErrorBranches(t *testing.T) {
@@ -1385,6 +2003,23 @@ type configurableStore struct {
 	loadErr   error
 	listErr   error
 	deleteErr error
+}
+
+type blockingDeleteSessionStore struct {
+	*configurableStore
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingDeleteSessionStore) Delete(ctx context.Context, _ SessionKey) error {
+	s.once.Do(func() { close(s.started) })
+	select {
+	case <-s.release:
+		return s.deleteErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *configurableStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {

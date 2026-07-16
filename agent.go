@@ -122,6 +122,7 @@ type Agent struct {
 	runtimeCleanupErr     error
 	runtimeEnv            map[string]string
 	runtimeEnvSet         bool
+	retainedThreads       map[acp.SessionId]*retainedRuntimeThread
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -181,6 +182,7 @@ func NewAgent(opts ...Option) *Agent {
 		explicitStore:     options.SessionStore != nil,
 		clientCalls:       make(chan struct{}, clientCallLimit),
 		providerProcesses: providerProcesses,
+		retainedThreads:   make(map[acp.SessionId]*retainedRuntimeThread),
 	}
 }
 
@@ -639,7 +641,75 @@ func (a *Agent) session(id acp.SessionId) (*session, error) {
 		return nil, newUnknownSession()
 	}
 
+	session.mu.Lock()
+	closing := session.closing
+	session.mu.Unlock()
+
+	if closing {
+		return nil, newSessionCloseInProgress()
+	}
+
 	return session, nil
+}
+
+// acquireSessionLifecycle admits a resume or load against an active wrapper.
+// The double check makes close admission linearizable without holding Agent.mu
+// across native calls. Agent.mu is always acquired before session.mu.
+func (a *Agent) acquireSessionLifecycle(id acp.SessionId) (func(), error) {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+
+		return nil, newAgentClosedError()
+	}
+
+	session := a.sessions[id]
+	if session == nil {
+		a.mu.Unlock()
+
+		return func() {}, nil
+	}
+
+	session.mu.Lock()
+	closing := session.closing
+	session.mu.Unlock()
+	a.mu.Unlock()
+
+	if closing {
+		return nil, newSessionCloseInProgress()
+	}
+
+	session.lifecycle.RLock()
+
+	if err := a.validateSessionLifecycle(id, session); err != nil {
+		session.lifecycle.RUnlock()
+
+		return nil, err
+	}
+
+	return session.lifecycle.RUnlock, nil
+}
+
+func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) error {
+	a.mu.Lock()
+	closed := a.closed
+	current := a.sessions[id]
+
+	session.mu.Lock()
+	closing := session.closing
+	session.mu.Unlock()
+	a.mu.Unlock()
+
+	switch {
+	case closed:
+		return newAgentClosedError()
+	case closing:
+		return newSessionCloseInProgress()
+	case current != session:
+		return newUnknownSession()
+	default:
+		return nil
+	}
 }
 
 func (a *Agent) storeStartedSession(session *session) error {
@@ -695,17 +765,88 @@ func (a *Agent) removeSession(id acp.SessionId) *session {
 	return session
 }
 
-func (a *Agent) removeSessionIf(id acp.SessionId, session *session) bool {
+func newSessionCloseInProgress() *acp.RequestError {
+	return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session close in progress"})
+}
+
+// beginSessionClose prevents new lifecycle requests from entering before the
+// native unsubscribe begins. The caller acquires session.lifecycle for the
+// native operation after this method returns.
+func (a *Agent) beginSessionClose(id acp.SessionId) (*session, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return nil, newAgentClosedError()
+	}
+
+	session := a.sessions[id]
+	if session == nil {
+		return nil, newUnknownSession()
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	if session.closing {
+		return nil, newSessionCloseInProgress()
+	}
+
+	session.closing = true
+
+	return session, nil
+}
+
+func (a *Agent) abortSessionClose(id acp.SessionId, session *session) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.sessions[id] != session {
-		return false
+		return
 	}
+
+	session.mu.Lock()
+	session.closing = false
+	session.mu.Unlock()
+}
+
+// finishSessionCloseRetainingThread publishes native-thread ownership only
+// after unsubscribe succeeded. Materialized rollout cleanup moves with that
+// ownership so the canonical path remains valid until rebind or runtime end.
+func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *session) (bool, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.sessions[id] != session {
+		return false, false
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
 
 	delete(a.sessions, id)
 
-	return true
+	if a.runtimeClient != session.client || a.runtimeDead || session.clientDead || session.codexThreadID == "" {
+		return true, false
+	}
+
+	if a.retainedThreads == nil {
+		a.retainedThreads = make(map[acp.SessionId]*retainedRuntimeThread)
+	}
+
+	a.retainedThreads[id] = &retainedRuntimeThread{
+		sessionID:           id,
+		threadID:            session.codexThreadID,
+		path:                session.rolloutPath,
+		client:              session.client,
+		epoch:               a.runtimeEpoch,
+		materializedPath:    session.materializedPath,
+		materializedRelease: session.materializedRelease,
+	}
+	session.materializedPath = ""
+	session.materializedRelease = nil
+
+	return true, true
 }
 
 func (a *Agent) connection() agentClient {

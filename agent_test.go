@@ -238,7 +238,8 @@ func TestServeLocalConnectionStreamsPlaceholderUpdates(t *testing.T) {
 		if err != nil && err != context.Canceled {
 			t.Fatalf("Serve returned error: %v", err)
 		}
-	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after cancellation")
 	}
 	if len(client.Updates()) == 0 {
 		t.Fatal("expected streamed updates")
@@ -504,9 +505,6 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	newer := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := replacing.storeStartedSession(newer); err != nil {
 		t.Fatalf("replace session: %v", err)
-	}
-	if replacing.removeSessionIf("same", old) {
-		t.Fatal("removeSessionIf removed non-current session")
 	}
 }
 

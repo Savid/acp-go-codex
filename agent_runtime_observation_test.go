@@ -144,6 +144,13 @@ func TestProviderProcessSnapshotTrackerDefensiveAndDuplicateBoundaries(t *testin
 	observer := agent.newProcessSnapshotObserver(ctx)
 	observer.Observe(ctx, 1)
 	observer.Quiescent(ctx)
+
+	zero := &providerProcessSnapshotTracker{roots: map[uint64]providerProcessRootSnapshot{
+		1: {known: true},
+	}}
+	count, proven := zero.snapshotLocked()
+	require.Zero(t, count)
+	require.False(t, proven)
 }
 
 func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {

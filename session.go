@@ -40,8 +40,10 @@ type session struct {
 
 	client codex.Client
 
+	lifecycle        sync.RWMutex
 	turn             chan struct{}
 	mu               sync.Mutex
+	closing          bool
 	cancel           context.CancelFunc
 	turnDone         <-chan struct{}
 	turnID           string
@@ -57,6 +59,7 @@ type session struct {
 	completionRows   int
 	visibleRows      int
 	rolloutIdentity  nativeTurnIdentity
+	permissionTools  permissionToolRegistry
 }
 
 type sessionInteraction struct {
@@ -274,6 +277,8 @@ func (s *session) turnQueue() chan struct{} {
 }
 
 func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Context {
+	s.permissionTools.reset()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -313,6 +318,13 @@ func (s *session) activeTurnNonce() string {
 	defer s.mu.Unlock()
 
 	return s.turnNonce
+}
+
+func (s *session) hasActiveTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnDone != nil
 }
 
 func (s *session) setTurnID(turnID string) {
@@ -370,11 +382,11 @@ func (s *session) accountMetaSnapshot() map[string]any {
 	return cloneAnyMap(s.accountMeta)
 }
 
-func (s *session) closeState() (codex.Client, string, string, func()) {
+func (s *session) closeState() (codex.Client, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.client, s.codexThreadID, s.materializedPath, s.materializedRelease
+	return s.client, s.codexThreadID
 }
 
 func (s *session) cancelTurn() {
@@ -475,30 +487,53 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 	return cancels
 }
 
-// Close releases one logical thread. The Agent owns the shared app-server and
-// closes it only when the service itself closes.
-func (s *session) Close(ctx context.Context) error {
+func (s *session) unsubscribe(ctx context.Context) error {
 	s.cancelTurn()
-	client, codexThreadID, materializedPath, materializedRelease := s.closeState()
+	client, codexThreadID := s.closeState()
 
 	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
 
-	var err error
-
 	if client != nil && codexThreadID != "" {
-		_ = client.UnsubscribeThread(closeCtx, codexThreadID)
+		return client.UnsubscribeThread(closeCtx, codexThreadID)
 	}
+
+	return nil
+}
+
+func (s *session) releaseMaterialized() error {
+	s.mu.Lock()
+	materializedPath := s.materializedPath
+	materializedRelease := s.materializedRelease
+	s.mu.Unlock()
 
 	if materializedPath != "" {
-		err = errors.Join(err, removeMaterializedRollout(materializedPath))
+		if err := removeMaterializedRollout(materializedPath); err != nil {
+			return err
+		}
 	}
+
+	s.mu.Lock()
+	if s.materializedPath == materializedPath {
+		s.materializedPath = ""
+		s.materializedRelease = nil
+	}
+	s.mu.Unlock()
 
 	if materializedRelease != nil {
 		materializedRelease()
 	}
 
-	return err
+	return nil
+}
+
+// Close releases one logical thread. The Agent owns the shared app-server and
+// closes it only when the service itself closes.
+func (s *session) Close(ctx context.Context) error {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+
+	return errors.Join(s.unsubscribe(ctx), s.releaseMaterialized())
 }
 
 func (s *session) info() acp.SessionInfo {

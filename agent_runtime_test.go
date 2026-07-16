@@ -1043,3 +1043,190 @@ func TestRemainingSessionCanaryCleanupBranches(t *testing.T) {
 	_, err = forkAgent.forkSession(ctx, ForkSessionRequest(parent.SessionId, "/work", WithSessionMCPServers(server)))
 	require.ErrorContains(t, err, "runtime_ready")
 }
+
+func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
+	ctx := context.Background()
+	entries := []SessionStoreEntry{json.RawMessage(`{"type":"session_meta","payload":{"id":"thread"}}`)}
+
+	newRetained := func(agent *Agent, client codex.Client, id acp.SessionId) *retainedRuntimeThread {
+		agent.runtimeClient = client
+		agent.runtimeEpoch = 7
+		agent.runtimeDead = false
+		retained := &retainedRuntimeThread{
+			sessionID: id,
+			threadID:  "thread",
+			path:      "/native/rollout.jsonl",
+			client:    client,
+			epoch:     7,
+		}
+		agent.retainedThreads[id] = retained
+
+		return retained
+	}
+
+	t.Run("logical close transfer", func(t *testing.T) {
+		agent := NewAgent()
+		client := newSpyCodexClient()
+		agent.runtimeClient = client
+		agent.runtimeEpoch = 3
+		active := newSession(agent, "session", "/work", nil, codex.Thread{
+			ID:   "thread",
+			Path: "/native/rollout.jsonl",
+		}, client, sessionMeta{}, nil)
+		materialized, err := materializeRollout(t.TempDir(), entries)
+		require.NoError(t, err)
+		released := false
+		active.materializedPath = materialized
+		active.materializedRelease = func() { released = true }
+		agent.sessions[active.id] = active
+		agent.retainedThreads = nil
+
+		removed, retainedOwnership := agent.finishSessionCloseRetainingThread(active.id, &session{})
+		require.False(t, removed)
+		require.False(t, retainedOwnership)
+		active.closing = true
+		removed, retainedOwnership = agent.finishSessionCloseRetainingThread(active.id, active)
+		require.True(t, removed)
+		require.True(t, retainedOwnership)
+		retained := agent.retainedThreads[active.id]
+		require.NotNil(t, retained)
+		require.Equal(t, materialized, retained.materializedPath)
+		require.Empty(t, active.materializedPath)
+		require.NoError(t, cleanupRetainedRuntimeThread(retained))
+		require.True(t, released)
+	})
+
+	t.Run("logical close without live runtime", func(t *testing.T) {
+		agent := NewAgent()
+		client := newSpyCodexClient()
+		active := newSession(agent, "session", "/work", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+		agent.sessions[active.id] = active
+		agent.runtimeClient = client
+		agent.runtimeDead = true
+		active.closing = true
+		removed, retainedOwnership := agent.finishSessionCloseRetainingThread(active.id, active)
+		require.True(t, removed)
+		require.False(t, retainedOwnership)
+		require.Empty(t, agent.retainedThreads)
+	})
+
+	t.Run("lookup active peer", func(t *testing.T) {
+		agent := NewAgent()
+		client := newSpyCodexClient()
+		agent.runtimeClient = client
+		agent.runtimeEpoch = 1
+		agent.sessions["requested"] = newSession(agent, "requested", "/work", nil, codex.Thread{ID: "self"}, client, sessionMeta{}, nil)
+		agent.sessions["unrelated"] = newSession(agent, "unrelated", "/work", nil, codex.Thread{ID: "other"}, client, sessionMeta{}, nil)
+		retained, err := agent.claimRetainedRuntimeThreadForStore("requested", "unclaimed")
+		require.ErrorIs(t, err, errNoRetainedRuntimeThread)
+		require.Nil(t, retained)
+
+		agent.sessions["peer"] = newSession(agent, "peer", "/work", nil, codex.Thread{ID: "claimed"}, client, sessionMeta{}, nil)
+		_, err = agent.claimRetainedRuntimeThreadForStore("requested", "claimed")
+		require.ErrorContains(t, err, "active in another session")
+		retained, err = agent.claimRetainedRuntimeThreadForStore("missing", "")
+		require.ErrorIs(t, err, errNoRetainedRuntimeThread)
+		require.Nil(t, retained)
+	})
+
+	t.Run("store guards", func(t *testing.T) {
+		fixture := func() (*Agent, *retainedRuntimeThread, *session) {
+			agent := NewAgent()
+			client := newSpyCodexClient()
+			retained := newRetained(agent, client, "session")
+			retained.claimed = true
+			candidate := newSession(agent, "session", "/work", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+
+			return agent, retained, candidate
+		}
+
+		agent, retained, candidate := fixture()
+		agent.closed = true
+		require.Error(t, agent.storeRetainedRuntimeSession(candidate, retained))
+
+		agent, _, candidate = fixture()
+		require.ErrorContains(t, agent.storeRetainedRuntimeSession(candidate, nil), "ownership changed")
+
+		agent, retained, candidate = fixture()
+		retained.nativeEnded = true
+		require.ErrorContains(t, agent.storeRetainedRuntimeSession(candidate, retained), "ownership changed")
+
+		agent, retained, candidate = fixture()
+		agent.runtimeDead = true
+		require.ErrorContains(t, agent.storeRetainedRuntimeSession(candidate, retained), "runtime ownership changed")
+
+		agent, retained, candidate = fixture()
+		agent.sessions[candidate.id] = &session{id: candidate.id}
+		require.ErrorContains(t, agent.storeRetainedRuntimeSession(candidate, retained), "became active")
+
+		agent, retained, candidate = fixture()
+		agent.options.ConcurrencyLimits.MaxActiveSessions = 1
+		agent.sessions["occupied"] = &session{id: "occupied"}
+		require.ErrorContains(t, agent.storeRetainedRuntimeSession(candidate, retained), valueBackpressure)
+
+		agent, retained, candidate = fixture()
+		materialized, err := materializeRollout(t.TempDir(), entries)
+		require.NoError(t, err)
+		released := false
+		retained.materializedPath = materialized
+		retained.materializedRelease = func() { released = true }
+		require.NoError(t, agent.storeRetainedRuntimeSession(candidate, retained))
+		require.Equal(t, materialized, candidate.materializedPath)
+		require.Nil(t, agent.retainedThreads[candidate.id])
+		require.NoError(t, candidate.Close(ctx))
+		require.True(t, released)
+	})
+
+	t.Run("cleanup and end", func(t *testing.T) {
+		require.NoError(t, cleanupRetainedRuntimeThread(nil))
+		require.NoError(t, NewAgent().endRetainedRuntimeThread(nil))
+
+		agent := NewAgent()
+		client := newSpyCodexClient()
+		retained := newRetained(agent, client, "session")
+		agent.retainedThreads[retained.sessionID] = &retainedRuntimeThread{sessionID: retained.sessionID}
+		require.NoError(t, agent.endRetainedRuntimeThread(retained))
+
+		retained = newRetained(agent, client, "release-race")
+		other := &retainedRuntimeThread{sessionID: retained.sessionID}
+		retained.materializedRelease = func() {
+			agent.mu.Lock()
+			agent.retainedThreads[retained.sessionID] = other
+			agent.mu.Unlock()
+		}
+		require.NoError(t, agent.endRetainedRuntimeThread(retained))
+		require.Same(t, other, agent.retainedThreads[retained.sessionID])
+
+		retained = newRetained(agent, client, "ended")
+		released := false
+		retained.materializedRelease = func() { released = true }
+		require.NoError(t, agent.endRetainedRuntimeThread(retained))
+		require.True(t, released)
+		require.Nil(t, agent.retainedThreads[retained.sessionID])
+	})
+
+	t.Run("cleanup failure and runtime release", func(t *testing.T) {
+		oldRemove := removeMaterializedRolloutFile
+		t.Cleanup(func() { removeMaterializedRolloutFile = oldRemove })
+		materialized, err := materializeRollout(t.TempDir(), entries)
+		require.NoError(t, err)
+
+		agent := NewAgent()
+		client := newSpyCodexClient()
+		retained := newRetained(agent, client, "failed")
+		retained.materializedPath = materialized
+		removeMaterializedRolloutFile = func(string) error { return errors.New("remove retained failed") }
+		require.ErrorContains(t, cleanupRetainedRuntimeThread(retained), "remove retained failed")
+		require.ErrorContains(t, agent.endRetainedRuntimeThread(retained), "remove retained failed")
+		require.ErrorContains(t, agent.releaseRetainedRuntimeThreads(client, 7), "remove retained failed")
+
+		removeMaterializedRolloutFile = oldRemove
+		require.NoError(t, agent.releaseRetainedRuntimeThreads(client, 7))
+		require.Nil(t, agent.retainedThreads[retained.sessionID])
+
+		unrelated := newRetained(agent, client, "unrelated")
+		unrelated.epoch = 8
+		require.NoError(t, agent.releaseRetainedRuntimeThreads(client, 7))
+		require.Same(t, unrelated, agent.retainedThreads[unrelated.sessionID])
+	})
+}

@@ -463,6 +463,8 @@ func TestServerRequestsMCPToolApprovalUsesPermission(t *testing.T) {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 	session := agent.sessionMust(resp.SessionId)
+	_ = session.beginTurn(ctx, "mcp-permission-turn")
+	defer session.finishTurn()
 
 	result, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 		ID:     json.RawMessage(`"mcp-approval-1"`),

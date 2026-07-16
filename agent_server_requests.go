@@ -110,7 +110,7 @@ func (a *Agent) handleCodexApproval(ctx context.Context, req codex.ServerRequest
 	title := codex.ApprovalTitle(req.Method, params)
 	status := acp.ToolCallStatusPending
 
-	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+	resp, requested, err := session.requestPermissionForTool(ctx, conn, acp.RequestPermissionRequest{
 		SessionId: session.id,
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: acp.ToolCallId(codex.ApprovalToolCallID(req, params)),
@@ -122,9 +122,13 @@ func (a *Agent) handleCodexApproval(ctx context.Context, req codex.ServerRequest
 			Meta:       map[string]any{codexMetaKey: params},
 		},
 		Options: codex.ApprovalOptions(params),
-	})
+	}, permissionToolClassForApprovalKind(kind))
 	if err != nil {
 		return nil, err
+	}
+
+	if !requested {
+		return codex.ApprovalCancelResponse(), nil
 	}
 
 	if resp.Outcome.Selected == nil {
@@ -151,7 +155,7 @@ func (a *Agent) handleCodexPermissionsApproval(ctx context.Context, req codex.Se
 	status := acp.ToolCallStatusPending
 	title := codex.PermissionsApprovalTitle(params)
 
-	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+	resp, requested, err := session.requestPermissionForTool(ctx, conn, acp.RequestPermissionRequest{
 		SessionId: session.id,
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: acp.ToolCallId(codex.PermissionsToolCallID(req, params)),
@@ -163,9 +167,13 @@ func (a *Agent) handleCodexPermissionsApproval(ctx context.Context, req codex.Se
 			Meta:       map[string]any{codexMetaKey: params},
 		},
 		Options: codex.PermissionsApprovalOptions(),
-	})
+	}, permissionToolPermissions)
 	if err != nil {
 		return nil, err
+	}
+
+	if !requested {
+		return codex.PermissionsDeniedResponse(), nil
 	}
 
 	if resp.Outcome.Selected == nil {
@@ -234,7 +242,7 @@ func (a *Agent) handleCodexMCPToolApproval(ctx context.Context, req codex.Server
 	kind := acp.ToolKindOther
 	status := acp.ToolCallStatusPending
 
-	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+	resp, requested, err := session.requestPermissionForTool(ctx, conn, acp.RequestPermissionRequest{
 		SessionId: session.id,
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: acp.ToolCallId(codex.MCPToolApprovalToolCallID(req, params)),
@@ -246,9 +254,13 @@ func (a *Agent) handleCodexMCPToolApproval(ctx context.Context, req codex.Server
 			Meta:       map[string]any{codexMetaKey: params},
 		},
 		Options: codex.MCPToolApprovalOptions(),
-	})
+	}, permissionToolMCP)
 	if err != nil {
 		return nil, err
+	}
+
+	if !requested {
+		return codex.ElicitationCancelResponse(), nil
 	}
 
 	if resp.Outcome.Selected == nil {
@@ -256,6 +268,14 @@ func (a *Agent) handleCodexMCPToolApproval(ctx context.Context, req codex.Server
 	}
 
 	return codex.MCPToolApprovalResponse(resp.Outcome.Selected.OptionId), nil
+}
+
+func permissionToolClassForApprovalKind(kind acp.ToolKind) permissionToolClass {
+	if kind == acp.ToolKindEdit {
+		return permissionToolFileChange
+	}
+
+	return permissionToolCommand
 }
 
 func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.ServerRequest, params map[string]any) (any, error) {

@@ -63,11 +63,16 @@ as `_meta.codex.turnId` and `_meta.codex.messageId`. Store-backed
 `session/load` emits an identity-bearing replay update even when that final
 assistant item has empty content.
 
-Store hydration is only used when no active in-process session owns the native
-thread. For an active session, `session/load` and `session/resume` keep the
-native rollout path authoritative and use the stored `session_meta` thread ID
-only as an identity check. A mismatched ID is rejected; stored rows cannot
-redirect an active session to another native thread or rollout path.
+Store hydration is only used when the current app-server does not already own
+the native thread. For an active session or a thread retained after
+`session/close`, `session/load` and `session/resume` keep the native rollout
+path authoritative and require the stored `session_meta` thread ID as an exact
+identity check. Missing or mismatched identity is rejected; stored rows cannot
+redirect one logical session to another native thread or rollout path.
+One resume/load request claims retained ownership before making a native call.
+Concurrent resume, load, or delete requests fail closed until that claim is
+committed or rolled back; a failed native rebind is unsubscribed before the
+claim becomes retryable.
 
 ## Generations and deletion
 

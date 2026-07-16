@@ -27,6 +27,24 @@ var runtimeReadyDeadline = 2 * time.Minute
 var runtimeRandRead = rand.Read
 var runtimeUserHomeDir = os.UserHomeDir
 var runtimeRemoveAll = os.RemoveAll
+var errNoRetainedRuntimeThread = errors.New("no retained Codex runtime thread")
+
+// retainedRuntimeThread is native ownership that outlives an ACP
+// session/close but not the app-server generation that still owns the thread.
+// The ACP session ID and native thread ID form one inseparable identity; the
+// canonical rollout path is never selected from host-provided store data.
+type retainedRuntimeThread struct {
+	sessionID acp.SessionId
+	threadID  string
+	path      string
+	client    codex.Client
+	epoch     uint64
+	claimed   bool
+
+	materializedPath    string
+	materializedRelease func()
+	nativeEnded         bool
+}
 
 func (a *Agent) runtimeEpochIsCurrent(epoch uint64) bool {
 	a.mu.Lock()
@@ -125,6 +143,226 @@ func closeRuntimeResources(
 	return finalizeRuntimeResources(closeErr, nativeRelease, scratchRoot, scratchRelease)
 }
 
+func (a *Agent) claimRetainedRuntimeThreadForStore(
+	sessionID acp.SessionId,
+	storedThreadID string,
+) (*retainedRuntimeThread, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	current := func(retained *retainedRuntimeThread) bool {
+		return retained != nil &&
+			!retained.nativeEnded &&
+			!a.closed && !a.runtimeDead &&
+			retained.client == a.runtimeClient && retained.epoch == a.runtimeEpoch
+	}
+
+	if retained := a.retainedThreads[sessionID]; current(retained) {
+		switch {
+		case retained.claimed:
+			return nil, acp.NewInvalidRequest(map[string]any{
+				jsonFieldError: "retained Codex thread lifecycle is already in progress",
+			})
+		case storedThreadID == "":
+			return nil, acp.NewInvalidRequest(map[string]any{
+				jsonFieldError: "stored Codex thread identity is required for the retained session",
+			})
+		case storedThreadID != retained.threadID:
+			return nil, acp.NewInvalidRequest(map[string]any{
+				jsonFieldError: "stored Codex thread does not match the retained session",
+			})
+		default:
+			retained.claimed = true
+
+			return retained, nil
+		}
+	}
+
+	if storedThreadID == "" {
+		return nil, errNoRetainedRuntimeThread
+	}
+
+	for otherID, retained := range a.retainedThreads {
+		if otherID != sessionID && current(retained) && retained.threadID == storedThreadID {
+			return nil, acp.NewInvalidRequest(map[string]any{
+				jsonFieldError: "stored Codex thread is retained by another session",
+			})
+		}
+	}
+
+	for otherID, active := range a.sessions {
+		if otherID == sessionID {
+			continue
+		}
+
+		active.mu.Lock()
+		ownedByPeer := active.client == a.runtimeClient && !active.clientDead && active.codexThreadID == storedThreadID
+		active.mu.Unlock()
+
+		if ownedByPeer {
+			return nil, acp.NewInvalidRequest(map[string]any{
+				jsonFieldError: "stored Codex thread is active in another session",
+			})
+		}
+	}
+
+	return nil, errNoRetainedRuntimeThread
+}
+
+func (a *Agent) storeRetainedRuntimeSession(session *session, retained *retainedRuntimeThread) error {
+	a.mu.Lock()
+
+	switch {
+	case a.closed:
+		a.mu.Unlock()
+
+		return newAgentClosedError()
+	case retained == nil || retained.nativeEnded || !retained.claimed || a.retainedThreads[session.id] != retained:
+		a.mu.Unlock()
+
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "retained Codex thread ownership changed during resume"})
+	case a.runtimeDead || a.runtimeClient != retained.client || a.runtimeEpoch != retained.epoch:
+		a.mu.Unlock()
+
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "retained Codex runtime ownership changed during resume"})
+	case a.sessions[session.id] != nil:
+		a.mu.Unlock()
+
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "Codex session became active during retained resume"})
+	case len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions:
+		a.mu.Unlock()
+
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "active_sessions"})
+	}
+
+	session.mu.Lock()
+	session.materializedPath = retained.materializedPath
+	session.materializedRelease = retained.materializedRelease
+	session.mu.Unlock()
+
+	retained.materializedPath = ""
+	retained.materializedRelease = nil
+
+	delete(a.retainedThreads, session.id)
+	a.sessions[session.id] = session
+	a.mu.Unlock()
+
+	a.observe.AddActiveSession(context.Background(), 1)
+
+	return nil
+}
+
+func (a *Agent) releaseRetainedRuntimeThreadClaim(retained *retainedRuntimeThread) {
+	if retained == nil {
+		return
+	}
+
+	a.mu.Lock()
+	if a.retainedThreads[retained.sessionID] == retained {
+		retained.claimed = false
+	}
+	a.mu.Unlock()
+}
+
+func (a *Agent) claimRetainedRuntimeThreadForDelete(sessionID acp.SessionId) (*retainedRuntimeThread, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	retained := a.retainedThreads[sessionID]
+	if retained == nil {
+		return nil, errNoRetainedRuntimeThread
+	}
+
+	if retained.claimed {
+		return nil, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "retained Codex thread lifecycle is already in progress",
+		})
+	}
+
+	retained.claimed = true
+
+	return retained, nil
+}
+
+func cleanupRetainedRuntimeThread(retained *retainedRuntimeThread) error {
+	if retained == nil {
+		return nil
+	}
+
+	if retained.materializedPath != "" {
+		if err := removeMaterializedRollout(retained.materializedPath); err != nil {
+			return err
+		}
+	}
+
+	if retained.materializedRelease != nil {
+		retained.materializedRelease()
+	}
+
+	retained.materializedPath = ""
+	retained.materializedRelease = nil
+
+	return nil
+}
+
+func (a *Agent) endRetainedRuntimeThread(retained *retainedRuntimeThread) error {
+	if retained == nil {
+		return nil
+	}
+
+	a.mu.Lock()
+	if a.retainedThreads[retained.sessionID] != retained {
+		a.mu.Unlock()
+
+		return nil
+	}
+
+	retained.nativeEnded = true
+	a.mu.Unlock()
+
+	if err := cleanupRetainedRuntimeThread(retained); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	if a.retainedThreads[retained.sessionID] == retained {
+		delete(a.retainedThreads, retained.sessionID)
+	}
+	a.mu.Unlock()
+
+	return nil
+}
+
+func (a *Agent) releaseRetainedRuntimeThreads(client codex.Client, epoch uint64) error {
+	a.mu.Lock()
+
+	retained := make([]*retainedRuntimeThread, 0, len(a.retainedThreads))
+	for _, candidate := range a.retainedThreads {
+		if candidate.client == client && candidate.epoch == epoch {
+			retained = append(retained, candidate)
+		}
+	}
+	a.mu.Unlock()
+
+	var cleanupErr error
+
+	for _, candidate := range retained {
+		if err := cleanupRetainedRuntimeThread(candidate); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+
+			continue
+		}
+
+		a.mu.Lock()
+		if a.retainedThreads[candidate.sessionID] == candidate {
+			delete(a.retainedThreads, candidate.sessionID)
+		}
+		a.mu.Unlock()
+	}
+
+	return cleanupErr
+}
+
 // sharedRuntime returns the one app-server owned by this Agent. A dead runtime
 // is replaced as one atomic generation: every loaded thread is resumed with
 // its own MCP config before any thread becomes visible again.
@@ -164,6 +402,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 
 		wait := make(chan struct{})
 		a.runtimeStarting = wait
+		oldEpoch := a.runtimeEpoch
 		a.runtimeEpoch++
 		epoch := a.runtimeEpoch
 		oldClient := a.runtimeClient
@@ -184,8 +423,9 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 		a.runtimeDead = true
 		a.mu.Unlock()
 
-		cleanupErr := closeRuntimeResources(
+		cleanupErr := a.closeRuntimeGeneration(
 			context.Background(), oldClient, oldRelease, oldScratchRoot, oldScratchRelease,
+			oldEpoch,
 		)
 		if cleanupErr != nil {
 			a.mu.Lock()
@@ -481,6 +721,7 @@ func runtimeReadyEvent(event codex.Event, nonce string) bool {
 func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 	a.mu.Lock()
 	client := a.runtimeClient
+	epoch := a.runtimeEpoch
 	release := a.runtimeNativeRelease
 	scratchRoot := a.runtimeScratchRoot
 	scratchRelease := a.runtimeScratchRelease
@@ -495,8 +736,9 @@ func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 
 	cleanupErr := errors.Join(
 		latchedCleanupErr,
-		closeRuntimeResources(ctx, client, release, scratchRoot, scratchRelease),
+		a.closeRuntimeGeneration(ctx, client, release, scratchRoot, scratchRelease, epoch),
 	)
+
 	if errors.Is(cleanupErr, codex.ErrProcessTreeUnproven) {
 		a.mu.Lock()
 		a.runtimeCleanupErr = cleanupErr
@@ -504,4 +746,20 @@ func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 	}
 
 	return cleanupErr
+}
+
+func (a *Agent) closeRuntimeGeneration(
+	ctx context.Context,
+	client codex.Client,
+	release func(),
+	scratchRoot string,
+	scratchRelease func(),
+	epoch uint64,
+) error {
+	runtimeCloseErr := closeRuntimeResources(ctx, client, release, scratchRoot, scratchRelease)
+	if errors.Is(runtimeCloseErr, codex.ErrProcessTreeUnproven) {
+		return runtimeCloseErr
+	}
+
+	return errors.Join(runtimeCloseErr, a.releaseRetainedRuntimeThreads(client, epoch))
 }
