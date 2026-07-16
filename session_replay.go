@@ -137,7 +137,7 @@ func threadHistoryReplayUpdates(items []map[string]any) []acp.SessionUpdate {
 			kind := toolKind(codex.ToolEvent{Kind: firstNonEmpty(stringFromAny(item[jsonFieldType]), stringFromAny(item["kind"]))})
 
 			update := replayToolStart(item, title, kind, acp.ToolCallStatusCompleted, item)
-			if text := firstNonEmpty(stringFromAny(item["output"]), stringFromAny(item["result"]), stringFromAny(item[jsonFieldMessage])); text != "" && update.ToolCall != nil {
+			if text := firstNonEmpty(stringFromAny(item["output"]), stringFromAny(item[jsonFieldResult]), stringFromAny(item[jsonFieldMessage])); text != "" && update.ToolCall != nil {
 				update.ToolCall.Content = []acp.ToolCallContent{textToolContent(text)}
 			}
 
@@ -344,7 +344,7 @@ func replayToolOutput(payload map[string]any) []acp.SessionUpdate {
 		return nil
 	}
 
-	output := firstNonNil(payload["output"], payload["result"])
+	output := firstNonNil(payload["output"], payload[jsonFieldResult])
 
 	opts := []acp.ToolCallUpdateOpt{
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),

@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 // turnFailureData returns the data map of a codex_turn_failed JSON-RPC error, or
@@ -371,11 +372,36 @@ func TestTurnFailureTimeout(t *testing.T) {
 	}
 }
 
+func TestTurnFailureTimeoutIncludesRuntimeQuiescenceFailure(t *testing.T) {
+	closeErr := errors.New("runtime quiescence failed")
+	interrupt := &recordingCancelClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}
+	agent := NewAgent(WithTurnTimeout(time.Nanosecond))
+	timeoutSession := &session{
+		agent:         agent,
+		id:            "timeout-close-error",
+		cwd:           "/tmp/project",
+		codexThreadID: "thread",
+		client:        interrupt,
+	}
+	agent.setAgentClient(newRecordingAgentClient())
+	agent.sessions[timeoutSession.id] = timeoutSession
+	agent.runtimeClient = interrupt
+
+	_, err := timeoutSession.Prompt(
+		context.Background(),
+		TextPromptRequest(timeoutSession.id, "test-turn", "hi"),
+	)
+	require.True(t, isTurnFailure(err, codex.CauseTimeout))
+	require.ErrorContains(t, err, closeErr.Error())
+	require.True(t, timeoutSession.clientDead)
+}
+
 // recordingCancelClient hangs the turn until its context is cancelled and
 // records whether CancelTurn (turn/interrupt) was invoked.
 type recordingCancelClient struct {
 	*spyCodexClient
 	cancelled bool
+	closeErr  error
 }
 
 func (c *recordingCancelClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (<-chan codex.Event, error) {
@@ -403,11 +429,12 @@ func (c *recordingCancelClient) interrupted() bool {
 	return c.cancelled
 }
 
+func (c *recordingCancelClient) Close(context.Context) error { return c.closeErr }
+
 func (c *recordingCancelClient) UnsubscribeThread(context.Context, string) error { return nil }
 func (c *recordingCancelClient) DeleteThread(context.Context, codex.ThreadDeleteRequest) error {
 	return nil
 }
-func (c *recordingCancelClient) Close(context.Context) error { return nil }
 
 func TestMapTurnFailureBranches(t *testing.T) {
 	failSession := &session{agent: NewAgent(), id: "map"}

@@ -206,11 +206,16 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 
 	if timedOut && state.stopReason != acp.StopReasonCancelled {
-		s.abortTurnAfterTimeout(ctx)
+		abortErr := s.abortTurnAfterTimeout(ctx)
+
+		message := fmt.Sprintf("codex turn exceeded %s deadline", s.agent.options.TurnTimeout)
+		if abortErr != nil {
+			message = fmt.Sprintf("%s: %v", message, abortErr)
+		}
 
 		return acp.PromptResponse{}, s.mapTurnFailure(&codex.TurnFailedError{
 			Cause:   codex.CauseTimeout,
-			Message: fmt.Sprintf("codex turn exceeded %s deadline", s.agent.options.TurnTimeout),
+			Message: message,
 		})
 	}
 
@@ -296,14 +301,23 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 	return nil
 }
 
-// abortTurnAfterTimeout interrupts the in-flight native Codex turn after the
-// turn deadline expires. The app-server connection stays alive, so the session
-// remains retriable.
-func (s *session) abortTurnAfterTimeout(ctx context.Context) {
-	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-	defer cancel()
+// abortTurnAfterTimeout interrupts the in-flight native Codex turn, then uses
+// the same process-tree fence as explicit cancellation. The logical session is
+// retained for lazy resume on the replacement runtime generation.
+func (s *session) abortTurnAfterTimeout(ctx context.Context) error {
+	client, threadID, turnID := s.activeTurnTarget()
 
-	_ = s.client.CancelTurn(abortCtx, s.codexThreadID, s.activeTurnID())
+	interruptCtx, cancelInterrupt := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	interruptErr := client.CancelTurn(interruptCtx, threadID, turnID)
+
+	cancelInterrupt()
+
+	quiesceCtx, cancelQuiesce := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	quiesceErr := s.agent.quiesceRuntimeAfterCancel(quiesceCtx, client)
+
+	cancelQuiesce()
+
+	return errors.Join(interruptErr, quiesceErr)
 }
 
 func (s *session) recordRawEmitFailure(ctx context.Context, err error) {
@@ -467,7 +481,7 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 		return nil
 	}
 
-	raw["method"] = event.RawMethod
+	raw[jsonFieldMethod] = event.RawMethod
 
 	conn := s.agent.connection()
 	if conn == nil {

@@ -55,6 +55,7 @@ const (
 	jsonFieldConfigID      = "configId"
 	jsonFieldAccessToken   = "accessToken"
 	jsonFieldNetworkAccess = "networkAccess"
+	jsonFieldResult        = "result"
 
 	valueBackpressure   = "backpressure"
 	valueSession        = "session"
@@ -337,10 +338,10 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 	codexMeta := map[string]any{
 		"fork": map[string]any{
-			"unstable": true,
-			"method":   ForkSessionMethod,
-			"request":  "acp.UnstableForkSessionRequest JSON payload only",
-			"response": "acp.UnstableForkSessionResponse JSON payload only",
+			"unstable":      true,
+			jsonFieldMethod: ForkSessionMethod,
+			"request":       "acp.UnstableForkSessionRequest JSON payload only",
+			"response":      "acp.UnstableForkSessionResponse JSON payload only",
 		},
 		"elicitation": map[string]any{
 			"unstable":     true,
@@ -348,7 +349,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			"tracks":       "in-progress ACP elicitation RFD",
 		},
 		rawEventCapabilityKey: map[string]any{
-			"method":         RawEventMethod,
+			jsonFieldMethod:  RawEventMethod,
 			"enabledBy":      rawEventEnabledByPath,
 			"maxBytes":       rawEventMaxBytes,
 			"defaultEnabled": false,
@@ -358,9 +359,9 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			"key":    []string{jsonFieldSessionID, "subpath"},
 		},
 		structuredOutputCapabilityKey: map[string]any{
-			"config": "_meta.codex.options.outputSchema",
-			"result": "_meta.codex.structuredOutput",
-			"schema": "json_schema",
+			"config":        "_meta.codex.options.outputSchema",
+			jsonFieldResult: "_meta.codex.structuredOutput",
+			"schema":        "json_schema",
 		},
 	}
 

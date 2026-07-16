@@ -346,6 +346,13 @@ func (s *session) activeTurnID() string {
 	return s.turnID
 }
 
+func (s *session) activeTurnTarget() (codex.Client, string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.client, s.codexThreadID, s.turnID
+}
+
 func (s *session) currentModel() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -608,6 +608,69 @@ func (a *Agent) markRuntimeDead(client codex.Client) {
 	a.mu.Unlock()
 }
 
+// quiesceRuntimeAfterCancel atomically fences the shared runtime generation
+// that accepted a cancelled turn, then closes it and waits for its native-tree
+// completion proof. A replacement generation cannot start until cleanup has
+// completed, and every logical session remains registered for lazy resume.
+func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Client) error {
+	a.mu.Lock()
+	if expected == nil || a.runtimeClient != expected {
+		wait := a.runtimeStarting
+		a.mu.Unlock()
+
+		if wait != nil {
+			// Another generation transition already owns cleanup. Its completion
+			// is the proof that the expected tree cannot survive this return.
+			<-wait
+		}
+
+		a.mu.Lock()
+		cleanupErr := a.runtimeCleanupErr
+		a.mu.Unlock()
+
+		return cleanupErr
+	}
+
+	wait := make(chan struct{})
+	a.runtimeStarting = wait
+
+	client := a.runtimeClient
+	epoch := a.runtimeEpoch
+	release := a.runtimeNativeRelease
+	scratchRoot := a.runtimeScratchRoot
+	scratchRelease := a.runtimeScratchRelease
+
+	a.runtimeClient = nil
+	a.runtimeNativeRelease = nil
+	a.runtimeScratchRoot = ""
+	a.runtimeScratchRelease = nil
+	a.runtimeDead = true
+	a.runtimeEpoch++
+
+	for _, session := range a.sessions {
+		session.setClientDead(true)
+	}
+	a.mu.Unlock()
+
+	cleanupErr := a.closeRuntimeGeneration(
+		context.WithoutCancel(ctx), client, release, scratchRoot, scratchRelease, epoch,
+	)
+
+	a.mu.Lock()
+	if errors.Is(cleanupErr, codex.ErrProcessTreeUnproven) {
+		a.runtimeCleanupErr = cleanupErr
+	}
+
+	if a.runtimeStarting == wait {
+		a.runtimeStarting = nil
+
+		close(wait)
+	}
+	a.mu.Unlock()
+
+	return cleanupErr
+}
+
 func (a *Agent) resumeRuntimeSessions(ctx context.Context, client codex.Client, sessions []*session) error {
 	for _, session := range sessions {
 		req, err := session.resumeRequest()

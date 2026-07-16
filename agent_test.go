@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -66,11 +67,11 @@ func TestInitializeAdvertisesCodexCapabilities(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing Codex meta: %#v", resp.AgentCapabilities.Meta)
 	}
-	if rawMeta, rawOK := meta[rawEventCapabilityKey].(map[string]any); !rawOK || rawMeta["method"] != RawEventMethod {
+	if rawMeta, rawOK := meta[rawEventCapabilityKey].(map[string]any); !rawOK || rawMeta[jsonFieldMethod] != RawEventMethod {
 		t.Fatalf("missing raw event capability: %#v", meta)
 	}
 	outputSchemaMeta, ok := meta[structuredOutputCapabilityKey].(map[string]any)
-	if !ok || outputSchemaMeta["result"] != "_meta.codex.structuredOutput" {
+	if !ok || outputSchemaMeta[jsonFieldResult] != "_meta.codex.structuredOutput" {
 		t.Fatalf("missing output schema capability: %#v", meta)
 	}
 	if _, ok := meta["goals"]; ok {
@@ -1090,7 +1091,14 @@ func TestMain(m *testing.M) {
 			fmt.Println("codex-cli 0.144.1")
 			os.Exit(0)
 		case "app-server":
-			runFakeCodexAppServer()
+			if os.Getenv(fakeCodexModeEnv) == fakeCodexCancelTreeMode {
+				runCancelTreeFakeCodexAppServer()
+			} else {
+				runFakeCodexAppServer()
+			}
+			os.Exit(0)
+		case fakeCodexDelayedChildArg:
+			runFakeCodexDelayedChild()
 			os.Exit(0)
 		}
 	}
@@ -1102,6 +1110,23 @@ func TestMain(m *testing.M) {
 // process death surfaces a real diagnostic tail rather than a bare EOF.
 const fakeCodexStderrTail = "codex app-server: fatal: killed (out of memory)"
 
+const (
+	fakeCodexModeEnv              = "ACP_GO_CODEX_TEST_APP_SERVER_MODE"
+	fakeCodexCancelTreeMode       = "cancel-tree"
+	fakeCodexDelayedChildArg      = "fake-delayed-child"
+	fakeCodexChildStartedEnv      = "ACP_GO_CODEX_TEST_CHILD_STARTED"
+	fakeCodexCancelReturnedEnv    = "ACP_GO_CODEX_TEST_CANCEL_RETURNED"
+	fakeCodexChildSentinelEnv     = "ACP_GO_CODEX_TEST_CHILD_SENTINEL"
+	fakeCodexBlockingPrompt       = "START_DELAYED_CHILD"
+	fakeCodexReplacementPrompt    = "REPLACEMENT_TURN"
+	fakeCodexReplacementReply     = "REPLACEMENT_OK"
+	fakeCodexThreadID             = "thread-cancel-tree"
+	fakeCodexBlockingTurnID       = "turn-blocking"
+	fakeCodexReplacementTurnID    = "turn-replacement"
+	fakeCodexChildSentinelDelay   = 750 * time.Millisecond
+	fakeCodexChildObservationWait = 1250 * time.Millisecond
+)
+
 // runFakeCodexAppServer speaks just enough of the codex app-server JSON-RPC
 // protocol to complete the launch handshake, then dies mid-turn on turn/start so
 // the transport observes a real process exit (exit status 1 + stderr tail).
@@ -1109,7 +1134,7 @@ func runFakeCodexAppServer() {
 	fmt.Fprintln(os.Stderr, fakeCodexStderrTail)
 
 	writeReply := func(id any, result map[string]any) {
-		payload, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+		payload, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, jsonFieldResult: result})
 		payload = append(payload, '\n')
 		_, _ = os.Stdout.Write(payload)
 	}
@@ -1126,13 +1151,110 @@ func runFakeCodexAppServer() {
 			continue
 		}
 
-		if method, _ := msg["method"].(string); method == "turn/start" {
+		if method, _ := msg[jsonFieldMethod].(string); method == "turn/start" {
 			writeReply(id, map[string]any{"turn": map[string]any{"id": "turn-1"}})
 			os.Exit(1)
 		}
 
 		writeReply(id, map[string]any{})
 	}
+}
+
+// runCancelTreeFakeCodexAppServer deliberately implements the native failure
+// observed in production: turn/interrupt acknowledges cancellation but leaves
+// a command descendant running. The adapter must close the app-server
+// containment to stop the child; the fake itself never stops it.
+func runCancelTreeFakeCodexAppServer() {
+	writeMessage := func(message map[string]any) {
+		payload, _ := json.Marshal(message)
+		payload = append(payload, '\n')
+		_, _ = os.Stdout.Write(payload)
+	}
+	writeReply := func(id any, result map[string]any) {
+		writeMessage(map[string]any{"jsonrpc": "2.0", "id": id, jsonFieldResult: result})
+	}
+	writeNotification := func(method string, params map[string]any) {
+		writeMessage(map[string]any{"jsonrpc": "2.0", jsonFieldMethod: method, "params": params})
+	}
+
+	decoder := json.NewDecoder(os.Stdin)
+	for {
+		var msg map[string]any
+		if err := decoder.Decode(&msg); err != nil {
+			return
+		}
+
+		id, hasID := msg["id"]
+		if !hasID {
+			continue
+		}
+
+		method, _ := msg[jsonFieldMethod].(string)
+		switch method {
+		case "thread/start", "thread/resume":
+			writeReply(id, map[string]any{"thread": map[string]any{"id": fakeCodexThreadID}})
+		case "turn/start":
+			rawParams, _ := json.Marshal(msg["params"])
+			if strings.Contains(string(rawParams), fakeCodexBlockingPrompt) {
+				child := exec.Command(os.Args[0], fakeCodexDelayedChildArg) // #nosec G204 -- fixed test binary and fixed argument.
+				child.Env = os.Environ()
+				if err := child.Start(); err != nil {
+					os.Exit(2)
+				}
+
+				writeReply(id, map[string]any{"turn": map[string]any{"id": fakeCodexBlockingTurnID}})
+				writeNotification("item/started", map[string]any{
+					"threadId": fakeCodexThreadID,
+					"turnId":   fakeCodexBlockingTurnID,
+					"item": map[string]any{
+						"id": fakeCodexBlockingTurnID + "-command", "type": "commandExecution", "command": "delayed child",
+					},
+				})
+
+				continue
+			}
+
+			writeReply(id, map[string]any{"turn": map[string]any{"id": fakeCodexReplacementTurnID}})
+			writeNotification("item/agentMessage/delta", map[string]any{
+				"threadId": fakeCodexThreadID, "turnId": fakeCodexReplacementTurnID, "delta": fakeCodexReplacementReply,
+			})
+			writeNotification("turn/completed", map[string]any{
+				"threadId": fakeCodexThreadID,
+				"turn":     map[string]any{"id": fakeCodexReplacementTurnID, "status": "completed"},
+			})
+		case "turn/interrupt":
+			// Intentionally acknowledge without touching the delayed child.
+			writeReply(id, map[string]any{})
+		default:
+			writeReply(id, map[string]any{})
+		}
+	}
+}
+
+func runFakeCodexDelayedChild() {
+	started := os.Getenv(fakeCodexChildStartedEnv)
+	cancelReturned := os.Getenv(fakeCodexCancelReturnedEnv)
+	sentinel := os.Getenv(fakeCodexChildSentinelEnv)
+	if started == "" || cancelReturned == "" || sentinel == "" {
+		os.Exit(3)
+	}
+
+	if err := os.WriteFile(started, []byte("started"), 0o600); err != nil {
+		os.Exit(4)
+	}
+
+	deadline := time.Now().Add(fakeCodexChildSentinelDelay)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(cancelReturned); err == nil {
+			_ = os.WriteFile(sentinel, []byte("survived cancellation return"), 0o600)
+
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_ = os.WriteFile(sentinel, []byte("delayed side effect"), 0o600)
 }
 
 type appendErrorStore struct{}

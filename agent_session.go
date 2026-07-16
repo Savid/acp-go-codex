@@ -120,13 +120,26 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 		return routeInvalidParams(fmt.Errorf("turnNonce does not identify the active turn"))
 	}
 
+	client, threadID, turnID := session.activeTurnTarget()
 	session.cancelTurn()
 
-	cancelCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-	defer cancel()
+	interruptCtx, cancelInterrupt := context.WithTimeout(context.Background(), closeTimeout)
+	interruptErr := client.CancelTurn(interruptCtx, threadID, turnID)
+
+	cancelInterrupt()
+
+	// Native turn/interrupt acknowledges the logical turn, but Codex command
+	// descendants can outlive that acknowledgement. Retire the entire shared
+	// app-server generation and wait for its containment proof before reporting
+	// cancellation. The next operation lazily launches a replacement generation
+	// and resumes every still-addressable logical thread.
+	quiesceCtx, cancelQuiesce := context.WithTimeout(context.Background(), closeTimeout)
+	quiesceErr := a.quiesceRuntimeAfterCancel(quiesceCtx, client)
+
+	cancelQuiesce()
 
 	return codexThreadACPError(
-		session.client.CancelTurn(cancelCtx, session.codexThreadID, session.activeTurnID()),
+		errors.Join(interruptErr, quiesceErr),
 		session.accountMetaSnapshot(),
 	)
 }

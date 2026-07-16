@@ -515,6 +515,41 @@ func TestSharedRuntimeLatchesUnprovenTreeFailure(t *testing.T) {
 	require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
 }
 
+func TestCancelRuntimeQuiescenceWaitsForExistingTransitionAndLatchesUnprovenTree(t *testing.T) {
+	t.Run("wait for owner", func(t *testing.T) {
+		agent := NewAgent()
+		transition := make(chan struct{})
+		close(transition)
+		agent.runtimeStarting = transition
+
+		require.NoError(t, agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient()))
+
+		agent.runtimeCleanupErr = codex.ErrProcessTreeUnproven
+		require.ErrorIs(
+			t,
+			agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient()),
+			codex.ErrProcessTreeUnproven,
+		)
+	})
+
+	t.Run("latch unproven tree", func(t *testing.T) {
+		client := &errorCodexClient{
+			spyCodexClient: newSpyCodexClient(),
+			closeErr:       codex.ErrProcessTreeUnproven,
+		}
+		agent := NewAgent()
+		session := &session{agent: agent, id: "session", client: client}
+		agent.sessions[session.id] = session
+		agent.runtimeClient = client
+
+		err := agent.quiesceRuntimeAfterCancel(context.Background(), client)
+		require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
+		require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrProcessTreeUnproven)
+		require.True(t, session.clientDead)
+		require.Nil(t, agent.runtimeStarting)
+	})
+}
+
 func TestSharedRuntimeGenerationCleanupFailureBranches(t *testing.T) {
 	ordinaryCloseErr := errors.New("ordinary prior generation close failure")
 	ordinary := NewAgent()

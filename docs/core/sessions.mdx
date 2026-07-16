@@ -13,8 +13,13 @@ host reconnects.
 `session/new` starts a Codex thread rooted at an absolute `cwd`. `session/prompt`
 starts a Codex turn on that thread and streams
 [ACP updates](/docs/core/prompt-streaming) until Codex completes, the turn is
-cancelled, or it fails. `session/cancel` aborts the in-flight turn;
-`session/close` unsubscribes and releases that logical thread without closing
+cancelled, or it fails. `session/cancel` interrupts the in-flight native turn,
+then synchronously retires the shared app-server generation and waits until its
+contained process tree is proved empty. This stronger fence is required because
+a native interrupt acknowledgement alone does not prove that command
+descendants exited. Every still-addressable logical thread is preserved for
+lazy resume on the replacement generation. `session/close` unsubscribes and
+releases that logical thread without closing
 the shared app-server. The logical session remains addressable when native
 unsubscribe fails. Only after unsubscribe succeeds, and while that app-server
 generation remains live, the adapter retains the closed thread's native ID and
@@ -27,7 +32,10 @@ or is released when native thread/runtime ownership ends.
 One Agent owns one Codex `app-server` and multiplexes all of its ACP sessions as
 independent native threads. Working directory, model, approval/sandbox policy,
 MCP configuration, callbacks, event streams, and cancellation remain keyed by
-thread. Agent close owns app-server shutdown.
+thread. Because descendant containment is app-server-wide, cancelling one turn
+fences the generation and causes any concurrent peer turn to fail as a transport
+loss; the peer logical sessions remain available for lazy resume. Agent close
+owns ordinary app-server shutdown.
 
 If the shared process dies, its runtime epoch is fenced and every bound thread
 is marked unavailable. The next explicit operation starts one replacement,
@@ -80,9 +88,12 @@ stable ACP `session/fork` method is intentionally not routed. See
 
 By default a prompt turn runs without an adapter-imposed deadline. Set
 `WithTurnTimeout` (a process option) to bound a single `session/prompt`. When a
-turn exceeds the deadline the native Codex turn is aborted and `session/prompt`
-fails with the [`codex_turn_failed`](/docs/reference/updates#turn-failure)
-error carrying `cause: "timeout"`. The default of `0` disables the deadline.
+turn exceeds the deadline the native Codex turn is interrupted, the shared
+runtime receives the same synchronous process-tree fence as explicit
+cancellation, and `session/prompt` fails with the
+[`codex_turn_failed`](/docs/reference/updates#turn-failure) error carrying
+`cause: "timeout"`. The logical sessions remain available for lazy resume. The
+default of `0` disables the deadline.
 
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
