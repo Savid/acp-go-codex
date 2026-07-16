@@ -57,6 +57,13 @@ in-memory sessions first, then the configured
 This lets a host restore a session whose local Codex thread state is gone as
 long as the rollout rows were mirrored to a store.
 
+When a lifecycle request refreshes configuration for a session whose native
+thread is still attached to the current app-server, the adapter rebinds that
+same thread at its owned native rollout path. It never materializes the mirror
+as a second rollout or replaces the live session object. A native thread ID in
+the stored `session_meta` row must match the active thread; a mismatch is
+rejected before Codex is called.
+
 Forking is exposed as the Codex extension method `_codex/session/fork`; the
 stable ACP `session/fork` method is intentionally not routed. See
 [ACP methods](/docs/reference/acp-methods) for the full routing table.

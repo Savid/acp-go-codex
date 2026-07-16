@@ -350,11 +350,26 @@ func (a *Agent) activeSessionForStart(id acp.SessionId, start codexSessionStart)
 	defer a.mu.Unlock()
 
 	session := a.sessions[id]
-	if session == nil || session.fingerprint != fingerprint {
+	if session == nil {
+		return nil
+	}
+
+	session.mu.Lock()
+	matches := session.fingerprint == fingerprint
+	session.mu.Unlock()
+
+	if !matches {
 		return nil
 	}
 
 	return session
+}
+
+func (a *Agent) activeSession(id acp.SessionId) *session {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.sessions[id]
 }
 
 func codexSessionStartFingerprint(start codexSessionStart) string {
@@ -593,6 +608,10 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
 
+	if active := a.activeSession(params.SessionId); active != nil {
+		return a.rebindActiveStoredSession(ctx, params, entries, meta, active)
+	}
+
 	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
@@ -666,6 +685,112 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
 		ConfigOptions: sessionConfigOptions(session, models),
+	}, nil
+}
+
+// rebindActiveStoredSession refreshes lifecycle configuration without
+// hydrating a second rollout for a thread already owned by this app-server.
+// The durable snapshot may corroborate the native thread ID, but it cannot
+// redirect an active ACP session to another native thread or path.
+func (a *Agent) rebindActiveStoredSession(
+	ctx context.Context,
+	params acp.ResumeSessionRequest,
+	entries []SessionStoreEntry,
+	meta sessionMeta,
+	active *session,
+) (acp.ResumeSessionResponse, error) {
+	if err := active.ensureLiveClient(ctx); err != nil {
+		return acp.ResumeSessionResponse{}, codexThreadACPError(err, active.accountMetaSnapshot())
+	}
+
+	client, ownedThreadID, ownedPath, live := active.activeThreadOwnership()
+	if !live || client == nil || ownedThreadID == "" {
+		return acp.ResumeSessionResponse{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "active Codex thread ownership is unavailable",
+		})
+	}
+
+	storedThreadID := rolloutNativeThreadID(entries)
+	if storedThreadID != "" && storedThreadID != ownedThreadID {
+		return acp.ResumeSessionResponse{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "stored Codex thread does not match the active session",
+		})
+	}
+
+	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: ownedThreadID,
+		Path:     ownedPath,
+		Cwd:      params.Cwd,
+		Config:   config,
+	})
+	if err != nil {
+		return acp.ResumeSessionResponse{}, codexThreadACPError(err, active.accountMetaSnapshot())
+	}
+
+	if thread.ID != ownedThreadID {
+		return acp.ResumeSessionResponse{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex resumed a different native thread",
+		})
+	}
+
+	if thread.Path == "" {
+		thread.Path = ownedPath
+	} else if ownedPath != "" && thread.Path != ownedPath {
+		return acp.ResumeSessionResponse{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex resumed the active thread at a different rollout path",
+		})
+	}
+
+	candidate := newSession(a, params.SessionId, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	if err := a.runtimeReadyCanary(ctx, client, candidate); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	fingerprint := codexSessionStartFingerprint(codexSessionStart{
+		Cwd:                   params.Cwd,
+		AdditionalDirectories: params.AdditionalDirectories,
+		McpServers:            params.McpServers,
+		Meta:                  meta,
+		ResumeID:              string(params.SessionId),
+	})
+	accountMeta := clientAccountMeta(ctx, client)
+
+	a.mu.Lock()
+	current := a.sessions[params.SessionId]
+	runtimeCurrent := a.runtimeClient == client && !a.runtimeDead
+
+	if current == active && runtimeCurrent {
+		active.applyActiveRebind(
+			thread,
+			params.Cwd,
+			params.AdditionalDirectories,
+			meta,
+			mcpServers,
+			fingerprint,
+			accountMeta,
+		)
+	}
+	a.mu.Unlock()
+
+	if current != active || !runtimeCurrent {
+		return acp.ResumeSessionResponse{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "active Codex thread ownership changed during resume",
+		})
+	}
+
+	models := modelList(ctx, client)
+	snapshot := active.snapshot()
+
+	return acp.ResumeSessionResponse{
+		Meta:          sessionResponseMeta(snapshot),
+		ConfigOptions: sessionConfigOptions(active, models),
 	}, nil
 }
 
@@ -823,6 +948,19 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
+	}
+
+	if active := a.activeSession(params.SessionId); active != nil {
+		resp, rebindErr := a.rebindActiveStoredSession(ctx, acp.ResumeSessionRequest(params), entries, meta, active)
+		if rebindErr != nil {
+			return acp.LoadSessionResponse{}, rebindErr
+		}
+
+		if replayErr := active.replayRollout(ctx, entries); replayErr != nil {
+			return acp.LoadSessionResponse{}, replayErr
+		}
+
+		return acp.LoadSessionResponse(resp), nil
 	}
 
 	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)

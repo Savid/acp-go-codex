@@ -190,6 +190,66 @@ func (s *session) resumeRequest() (codex.ThreadResumeRequest, error) {
 	return codex.ThreadResumeRequest{ThreadID: threadID, Path: path, Cwd: cwd, Config: config}, nil
 }
 
+// activeThreadOwnership returns the native identity and rollout path owned by
+// this live session. A store-backed lifecycle request must use this identity
+// while the thread is still attached to the same app-server; materializing the
+// mirrored rows at a different path would ask Codex to attach an already-live
+// thread to a second rollout.
+func (s *session) activeThreadOwnership() (codex.Client, string, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.client, s.codexThreadID, s.rolloutPath, !s.clientDead
+}
+
+func (s *session) applyActiveRebind(
+	thread codex.Thread,
+	cwd string,
+	additionalDirectories []string,
+	meta sessionMeta,
+	mcpServers []acp.McpServer,
+	fingerprint string,
+	accountMeta map[string]any,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cwd = cwd
+
+	s.additionalDirectories = append([]string(nil), additionalDirectories...)
+	s.rolloutPath = thread.Path
+
+	s.title = thread.Title
+	if s.title == "" {
+		s.title = "Codex session"
+	}
+
+	s.updatedAt = thread.UpdatedAt
+	if s.updatedAt == "" {
+		s.updatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	s.model = firstNonEmpty(thread.Model, meta.Model)
+	s.modelProvider = thread.Provider
+	s.fingerprint = fingerprint
+	s.mode = modeDefault
+	s.reasoningEffort = firstNonEmpty(meta.ReasoningEffort, thread.ReasoningEffort)
+	s.serviceTier = meta.ServiceTier
+	s.personality = meta.Personality
+	s.approvalPolicy = cloneAny(meta.ApprovalPolicy)
+	s.sandboxPolicy = cloneAny(meta.SandboxPolicy)
+	s.rawMessages = meta.RawMessages
+	s.outputSchema = cloneAny(meta.OutputSchema)
+
+	s.mcpServers = append([]acp.McpServer(nil), mcpServers...)
+
+	s.mcpApprovalMode = meta.MCPToolApprovalMode
+
+	if len(accountMeta) > 0 {
+		s.accountMeta = cloneAnyMap(accountMeta)
+	}
+}
+
 func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
 	select {

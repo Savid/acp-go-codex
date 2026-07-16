@@ -1,16 +1,21 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 func requireRequestError(t *testing.T, err error, code int, message string) {
@@ -789,6 +794,349 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-replay", "/tmp/project"), []SessionStoreEntry{SessionStoreEntry(`not-json`)}); err == nil {
 		t.Fatal("loadMaterializedSession ignored replay error")
 	}
+}
+
+type activeRolloutPathClient struct {
+	*spyCodexClient
+
+	nativeThreadID string
+	nativePath     string
+	turnStarted    chan struct{}
+	startOnce      sync.Once
+	resumeCount    int
+}
+
+func (c *activeRolloutPathClient) StartThread(ctx context.Context, req codex.ThreadStartRequest) (codex.Thread, error) {
+	thread, err := c.spyCodexClient.StartThread(ctx, req)
+	if err != nil {
+		return codex.Thread{}, err
+	}
+
+	thread.ID = c.nativeThreadID
+	thread.SessionID = c.nativeThreadID
+	thread.Path = c.nativePath
+
+	return thread, nil
+}
+
+func (c *activeRolloutPathClient) ResumeThread(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.resume = req
+	c.resumeCount++
+	if req.ThreadID != c.nativeThreadID {
+		return codex.Thread{}, fmt.Errorf("wrong active thread: %s", req.ThreadID)
+	}
+	if req.Path != c.nativePath {
+		return codex.Thread{}, fmt.Errorf("cannot resume running thread %s with stale path", req.ThreadID)
+	}
+
+	thread := c.thread
+	thread.ID = c.nativeThreadID
+	thread.SessionID = c.nativeThreadID
+	thread.Path = c.nativePath
+	thread.Cwd = req.Cwd
+	thread.Title = ""
+	thread.UpdatedAt = ""
+
+	return thread, nil
+}
+
+func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (<-chan codex.Event, error) {
+	c.mu.Lock()
+	c.lastTurn = req
+	c.mu.Unlock()
+	c.startOnce.Do(func() { close(c.turnStarted) })
+
+	events := make(chan codex.Event)
+	go func() {
+		<-ctx.Done()
+		close(events)
+	}()
+
+	return events, nil
+}
+
+// A steering interrupt leaves the native Codex thread attached to the shared
+// app-server. When the host immediately resumes from its mirrored store, the
+// active native rollout remains authoritative: the wrapper snapshot must not
+// be materialized at a second path or replace/unsubscribe the live session.
+func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
+	ctx := context.Background()
+	nativeThreadID := "thread-active"
+	nativePath := filepath.Join(t.TempDir(), "native-rollout.jsonl")
+	entries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active","cwd":"/tmp/project"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"before interrupt"}}`),
+	}
+	var rollout bytes.Buffer
+	for _, entry := range entries {
+		rollout.Write(entry)
+		rollout.WriteByte('\n')
+	}
+	require.NoError(t, os.WriteFile(nativePath, rollout.Bytes(), 0o600))
+
+	store := NewInMemorySessionStore()
+	client := &activeRolloutPathClient{
+		spyCodexClient: newSpyCodexClient(),
+		nativeThreadID: nativeThreadID,
+		nativePath:     nativePath,
+		turnStarted:    make(chan struct{}),
+	}
+	var sessionScratchAdmissions int
+	agent := NewAgent(
+		WithSessionStore(store),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				if kind == RuntimeResourceSession {
+					sessionScratchAdmissions++
+
+					return nil, errors.New("active thread must not materialize its mirrored rollout")
+				}
+
+				return func() {}, nil
+			},
+		}),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+	agent.setAgentClient(newRecordingAgentClient())
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	require.NotNil(t, active)
+
+	type promptResult struct {
+		resp acp.PromptResponse
+		err  error
+	}
+	promptDone := make(chan promptResult, 1)
+	go func() {
+		resp, promptErr := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "interrupted-turn", "wait"))
+		promptDone <- promptResult{resp: resp, err: promptErr}
+	}()
+	<-client.turnStarted
+	active.cancelTurn()
+	result := <-promptDone
+	require.NoError(t, result.err)
+	require.Equal(t, acp.StopReasonCancelled, result.resp.StopReason)
+
+	mirrored, err := store.Load(ctx, SessionKey{SessionID: string(created.SessionId)})
+	require.NoError(t, err)
+	require.Equal(t, entries, mirrored)
+
+	resumed, err := agent.ResumeSession(ctx, ResumeSessionRequest(
+		created.SessionId,
+		"/tmp/project",
+		WithSessionAdditionalDirectories("/tmp/additional"),
+	))
+	require.NoError(t, err)
+	require.NotNil(t, resumed.Meta)
+	require.Same(t, active, agent.activeSession(created.SessionId))
+	require.Zero(t, sessionScratchAdmissions)
+
+	client.mu.Lock()
+	require.Equal(t, 1, client.resumeCount)
+	require.Equal(t, nativeThreadID, client.resume.ThreadID)
+	require.Equal(t, nativePath, client.resume.Path)
+	require.Empty(t, client.unsubscribed)
+	client.mu.Unlock()
+
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(
+		created.SessionId,
+		"/tmp/project",
+		WithSessionAdditionalDirectories("/tmp/load"),
+	))
+	require.NoError(t, err)
+	require.Same(t, active, agent.activeSession(created.SessionId))
+	require.Zero(t, sessionScratchAdmissions)
+
+	client.mu.Lock()
+	require.Equal(t, 2, client.resumeCount)
+	require.Equal(t, nativePath, client.resume.Path)
+	require.Empty(t, client.unsubscribed)
+	client.mu.Unlock()
+
+	agent.setAgentClient(&errorAgentClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		updateErr:            errors.New("replay update failed"),
+	})
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(
+		created.SessionId,
+		"/tmp/project",
+		WithSessionAdditionalDirectories("/tmp/replay-error"),
+	))
+	require.ErrorContains(t, err, "replay update failed")
+	agent.setAgentClient(newRecordingAgentClient())
+
+	wrongEntries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-other","cwd":"/tmp/project"}}`),
+	}
+	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+		Key:     SessionKey{SessionID: string(created.SessionId)},
+		Entries: wrongEntries,
+	}}))
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(
+		created.SessionId,
+		"/tmp/project",
+		WithSessionAdditionalDirectories("/tmp/different"),
+	))
+	require.ErrorContains(t, err, "stored Codex thread does not match the active session")
+
+	client.mu.Lock()
+	require.Equal(t, 3, client.resumeCount, "wrong-thread snapshot reached Codex")
+	client.mu.Unlock()
+}
+
+type activeRebindEdgeClient struct {
+	*spyCodexClient
+	resume  func(context.Context, codex.ThreadResumeRequest) (codex.Thread, error)
+	account func(context.Context) (codex.Account, error)
+}
+
+func (c *activeRebindEdgeClient) ResumeThread(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+	return c.resume(ctx, req)
+}
+
+func (c *activeRebindEdgeClient) AccountRead(ctx context.Context) (codex.Account, error) {
+	if c.account != nil {
+		return c.account(ctx)
+	}
+
+	return c.spyCodexClient.AccountRead(ctx)
+}
+
+func TestActiveStoredRebindFailureBranches(t *testing.T) {
+	ctx := context.Background()
+	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
+	params := ResumeSessionRequest("session", "/tmp/project")
+
+	bind := func(agent *Agent, client codex.Client) *session {
+		active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+			ID:   "thread-active",
+			Path: "/native/rollout.jsonl",
+		}, client, sessionMeta{}, nil)
+		agent.sessions[active.id] = active
+		agent.runtimeClient = client
+		agent.runtimeDead = false
+
+		return active
+	}
+
+	t.Run("relaunch failure", func(t *testing.T) {
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+			return nil, errors.New("relaunch failed")
+		}))
+		active := bind(agent, newSpyCodexClient())
+		active.setClientDead(true)
+		agent.runtimeDead = true
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "relaunch failed")
+	})
+
+	t.Run("ownership unavailable", func(t *testing.T) {
+		agent := NewAgent()
+		active := bind(agent, nil)
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "active Codex thread ownership is unavailable")
+	})
+
+	t.Run("MCP validation", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent := NewAgent()
+		active := bind(agent, client)
+		invalid := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(acp.McpServer{
+			Sse: &acp.McpServerSseInline{Name: "removed"},
+		}))
+		_, err := agent.rebindActiveStoredSession(ctx, invalid, entries, sessionMeta{}, active)
+		require.Error(t, err)
+	})
+
+	t.Run("native resume failure", func(t *testing.T) {
+		client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("resume failed")}
+		agent := NewAgent()
+		active := bind(agent, client)
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "resume failed")
+	})
+
+	for _, tc := range []struct {
+		name   string
+		thread codex.Thread
+		want   string
+	}{
+		{
+			name:   "wrong returned thread",
+			thread: codex.Thread{ID: "thread-other", Path: "/native/rollout.jsonl"},
+			want:   "different native thread",
+		},
+		{
+			name:   "wrong returned path",
+			thread: codex.Thread{ID: "thread-active", Path: "/other/rollout.jsonl"},
+			want:   "different rollout path",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &activeRebindEdgeClient{
+				spyCodexClient: newSpyCodexClient(),
+				resume: func(context.Context, codex.ThreadResumeRequest) (codex.Thread, error) {
+					return tc.thread, nil
+				},
+			}
+			agent := NewAgent()
+			active := bind(agent, client)
+			_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+
+	t.Run("empty returned path keeps ownership", func(t *testing.T) {
+		client := &activeRebindEdgeClient{
+			spyCodexClient: newSpyCodexClient(),
+			resume: func(context.Context, codex.ThreadResumeRequest) (codex.Thread, error) {
+				return codex.Thread{ID: "thread-active"}, nil
+			},
+		}
+		agent := NewAgent()
+		active := bind(agent, client)
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.NoError(t, err)
+		require.Equal(t, "/native/rollout.jsonl", active.rolloutPath)
+	})
+
+	t.Run("canary failure", func(t *testing.T) {
+		client := &runtimeFailureClient{
+			runtimeRecordingClient: newRuntimeRecordingClient(),
+			events:                 []codex.Event{{Kind: codex.EventCompleted}},
+		}
+		agent := NewAgent()
+		active := bind(agent, client)
+		withMCP := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(
+			HTTPMCPServer("marker", "https://example.test/mcp", nil),
+		))
+		_, err := agent.rebindActiveStoredSession(ctx, withMCP, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "runtime_ready")
+	})
+
+	t.Run("ownership changes before commit", func(t *testing.T) {
+		agent := NewAgent()
+		client := &activeRebindEdgeClient{spyCodexClient: newSpyCodexClient()}
+		client.resume = func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+			return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+		}
+		active := bind(agent, client)
+		client.account = func(context.Context) (codex.Account, error) {
+			agent.mu.Lock()
+			agent.sessions[active.id] = &session{id: active.id}
+			agent.mu.Unlock()
+
+			return codex.Account{}, nil
+		}
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "ownership changed during resume")
+	})
 }
 
 func TestForkSessionErrorBranches(t *testing.T) {
