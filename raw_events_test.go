@@ -48,7 +48,10 @@ func TestRawMessageConfigFromMeta(t *testing.T) {
 		t.Fatal("nil raw event decoded to non-nil map")
 	}
 	payload := map[string]any{"sessionId": "s", "sequence": int64(1), "source": "codex", "event": strings.Repeat("x", rawEventMaxBytes)}
-	capped := capRawEventPayload(payload)
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		t.Fatalf("cap oversized payload: %v", err)
+	}
 	event := asType[map[string]any](t, capped["event"])
 	if event[rawMarkerTruncated] != true || event[rawMarkerReason] != rawMarkerReasonOversize ||
 		event[rawMarkerMaxBytes] != rawEventMaxBytes {
@@ -62,13 +65,81 @@ func TestRawMessageConfigFromMeta(t *testing.T) {
 	}
 
 	unserializable := map[string]any{"sessionId": "s", "sequence": int64(2), "source": codexMetaKey, "event": map[string]any{"bad": make(chan int)}}
-	badCapped := capRawEventPayload(unserializable)
+	badCapped, err := capRawEventPayload(unserializable)
+	if err != nil {
+		t.Fatalf("cap unserializable payload: %v", err)
+	}
 	badEvent := asType[map[string]any](t, badCapped["event"])
 	if badEvent[rawMarkerTruncated] != true || badEvent[rawMarkerReason] != rawMarkerReasonUnserializable {
 		t.Fatalf("unserializable marker = %#v", badCapped)
 	}
 	if _, ok := badEvent[rawMarkerSizeBytes]; ok {
 		t.Fatalf("unserializable marker must omit sizeBytes: %#v", badEvent)
+	}
+}
+
+func TestRawEventFinalPayloadBoundaryIncludesRouteMeta(t *testing.T) {
+	payload := map[string]any{
+		jsonFieldSessionID: "session-1",
+		jsonFieldSequence:  int64(1),
+		jsonFieldSource:    rawEventSource,
+		jsonFieldEvent:     map[string]any{"data": ""},
+		jsonFieldMeta:      inboundRouteMeta(strings.Repeat("n", routeTurnNonceMaxBytes)),
+	}
+	empty, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal empty payload: %v", err)
+	}
+	padding := rawEventMaxBytes - len(empty)
+	if padding <= 0 {
+		t.Fatalf("empty routed payload is %d bytes", len(empty))
+	}
+	payload[jsonFieldEvent] = map[string]any{"data": strings.Repeat("x", padding)}
+
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		t.Fatalf("cap boundary payload: %v", err)
+	}
+	encoded, err := json.Marshal(capped)
+	if err != nil {
+		t.Fatalf("marshal boundary payload: %v", err)
+	}
+	if len(encoded) != rawEventMaxBytes {
+		t.Fatalf("boundary payload = %d bytes, want %d", len(encoded), rawEventMaxBytes)
+	}
+	if event := asType[map[string]any](t, capped[jsonFieldEvent]); event[rawMarkerTruncated] == true {
+		t.Fatalf("exact-boundary event was replaced: %#v", event)
+	}
+
+	payload[jsonFieldEvent] = map[string]any{"data": strings.Repeat("x", padding+1)}
+	capped, err = capRawEventPayload(payload)
+	if err != nil {
+		t.Fatalf("cap over-boundary payload: %v", err)
+	}
+	encoded, err = json.Marshal(capped)
+	if err != nil {
+		t.Fatalf("marshal capped payload: %v", err)
+	}
+	if len(encoded) > rawEventMaxBytes {
+		t.Fatalf("capped payload = %d bytes, exceeds %d", len(encoded), rawEventMaxBytes)
+	}
+	marker := asType[map[string]any](t, capped[jsonFieldEvent])
+	if marker[rawMarkerReason] != rawMarkerReasonOversize || marker[rawMarkerSizeBytes] != rawEventMaxBytes+1 {
+		t.Fatalf("over-boundary marker = %#v", marker)
+	}
+}
+
+func TestRawEventFinalPayloadRejectsUnboundedInternalRoute(t *testing.T) {
+	payload := map[string]any{
+		jsonFieldSessionID: "session-1",
+		jsonFieldSequence:  int64(1),
+		jsonFieldSource:    rawEventSource,
+		jsonFieldEvent:     map[string]any{"type": "event"},
+		jsonFieldMeta:      inboundRouteMeta(strings.Repeat("n", rawEventMaxBytes)),
+	}
+
+	if _, err := capRawEventPayload(payload); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("unbounded route error = %v", err)
 	}
 }
 

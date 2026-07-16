@@ -59,8 +59,8 @@ fresh, unguessable nonce minted by the host:
 ```
 
 An active-turn `session/cancel` must carry the identical object. Missing,
-malformed, or stale routes are rejected; cancellation never falls back to a
-mutable "current turn". Embedded Go clients should use `PromptRequest`,
+malformed, stale, or greater-than-4096-byte nonces are rejected; cancellation
+never falls back to a mutable "current turn". Embedded Go clients should use `PromptRequest`,
 `TextPromptRequest`, and `CancelRequest`, which require the nonce explicitly.
 
 Every live-turn `session/update` and `_codex/rawEvent` notification carries the

@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -18,16 +19,22 @@ func TestInitializeAdvertisesExactRouteEnvelopeCapability(t *testing.T) {
 }
 
 func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) {
+	boundaryNonce := strings.Repeat("n", routeTurnNonceMaxBytes)
+	boundary, err := parseInboundRoute(inboundRouteMeta(boundaryNonce))
+	require.NoError(t, err)
+	require.Equal(t, boundaryNonce, boundary.TurnNonce)
+
 	for name, meta := range map[string]map[string]any{
 		"missing":            nil,
 		"wrong version":      {routeMetaKey: map[string]any{routeVersionKey: 2, routeTurnNonceKey: "n"}},
 		"wrong version type": {routeMetaKey: map[string]any{routeVersionKey: "1", routeTurnNonceKey: "n"}},
 		"empty nonce":        {routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: ""}},
+		"oversized nonce":    {routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: strings.Repeat("n", routeTurnNonceMaxBytes+1)}},
 		"extra field":        {routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: "n", "extra": true}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := parseInboundRoute(meta)
-			require.Error(t, err)
+			_, routeErr := parseInboundRoute(meta)
+			require.Error(t, routeErr)
 		})
 	}
 

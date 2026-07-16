@@ -9,13 +9,14 @@ import (
 )
 
 const (
-	routeMetaKey       = "acp-go.dev/route"
-	routeVersion       = 1
-	routeVersionKey    = "version"
-	routeVersionsKey   = "versions"
-	routeTurnNonceKey  = "turnNonce"
-	routeToolCallIDKey = "toolCallId"
-	routeRequestIDKey  = "requestId"
+	routeMetaKey           = "acp-go.dev/route"
+	routeVersion           = 1
+	routeTurnNonceMaxBytes = 4 * 1024
+	routeVersionKey        = "version"
+	routeVersionsKey       = "versions"
+	routeTurnNonceKey      = "turnNonce"
+	routeToolCallIDKey     = "toolCallId"
+	routeRequestIDKey      = "requestId"
 )
 
 type inboundRoute struct {
@@ -67,6 +68,10 @@ func parseInboundRoute(meta map[string]any) (inboundRoute, error) {
 	nonce, ok := value[routeTurnNonceKey].(string)
 	if !ok || strings.TrimSpace(nonce) == "" {
 		return inboundRoute{}, fmt.Errorf("_meta.%s.turnNonce must be a non-empty string", routeMetaKey)
+	}
+
+	if len(nonce) > routeTurnNonceMaxBytes {
+		return inboundRoute{}, fmt.Errorf("_meta.%s.turnNonce exceeds the maximum size", routeMetaKey)
 	}
 
 	return inboundRoute{TurnNonce: nonce}, nil

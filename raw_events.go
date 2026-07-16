@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 const (
@@ -14,6 +15,7 @@ const (
 	rawEventCapabilityKey         = "rawEvent"
 	rawEventEnabledByPath         = "_meta.codex.rawEvent.enabled"
 	rawEventMaxBytes              = 64 * 1024
+	rawEventSource                = "codex-app-server"
 	structuredOutputCapabilityKey = "structuredOutput"
 
 	rawMarkerTruncated            = "truncated"
@@ -66,10 +68,10 @@ func decodedRawEvent(raw json.RawMessage) map[string]any {
 	return out
 }
 
-func capRawEventPayload(payload map[string]any) map[string]any {
+func capRawEventPayload(payload map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(payload)
 	if err == nil && len(encoded) <= rawEventMaxBytes {
-		return payload
+		return payload, nil
 	}
 
 	marker := map[string]any{
@@ -96,7 +98,16 @@ func capRawEventPayload(payload map[string]any) map[string]any {
 		capped[jsonFieldMeta] = meta
 	}
 
-	return capped
+	final, finalErr := json.Marshal(capped)
+	if finalErr != nil {
+		return nil, fmt.Errorf("marshal capped raw event payload: %w", finalErr)
+	}
+
+	if len(final) > rawEventMaxBytes {
+		return nil, fmt.Errorf("capped raw event payload is %d bytes, exceeds %d", len(final), rawEventMaxBytes)
+	}
+
+	return capped, nil
 }
 
 func stringMeta(values map[string]any, key string) string {

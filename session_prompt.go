@@ -491,14 +491,19 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 	payload := map[string]any{
 		jsonFieldSessionID: s.id,
 		jsonFieldSequence:  sequence,
-		jsonFieldSource:    "codex-app-server",
+		jsonFieldSource:    rawEventSource,
 		jsonFieldEvent:     raw,
 	}
 	if meta := turnRouteMetaFromContext(ctx); meta != nil {
 		payload["_meta"] = meta
 	}
 
-	if err := conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload)); err != nil {
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		return err
+	}
+
+	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
 		return err
 	}
 
