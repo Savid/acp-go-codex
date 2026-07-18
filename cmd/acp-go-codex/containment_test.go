@@ -42,6 +42,24 @@ func TestRunContainmentUsage(t *testing.T) {
 	}
 }
 
+func TestRunContainmentSuccessfulOperations(t *testing.T) {
+	originalDiagnose := diagnoseContainment
+	originalCleanup := cleanupContainment
+	t.Cleanup(func() {
+		diagnoseContainment = originalDiagnose
+		cleanupContainment = originalCleanup
+	})
+
+	diagnoseContainment = func(string, io.Writer) error { return nil }
+	cleanupContainment = func(string, string, bool, io.Writer) error { return nil }
+	if code := runContainment([]string{"diagnose", "-scratch-dir", t.TempDir()}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("diagnose code = %d", code)
+	}
+	if code := runContainment([]string{"cleanup", "-scratch-dir", t.TempDir(), "-runtime-id", strings.Repeat("0", 32), "-force"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("cleanup code = %d", code)
+	}
+}
+
 func TestRunContainmentDispatchAndOffDarwinFlag(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(t.Context(), []string{"containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 {

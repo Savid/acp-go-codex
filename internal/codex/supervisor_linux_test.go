@@ -89,13 +89,21 @@ func TestSupervisorGuardianSIGKILLLeavesLivenessLockedUntilTreeExit(t *testing.T
 	runtime := startSupervisedNative(t)
 	require.NoError(t, syscall.Kill(-runtime.rootPID, syscall.SIGSTOP))
 	require.NoError(t, runtime.cmd.Process.Kill())
-	_ = runtime.cmd.Wait()
 
-	claim, err := homelock.AcquireClaim(runtime.home)
-	require.NoError(t, err, "guardian death must release only claim")
+	var claim *homelock.Lock
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		claim, _ = homelock.AcquireClaim(runtime.home)
+		if claim != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NotNil(t, claim, "guardian death must release only claim")
 	defer func() { require.NoError(t, claim.Release()) }()
-	_, err = homelock.AcquireLiveness(runtime.home)
+	_, err := homelock.AcquireLiveness(runtime.home)
 	require.Error(t, err, "surviving liveness supervisor must retain its lock")
+	_ = runtime.cmd.Wait()
 
 	liveness := acquireLivenessEventually(t, runtime.home)
 	require.NoError(t, liveness.Release())
@@ -254,6 +262,11 @@ func TestLinuxSubreaperPrimitiveFailureBranches(t *testing.T) {
 		err = quiesceSubreaper(123, 510*time.Millisecond, true)
 		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.Contains(t, signals, syscall.SIGTERM)
+		require.Contains(t, signals, syscall.SIGKILL)
+
+		signals = nil
+		err = quiesceSubreaper(123, 25*time.Millisecond, true)
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.Contains(t, signals, syscall.SIGKILL)
 	})
 }

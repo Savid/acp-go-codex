@@ -7,6 +7,10 @@ import (
 	"io"
 )
 
+func NewDarwinGenerationRecord(string, string, string) (*DarwinGeneration, error) {
+	return nil, errors.New("darwin best-effort containment is unavailable on this platform")
+}
+
 func DiagnoseDarwinContainment(string, io.Writer) error {
 	return errors.New("containment diagnose is available only on darwin")
 }

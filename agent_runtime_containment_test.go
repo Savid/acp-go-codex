@@ -73,6 +73,15 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	if _, err := opted.Initialize(t.Context(), acp.InitializeRequest{}); err == nil || !strings.Contains(err.Error(), "supported only on darwin") {
 		t.Fatalf("off-Darwin opt-in initialization error = %v", err)
 	}
+
+	originalGOOS := containmentGOOS
+	containmentGOOS = "darwin"
+	t.Cleanup(func() { containmentGOOS = originalGOOS })
+	logs.Reset()
+	opted = NewAgent(WithDarwinBestEffortContainment(), WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
+	if opted.ContainmentMode() != RuntimeContainmentBestEffort || !strings.Contains(logs.String(), `"containment":"best_effort"`) {
+		t.Fatalf("simulated Darwin mode=%q logs=%q", opted.ContainmentMode(), logs.String())
+	}
 }
 
 func TestContainmentModeSelections(t *testing.T) {

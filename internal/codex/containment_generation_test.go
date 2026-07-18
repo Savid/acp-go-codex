@@ -3,6 +3,7 @@ package codex
 import (
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -56,5 +57,10 @@ func TestDarwinGenerationCommandMarkersAndFinish(t *testing.T) {
 	}
 	if err := finishGeneration.finish(true); !errors.Is(err, ErrProcessContainmentIncomplete) || finishCalls != 1 {
 		t.Fatalf("memoized finish = %v, calls=%d", err, finishCalls)
+	}
+
+	parent := t.TempDir()
+	if !pathWithin(parent, filepath.Join(parent, "child")) || pathWithin(parent, parent) || pathWithin(parent, filepath.Dir(parent)) {
+		t.Fatal("path containment mismatch")
 	}
 }

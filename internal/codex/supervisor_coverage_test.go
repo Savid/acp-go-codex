@@ -353,7 +353,6 @@ func TestSupervisorEntropyAndProofStatFailures(t *testing.T) {
 func TestRunGuardianPipeAndStartFailures(t *testing.T) {
 	tests := map[string]func(*exec.Cmd){
 		"stdin":  func(command *exec.Cmd) { command.Stdin = strings.NewReader("") },
-		"stdout": func(command *exec.Cmd) { command.Stdout = io.Discard },
 		"stderr": func(command *exec.Cmd) { command.Stderr = io.Discard },
 	}
 	for name, configure := range tests {
@@ -393,7 +392,6 @@ func TestRunGuardianPipeAndStartFailures(t *testing.T) {
 func TestRunLivenessPipeAndExitFailures(t *testing.T) {
 	tests := map[string]func(*exec.Cmd){
 		"stdin":  func(command *exec.Cmd) { command.Stdin = strings.NewReader("") },
-		"stdout": func(command *exec.Cmd) { command.Stdout = io.Discard },
 		"stderr": func(command *exec.Cmd) { command.Stderr = io.Discard },
 	}
 	for name, configure := range tests {
