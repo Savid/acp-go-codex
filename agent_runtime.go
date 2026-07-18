@@ -27,6 +27,7 @@ var runtimeReadyDeadline = 2 * time.Minute
 var runtimeRandRead = rand.Read
 var runtimeUserHomeDir = os.UserHomeDir
 var runtimeRemoveAll = os.RemoveAll
+var runtimeProbeCodexVersion = codex.ProbeVersion
 var errNoRetainedRuntimeThread = errors.New("no retained Codex runtime thread")
 
 // retainedRuntimeThread is native ownership that outlives an ACP
@@ -98,8 +99,8 @@ func (a *Agent) reserveScratchRoot(ctx context.Context, kind RuntimeResourceKind
 }
 
 // finalizeRuntimeResources releases admissions only after their corresponding
-// resource is gone. An unproven native tree retains both reservations because
-// it may still be using the private runtime root. Scratch deletion failure
+// resource is gone. An incomplete containment boundary retains both
+// reservations because native work may still be using the private runtime root. Scratch deletion failure
 // likewise retains the scratch reservation so the worker-wide bound remains
 // truthful.
 func finalizeRuntimeResources(
@@ -108,7 +109,7 @@ func finalizeRuntimeResources(
 	scratchRoot string,
 	scratchRelease func(),
 ) error {
-	if errors.Is(runtimeErr, codex.ErrProcessTreeUnproven) {
+	if errors.Is(runtimeErr, codex.ErrProcessContainmentIncomplete) {
 		return runtimeErr
 	}
 
@@ -383,6 +384,17 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			return nil, cleanupErr
 		}
 
+		if closing := a.runtimeClosing; closing != nil {
+			a.mu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-closing:
+				continue
+			}
+		}
+
 		if a.runtimeClient != nil && !a.runtimeDead {
 			client := a.runtimeClient
 			a.mu.Unlock()
@@ -402,7 +414,9 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 		}
 
 		wait := make(chan struct{})
+		startCtx, cancelStart := context.WithCancel(ctx)
 		a.runtimeStarting = wait
+		a.runtimeStartCancel = cancelStart
 		oldEpoch := a.runtimeEpoch
 		a.runtimeEpoch++
 		epoch := a.runtimeEpoch
@@ -422,12 +436,15 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			oldEpoch,
 		)
 		if cleanupErr != nil {
+			cancelStart()
+
 			a.mu.Lock()
-			if errors.Is(cleanupErr, codex.ErrProcessTreeUnproven) {
+			if errors.Is(cleanupErr, codex.ErrProcessContainmentIncomplete) {
 				a.runtimeCleanupErr = cleanupErr
 			}
 
 			a.runtimeStarting = nil
+			a.runtimeStartCancel = nil
 
 			close(wait)
 			a.mu.Unlock()
@@ -435,7 +452,18 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			return nil, cleanupErr
 		}
 
-		scratchRelease, err := a.reserveScratchRoot(ctx, RuntimeResourceRuntime)
+		var (
+			nativeVersion = minSupportedCodexVersion
+			err           error
+		)
+		if !a.options.customClientFactory {
+			nativeVersion, err = a.probeRuntimeVersion(startCtx)
+		}
+
+		var scratchRelease func()
+		if err == nil {
+			scratchRelease, err = a.reserveScratchRoot(startCtx, RuntimeResourceRuntime)
+		}
 
 		var scratchRoot string
 		if err == nil {
@@ -447,7 +475,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 
 		var release func()
 		if err == nil {
-			release, err = a.acquireNativeRoot(ctx, RuntimeResourceRuntime)
+			release, err = a.acquireNativeRoot(startCtx, RuntimeResourceRuntime)
 			if err != nil {
 				err = finalizeRuntimeResources(err, nil, scratchRoot, scratchRelease)
 			}
@@ -455,11 +483,13 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 
 		var client codex.Client
 		if err == nil {
-			client, err = a.launchRuntimeClient(ctx, epoch, scratchRoot)
+			client, err = a.launchRuntimeClient(startCtx, epoch, scratchRoot, nativeVersion)
 			if err != nil {
 				err = finalizeRuntimeResources(err, release, scratchRoot, scratchRelease)
 			}
 		}
+
+		cancelStart()
 
 		a.mu.Lock()
 		if err == nil && !a.closed && a.runtimeEpoch == epoch {
@@ -474,11 +504,12 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			err = errors.Join(newAgentClosedError(), cleanupErr)
 		}
 
-		if errors.Is(err, codex.ErrProcessTreeUnproven) {
+		if errors.Is(err, codex.ErrProcessContainmentIncomplete) {
 			a.runtimeCleanupErr = err
 		}
 
 		a.runtimeStarting = nil
+		a.runtimeStartCancel = nil
 
 		close(wait)
 		a.mu.Unlock()
@@ -491,10 +522,52 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 	}
 }
 
+func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
+	scratchRelease, err := a.reserveScratchRoot(ctx, RuntimeResourceDiscovery)
+	if err != nil {
+		return "", err
+	}
+
+	scratchRoot, err := createPrivateTempDir(a.options.ScratchDir, "acp-go-codex-runtime-discovery-")
+	if err != nil {
+		scratchRelease()
+
+		return "", err
+	}
+
+	nativeRelease, err := a.acquireNativeRoot(ctx, RuntimeResourceDiscovery)
+	if err != nil {
+		return "", finalizeRuntimeResources(err, nil, scratchRoot, scratchRelease)
+	}
+
+	env, _ := a.pinRuntimeEnvironment(nil)
+	version, probeErr := runtimeProbeCodexVersion(ctx, codex.VersionProbeOptions{
+		CLIPath:          a.options.ExecutablePath,
+		CodexHome:        a.options.Home,
+		WritableHome:     a.resolvedCodexHomeForEnv(env),
+		Scratch:          scratchRoot,
+		ScratchParent:    filepath.Dir(scratchRoot),
+		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
+		Env:              env,
+	})
+	probeErr = finalizeRuntimeResources(probeErr, nativeRelease, scratchRoot, scratchRelease)
+
+	return version, probeErr
+}
+
 // pinRuntimeEnvironment fixes the immutable process environment for this
 // Agent-owned runtime key. Empty peer session env inherits the pinned value;
 // an explicit peer env must resolve to the same effective environment.
 func (a *Agent) pinRuntimeEnvironment(sessionEnv map[string]string) (map[string]string, error) {
+	for key := range sessionEnv {
+		if reservedCodexEnvKey(key) {
+			return nil, acp.NewInvalidParams(map[string]any{
+				jsonFieldError: "session env uses a reserved Codex adapter process-management key",
+				jsonFieldField: "_meta.codex.options.env",
+			})
+		}
+	}
+
 	desired := cloneStringMap(a.options.Env)
 	if desired == nil {
 		desired = map[string]string{}
@@ -594,6 +667,17 @@ func (a *Agent) markRuntimeDead(client codex.Client) {
 // completed, and every logical session remains registered for lazy resume.
 func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Client) error {
 	a.mu.Lock()
+	if closing := a.runtimeClosing; closing != nil {
+		a.mu.Unlock()
+		<-closing
+
+		a.mu.Lock()
+		cleanupErr := a.runtimeCleanupErr
+		a.mu.Unlock()
+
+		return cleanupErr
+	}
+
 	if expected == nil || a.runtimeClient != expected {
 		wait := a.runtimeStarting
 		a.mu.Unlock()
@@ -637,7 +721,7 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 	)
 
 	a.mu.Lock()
-	if errors.Is(cleanupErr, codex.ErrProcessTreeUnproven) {
+	if errors.Is(cleanupErr, codex.ErrProcessContainmentIncomplete) {
 		a.runtimeCleanupErr = cleanupErr
 	}
 
@@ -765,6 +849,33 @@ func runtimeReadyEvent(event codex.Event, nonce string) bool {
 }
 
 func (a *Agent) closeSharedRuntime(ctx context.Context) error {
+	closing := make(chan struct{})
+
+	for {
+		a.mu.Lock()
+		if currentClosing := a.runtimeClosing; currentClosing != nil {
+			a.mu.Unlock()
+			<-currentClosing
+
+			continue
+		}
+
+		a.runtimeClosing = closing
+		starting := a.runtimeStarting
+		cancelStart := a.runtimeStartCancel
+		a.mu.Unlock()
+
+		if cancelStart != nil {
+			cancelStart()
+		}
+
+		if starting != nil {
+			<-starting
+		}
+
+		break
+	}
+
 	a.mu.Lock()
 	client := a.runtimeClient
 	epoch := a.runtimeEpoch
@@ -785,11 +896,19 @@ func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 		a.closeRuntimeGeneration(ctx, client, release, scratchRoot, scratchRelease, epoch),
 	)
 
-	if errors.Is(cleanupErr, codex.ErrProcessTreeUnproven) {
+	if errors.Is(cleanupErr, codex.ErrProcessContainmentIncomplete) {
 		a.mu.Lock()
 		a.runtimeCleanupErr = cleanupErr
 		a.mu.Unlock()
 	}
+
+	a.mu.Lock()
+	if a.runtimeClosing == closing {
+		a.runtimeClosing = nil
+
+		close(closing)
+	}
+	a.mu.Unlock()
 
 	return cleanupErr
 }
@@ -803,7 +922,7 @@ func (a *Agent) closeRuntimeGeneration(
 	epoch uint64,
 ) error {
 	runtimeCloseErr := closeRuntimeResources(ctx, client, release, scratchRoot, scratchRelease)
-	if errors.Is(runtimeCloseErr, codex.ErrProcessTreeUnproven) {
+	if errors.Is(runtimeCloseErr, codex.ErrProcessContainmentIncomplete) {
 		return runtimeCloseErr
 	}
 

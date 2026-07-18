@@ -18,15 +18,16 @@ const (
 // command is run through the same home-lock supervisor and process-tree
 // containment used by app-server runtimes.
 type AccountCommandOptions struct {
-	CLIPath    string
-	CodexHome  string
-	ScratchDir string
-	Mode       string
-	DeviceAuth bool
-	Stdin      io.Reader
-	Stdout     io.Writer
-	Stderr     io.Writer
-	Signals    <-chan os.Signal
+	CLIPath          string
+	CodexHome        string
+	ScratchDir       string
+	Mode             string
+	DeviceAuth       bool
+	DarwinBestEffort bool
+	Stdin            io.Reader
+	Stdout           io.Writer
+	Stderr           io.Writer
+	Signals          <-chan os.Signal
 }
 
 var accountScratchParent func(string) (string, error)
@@ -34,6 +35,7 @@ var accountMkdirTemp = os.MkdirTemp
 var accountRemoveAll = os.RemoveAll
 var accountStartProcess = startProcess
 var accountSupervisorCommand = supervisorCommand
+var accountProbeVersion = ProbeVersion
 
 // SetScratchParentResolver installs the root package's canonical scratch
 // accessor. The internal account-command runner never resolves system temp on
@@ -43,8 +45,8 @@ func SetScratchParentResolver(resolver func(string) (string, error)) {
 }
 
 // RunAccountCommand performs a login or logout only while it exclusively owns
-// the writable Codex home. It returns after the contained native process tree
-// has been reaped and proven quiescent.
+// the writable Codex home. It returns after the selected containment boundary
+// completes.
 func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (returnErr error) {
 	args, err := accountCommandArgs(options.Mode, options.DeviceAuth)
 	if err != nil {
@@ -60,10 +62,6 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return err
 	}
 
-	if _, versionErr := validateCodexVersion(ctx, path); versionErr != nil {
-		return versionErr
-	}
-
 	if accountScratchParent == nil {
 		return errors.New("codex scratch parent resolver is not configured")
 	}
@@ -73,19 +71,30 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return fmt.Errorf("resolve account-command scratch parent: %w", err)
 	}
 
+	if _, versionErr := runAccountVersionProbe(ctx, path, scratchParent, options); versionErr != nil {
+		return versionErr
+	}
+
 	scratch, err := accountMkdirTemp(scratchParent, accountCommandScratchPrefix)
 	if err != nil {
 		return fmt.Errorf("create account-command supervisor scratch: %w", err)
 	}
-	defer func() { returnErr = errors.Join(returnErr, accountRemoveAll(scratch)) }()
+	defer func() {
+		if !errors.Is(returnErr, ErrProcessContainmentIncomplete) {
+			returnErr = errors.Join(returnErr, accountRemoveAll(scratch))
+		}
+	}()
 
 	cmd, proof, err := accountSupervisorCommand(ctx, supervisorConfig{
-		NativePath:  path,
-		NativeArgs:  args,
-		NativeEnv:   upsertEnv(os.Environ(), envCodexHome, options.CodexHome),
-		Home:        options.CodexHome,
-		Scratch:     scratch,
-		FramedInput: true,
+		NativePath:       path,
+		NativeArgs:       args,
+		NativeEnv:        upsertEnv(os.Environ(), envCodexHome, options.CodexHome),
+		Home:             options.CodexHome,
+		Scratch:          scratch,
+		ScratchParent:    scratchParent,
+		LifecycleKind:    lifecycleDiscovery,
+		DarwinBestEffort: options.DarwinBestEffort,
+		FramedInput:      true,
 	})
 	if err != nil {
 		return err
@@ -118,6 +127,34 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 			_ = cmd.Process.Signal(signalValue)
 		}
 	}
+}
+
+func runAccountVersionProbe(
+	ctx context.Context,
+	path string,
+	scratchParent string,
+	options AccountCommandOptions,
+) (version string, returnErr error) {
+	scratch, err := accountMkdirTemp(scratchParent, accountCommandScratchPrefix+"version-")
+	if err != nil {
+		return "", fmt.Errorf("create account-command version scratch: %w", err)
+	}
+	defer func() {
+		if !errors.Is(returnErr, ErrProcessContainmentIncomplete) {
+			returnErr = errors.Join(returnErr, accountRemoveAll(scratch))
+		}
+	}()
+
+	version, returnErr = accountProbeVersion(ctx, VersionProbeOptions{
+		CLIPath:          path,
+		CodexHome:        options.CodexHome,
+		WritableHome:     options.CodexHome,
+		Scratch:          scratch,
+		ScratchParent:    scratchParent,
+		DarwinBestEffort: options.DarwinBestEffort,
+	})
+
+	return version, returnErr
 }
 
 func accountCommandArgs(mode string, deviceAuth bool) ([]string, error) {

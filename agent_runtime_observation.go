@@ -12,6 +12,7 @@ import (
 type providerProcessSnapshotTracker struct {
 	mu         sync.Mutex
 	hooks      RuntimeResourceHooks
+	enabled    bool
 	nextID     uint64
 	roots      map[uint64]providerProcessRootSnapshot
 	last       int
@@ -30,10 +31,11 @@ type providerProcessRootObservation struct {
 	id      uint64
 }
 
-func newProviderProcessSnapshotTracker(hooks RuntimeResourceHooks) *providerProcessSnapshotTracker {
+func newProviderProcessSnapshotTracker(hooks RuntimeResourceHooks, enabled bool) *providerProcessSnapshotTracker {
 	return &providerProcessSnapshotTracker{
-		hooks: hooks,
-		roots: make(map[uint64]providerProcessRootSnapshot),
+		hooks:   hooks,
+		enabled: enabled,
+		roots:   make(map[uint64]providerProcessRootSnapshot),
 	}
 }
 
@@ -48,7 +50,7 @@ func (a *Agent) newProcessSnapshotObserver(ctx context.Context) internalcodex.Pr
 }
 
 func (t *providerProcessSnapshotTracker) start(ctx context.Context) *providerProcessRootObservation {
-	if t == nil {
+	if t == nil || !t.enabled {
 		return nil
 	}
 
@@ -254,6 +256,14 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 
 		if externalStage != nil {
 			externalStage(ctx, lifecycle, stage, elapsed, err)
+		}
+	}
+	externalContainment := hooks.ObserveContainment
+	hooks.ObserveContainment = func(ctx context.Context, mode RuntimeContainmentMode) {
+		observe.ObserveRuntimeContainment(ctx, string(mode))
+
+		if externalContainment != nil {
+			externalContainment(ctx, mode)
 		}
 	}
 

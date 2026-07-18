@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	codexacp "github.com/savid/acp-go-codex"
@@ -18,8 +19,10 @@ import (
 )
 
 const (
-	loginCommand  = "login"
-	logoutCommand = "logout"
+	loginCommand       = "login"
+	logoutCommand      = "logout"
+	containmentCommand = "containment"
+	platformDarwin     = "darwin"
 )
 
 // seedFileFlag collects repeatable -seed-file <relpath>=<hostpath> flags,
@@ -96,6 +99,7 @@ var exit = os.Exit
 var runCodexCLICommand = runCodexCLI
 var shutdownOpenTelemetry = shutdownTelemetry
 var codexCLIUserHomeDir = os.UserHomeDir
+var runtimeGOOS = runtime.GOOS
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -104,6 +108,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == containmentCommand {
+		return runContainment(args[1:], stdout, stderr)
+	}
+
 	if len(args) > 0 && (args[0] == loginCommand || args[0] == logoutCommand) {
 		return runCodexCLISubcommand(ctx, args, stdin, stdout, stderr)
 	}
@@ -117,6 +125,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	model := flags.String("model", "", "default Codex model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
+	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
 	allowAccountLogout := flags.Bool("codex-allow-account-logout", false, "permit ACP logout to mutate adapter-owned Codex auth")
 
 	seedFiles := &seedFileFlag{}
@@ -126,6 +135,12 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.Var(configOverrides, "config", "Codex config override as <key>=<value>, repeatable; passed to codex app-server as -c key=value (dotted keys set nested config, nothing is written to disk)")
 
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+
+	if *darwinBestEffort && runtimeGOOS != platformDarwin {
+		_, _ = fmt.Fprintln(stderr, "acp-go-codex: -darwin-best-effort-containment is valid only on darwin")
+
 		return 2
 	}
 
@@ -160,7 +175,12 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger = telemetry.logger
 
+	if *darwinBestEffort {
+		_, _ = fmt.Fprintln(stderr, "WARNING containment=best_effort: escaped descendants may survive; numeric PGID reuse can cause collateral signalling; marker correlation is not ownership; markers can be scrubbed; native-root permits do not bound escaped provider work")
+	}
+
 	serveOptions := make([]codexacp.Option, 0, 8+len(telemetry.options))
+
 	serveOptions = append(serveOptions,
 		codexacp.WithAgentVersion(version),
 		codexacp.WithExecutablePath(*codexPath),
@@ -170,6 +190,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		codexacp.WithCodexAllowAccountLogout(*allowAccountLogout),
 		codexacp.WithLogger(logger),
 	)
+	if *darwinBestEffort {
+		serveOptions = append(serveOptions, codexacp.WithDarwinBestEffortContainment())
+	}
 
 	if len(seedFiles.files) > 0 {
 		serveOptions = append(serveOptions, codexacp.WithSeedFiles(seedFiles.files))
@@ -210,13 +233,24 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 	codexPath := flags.String("path", "", "path to codex CLI")
 	codexHome := flags.String("home", "", "Codex home directory")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral account-command scratch; empty means the system temp directory")
+	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
 
 	deviceAuth := flags.Bool("codex-device-auth", false, "use Codex device auth for login")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
 
-	if err := runCodexCLICommand(ctx, *codexPath, *codexHome, *scratchDir, mode, *deviceAuth, stdin, stdout, stderr); err != nil {
+	if *darwinBestEffort && runtimeGOOS != platformDarwin {
+		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: -darwin-best-effort-containment is valid only on darwin\n", mode)
+
+		return 2
+	}
+
+	if *darwinBestEffort {
+		_, _ = fmt.Fprintln(stderr, "WARNING containment=best_effort: escaped descendants may survive; numeric PGID reuse can cause collateral signalling; marker correlation is not ownership; markers can be scrubbed; native-root permits do not bound escaped provider work")
+	}
+
+	if err := runCodexCLICommand(ctx, *codexPath, *codexHome, *scratchDir, mode, *deviceAuth, *darwinBestEffort, stdin, stdout, stderr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: %v\n", mode, err)
 
 		return commandExitCode(err)
@@ -225,7 +259,7 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 	return 0
 }
 
-func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratchDir string, mode string, deviceAuth bool, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratchDir string, mode string, deviceAuth bool, darwinBestEffort bool, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	home, err := resolvedCodexCLIHome(codexHome)
 	if err != nil {
 		return err
@@ -236,7 +270,7 @@ func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratc
 	signal.Notify(signals, forwardedSignals()...)
 	defer signal.Stop(signals)
 
-	return runCodexCLIWithSignals(ctx, codexPath, home, scratchDir, mode, deviceAuth, stdin, stdout, stderr, signals)
+	return runCodexCLIWithSignals(ctx, codexPath, home, scratchDir, mode, deviceAuth, darwinBestEffort, stdin, stdout, stderr, signals)
 }
 
 func runCodexCLIWithSignals(
@@ -246,21 +280,23 @@ func runCodexCLIWithSignals(
 	scratchDir string,
 	mode string,
 	deviceAuth bool,
+	darwinBestEffort bool,
 	stdin io.Reader,
 	stdout io.Writer,
 	stderr io.Writer,
 	signals <-chan os.Signal,
 ) error {
 	return codex.RunAccountCommand(ctx, codex.AccountCommandOptions{
-		CLIPath:    codexPath,
-		CodexHome:  home,
-		ScratchDir: scratchDir,
-		Mode:       mode,
-		DeviceAuth: deviceAuth,
-		Stdin:      stdin,
-		Stdout:     stdout,
-		Stderr:     stderr,
-		Signals:    signals,
+		CLIPath:          codexPath,
+		CodexHome:        home,
+		ScratchDir:       scratchDir,
+		Mode:             mode,
+		DeviceAuth:       deviceAuth,
+		DarwinBestEffort: darwinBestEffort,
+		Stdin:            stdin,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		Signals:          signals,
 	})
 }
 

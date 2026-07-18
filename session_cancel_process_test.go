@@ -34,7 +34,7 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	require.NoError(t, os.MkdirAll(scratch, 0o700))
 
 	store := NewInMemorySessionStore()
-	agent := NewAgent(
+	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(os.Args[0]),
 		WithHome(home),
 		WithScratchDir(scratch),
@@ -47,7 +47,7 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 			RolloutPath:    rolloutPath,
 			TailStopped:    tailStopped,
 		})),
-	)
+	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
@@ -128,7 +128,7 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	require.NoError(t, os.MkdirAll(scratch, 0o700))
 
 	store := NewInMemorySessionStore()
-	agent := NewAgent(
+	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(os.Args[0]),
 		WithHome(home),
 		WithScratchDir(scratch),
@@ -141,7 +141,7 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 			ChildSentinel:  childSentinel,
 			RolloutPath:    rolloutPath,
 		})),
-	)
+	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
@@ -210,7 +210,7 @@ func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	require.NoError(t, os.MkdirAll(scratch, 0o700))
 
 	store := NewInMemorySessionStore()
-	agent := NewAgent(
+	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(os.Args[0]),
 		WithHome(home),
 		WithScratchDir(scratch),
@@ -223,7 +223,7 @@ func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 			RolloutPath:    rolloutPath,
 			TailStopped:    tailStopped,
 		})),
-	)
+	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 

@@ -71,6 +71,7 @@ func preserveSupervisorGlobals(t *testing.T) {
 	oldEncode := supervisorEncodeConfig
 	oldGuardianContainment := supervisorNewGuardianContainment
 	oldLivenessContainment := supervisorOpenLivenessContainment
+	oldGuardianQuiesce := supervisorGuardianQuiesce
 	oldInput := supervisorInput
 	oldOutput := supervisorOutput
 	oldError := supervisorError
@@ -84,6 +85,7 @@ func preserveSupervisorGlobals(t *testing.T) {
 		supervisorEncodeConfig = oldEncode
 		supervisorNewGuardianContainment = oldGuardianContainment
 		supervisorOpenLivenessContainment = oldLivenessContainment
+		supervisorGuardianQuiesce = oldGuardianQuiesce
 		supervisorInput = oldInput
 		supervisorOutput = oldOutput
 		supervisorError = oldError
@@ -158,9 +160,10 @@ func TestSupervisorCommandNonceEnvironmentAndProof(t *testing.T) {
 	require.NotContains(t, env, supervisorModeEnv+"=old")
 
 	require.NoError(t, (*supervisorProof)(nil).awaitCompletion())
-	require.NoError(t, (&supervisorProof{
+	require.ErrorIs(t, (&supervisorProof{
 		started: filepath.Join(root, "never-started"), completion: filepath.Join(root, "never-completed"),
-	}).awaitCompletion())
+		startupWait: 20 * time.Millisecond,
+	}).awaitCompletion(), ErrProcessContainmentIncomplete)
 
 	started := filepath.Join(root, "started")
 	completed := filepath.Join(root, "completed")
@@ -307,11 +310,11 @@ func TestSupervisorBootstrapAndUnixContainmentBranches(t *testing.T) {
 	t.Setenv(supervisorConfigEnv, "")
 	supervisorBootstrap()
 
-	guardian, err := newGuardianContainment()
+	guardian, err := newGuardianContainment(supervisorConfig{})
 	require.NoError(t, err)
 	require.Equal(t, "linux-subreaper", guardian.Name())
 	require.NoError(t, guardian.Close())
-	liveness, err := openLivenessContainment("")
+	liveness, err := openLivenessContainment(supervisorConfig{})
 	require.NoError(t, err)
 	require.NoError(t, liveness.Close())
 
@@ -341,10 +344,10 @@ func TestSupervisorEntropyAndProofStatFailures(t *testing.T) {
 	require.NoError(t, os.WriteFile(notDirectory, []byte("x"), 0o600))
 	err = (&supervisorProof{completion: filepath.Join(notDirectory, "child")}).awaitCompletion()
 	require.ErrorContains(t, err, "stat liveness completion")
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	err = (&supervisorProof{started: filepath.Join(notDirectory, "child"), completion: filepath.Join(root, "missing")}).awaitCompletion()
 	require.ErrorContains(t, err, "stat liveness start")
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 }
 
 func TestRunGuardianPipeAndStartFailures(t *testing.T) {
@@ -437,13 +440,13 @@ func TestUnixQuiescenceSignalEscalationAndTimeout(t *testing.T) {
 	killProcessID = func(int, syscall.Signal) error { return syscall.ESRCH }
 	require.NoError(t, terminateIndependentSupervisor(command))
 
-	liveness, err := openLivenessContainment("")
+	liveness, err := openLivenessContainment(supervisorConfig{})
 	require.NoError(t, err)
 	command = exec.Command("/bin/true")
 	require.NoError(t, liveness.Start(command))
-	require.NoError(t, command.Wait())
+	require.NoError(t, <-liveness.Wait())
 	require.NoError(t, liveness.Quiesce(0, time.Second))
-	guardian, err := newGuardianContainment()
+	guardian, err := newGuardianContainment(supervisorConfig{})
 	require.NoError(t, err)
 	require.NotNil(t, guardian)
 }
@@ -472,7 +475,7 @@ func TestSupervisorInjectedFilesystemAndContainmentFailures(t *testing.T) {
 
 	t.Run("guardian containment", func(t *testing.T) {
 		preserveSupervisorGlobals(t)
-		supervisorNewGuardianContainment = func() (*guardianContainment, error) { return nil, errors.New("containment failed") }
+		supervisorNewGuardianContainment = func(supervisorConfig) (*guardianContainment, error) { return nil, errors.New("containment failed") }
 		root := t.TempDir()
 		err := runGuardian(supervisorConfig{Home: filepath.Join(root, "home"), Scratch: root})
 		require.ErrorContains(t, err, "containment failed")
@@ -480,7 +483,7 @@ func TestSupervisorInjectedFilesystemAndContainmentFailures(t *testing.T) {
 
 	t.Run("liveness containment", func(t *testing.T) {
 		preserveSupervisorGlobals(t)
-		supervisorOpenLivenessContainment = func(string) (*livenessContainment, error) { return nil, errors.New("containment failed") }
+		supervisorOpenLivenessContainment = func(supervisorConfig) (*livenessContainment, error) { return nil, errors.New("containment failed") }
 		root := t.TempDir()
 		err := runLiveness(supervisorConfig{
 			Home: filepath.Join(root, "home"), Scratch: root, Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"),

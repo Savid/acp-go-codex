@@ -12,6 +12,9 @@ type Options struct {
 	CodexHome                  string
 	WritableHome               string
 	SupervisorRoot             string
+	SupervisorParent           string
+	DarwinBestEffort           bool
+	NativeVersion              string
 	DefaultModel               string
 	Env                        map[string]string
 	Config                     map[string]any

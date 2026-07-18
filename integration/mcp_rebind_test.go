@@ -29,6 +29,7 @@ func TestCodexNativeTwoThreadMCPRebindIsolation(t *testing.T) {
 	codexPath := integrationCodexPath(t)
 	launch := func() *codex.AppServerClient {
 		client, err := codex.NewAppServerClient(ctx, codex.Options{
+			NativeVersion:  "0.144.1",
 			CLIPath:        codexPath,
 			CodexHome:      home,
 			SupervisorRoot: t.TempDir(),

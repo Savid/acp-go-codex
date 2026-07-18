@@ -54,7 +54,7 @@ func processCloseError(err error) error {
 		return nil
 	}
 
-	if errors.Is(err, ErrProcessTreeUnproven) {
+	if errors.Is(err, ErrProcessContainmentIncomplete) {
 		return err
 	}
 

@@ -112,7 +112,7 @@ func TestSupervisorLivenessSIGKILLLeavesClaimLockedUntilTreeExit(t *testing.T) {
 	require.Error(t, err, "surviving guardian must retain claim while it kills the tree")
 	waitErr := waitSupervisor(runtime, 10*time.Second)
 	require.Error(t, waitErr, "guardian must report its killed liveness child")
-	require.NotErrorIs(t, waitErr, ErrProcessTreeUnproven)
+	require.NotErrorIs(t, waitErr, ErrProcessContainmentIncomplete)
 
 	assertProcessGone(t, runtime.rootPID)
 	assertProcessGone(t, runtime.descPID)
@@ -128,7 +128,7 @@ func TestLinuxSubreaperProofFailureIsBoundedAndTyped(t *testing.T) {
 
 	startedAt := time.Now()
 	err := quiesceSubreaper(123, 25*time.Millisecond, false)
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Less(t, time.Since(startedAt), time.Second)
 
 	root := t.TempDir()
@@ -140,7 +140,7 @@ func TestLinuxSubreaperProofFailureIsBoundedAndTyped(t *testing.T) {
 		completion:     filepath.Join(root, "missing-completion"),
 		completionWait: 25 * time.Millisecond,
 	}).awaitCompletion()
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Less(t, time.Since(startedAt), time.Second)
 }
 
@@ -149,9 +149,9 @@ func TestLinuxSubreaperPrimitiveFailureBranches(t *testing.T) {
 		preserveLinuxSupervisorGlobals(t)
 		linuxSetSubreaper = func() error { return errors.New("prctl failed") }
 
-		_, err := newGuardianContainment()
+		_, err := newGuardianContainment(supervisorConfig{})
 		require.ErrorContains(t, err, "guardian child subreaper")
-		_, err = openLivenessContainment("")
+		_, err = openLivenessContainment(supervisorConfig{})
 		require.ErrorContains(t, err, "liveness child subreaper")
 	})
 
@@ -241,7 +241,7 @@ func TestLinuxSubreaperPrimitiveFailureBranches(t *testing.T) {
 
 		linuxTaskEntries = func() ([]os.DirEntry, error) { return nil, errors.New("children failed") }
 		require.ErrorContains(t, quiesceSubreaper(123, time.Second, false), "drain adopted")
-		require.ErrorIs(t, quiesceSubreaper(123, 0, false), ErrProcessTreeUnproven)
+		require.ErrorIs(t, quiesceSubreaper(123, 0, false), ErrProcessContainmentIncomplete)
 
 		linuxTaskEntries = func() ([]os.DirEntry, error) { return nil, nil }
 		linuxWaitid = func(int, int, *unix.Siginfo, int, *unix.Rusage) error { return nil }
@@ -252,7 +252,7 @@ func TestLinuxSubreaperPrimitiveFailureBranches(t *testing.T) {
 			return nil
 		}
 		err = quiesceSubreaper(123, 510*time.Millisecond, true)
-		require.ErrorIs(t, err, ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.Contains(t, signals, syscall.SIGTERM)
 		require.Contains(t, signals, syscall.SIGKILL)
 	})
@@ -275,7 +275,7 @@ func TestSupervisorPropagatesKernelProofFailure(t *testing.T) {
 			Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"), NativePIDFile: filepath.Join(root, "pid"),
 		}
 		err := runLiveness(config)
-		require.ErrorIs(t, err, ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.NoFileExists(t, config.Completion)
 	})
 
@@ -297,7 +297,7 @@ func TestSupervisorPropagatesKernelProofFailure(t *testing.T) {
 			Home: filepath.Join(root, "home"), Scratch: root, Completion: filepath.Join(root, "complete"),
 		}
 		err := runGuardian(config)
-		require.ErrorIs(t, err, ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.NoFileExists(t, config.Completion)
 	})
 }

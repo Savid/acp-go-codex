@@ -328,7 +328,7 @@ func TestRunCodexCLISubcommand(t *testing.T) {
 
 	var gotPath, gotHome, gotScratch, gotMode string
 	var gotDeviceAuth bool
-	runCodexCLICommand = func(_ context.Context, path string, home string, scratch string, mode string, deviceAuth bool, _ io.Reader, _ io.Writer, _ io.Writer) error {
+	runCodexCLICommand = func(_ context.Context, path string, home string, scratch string, mode string, deviceAuth bool, _ bool, _ io.Reader, _ io.Writer, _ io.Writer) error {
 		gotPath, gotHome, gotScratch, gotMode, gotDeviceAuth = path, home, scratch, mode, deviceAuth
 
 		return nil
@@ -340,7 +340,7 @@ func TestRunCodexCLISubcommand(t *testing.T) {
 		t.Fatalf("cli args path=%q home=%q scratch=%q mode=%q deviceAuth=%v", gotPath, gotHome, gotScratch, gotMode, gotDeviceAuth)
 	}
 
-	runCodexCLICommand = func(context.Context, string, string, string, string, bool, io.Reader, io.Writer, io.Writer) error {
+	runCodexCLICommand = func(context.Context, string, string, string, string, bool, bool, io.Reader, io.Writer, io.Writer) error {
 		return assertError("cli failed")
 	}
 	var stderr bytes.Buffer
@@ -397,7 +397,7 @@ func TestRunCodexCLI(t *testing.T) {
 	t.Setenv("TEST_LOG", logPath)
 	var commandStderr bytes.Buffer
 
-	if err := runCodexCLI(context.Background(), script, home, t.TempDir(), "login", true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &commandStderr); err != nil {
+	if err := runCodexCLI(context.Background(), script, home, t.TempDir(), "login", true, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &commandStderr); err != nil {
 		t.Fatalf("runCodexCLI login returned error: %v", err)
 	}
 	raw, err := os.ReadFile(logPath)
@@ -407,10 +407,10 @@ func TestRunCodexCLI(t *testing.T) {
 	if !strings.Contains(string(raw), "login --device-auth:"+home) {
 		t.Fatalf("log = %q", string(raw))
 	}
-	if logoutErr := runCodexCLI(context.Background(), script, "", "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); logoutErr != nil {
+	if logoutErr := runCodexCLI(context.Background(), script, "", "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); logoutErr != nil {
 		t.Fatalf("runCodexCLI logout returned error: %v", logoutErr)
 	}
-	if badErr := runCodexCLI(context.Background(), script, "", "", "bad", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); badErr == nil {
+	if badErr := runCodexCLI(context.Background(), script, "", "", "bad", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); badErr == nil {
 		t.Fatal("unsupported CLI command succeeded")
 	}
 
@@ -418,7 +418,7 @@ func TestRunCodexCLI(t *testing.T) {
 	if writeErr := os.WriteFile(fail, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; exit 0; fi\nexit 7\n"), 0o700); writeErr != nil {
 		t.Fatalf("write failing script: %v", writeErr)
 	}
-	if failErr := runCodexCLI(context.Background(), fail, "", "", "login", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); failErr == nil || commandExitCode(failErr) == 0 {
+	if failErr := runCodexCLI(context.Background(), fail, "", "", "login", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); failErr == nil || commandExitCode(failErr) == 0 {
 		t.Fatalf("failing cli err=%v code=%d", failErr, commandExitCode(failErr))
 	}
 
@@ -428,10 +428,10 @@ func TestRunCodexCLI(t *testing.T) {
 		t.Fatalf("write PATH codex: %v", writePathErr)
 	}
 	t.Setenv("PATH", pathDir)
-	if defaultPathErr := runCodexCLI(context.Background(), "", "", "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); defaultPathErr != nil {
+	if defaultPathErr := runCodexCLI(context.Background(), "", "", "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); defaultPathErr != nil {
 		t.Fatalf("runCodexCLI default path returned error: %v", defaultPathErr)
 	}
-	if missingErr := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), "", "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); missingErr == nil {
+	if missingErr := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), "", "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); missingErr == nil {
 		t.Fatal("runCodexCLI accepted missing executable")
 	}
 
@@ -454,9 +454,9 @@ exit 2
 	accountSignals := make(chan os.Signal, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, "", "logout", false, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
+		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
 	}()
-	waitUntil(t, func() bool {
+	waitUntilFor(t, 7*time.Second, func() bool {
 		_, statErr := os.Stat(readyPath)
 
 		return statErr == nil
@@ -533,7 +533,7 @@ func TestResolvedCodexCLIHome(t *testing.T) {
 	if _, err := resolvedCodexCLIHome(""); err == nil {
 		t.Fatal("home lookup failure was accepted")
 	}
-	if err := runCodexCLI(context.Background(), "codex", "", "", logoutCommand, false, nil, nil, nil); err == nil {
+	if err := runCodexCLI(context.Background(), "codex", "", "", logoutCommand, false, true, nil, nil, nil); err == nil {
 		t.Fatal("terminal command accepted failed home lookup")
 	}
 	codexCLIUserHomeDir = func() (string, error) { return "", nil }
@@ -560,9 +560,9 @@ type testSignal string
 func (s testSignal) String() string { return string(s) }
 func (s testSignal) Signal()        {}
 
-func waitUntil(t *testing.T, ready func() bool) {
+func waitUntilFor(t *testing.T, timeout time.Duration, ready func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if ready() {
 			return

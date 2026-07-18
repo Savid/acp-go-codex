@@ -27,7 +27,7 @@ var (
 
 // Lock owns one or more never-unlinked writable-home lock files. Supervisor
 // processes deliberately acquire claim and liveness independently so neither
-// descriptor is inherited by the native process tree.
+// descriptor is inherited by native provider work.
 type Lock struct {
 	files []*os.File
 	once  sync.Once
@@ -55,9 +55,9 @@ func AcquireClaim(home string) (*Lock, error) {
 	return acquire(home, ClaimFileName, "claim Codex writable home")
 }
 
-// AcquireLiveness takes the native-tree supervisor's independent liveness
-// lock. It is held until that supervisor has reaped the native root and proved
-// the contained tree quiescent.
+// AcquireLiveness takes the native supervisor's independent liveness lock. It
+// is held until that supervisor has reaped the native root and completed the
+// selected containment boundary.
 func AcquireLiveness(home string) (*Lock, error) {
 	return acquire(home, LivenessFileName, "claim Codex home liveness")
 }

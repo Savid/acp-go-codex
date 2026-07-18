@@ -25,6 +25,17 @@ func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []
 			}
 
 			seen[name] = struct{}{}
+
+			if server.Stdio != nil {
+				for envIndex, variable := range server.Stdio.Env {
+					if reservedCodexEnvKey(variable.Name) {
+						return nil, acp.NewInvalidParams(map[string]any{
+							jsonFieldError: "MCP server env uses a reserved Codex adapter process-management key",
+							jsonFieldField: fmt.Sprintf("mcpServers[%d].env[%d].name", index, envIndex),
+						})
+					}
+				}
+			}
 		case server.Sse != nil:
 			return nil, acp.NewInvalidParams(map[string]any{
 				jsonFieldError:  errValueUnsupported,

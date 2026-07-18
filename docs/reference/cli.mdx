@@ -16,6 +16,7 @@ Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
 | `-path` | `codex` on `PATH` | Codex CLI executable path. |
 | `-home` | unset | Codex home directory passed as `CODEX_HOME`. |
 | `-scratch-dir` | system temp | Parent directory for ephemeral session scratch; empty means the system temp directory. |
+| `-darwin-best-effort-containment` | `false` | On Darwin only, explicitly accept captured process-group containment and its escaped-descendant and numeric-PGID-reuse risks. Rejected on every other platform. |
 | `-model` | unset | Default model preference. |
 | `-debug` | `false` | Write adapter debug logs to stderr. |
 | `-version` | `false` | Print adapter version and exit. |
@@ -49,12 +50,40 @@ an explicit `-home`.
 Login helpers delegate to the Codex CLI:
 
 ```sh
-acp-go-codex login [-path PATH] [-home DIR] [-scratch-dir DIR] [-codex-device-auth]
-acp-go-codex logout [-path PATH] [-home DIR] [-scratch-dir DIR]
+acp-go-codex login [-path PATH] [-home DIR] [-scratch-dir DIR] [-darwin-best-effort-containment] [-codex-device-auth]
+acp-go-codex logout [-path PATH] [-home DIR] [-scratch-dir DIR] [-darwin-best-effort-containment]
 ```
 
 Both subcommands require Codex CLI 0.144.1 or newer and run under the same
-writable-home lock and process-tree containment as app-server mode.
+writable-home lock and selected containment backend as app-server mode.
 `-scratch-dir` selects the parent for their private supervisor scratch and
 defaults to system temp. A command fails closed when the home is already
 claimed or is not on an approved local filesystem.
+
+On Darwin, serve, login, and logout all remain fail closed unless
+`-darwin-best-effort-containment` is present. The binary writes an unconditional
+`containment=best_effort` warning to stderr before starting work. Descendants
+that escape the original process group with `setsid` may survive, and signalling
+a reused numeric PGID may affect an unrelated process group.
+
+## Darwin containment operations
+
+```sh
+acp-go-codex containment diagnose -scratch-dir <parent>
+acp-go-codex containment cleanup -scratch-dir <parent> -runtime-id <id> -force
+```
+
+`diagnose` is read-only. `cleanup` acts only on the selected 128-bit lowercase
+hex runtime ID, re-enumerates same-UID processes carrying both exact runtime
+markers, and revalidates each PID, start identity, UID, and both markers before
+each individual signal. It never signals a recorded PID or PGID by itself.
+PID revalidation and signalling are separate operations, so PID reuse in that
+gap can still cause collateral signalling of unrelated same-UID work. The
+fixed five-second cleanup deadline starts before process enumeration.
+
+Success writes exactly one JSON object and newline to stdout. Usage errors exit
+`2`; operational errors exit `1` with one `acp-go-codex: ...` line on stderr.
+A completed cleanup that still finds correlated or ambiguous PIDs writes its
+populated JSON result and exits `1`. Every report warns that correlation is not
+ownership or proof of absence and that inherited markers can be scrubbed.
+It also warns about the PID-reuse race between revalidation and signalling.

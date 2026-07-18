@@ -18,7 +18,9 @@ import (
 
 type guardianContainment struct{}
 
-type livenessContainment struct{}
+type livenessContainment struct {
+	waiter *supervisorWaiter
+}
 
 const linuxTaskRoot = "/proc/self/task"
 
@@ -43,7 +45,7 @@ func (*livenessContainment) DescendantCount() (int, bool) {
 	return len(children), true
 }
 
-func newGuardianContainment() (*guardianContainment, error) {
+func newGuardianContainment(supervisorConfig) (*guardianContainment, error) {
 	if err := linuxSetSubreaper(); err != nil {
 		return nil, fmt.Errorf("enable guardian child subreaper: %w", err)
 	}
@@ -59,7 +61,7 @@ func (*guardianContainment) Quiesce(nativePID int, timeout time.Duration) error 
 	return quiesceSubreaper(nativePID, timeout, false)
 }
 
-func openLivenessContainment(string) (*livenessContainment, error) {
+func openLivenessContainment(supervisorConfig) (*livenessContainment, error) {
 	if err := linuxSetSubreaper(); err != nil {
 		return nil, fmt.Errorf("enable liveness child subreaper: %w", err)
 	}
@@ -67,8 +69,18 @@ func openLivenessContainment(string) (*livenessContainment, error) {
 	return &livenessContainment{}, nil
 }
 
-func (*livenessContainment) Start(cmd *exec.Cmd) error {
-	return startProcess(cmd)
+func (c *livenessContainment) Start(cmd *exec.Cmd) error {
+	if err := startProcess(cmd); err != nil {
+		return err
+	}
+
+	c.waiter = newSupervisorWaiter(cmd, false)
+
+	return nil
+}
+
+func (c *livenessContainment) Wait() <-chan error {
+	return c.waiter.result()
 }
 
 func (*livenessContainment) Close() error { return nil }
@@ -91,7 +103,7 @@ func terminateIndependentSupervisor(cmd *exec.Cmd) error {
 // child remains; it cannot be fabricated by kill(pid, 0) or a /proc snapshot.
 func quiesceSubreaper(nativePID int, timeout time.Duration, externalRootWaiter bool) error {
 	if timeout <= 0 {
-		return fmt.Errorf("%w: positive quiescence timeout is required", ErrProcessTreeUnproven)
+		return fmt.Errorf("%w: positive quiescence timeout is required", ErrProcessContainmentIncomplete)
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -116,12 +128,12 @@ func quiesceSubreaper(nativePID int, timeout time.Duration, externalRootWaiter b
 		}
 
 		if err := killAndReapAdoptedChildren(nativePID, externalRootWaiter); err != nil {
-			return fmt.Errorf("%w: drain adopted native descendants: %v", ErrProcessTreeUnproven, err)
+			return fmt.Errorf("%w: drain adopted native descendants: %v", ErrProcessContainmentIncomplete, err)
 		}
 
 		empty, err := subreaperHasNoChildren()
 		if err != nil {
-			return fmt.Errorf("%w: prove subreaper has no children: %v", ErrProcessTreeUnproven, err)
+			return fmt.Errorf("%w: prove subreaper has no children: %v", ErrProcessContainmentIncomplete, err)
 		}
 
 		if empty {
@@ -135,7 +147,7 @@ func quiesceSubreaper(nativePID int, timeout time.Duration, externalRootWaiter b
 		_ = signalProcessGroup(nativePID, syscall.SIGKILL)
 	}
 
-	return fmt.Errorf("%w: native descendants remained after %s", ErrProcessTreeUnproven, timeout)
+	return fmt.Errorf("%w: native descendants remained after %s", ErrProcessContainmentIncomplete, timeout)
 }
 
 func killAndReapAdoptedChildren(nativePID int, externalRootWaiter bool) error {

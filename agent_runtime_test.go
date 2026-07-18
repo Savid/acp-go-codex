@@ -28,6 +28,21 @@ type runtimeFailureClient struct {
 
 type mismatchedResumeClient struct{ *runtimeRecordingClient }
 
+type blockingCloseRuntimeClient struct {
+	*spyCodexClient
+	started chan struct{}
+	release chan struct{}
+	count   atomic.Int64
+}
+
+func (c *blockingCloseRuntimeClient) Close(context.Context) error {
+	c.count.Add(1)
+	close(c.started)
+	<-c.release
+
+	return codex.ErrProcessContainmentIncomplete
+}
+
 func (c *mismatchedResumeClient) ResumeThread(
 	context.Context,
 	codex.ThreadResumeRequest,
@@ -301,6 +316,225 @@ func TestAgentSharesOneRuntimeAcrossThreadsAndReleasesItAtAgentClose(t *testing.
 	require.Equal(t, 1, client.closeCount)
 }
 
+func TestAgentCloseConcurrentCallersJoinMemoizedContainmentResult(t *testing.T) {
+	client := &blockingCloseRuntimeClient{
+		spyCodexClient: newSpyCodexClient(),
+		started:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	agent := NewAgent()
+	agent.runtimeClient = client
+
+	results := make(chan error, 2)
+	go func() { results <- agent.Close() }()
+	<-client.started
+	go func() { results <- agent.Close() }()
+
+	select {
+	case result := <-results:
+		t.Fatalf("concurrent Close returned before the owned cleanup completed: %v", result)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(client.release)
+	require.ErrorIs(t, <-results, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-results, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), codex.ErrProcessContainmentIncomplete)
+	require.EqualValues(t, 1, client.count.Load())
+}
+
+func TestAgentCloseJoinsIncompleteRuntimeLaunchBeforeMemoizing(t *testing.T) {
+	factoryStarted := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	client := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(),
+		closeErr:       codex.ErrProcessContainmentIncomplete,
+	}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		close(factoryStarted)
+		<-releaseFactory
+
+		return client, nil
+	}))
+
+	runtimeErr := make(chan error, 1)
+	go func() {
+		_, err := agent.sharedRuntime(context.Background())
+		runtimeErr <- err
+	}()
+	<-factoryStarted
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- agent.Close() }()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return agent.closed
+	}, time.Second, time.Millisecond)
+
+	select {
+	case err := <-closeErr:
+		t.Fatalf("Close returned before the admitted runtime launch cleaned up: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseFactory)
+	require.ErrorIs(t, <-runtimeErr, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), codex.ErrProcessContainmentIncomplete)
+}
+
+func TestCloseSharedRuntimeFencesNewConstructionAndConcurrentClosers(t *testing.T) {
+	factoryStarted := make(chan struct{})
+	factoryCancelled := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	var factoryCalls atomic.Int64
+	agent := NewAgent(withClientFactory(func(ctx context.Context, _ codex.Options) (codex.Client, error) {
+		if factoryCalls.Add(1) != 1 {
+			return newSpyCodexClient(), nil
+		}
+
+		close(factoryStarted)
+		<-ctx.Done()
+		close(factoryCancelled)
+		<-releaseFactory
+
+		return nil, ctx.Err()
+	}))
+
+	runtimeErr := make(chan error, 1)
+	go func() {
+		_, err := agent.sharedRuntime(context.Background())
+		runtimeErr <- err
+	}()
+	<-factoryStarted
+
+	firstClose := make(chan error, 1)
+	go func() { firstClose <- agent.closeSharedRuntime(context.Background()) }()
+	<-factoryCancelled
+	quiesceErr := make(chan error, 1)
+	go func() {
+		quiesceErr <- agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient())
+	}()
+
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	waitingRuntime := make(chan error, 1)
+	go func() {
+		_, err := agent.sharedRuntime(waitCtx)
+		waitingRuntime <- err
+	}()
+	cancelWait()
+	require.ErrorIs(t, <-waitingRuntime, context.Canceled)
+	require.EqualValues(t, 1, factoryCalls.Load())
+	survivingRuntime := make(chan error, 1)
+	go func() {
+		_, err := agent.sharedRuntime(context.Background())
+		survivingRuntime <- err
+	}()
+	require.Never(t, func() bool { return factoryCalls.Load() != 1 }, 25*time.Millisecond, time.Millisecond)
+
+	secondClose := make(chan error, 1)
+	go func() { secondClose <- agent.closeSharedRuntime(context.Background()) }()
+
+	close(releaseFactory)
+	require.ErrorIs(t, <-runtimeErr, context.Canceled)
+	require.NoError(t, <-firstClose)
+	require.NoError(t, <-quiesceErr)
+	require.NoError(t, <-secondClose)
+	require.NoError(t, <-survivingRuntime)
+	require.EqualValues(t, 2, factoryCalls.Load())
+	require.NoError(t, agent.Close())
+}
+
+func TestRuntimeVersionProbeOwnsDiscoveryAdmissionsAndGeneration(t *testing.T) {
+	originalProbe := runtimeProbeCodexVersion
+	t.Cleanup(func() { runtimeProbeCodexVersion = originalProbe })
+
+	parent := t.TempDir()
+	var acquired []RuntimeResourceKind
+	var reserved []RuntimeResourceKind
+	var releasedNative atomic.Int64
+	var releasedScratch atomic.Int64
+	var probeOptions codex.VersionProbeOptions
+	runtimeProbeCodexVersion = func(_ context.Context, options codex.VersionProbeOptions) (string, error) {
+		probeOptions = options
+
+		return minSupportedCodexVersion, nil
+	}
+
+	agent := NewAgent(
+		WithScratchDir(parent),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				acquired = append(acquired, kind)
+
+				return func() { releasedNative.Add(1) }, nil
+			},
+			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+				reserved = append(reserved, kind)
+
+				return func() { releasedScratch.Add(1) }, nil
+			},
+		}),
+	)
+
+	version, err := agent.probeRuntimeVersion(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, minSupportedCodexVersion, version)
+	require.Equal(t, []RuntimeResourceKind{RuntimeResourceDiscovery}, acquired)
+	require.Equal(t, []RuntimeResourceKind{RuntimeResourceDiscovery}, reserved)
+	require.EqualValues(t, 1, releasedNative.Load())
+	require.EqualValues(t, 1, releasedScratch.Load())
+	require.Equal(t, parent, probeOptions.ScratchParent)
+	require.Contains(t, filepath.Base(probeOptions.Scratch), "acp-go-codex-runtime-discovery-")
+	require.NoDirExists(t, probeOptions.Scratch)
+}
+
+func TestRuntimeVersionProbeAdmissionFailureBranches(t *testing.T) {
+	t.Run("scratch admission", func(t *testing.T) {
+		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return nil, errors.New("scratch admission")
+			},
+		}))
+		_, err := agent.probeRuntimeVersion(context.Background())
+		require.ErrorContains(t, err, "scratch admission")
+	})
+
+	t.Run("scratch generation", func(t *testing.T) {
+		parent := filepath.Join(t.TempDir(), "file")
+		require.NoError(t, os.WriteFile(parent, nil, 0o600))
+		var released atomic.Int64
+		agent := NewAgent(
+			WithScratchDir(parent),
+			WithRuntimeResourceHooks(RuntimeResourceHooks{
+				ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+					return func() { released.Add(1) }, nil
+				},
+			}),
+		)
+		_, err := agent.probeRuntimeVersion(context.Background())
+		require.Error(t, err)
+		require.EqualValues(t, 1, released.Load())
+	})
+
+	t.Run("native admission", func(t *testing.T) {
+		var released atomic.Int64
+		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { released.Add(1) }, nil
+			},
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return nil, errors.New("native admission")
+			},
+		}))
+		_, err := agent.probeRuntimeVersion(context.Background())
+		require.ErrorContains(t, err, "native admission")
+		require.EqualValues(t, 1, released.Load())
+	})
+}
+
 func TestRuntimeReplacementResumesEachSessionLazilyWithItsOwnConfig(t *testing.T) {
 	first := newRuntimeRecordingClient()
 	replacement := newRuntimeRecordingClient()
@@ -475,13 +709,13 @@ func TestRuntimeResourceCleanupReleaseProofBoundaries(t *testing.T) {
 
 		err := closeRuntimeResources(
 			context.Background(),
-			&errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: codex.ErrProcessTreeUnproven},
+			&errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: codex.ErrProcessContainmentIncomplete},
 			func() { nativeReleased.Add(1) },
 			root,
 			func() { scratchReleased.Add(1) },
 		)
 
-		require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
 		require.Zero(t, nativeReleased.Load())
 		require.Zero(t, scratchReleased.Load())
 		require.False(t, removeCalled)
@@ -521,20 +755,20 @@ func TestSharedRuntimeLatchesUnprovenTreeFailure(t *testing.T) {
 	agent := NewAgent()
 	agent.runtimeClient = &errorCodexClient{
 		spyCodexClient: newSpyCodexClient(),
-		closeErr:       codex.ErrProcessTreeUnproven,
+		closeErr:       codex.ErrProcessContainmentIncomplete,
 	}
 	agent.runtimeNativeRelease = func() { nativeReleased.Add(1) }
 	agent.runtimeScratchRoot = root
 	agent.runtimeScratchRelease = func() { scratchReleased.Add(1) }
 
 	err := agent.closeSharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
-	require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
 	require.Zero(t, nativeReleased.Load())
 	require.Zero(t, scratchReleased.Load())
 	require.DirExists(t, root)
 	_, err = agent.sharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
 }
 
 func TestCancelRuntimeQuiescenceWaitsForExistingTransitionAndLatchesUnprovenTree(t *testing.T) {
@@ -546,18 +780,18 @@ func TestCancelRuntimeQuiescenceWaitsForExistingTransitionAndLatchesUnprovenTree
 
 		require.NoError(t, agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient()))
 
-		agent.runtimeCleanupErr = codex.ErrProcessTreeUnproven
+		agent.runtimeCleanupErr = codex.ErrProcessContainmentIncomplete
 		require.ErrorIs(
 			t,
 			agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient()),
-			codex.ErrProcessTreeUnproven,
+			codex.ErrProcessContainmentIncomplete,
 		)
 	})
 
 	t.Run("latch unproven tree", func(t *testing.T) {
 		client := &errorCodexClient{
 			spyCodexClient: newSpyCodexClient(),
-			closeErr:       codex.ErrProcessTreeUnproven,
+			closeErr:       codex.ErrProcessContainmentIncomplete,
 		}
 		agent := NewAgent()
 		session := &session{agent: agent, id: "session", client: client}
@@ -565,8 +799,8 @@ func TestCancelRuntimeQuiescenceWaitsForExistingTransitionAndLatchesUnprovenTree
 		agent.runtimeClient = client
 
 		err := agent.quiesceRuntimeAfterCancel(context.Background(), client)
-		require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
-		require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
 		require.True(t, session.clientDead)
 		require.Nil(t, agent.runtimeStarting)
 	})
@@ -617,21 +851,21 @@ func TestSharedRuntimeGenerationCleanupFailureBranches(t *testing.T) {
 	unproven := NewAgent()
 	unproven.runtimeClient = &errorCodexClient{
 		spyCodexClient: newSpyCodexClient(),
-		closeErr:       codex.ErrProcessTreeUnproven,
+		closeErr:       codex.ErrProcessContainmentIncomplete,
 	}
 	unproven.runtimeDead = true
 
 	_, err = unproven.sharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
-	require.ErrorIs(t, unproven.runtimeCleanupErr, codex.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, unproven.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
 	require.Nil(t, unproven.runtimeStarting)
 
 	launchFailure := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return nil, codex.ErrProcessTreeUnproven
+		return nil, codex.ErrProcessContainmentIncomplete
 	}))
 	_, err = launchFailure.sharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessTreeUnproven)
-	require.ErrorIs(t, launchFailure.runtimeCleanupErr, codex.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, launchFailure.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
 }
 
 func TestRuntimeFailureAndHelperBranches(t *testing.T) {
@@ -687,6 +921,7 @@ func TestRuntimeFailureAndHelperBranches(t *testing.T) {
 	require.Error(t, err)
 
 	lost := NewAgent()
+	lost.options.customClientFactory = true
 	lost.options.clientFactory = func(context.Context, codex.Options) (codex.Client, error) {
 		lost.mu.Lock()
 		lost.closed = true
@@ -743,6 +978,20 @@ func TestRuntimeEnvironmentPinIsAtomicAndImmutable(t *testing.T) {
 	require.Equal(t, winner, matching)
 }
 
+func TestRuntimeEnvironmentRejectsReservedSessionKeys(t *testing.T) {
+	agent := NewAgent()
+
+	for _, key := range []string{
+		"acp_go_codex_internal_spoof",
+		"acp_go_codex_runtime_id",
+		"ACP_GO_CODEX_SCRATCH_ROOT",
+	} {
+		_, err := agent.pinRuntimeEnvironment(map[string]string{key: "1"})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "_meta.codex.options.env")
+	}
+}
+
 func TestConflictingSessionEnvironmentFailsBeforeNativeCreation(t *testing.T) {
 	var launches atomic.Int64
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
@@ -772,7 +1021,7 @@ func TestPinnedSessionEnvironmentLaunchAndFingerprint(t *testing.T) {
 	)
 	meta := sessionMeta{Env: map[string]string{"SESSION": "one"}}
 	require.NoError(t, agent.canonicalizeSessionMeta(&meta))
-	_, err := agent.launchRuntimeClient(context.Background(), 1, "")
+	_, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion)
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"BASE": "agent", "SESSION": "one"}, gotOptions.Env)
 
@@ -915,7 +1164,7 @@ func TestRuntimeRemainingCanaryAndObserverBranches(t *testing.T) {
 			return newSpyCodexClient(), nil
 		}),
 	)
-	_, err = launcher.launchRuntimeClient(ctx, 1, "")
+	_, err = launcher.launchRuntimeClient(ctx, 1, "", minSupportedCodexVersion)
 	require.NoError(t, err)
 	gotOptions.ObserveProcess(ctx, string(RuntimeProcessProviderDescendant), 1)
 	gotOptions.ObserveStartupStage(ctx, string(RuntimeResourceRuntime), string(RuntimeStartupSpawn), time.Millisecond, nil)

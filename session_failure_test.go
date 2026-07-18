@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,9 +202,11 @@ func TestTurnFailureProcessDeath(t *testing.T) {
 	ctx := context.Background()
 
 	client, err := codex.NewAppServerClient(ctx, codex.Options{
-		CLIPath:        os.Args[0],
-		CodexHome:      t.TempDir(),
-		SupervisorRoot: t.TempDir(),
+		CLIPath:          os.Args[0],
+		CodexHome:        t.TempDir(),
+		SupervisorRoot:   t.TempDir(),
+		DarwinBestEffort: runtime.GOOS == "darwin",
+		NativeVersion:    "0.144.1",
 	})
 	if err != nil {
 		t.Fatalf("launch fake app-server: %v", err)

@@ -456,7 +456,7 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 
 		return newSpyCodexClient(), nil
 	}))
-	if _, err := envAgent.launchRuntimeClient(ctx, 1, ""); err != nil {
+	if _, err := envAgent.launchRuntimeClient(ctx, 1, "", minSupportedCodexVersion); err != nil {
 		t.Fatalf("newClient with env overlays returned error: %v", err)
 	}
 	if len(gotOptions.Env) != 0 {
@@ -817,7 +817,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 				return &errorCodexClient{
 					spyCodexClient: newSpyCodexClient(),
-					closeErr:       errors.Join(errors.New("close failed"), codex.ErrProcessTreeUnproven),
+					closeErr:       errors.Join(errors.New("close failed"), codex.ErrProcessContainmentIncomplete),
 				}, nil
 			}),
 		)
@@ -833,10 +833,10 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	_ = c2aW.Close()
 	_ = a2cR.Close()
 	serveErr := <-errCh
-	if !errors.Is(serveErr, ErrProcessTreeUnproven) {
-		t.Fatalf("Serve close-error returned %v, want ErrProcessTreeUnproven", serveErr)
+	if !errors.Is(serveErr, ErrProcessContainmentIncomplete) {
+		t.Fatalf("Serve close-error returned %v, want ErrProcessContainmentIncomplete", serveErr)
 	}
-	if !errors.Is(ErrProcessTreeUnproven, codex.ErrProcessTreeUnproven) {
+	if !errors.Is(ErrProcessContainmentIncomplete, codex.ErrProcessContainmentIncomplete) {
 		t.Fatalf("public process-tree error does not preserve internal identity")
 	}
 	_ = c2aR.Close()
@@ -845,7 +845,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	agent := NewAgent()
 	agent.options.clientFactory = nil
 	agent.options.ExecutablePath = filepath.Join(t.TempDir(), "missing-codex")
-	if _, err := agent.launchRuntimeClient(context.Background(), 1, ""); err == nil {
+	if _, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion); err == nil {
 		t.Fatal("newClient with nil factory and no Codex CLI succeeded")
 	}
 	var gotOptions codex.Options
@@ -854,11 +854,81 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 
 		return newSpyCodexClient(), nil
 	}))
-	if _, err := requestAgent.launchRuntimeClient(context.Background(), 1, ""); err != nil {
+	if _, err := requestAgent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion); err != nil {
 		t.Fatalf("newClient for request handler returned error: %v", err)
 	}
 	if _, err := gotOptions.RequestHandler(context.Background(), codex.ServerRequest{Method: "missing"}); err == nil {
 		t.Fatal("Codex request handler accepted missing method")
+	}
+}
+
+func TestServeJoinsIncompleteRuntimeLaunchBeforeReturning(t *testing.T) {
+	serveCtx, serveCancel := context.WithCancel(context.Background())
+	c2aR, c2aW := io.Pipe()
+	a2cR, a2cW := io.Pipe()
+	t.Cleanup(func() {
+		serveCancel()
+		_ = c2aR.Close()
+		_ = c2aW.Close()
+		_ = a2cR.Close()
+		_ = a2cW.Close()
+	})
+
+	factoryStarted := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	scratchDir := t.TempDir()
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- Serve(
+			serveCtx,
+			c2aR,
+			a2cW,
+			WithScratchDir(scratchDir),
+			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+				close(factoryStarted)
+				<-releaseFactory
+
+				return &errorCodexClient{
+					spyCodexClient: newSpyCodexClient(),
+					closeErr:       codex.ErrProcessContainmentIncomplete,
+				}, nil
+			}),
+		)
+	}()
+
+	clientConn := acp.NewClientSideConnection(&recordingClient{}, c2aW, a2cR)
+	if _, err := clientConn.Initialize(context.Background(), acp.InitializeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	sessionCtx, cancelSession := context.WithCancel(context.Background())
+	sessionErr := make(chan error, 1)
+	go func() {
+		_, err := clientConn.NewSession(sessionCtx, acp.NewSessionRequest{Cwd: "/tmp/project", McpServers: []acp.McpServer{}})
+		sessionErr <- err
+	}()
+	<-factoryStarted
+
+	serveCancel()
+	select {
+	case err := <-serveErr:
+		t.Fatalf("Serve returned before the admitted runtime launch cleaned up: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseFactory)
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, ErrProcessContainmentIncomplete) {
+			t.Fatalf("Serve error = %v, want ErrProcessContainmentIncomplete", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not join the incomplete runtime launch")
+	}
+	cancelSession()
+	select {
+	case <-sessionErr:
+	case <-time.After(time.Second):
+		t.Fatal("session request did not settle after Serve returned")
 	}
 }
 

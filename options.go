@@ -41,11 +41,21 @@ const (
 	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
 )
 
+const minSupportedCodexVersion = "0.144.1"
+
 type RuntimeProcessKind string
 
 const (
 	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
 	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
+)
+
+type RuntimeContainmentMode string
+
+const (
+	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
+	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
+	RuntimeContainmentUnavailable   RuntimeContainmentMode = "unavailable"
 )
 
 type RuntimeStartupStage string
@@ -66,6 +76,7 @@ type RuntimeResourceHooks struct {
 	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
 	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
 	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
+	ObserveContainment     func(context.Context, RuntimeContainmentMode)
 }
 
 // Options configures the ACP agent process and Codex sessions it starts.
@@ -129,6 +140,9 @@ type Options struct {
 	// RuntimeResourceHooks account for native roots and scratch roots at their
 	// exact creation/deletion boundaries.
 	RuntimeResourceHooks RuntimeResourceHooks
+	// DarwinBestEffortContainment explicitly accepts process-group containment
+	// on Darwin, including its escaped-descendant and numeric-PGID-reuse risks.
+	DarwinBestEffortContainment bool
 
 	clientFactory       func(context.Context, codex.Options) (codex.Client, error)
 	customClientFactory bool
@@ -204,6 +218,13 @@ func WithScratchDir(dir string) Option {
 	}
 }
 
+// WithDarwinBestEffortContainment explicitly accepts Darwin process-group containment.
+func WithDarwinBestEffortContainment() Option {
+	return func(options *Options) {
+		options.DarwinBestEffortContainment = true
+	}
+}
+
 // WithDefaultModel selects a Codex model for newly created sessions.
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
@@ -218,7 +239,9 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// WithEnv merges environment variables into launched Codex sessions.
+// WithEnv merges environment variables into launched Codex sessions. Adapter
+// process-management and Darwin correlation keys are reserved and rejected
+// case-insensitively before a native lifecycle starts.
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = make(map[string]string, len(env))
@@ -286,9 +309,10 @@ func WithSeedFiles(files map[string]string) Option {
 // WithCodexConfigOverrides sets TOML config overrides passed to `codex
 // app-server` as `-c key=value`. Keys may be dotted paths for nested values
 // (e.g. model_providers.litellm.base_url). The session-scoped mcp_servers
-// keyspace is reserved and causes Initialize to fail closed. String values are
-// TOML-quoted automatically. Nothing is written to disk, so it is
-// non-destructive and safe against a real ~/.codex. The input map is cloned.
+// keyspace is reserved and causes initialization or an embedded lifecycle call
+// to fail closed. String values are TOML-quoted automatically. Nothing is
+// written to disk, so it is non-destructive and safe against a real ~/.codex.
+// The input map is cloned.
 func WithCodexConfigOverrides(overrides map[string]any) Option {
 	return func(options *Options) {
 		options.Config = make(map[string]any, len(overrides))

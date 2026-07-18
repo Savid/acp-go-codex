@@ -135,6 +135,79 @@ sleep 0.05
 	require.NoError(t, os.RemoveAll(scratch))
 }
 
+func TestRunAccountCommandUsesSeparateVersionGeneration(t *testing.T) {
+	restoreAccountCommandHooks(t)
+	parent := t.TempDir()
+	home := t.TempDir()
+	SetScratchParentResolver(func(string) (string, error) { return parent, nil })
+
+	var versionScratch string
+	accountProbeVersion = func(_ context.Context, options VersionProbeOptions) (string, error) {
+		versionScratch = options.Scratch
+
+		return minCodexVersion, nil
+	}
+
+	var accountScratch string
+	accountSupervisorCommand = func(_ context.Context, config supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
+		accountScratch = config.Scratch
+
+		return exec.Command("/usr/bin/true"), &supervisorProof{}, nil
+	}
+
+	err := RunAccountCommand(context.Background(), AccountCommandOptions{
+		CLIPath: "/usr/bin/true", CodexHome: home, ScratchDir: parent, Mode: accountCommandLogout,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, versionScratch)
+	require.NotEmpty(t, accountScratch)
+	require.NotEqual(t, versionScratch, accountScratch)
+	require.Equal(t, filepath.Dir(versionScratch), parent)
+	require.Equal(t, filepath.Dir(accountScratch), parent)
+	require.NoDirExists(t, versionScratch)
+	require.NoDirExists(t, accountScratch)
+}
+
+func TestRunAccountCommandAccountGenerationAndClosedSignalBranches(t *testing.T) {
+	t.Run("account generation", func(t *testing.T) {
+		restoreAccountCommandHooks(t)
+		parent := t.TempDir()
+		SetScratchParentResolver(func(string) (string, error) { return parent, nil })
+		accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) {
+			return minCodexVersion, nil
+		}
+		calls := 0
+		accountMkdirTemp = func(parent, pattern string) (string, error) {
+			calls++
+			if calls == 2 {
+				return "", errors.New("account generation")
+			}
+
+			return os.MkdirTemp(parent, pattern)
+		}
+		err := RunAccountCommand(context.Background(), AccountCommandOptions{
+			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
+		})
+		require.ErrorContains(t, err, "account generation")
+		require.Equal(t, 2, calls)
+	})
+
+	t.Run("closed signals", func(t *testing.T) {
+		restoreAccountCommandHooks(t)
+		accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) {
+			return minCodexVersion, nil
+		}
+		accountSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
+			return exec.Command("/bin/sh", "-c", "sleep 0.05"), &supervisorProof{}, nil
+		}
+		signals := make(chan os.Signal)
+		close(signals)
+		require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
+			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout, Signals: signals,
+		}))
+	})
+}
+
 func writeAccountCommandScript(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "codex")
@@ -150,13 +223,23 @@ func restoreAccountCommandHooks(t *testing.T) {
 	removeAll := accountRemoveAll
 	start := accountStartProcess
 	supervisor := accountSupervisorCommand
+	probeVersion := accountProbeVersion
 	t.Cleanup(func() {
 		accountScratchParent = scratchParent
 		accountMkdirTemp = mkdirTemp
 		accountRemoveAll = removeAll
 		accountStartProcess = start
 		accountSupervisorCommand = supervisor
+		accountProbeVersion = probeVersion
 	})
+	accountProbeVersion = func(_ context.Context, options VersionProbeOptions) (string, error) {
+		output, err := exec.Command(options.CLIPath, codexVersionArgument).Output()
+		if err != nil {
+			return "", err
+		}
+
+		return validateCodexVersionOutput(string(output))
+	}
 	defaultScratch := t.TempDir()
 	SetScratchParentResolver(func(dir string) (string, error) {
 		if dir != "" {

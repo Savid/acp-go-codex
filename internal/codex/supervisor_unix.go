@@ -1,4 +1,4 @@
-//go:build darwin || freebsd || openbsd
+//go:build freebsd || openbsd || netbsd
 
 package codex
 
@@ -20,10 +20,10 @@ type livenessContainment struct{}
 func (*livenessContainment) DescendantCount() (int, bool) { return 0, false }
 
 func unsupportedContainment() error {
-	return fmt.Errorf("Codex runtime containment is unsupported on %s", runtime.GOOS)
+	return fmt.Errorf("codex runtime containment is unsupported on %s", runtime.GOOS)
 }
 
-func newGuardianContainment() (*guardianContainment, error) {
+func newGuardianContainment(supervisorConfig) (*guardianContainment, error) {
 	return nil, unsupportedContainment()
 }
 
@@ -35,11 +35,18 @@ func (*guardianContainment) Quiesce(int, time.Duration) error {
 	return unsupportedContainment()
 }
 
-func openLivenessContainment(string) (*livenessContainment, error) {
+func openLivenessContainment(supervisorConfig) (*livenessContainment, error) {
 	return nil, unsupportedContainment()
 }
 
 func (*livenessContainment) Start(*exec.Cmd) error { return unsupportedContainment() }
+
+func (*livenessContainment) Wait() <-chan error {
+	result := make(chan error, 1)
+	result <- unsupportedContainment()
+
+	return result
+}
 
 func (*livenessContainment) Close() error { return nil }
 

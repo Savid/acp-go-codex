@@ -51,7 +51,7 @@ func TestAgentRuntimeClientMergesCodexOTELWithAgentEnv(t *testing.T) {
 		}),
 	)
 
-	_, err := agent.launchRuntimeClient(context.Background(), 1, "")
+	_, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion)
 
 	if err != nil {
 		t.Fatalf("newClient returned error: %v", err)
@@ -81,7 +81,7 @@ func TestAgentNewClientReturnsCodexOTELError(t *testing.T) {
 			return newSpyCodexClient(), nil
 		}),
 	)
-	if _, err := agent.launchRuntimeClient(context.Background(), 1, ""); err == nil {
+	if _, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion); err == nil {
 		t.Fatal("newClient accepted invalid Codex OTEL config")
 	}
 }

@@ -73,7 +73,9 @@ func TestPrivateTempFileModesAndCleanup(t *testing.T) {
 	if closeErr := file.Close(); closeErr != nil {
 		t.Fatalf("close private temp file: %v", closeErr)
 	}
-	if filepath.Dir(parent) != scratchParent("") {
+	resolvedParent, resolveParentErr := filepath.EvalSymlinks(filepath.Dir(parent))
+	resolvedScratch, resolveScratchErr := filepath.EvalSymlinks(scratchParent(""))
+	if resolveParentErr != nil || resolveScratchErr != nil || resolvedParent != resolvedScratch {
 		t.Fatalf("default private temp parent %q is not under the system temp directory", parent)
 	}
 	if info, statErr := os.Stat(parent); statErr != nil || info.Mode().Perm() != 0o700 {

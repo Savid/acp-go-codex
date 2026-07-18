@@ -32,6 +32,14 @@ active sessions, prompt duration, cancellations, Codex process starts, and
 `gen_ai.client.*` token usage — and prompt text, rollout rows, tool payloads,
 and diff bodies are never metric attributes.
 
+Runtime containment selection is the integer gauge
+`acp_go_codex.runtime.containment`, recorded with value `1` and exactly one
+`containment=authoritative`, `containment=best_effort`, or
+`containment=unavailable` attribute. It is a mode signal, not a process count or
+quiescence proof. Best-effort Darwin publishes no provider-descendant snapshot,
+including no zero; its structured Agent warning and unconditional standalone
+stderr warning carry `containment=best_effort` instead.
+
 <Warning>
 stdout is the ACP JSON-RPC transport. `-debug` writes adapter diagnostics to
 stderr only; never point a logger or an OpenTelemetry console exporter at

@@ -18,7 +18,7 @@ func TestProviderProcessSnapshotTrackerAggregatesProvenRoots(t *testing.T) {
 			require.Equal(t, RuntimeProcessProviderDescendant, kind)
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 
 	first := tracker.start(t.Context())
 	first.snapshot(t.Context(), 2)
@@ -38,7 +38,7 @@ func TestProviderProcessSnapshotTrackerUnprovenRootPreservesLastNonzero(t *testi
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 
 	unproven := tracker.start(t.Context())
 	unproven.snapshot(t.Context(), 4)
@@ -59,7 +59,7 @@ func TestProviderProcessSnapshotTrackerConcurrentLifecycle(t *testing.T) {
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 	observations := make([]*providerProcessRootObservation, roots)
 	for i := range observations {
 		observations[i] = tracker.start(context.Background())
@@ -94,7 +94,7 @@ func TestProviderProcessSnapshotTrackerHookReentryPublishesFreshAggregate(t *tes
 	var reentered bool
 	var second *providerProcessRootObservation
 
-	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{})
+	tracker := newProviderProcessSnapshotTracker(RuntimeResourceHooks{}, true)
 	tracker.hooks.ObserveProcessSnapshot = func(ctx context.Context, _ RuntimeProcessKind, count int) {
 		snapshots = append(snapshots, count)
 		if !reentered {
@@ -128,7 +128,7 @@ func TestProviderProcessSnapshotTrackerDefensiveAndDuplicateBoundaries(t *testin
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 	root := tracker.start(ctx)
 	root.snapshot(ctx, -1)
 	root.snapshot(ctx, 2)

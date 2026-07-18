@@ -66,7 +66,7 @@ func TestProcessProviderSnapshotLifecycle(t *testing.T) {
 	var nilProcess *process
 	nilProcess.finishProviderSnapshot(t.Context(), nil)
 	(&process{}).finishProviderSnapshot(t.Context(), nil)
-	(&process{}).finishProviderSnapshot(t.Context(), ErrProcessTreeUnproven)
+	(&process{}).finishProviderSnapshot(t.Context(), ErrProcessContainmentIncomplete)
 
 	path := filepath.Join(t.TempDir(), "provider-snapshot")
 	if err := os.WriteFile(path, []byte("3\n"), 0o600); err != nil {
@@ -91,7 +91,7 @@ func TestProcessProviderSnapshotLifecycle(t *testing.T) {
 	}
 
 	unprovenProc := &process{processSnapshot: proc.processSnapshot}
-	unprovenProc.finishProviderSnapshot(t.Context(), errors.Join(errors.New("close"), ErrProcessTreeUnproven))
+	unprovenProc.finishProviderSnapshot(t.Context(), errors.Join(errors.New("close"), ErrProcessContainmentIncomplete))
 	if quiescent != 1 || unproven != 1 {
 		t.Fatalf("unproven lifecycle = quiescent %d, unproven %d", quiescent, unproven)
 	}
@@ -106,7 +106,7 @@ func TestProcessClosePreservesSnapshotOnUnprovenTree(t *testing.T) {
 		cmd:        &exec.Cmd{Process: &os.Process{}},
 		supervisor: &supervisorProof{},
 		waitDone:   waitDone,
-		waitErr:    ErrProcessTreeUnproven,
+		waitErr:    ErrProcessContainmentIncomplete,
 		processSnapshot: ProcessSnapshotObserver{
 			Quiescent: func(context.Context) { quiescent++ },
 			Unproven:  func() { unproven++ },
@@ -115,7 +115,7 @@ func TestProcessClosePreservesSnapshotOnUnprovenTree(t *testing.T) {
 	proc.waitOnce.Do(func() {})
 
 	err := proc.Close()
-	if !errors.Is(err, ErrProcessTreeUnproven) {
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("Close error = %v, want process-tree proof sentinel", err)
 	}
 	if quiescent != 0 || unproven != 1 {

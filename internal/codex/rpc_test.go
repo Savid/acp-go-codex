@@ -429,7 +429,7 @@ func TestRPCTransportAndPendingCallErrors(t *testing.T) {
 	if err := processCloseError(errors.New("close failed")); err == nil {
 		t.Fatal("processCloseError ignored plain error")
 	}
-	if err := processCloseError(ErrProcessTreeUnproven); !errors.Is(err, ErrProcessTreeUnproven) {
+	if err := processCloseError(ErrProcessContainmentIncomplete); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("processCloseError lost process-tree proof sentinel: %v", err)
 	}
 }

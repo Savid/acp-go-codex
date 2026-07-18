@@ -105,11 +105,7 @@ func TestCommandHelpers(t *testing.T) {
 }
 
 func TestValidateCodexVersion(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "codex")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), 0o700); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	version, err := validateCodexVersion(context.Background(), script)
+	version, err := validateCodexVersionOutput("codex-cli 0.144.1")
 	if err != nil {
 		t.Fatalf("validateCodexVersion returned error: %v", err)
 	}
@@ -117,28 +113,12 @@ func TestValidateCodexVersion(t *testing.T) {
 		t.Fatalf("validateCodexVersion returned %q, want 0.144.1", version)
 	}
 
-	old := filepath.Join(t.TempDir(), "codex-old")
-	if err := os.WriteFile(old, []byte("#!/bin/sh\necho codex-cli 0.1.0\n"), 0o700); err != nil {
-		t.Fatalf("write old script: %v", err)
-	}
-	if _, err := validateCodexVersion(context.Background(), old); err == nil {
+	if _, err := validateCodexVersionOutput("codex-cli 0.1.0"); err == nil {
 		t.Fatal("old codex version succeeded")
 	}
 
-	bad := filepath.Join(t.TempDir(), "codex-bad")
-	if err := os.WriteFile(bad, []byte("#!/bin/sh\necho nope\n"), 0o700); err != nil {
-		t.Fatalf("write bad script: %v", err)
-	}
-	if _, err := validateCodexVersion(context.Background(), bad); err == nil {
+	if _, err := validateCodexVersionOutput("nope"); err == nil {
 		t.Fatal("bad codex version output succeeded")
-	}
-
-	fail := filepath.Join(t.TempDir(), "codex-fail")
-	if err := os.WriteFile(fail, []byte("#!/bin/sh\nexit 9\n"), 0o700); err != nil {
-		t.Fatalf("write failing script: %v", err)
-	}
-	if _, err := validateCodexVersion(context.Background(), fail); err == nil {
-		t.Fatal("failing codex version command succeeded")
 	}
 }
 
@@ -193,13 +173,15 @@ while read line; do :; done
 	logger := slog.New(slog.NewTextHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	var processSnapshotsQuiescent int
 	client, err := NewAppServerClient(context.Background(), Options{
-		CLIPath:        script,
-		CodexHome:      t.TempDir(),
-		SupervisorRoot: t.TempDir(),
-		Config:         map[string]any{"feature.enabled": true, "name": "x y"},
-		ExtraArgs:      []string{"--extra"},
-		Logger:         logger,
-		LaunchTimeout:  5 * time.Second,
+		CLIPath:          script,
+		CodexHome:        t.TempDir(),
+		SupervisorRoot:   t.TempDir(),
+		DarwinBestEffort: true,
+		NativeVersion:    minCodexVersion,
+		Config:           map[string]any{"feature.enabled": true, "name": "x y"},
+		ExtraArgs:        []string{"--extra"},
+		Logger:           logger,
+		LaunchTimeout:    5 * time.Second,
 		NewProcessSnapshotObserver: func(context.Context) ProcessSnapshotObserver {
 			return ProcessSnapshotObserver{Quiescent: func(context.Context) { processSnapshotsQuiescent++ }}
 		},
@@ -234,7 +216,7 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.144.1")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
-		if len(args) == 1 && args[0] == "--version" {
+		if len(args) == 1 && args[0] == codexVersionArgument {
 			return versionCmd(ctx, path, args...)
 		}
 		cmd := exec.Command("/bin/sh", "-c", "cat")
@@ -242,11 +224,11 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return cmd
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", skipSupervisor: true}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion, skipSupervisor: true}); err == nil {
 		t.Fatal("launchAppServer ignored StdinPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
-		if len(args) == 1 && args[0] == "--version" {
+		if len(args) == 1 && args[0] == codexVersionArgument {
 			return versionCmd(ctx, path, args...)
 		}
 		cmd := exec.Command("/bin/sh", "-c", "cat")
@@ -254,27 +236,27 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return cmd
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", skipSupervisor: true}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion, skipSupervisor: true}); err == nil {
 		t.Fatal("launchAppServer ignored StdoutPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
-		if len(args) == 1 && args[0] == "--version" {
+		if len(args) == 1 && args[0] == codexVersionArgument {
 			return versionCmd(ctx, path, args...)
 		}
 
 		return exec.Command(filepath.Join(t.TempDir(), "missing"))
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", skipSupervisor: true}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion, skipSupervisor: true}); err == nil {
 		t.Fatal("launchAppServer ignored start error")
 	}
 	execCommandContext = func(context.Context, string, ...string) *exec.Cmd {
 		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.1.0")
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", skipSupervisor: true}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: "0.1.0", skipSupervisor: true}); err == nil {
 		t.Fatal("launchAppServer ignored version error")
 	}
 	execCommandContext = versionCmd
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex"}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion}); err == nil {
 		t.Fatal("launchAppServer ignored supervisor configuration error")
 	}
 	execCommandContext = origExec
@@ -285,7 +267,7 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 }
 
 func TestCommandWaitJoinsSupervisorCompletion(t *testing.T) {
-	cmd := exec.Command("/bin/false")
+	cmd := exec.Command("/usr/bin/false")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start failing command: %v", err)
 	}
@@ -304,7 +286,7 @@ func TestCommandWaitJoinsSupervisorCompletion(t *testing.T) {
 }
 
 func TestCommandWaitRequiresCompletionAfterSuccessfulGuardianExit(t *testing.T) {
-	cmd := exec.Command("/bin/true")
+	cmd := exec.Command("/usr/bin/true")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start successful command: %v", err)
 	}
@@ -322,7 +304,7 @@ func TestCommandWaitRequiresCompletionAfterSuccessfulGuardianExit(t *testing.T) 
 	}}
 	proc.beginWait()
 	<-proc.waitDone
-	if !errors.Is(proc.waitErr, ErrProcessTreeUnproven) {
+	if !errors.Is(proc.waitErr, ErrProcessContainmentIncomplete) {
 		t.Fatalf("successful guardian without completion error = %v", proc.waitErr)
 	}
 }
@@ -412,9 +394,21 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	_ = killProcess(finalKillFail)
 	processCloseGrace = origGrace
 
-	stubborn := sleepCommand(t, "10")
+	ready := filepath.Join(t.TempDir(), "stubborn-ready")
+	stubborn := exec.Command("/bin/sh", "-c", `trap '' TERM; : > "$STUBBORN_READY"; exec /bin/sleep 10`)
+	stubborn.Env = append(os.Environ(), "STUBBORN_READY="+ready)
 	if err := startProcess(stubborn); err != nil {
 		t.Fatalf("start stubborn process: %v", err)
+	}
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = killProcess(stubborn)
+			_ = stubborn.Wait()
+			t.Fatal("stubborn process did not become ready")
+		}
 	}
 	processCloseGrace = 0
 	t.Cleanup(func() { processCloseGrace = origGrace })
@@ -468,6 +462,28 @@ while :; do :; done
 	}
 	if string(data) != "term" {
 		t.Fatalf("term marker = %q", string(data))
+	}
+}
+
+func TestSupervisedProcessCloseHasLocalDeadline(t *testing.T) {
+	originalWait := processSupervisorCloseWait
+	processSupervisorCloseWait = 20 * time.Millisecond
+	t.Cleanup(func() { processSupervisorCloseWait = originalWait })
+
+	proc := &process{
+		cmd:        &exec.Cmd{Process: &os.Process{Pid: 123}},
+		supervisor: &supervisorProof{},
+		waitDone:   make(chan struct{}),
+	}
+	proc.waitOnce.Do(func() {})
+
+	started := time.Now()
+	err := proc.Close()
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+		t.Fatalf("supervised close timeout = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("supervised close timeout elapsed = %v", elapsed)
 	}
 }
 

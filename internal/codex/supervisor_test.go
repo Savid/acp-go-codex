@@ -164,6 +164,21 @@ func TestSupervisorCommandAndProof(t *testing.T) {
 	badProof := &supervisorProof{started: filepath.Join(root, "directory"), completion: filepath.Join(root, "completion-directory")}
 	require.NoError(t, os.Mkdir(badProof.completion, 0o700))
 	require.NoError(t, badProof.awaitCompletion())
+
+	lateStarted := filepath.Join(root, "late-started")
+	lateCompletion := filepath.Join(root, "late-completion")
+	lateDone := make(chan struct{})
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		_ = writeSupervisorMarker(lateStarted)
+		_ = writeSupervisorMarker(lateCompletion)
+		close(lateDone)
+	}()
+	err = (&supervisorProof{
+		started: lateStarted, completion: lateCompletion, startupWait: 25 * time.Millisecond,
+	}).awaitCompletion()
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	<-lateDone
 }
 
 func TestSupervisorStreamAndQuiescenceHelpers(t *testing.T) {
@@ -180,7 +195,7 @@ func TestSupervisorStreamAndQuiescenceHelpers(t *testing.T) {
 		return nil
 	}))
 	require.Equal(t, 1, attempts)
-	require.ErrorIs(t, awaitQuiescence(func() error { return errors.New("unproven") }), ErrProcessTreeUnproven)
+	require.ErrorIs(t, awaitQuiescence(func() error { return errors.New("unproven") }), ErrProcessContainmentIncomplete)
 }
 
 func testSupervisorConfig(t *testing.T, root string, nativePath string, args []string) supervisorConfig {
@@ -189,14 +204,17 @@ func testSupervisorConfig(t *testing.T, root string, nativePath string, args []s
 	require.NoError(t, os.MkdirAll(scratch, 0o700))
 
 	return supervisorConfig{
-		NativePath:    nativePath,
-		NativeArgs:    args,
-		NativeEnv:     os.Environ(),
-		Home:          filepath.Join(root, "home"),
-		Scratch:       scratch,
-		Started:       filepath.Join(scratch, "started"),
-		Completion:    filepath.Join(scratch, "complete"),
-		NativePIDFile: filepath.Join(scratch, "native.pid"),
+		NativePath:       nativePath,
+		NativeArgs:       args,
+		NativeEnv:        os.Environ(),
+		Home:             filepath.Join(root, "home"),
+		Scratch:          scratch,
+		ScratchParent:    root,
+		LifecycleKind:    "runtime",
+		DarwinBestEffort: true,
+		Started:          filepath.Join(scratch, "started"),
+		Completion:       filepath.Join(scratch, "complete"),
+		NativePIDFile:    filepath.Join(scratch, "native.pid"),
 	}
 }
 
@@ -212,6 +230,7 @@ func TestSupervisorConfigRootPermissions(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, _, err = supervisorCommand(ctx, supervisorConfig{Scratch: filepath.Join(root, "other"), Home: config.Home, NativePath: config.NativePath})
+	cmd, _, err := supervisorCommand(ctx, supervisorConfig{Scratch: filepath.Join(root, "other"), Home: config.Home, NativePath: config.NativePath})
 	require.NoError(t, err)
+	require.Equal(t, supervisorQuiesceWindow+time.Second, cmd.WaitDelay)
 }

@@ -141,6 +141,11 @@ func TestRawEventFinalPayloadRejectsUnboundedInternalRoute(t *testing.T) {
 	if _, err := capRawEventPayload(payload); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("unbounded route error = %v", err)
 	}
+
+	payload[jsonFieldMeta] = map[string]any{"bad": make(chan int)}
+	if _, err := capRawEventPayload(payload); err == nil || !strings.Contains(err.Error(), "marshal capped") {
+		t.Fatalf("unserializable route error = %v", err)
+	}
 }
 
 func TestEmitRawCodexEventBranches(t *testing.T) {
@@ -159,6 +164,9 @@ func TestEmitRawCodexEventBranches(t *testing.T) {
 	}
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
+	if err := liveSession.emitRawCodexEvent(withTurnRoute(context.Background(), strings.Repeat("n", rawEventMaxBytes)), event); err == nil {
+		t.Fatal("unbounded raw-event route was accepted")
+	}
 	if err := liveSession.emitRawCodexEvent(context.Background(), event); err != nil {
 		t.Fatalf("emit raw event returned error: %v", err)
 	}

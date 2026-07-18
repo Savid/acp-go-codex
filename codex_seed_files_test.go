@@ -96,7 +96,7 @@ func TestNewClientSeedsUnderHome(t *testing.T) {
 		}),
 	)
 
-	client, err := agent.launchRuntimeClient(context.Background(), 1, "")
+	client, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion)
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -115,7 +115,7 @@ func TestNewClientSeedFilesRequireHome(t *testing.T) {
 		}),
 	)
 
-	_, err := agent.launchRuntimeClient(context.Background(), 1, "")
+	_, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion)
 	requireUnsupported(t, err)
 }
 

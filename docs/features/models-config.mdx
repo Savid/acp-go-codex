@@ -66,6 +66,9 @@ pins the effective process `WithEnv` plus session overlay for that Agent-owned
 runtime key. Empty or identical env on peer sessions inherits that process; a
 conflicting peer env fails before Codex creates a thread. A distinct effective
 environment therefore requires a distinct Agent/runtime key.
+Both environment surfaces reject the adapter-reserved
+`ACP_GO_CODEX_INTERNAL_*` namespace and the `ACP_GO_CODEX_RUNTIME_ID` and
+`ACP_GO_CODEX_SCRATCH_ROOT` containment markers, case-insensitively.
 
 ## Config overrides
 

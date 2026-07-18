@@ -22,7 +22,8 @@ type guardianContainment struct {
 }
 
 type livenessContainment struct {
-	job windows.Handle
+	job    windows.Handle
+	waiter *supervisorWaiter
 }
 
 func (c *livenessContainment) DescendantCount() (int, bool) {
@@ -45,7 +46,7 @@ type jobBasicAccounting struct {
 	TotalTerminatedProcesses  uint32
 }
 
-func newGuardianContainment() (*guardianContainment, error) {
+func newGuardianContainment(supervisorConfig) (*guardianContainment, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, fmt.Errorf("create Windows Job Object nonce: %w", err)
@@ -92,7 +93,8 @@ func (c *guardianContainment) Quiesce(_ int, timeout time.Duration) error {
 	return quiesceJob(c.job, timeout)
 }
 
-func openLivenessContainment(name string) (*livenessContainment, error) {
+func openLivenessContainment(config supervisorConfig) (*livenessContainment, error) {
+	name := config.JobName
 	if name == "" {
 		return nil, errors.New("Windows Job Object name is required")
 	}
@@ -128,7 +130,13 @@ func (c *livenessContainment) Start(cmd *exec.Cmd) error {
 		_, _ = cmd.Process.Wait()
 		return fmt.Errorf("assign suspended native root to Windows Job Object: %w", err)
 	}
+	c.waiter = newSupervisorWaiter(cmd, false)
+
 	return nil
+}
+
+func (c *livenessContainment) Wait() <-chan error {
+	return c.waiter.result()
 }
 
 func resumePrimaryThread(pid uint32) error {

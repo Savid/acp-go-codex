@@ -25,9 +25,10 @@ err := codexacp.Serve(ctx, stdin, stdout,
 
 `Serve` closes the agent before it returns. If shutdown fails, that close error
 takes precedence over EOF or context cancellation. In particular,
-`errors.Is(err, codexacp.ErrProcessTreeUnproven)` means the adapter could not
-prove every native Codex descendant exited; an embedding host must keep that
-runtime and its resources quarantined.
+`errors.Is(err, codexacp.ErrProcessContainmentIncomplete)` means the selected
+native containment boundary did not complete; an embedding host must keep that
+runtime and its resources quarantined. Absence of the sentinel does not prove
+escaped descendants are absent on Darwin.
 
 ## Agent options
 
@@ -37,13 +38,14 @@ runtime and its resources quarantined.
 | `WithHome(path)` | `CODEX_HOME` for launched Codex processes. |
 | `WithScratchDir(dir)` | Parent directory for all ephemeral on-disk materialization; empty means the system temp directory. Created `0700` when missing. |
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
-| `WithEnv(env)` | Environment variables merged into launched Codex processes. |
+| `WithEnv(env)` | Environment variables merged into launched Codex processes; `ACP_GO_CODEX_INTERNAL_*`, `ACP_GO_CODEX_RUNTIME_ID`, and `ACP_GO_CODEX_SCRATCH_ROOT` names are reserved and rejected case-insensitively. |
 | `WithLogger(logger)` | `*slog.Logger` for structured adapter diagnostics. |
 | `WithSessionStore(store)` | Replace the default in-memory lifecycle authority with a durable Codex rollout JSONL store. |
 | `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |
 | `WithConcurrencyLimits(limits)` | Bounds active sessions, prompts, and client calls. |
 | `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |
 | `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
+| `WithDarwinBestEffortContainment()` | Explicitly accept Darwin's direct-child plus captured-process-group boundary. Rejected off Darwin; without it Darwin fails closed. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
 | `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk, and the session-scoped `mcp_servers` keyspace is rejected. |
 | `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh callback. |
@@ -96,18 +98,26 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `RateLimitsMethod` | Method name for `_codex/rateLimits`. |
 | `RateLimitsResponse` | Decode the `_codex/rateLimits` reply (`Windows`, `PlanType`). |
 | `RateLimitWindow` | One rate-limit window (`ID`, `UsedPercent`, `ResetsAt`). |
-| `StdioMCPServer` | Construct a stdio MCP server. |
+| `StdioMCPServer` | Construct a stdio MCP server; adapter-reserved process-management and Darwin correlation env names are rejected case-insensitively. |
 | `HTTPMCPServer` | Construct a streamable-HTTP MCP server. |
 | `WithSessionMCPServers` | Attach MCP servers to a session. |
 | `WithSessionRawEvents` | Enable `_codex/rawEvent`. |
 | `WithSessionOutputSchema` | Configure structured output. |
 | `WithSessionCodexOptions` | Merge `_meta.codex.options`. |
-| `WithCodexEnv` | Contribute to the immutable environment pinned by the first runtime construction; conflicting peer env fails closed. |
+| `WithCodexEnv` | Contribute to the immutable environment pinned by the first runtime construction; conflicting peer env and the adapter-reserved process-management names listed above fail closed. |
 | `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and a nonblank turn nonce of at most 4096 bytes; invalid input omits route metadata so the agent rejects it. |
 | `CancelRequest` | Build an active-turn cancellation with the same bounded route; invalid input likewise fails closed. |
 
+`Agent.ContainmentMode()` returns `authoritative`, `best_effort`, or
+`unavailable`. Linux and Windows are authoritative. Opted-in Darwin is
+best-effort; it reaps the direct child and drains the captured original process
+group, but cannot contain `setsid` escapees or eliminate numeric-PGID-reuse
+collateral-signalling risk. FreeBSD, OpenBSD, NetBSD, and other unsupported
+platforms are unavailable.
+
 `RuntimeResourceHooks` exposes `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.
+`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
+`ObserveContainment`.
 Admission callbacks receive one of `runtime`, `session`, `prompt`, or
 `discovery`; rejection is propagated fail closed. A successful hook must
 return a release function. The adapter releases a native-root reservation only
@@ -118,6 +128,10 @@ derives that count from root permits. Absolute descendant snapshots are
 emitted only when containment proves them. Startup stages are `spawn`,
 `readiness`, `configuration`, and native `session` creation. Nil callbacks
 select standalone, adapter-owned unbounded accounting.
+Best-effort Darwin emits the containment selection but no provider-descendant
+snapshot, including no terminal zero. If cleanup returns
+`ErrProcessContainmentIncomplete`, hosts must retain the exact scratch and
+native-root reservations as quarantined resources.
 
 ## Store constants
 

@@ -76,6 +76,28 @@ func TestMCPConfigRejectsMissingTransport(t *testing.T) {
 	}, noTransportReqErr.Data)
 }
 
+func TestMCPConfigRejectsReservedProcessManagementEnvironment(t *testing.T) {
+	agent := NewAgent()
+	for _, key := range []string{
+		"acp_go_codex_internal_mode",
+		"ACP_GO_CODEX_RUNTIME_ID",
+		"acp_go_codex_scratch_root",
+	} {
+		_, err := agent.prepareMCPServers(t.Context(), "s", []acp.McpServer{{
+			Stdio: &acp.McpServerStdio{
+				Name: "stdio", Command: "cmd", Env: []acp.EnvVariable{{Name: key, Value: "spoof"}},
+			},
+		}})
+		var reqErr *acp.RequestError
+		require.ErrorAs(t, err, &reqErr)
+		require.Equal(t, -32602, reqErr.Code)
+		require.Equal(t, map[string]any{
+			jsonFieldError: "MCP server env uses a reserved Codex adapter process-management key",
+			jsonFieldField: "mcpServers[0].env[0].name",
+		}, reqErr.Data)
+	}
+}
+
 // TestMCPServerNameRequired pins R6-1: an accepted (stdio or http) MCP server
 // with an empty or whitespace-only name is rejected with invalid params
 // (-32602) whose data is exactly {"mcpServers[<i>].name": "required"}.

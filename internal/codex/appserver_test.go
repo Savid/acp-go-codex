@@ -185,7 +185,7 @@ while read line; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write codex script: %v", err)
 	}
-	client, err := NewAppServerClient(context.Background(), Options{CLIPath: script, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), LaunchTimeout: 5 * time.Second})
+	client, err := NewAppServerClient(context.Background(), Options{CLIPath: script, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
 	}
@@ -948,7 +948,7 @@ func mustRaw(value any) json.RawMessage {
 }
 
 func TestAppServerLifecycleMappingEdges(t *testing.T) {
-	if _, err := NewAppServerClient(context.Background(), Options{CLIPath: filepath.Join(t.TempDir(), "missing")}); err == nil {
+	if _, err := NewAppServerClient(context.Background(), Options{CLIPath: filepath.Join(t.TempDir(), "missing"), NativeVersion: minCodexVersion}); err == nil {
 		t.Fatal("NewAppServerClient accepted missing CLI")
 	}
 
@@ -964,7 +964,7 @@ while read line; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write init error script: %v", err)
 	}
-	if _, err := NewAppServerClient(context.Background(), Options{CLIPath: initErrorScript, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), LaunchTimeout: time.Second}); err == nil {
+	if _, err := NewAppServerClient(context.Background(), Options{CLIPath: initErrorScript, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: time.Second}); err == nil {
 		t.Fatal("NewAppServerClient accepted initialize failure")
 	}
 
@@ -1056,9 +1056,11 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 		codexPath = "codex"
 	}
 	client, err := NewAppServerClient(ctx, Options{
-		CLIPath:        codexPath,
-		CodexHome:      t.TempDir(),
-		SupervisorRoot: t.TempDir(),
+		CLIPath:          codexPath,
+		CodexHome:        t.TempDir(),
+		SupervisorRoot:   t.TempDir(),
+		DarwinBestEffort: true,
+		NativeVersion:    minCodexVersion,
 	})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)

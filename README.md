@@ -83,7 +83,36 @@ func main() {
 See the [Go API reference](https://pkg.go.dev/github.com/savid/acp-go-codex)
 for options such as the Codex executable path, `CODEX_HOME`, the ephemeral
 scratch directory, default model, session storage, external ChatGPT token
-refresh, guarded logout, and OpenTelemetry providers.
+refresh, guarded logout, explicit Darwin containment selection, and
+OpenTelemetry providers.
+
+## Platform containment
+
+Linux child-subreapers and Windows Job Objects provide authoritative native
+tree containment. Darwin remains fail closed unless the operator explicitly
+accepts its weaker process-group boundary:
+
+```sh
+acp-go-codex -darwin-best-effort-containment
+```
+
+Embedded callers use `codexacp.WithDarwinBestEffortContainment()`. This mode
+reaps the direct native child and performs a bounded `SIGTERM` then `SIGKILL`
+against the captured original process group. Descendants that call `setsid`
+can survive, and numeric PGID reuse can cause collateral signalling. The
+standalone command prints an unconditional warning before serving. FreeBSD,
+OpenBSD, NetBSD, and other unsupported platforms remain fail closed.
+
+Darwin operators can inspect or explicitly clean one marker-correlated runtime
+without signalling a recorded PGID:
+
+```sh
+acp-go-codex containment diagnose -scratch-dir /path/to/scratch-parent
+acp-go-codex containment cleanup -scratch-dir /path/to/scratch-parent -runtime-id <32-lowercase-hex> -force
+```
+
+Correlation is not ownership or proof that escaped descendants are absent;
+inherited environment markers can also be scrubbed.
 
 ## What It Provides
 

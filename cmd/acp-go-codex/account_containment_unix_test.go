@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,7 +49,7 @@ wait
 	var commandStderr bytes.Buffer
 	scratch := t.TempDir()
 	go func() {
-		errCh <- runCodexCLI(ctx, script, home, scratch, loginCommand, false, bytes.NewReader(nil), bytes.NewBuffer(nil), &commandStderr)
+		errCh <- runCodexCLI(ctx, script, home, scratch, loginCommand, false, true, bytes.NewReader(nil), bytes.NewBuffer(nil), &commandStderr)
 	}()
 
 	waitUntilWithFailure(t, func() bool {
@@ -77,7 +78,13 @@ wait
 		t.Fatal("cancelled terminal auth command returned nil")
 	}
 	if probeErr := syscall.Kill(pid, 0); probeErr == nil || !errors.Is(probeErr, syscall.ESRCH) {
-		t.Fatalf("auth descendant %d survived contained shutdown: %v", pid, probeErr)
+		if runtime.GOOS != "darwin" {
+			t.Fatalf("auth descendant %d survived contained shutdown: %v", pid, probeErr)
+		}
+		// Darwin explicitly accepts only the original process group. A shell may
+		// move background work out of that group, so the test reaps the accepted
+		// residual risk rather than claiming authoritative containment.
+		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 
 	before, err := os.Stat(writes)
@@ -104,7 +111,7 @@ wait
 
 func waitUntilWithFailure(t *testing.T, ready func() bool, failure func() string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if ready() {
 			return

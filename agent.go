@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -105,17 +106,22 @@ type Agent struct {
 
 	mu                sync.Mutex
 	closed            bool
+	closeDone         chan struct{}
+	closeErr          error
 	conn              agentClient
 	sessions          map[acp.SessionId]*session
 	deleted           map[acp.SessionId]struct{}
 	clientCalls       chan struct{}
 	authTokens        *ChatGPTAuthTokens
 	providerProcesses *providerProcessSnapshotTracker
+	containmentMode   RuntimeContainmentMode
 
 	runtimeClient         codex.Client
 	runtimeEpoch          uint64
 	runtimeDead           bool
 	runtimeStarting       chan struct{}
+	runtimeStartCancel    context.CancelFunc
+	runtimeClosing        chan struct{}
 	runtimeNativeRelease  func()
 	runtimeScratchRoot    string
 	runtimeScratchRelease func()
@@ -155,6 +161,7 @@ func NewAgent(opts ...Option) *Agent {
 
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
+	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
 	options.ConcurrencyLimits = limits
 
 	clientCallLimit := limits.MaxConcurrentClientCalls
@@ -174,7 +181,18 @@ func NewAgent(opts ...Option) *Agent {
 		Version:        options.AgentVersion,
 	})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks)
+	mode := containmentMode(options)
+
+	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative)
+	if options.RuntimeResourceHooks.ObserveContainment != nil {
+		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
+	}
+
+	if mode == RuntimeContainmentBestEffort {
+		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
+			slog.String("containment", string(mode)),
+		)
+	}
 
 	return &Agent{
 		options:           options,
@@ -185,8 +203,17 @@ func NewAgent(opts ...Option) *Agent {
 		deleted:           make(map[acp.SessionId]struct{}),
 		clientCalls:       make(chan struct{}, clientCallLimit),
 		providerProcesses: providerProcesses,
+		containmentMode:   mode,
 		retainedThreads:   make(map[acp.SessionId]*retainedRuntimeThread),
 	}
+}
+
+func (a *Agent) ContainmentMode() RuntimeContainmentMode {
+	if a == nil {
+		return RuntimeContainmentUnavailable
+	}
+
+	return a.containmentMode
 }
 
 func validateCodexConfigOverrides(config map[string]any) error {
@@ -268,6 +295,19 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 // Close cancels and closes all resources owned by the agent.
 func (a *Agent) Close() error {
 	a.mu.Lock()
+	if closeDone := a.closeDone; closeDone != nil {
+		a.mu.Unlock()
+		<-closeDone
+
+		a.mu.Lock()
+		closeErr := a.closeErr
+		a.mu.Unlock()
+
+		return closeErr
+	}
+
+	closeDone := make(chan struct{})
+	a.closeDone = closeDone
 
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
@@ -294,6 +334,12 @@ func (a *Agent) Close() error {
 	cancel()
 
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
+
+	a.mu.Lock()
+	a.closeErr = err
+
+	close(closeDone)
+	a.mu.Unlock()
 
 	return err
 }
@@ -401,7 +447,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	}, nil
 }
 
-func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string) (codex.Client, error) {
+func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string, nativeVersion string) (codex.Client, error) {
 	env, _ := a.pinRuntimeEnvironment(nil)
 
 	factory := a.options.clientFactory
@@ -433,16 +479,19 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, nil)
 
 	client, err := factory(ctx, codex.Options{
-		CLIPath:        a.options.ExecutablePath,
-		CodexHome:      a.options.Home,
-		WritableHome:   a.resolvedCodexHomeForEnv(env),
-		SupervisorRoot: supervisorRoot,
-		DefaultModel:   a.options.DefaultModel,
-		Env:            a.observe.InjectTraceEnv(ctx, env),
-		Config:         a.codexConfig(),
-		ExtraArgs:      extraArgs,
-		Logger:         a.log,
-		EventHandler:   eventSink.Handle,
+		CLIPath:          a.options.ExecutablePath,
+		CodexHome:        a.options.Home,
+		WritableHome:     a.resolvedCodexHomeForEnv(env),
+		SupervisorRoot:   supervisorRoot,
+		SupervisorParent: filepath.Dir(supervisorRoot),
+		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
+		NativeVersion:    nativeVersion,
+		DefaultModel:     a.options.DefaultModel,
+		Env:              a.observe.InjectTraceEnv(ctx, env),
+		Config:           a.codexConfig(),
+		ExtraArgs:        extraArgs,
+		Logger:           a.log,
+		EventHandler:     eventSink.Handle,
 		RequestHandler: func(ctx context.Context, req codex.ServerRequest) (any, error) {
 			return a.handleCodexServerRequestForEpoch(ctx, epoch, req)
 		},
@@ -613,6 +662,10 @@ func (a *Agent) ensureOpen() error {
 
 	if a.closed {
 		return newAgentClosedError()
+	}
+
+	if a.optionsErr != nil {
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
 	}
 
 	return nil

@@ -16,6 +16,8 @@ only; diagnostics go to stderr (and `-debug` when present).
 | --- | --- |
 | `-path` | Codex CLI executable path. |
 | `-home` | `CODEX_HOME` for launched Codex processes. |
+| `-scratch-dir` | Parent directory for ephemeral runtime generations. |
+| `-darwin-best-effort-containment` | Darwin-only explicit acceptance of direct-child and captured-process-group cleanup; rejected off Darwin. |
 | `-model` | Default model preference for new sessions. |
 | `-debug` | Write adapter diagnostics to stderr. |
 | `-version` | Print adapter version and exit. |
@@ -39,3 +41,6 @@ err := codexacp.Serve(ctx, stdin, stdout,
 ```
 
 Embedded mode exposes the same ACP surface as the standalone binary.
+On Darwin, append `WithDarwinBestEffortContainment()` only when the operator
+accepts that `setsid` descendants may escape and numeric PGID reuse can cause
+collateral signalling.

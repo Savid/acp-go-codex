@@ -23,6 +23,7 @@ const (
 
 var execCommandContext = exec.CommandContext
 var processCloseGrace = 2 * time.Second
+var processSupervisorCloseWait = supervisorQuiesceWindow + time.Second
 
 // launchAppServer starts the codex app-server. The request-scoped ctx bounds
 // the version check, while procCtx governs the lifetime of the spawned process
@@ -34,7 +35,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, "", err
 	}
 
-	version, versionErr := validateCodexVersion(ctx, path)
+	version, versionErr := validateCodexVersionOutput(options.NativeVersion)
 	if versionErr != nil {
 		return nil, nil, "", versionErr
 	}
@@ -48,11 +49,14 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		cmd.Env = mergedEnv(options)
 	} else {
 		cmd, supervisor, err = supervisorCommand(procCtx, supervisorConfig{
-			NativePath: path,
-			NativeArgs: appServerArgs(options),
-			NativeEnv:  mergedEnv(options),
-			Home:       firstNonEmpty(options.WritableHome, options.CodexHome),
-			Scratch:    options.SupervisorRoot,
+			NativePath:       path,
+			NativeArgs:       appServerArgs(options),
+			NativeEnv:        mergedEnv(options),
+			Home:             firstNonEmpty(options.WritableHome, options.CodexHome),
+			Scratch:          options.SupervisorRoot,
+			ScratchParent:    options.SupervisorParent,
+			LifecycleKind:    lifecycleRuntime,
+			DarwinBestEffort: options.DarwinBestEffort,
 		})
 		if err != nil {
 			return nil, nil, "", err
@@ -181,17 +185,10 @@ func resolveCodexPath(path string) (string, error) {
 	return resolved, nil
 }
 
-func validateCodexVersion(ctx context.Context, path string) (string, error) {
-	cmd := execCommandContext(ctx, path, "--version")
-
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("check codex CLI version: %w", err)
-	}
-
-	version := parseCodexVersion(string(output))
+func validateCodexVersionOutput(output string) (string, error) {
+	version := parseCodexVersion(output)
 	if version == "" {
-		return "", fmt.Errorf("check codex CLI version: could not parse %q", strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("check codex CLI version: could not parse %q", strings.TrimSpace(output))
 	}
 
 	if compareSemver(version, minCodexVersion) < 0 {
@@ -355,7 +352,7 @@ func (p *process) finishProviderSnapshot(ctx context.Context, err error) {
 		return
 	}
 
-	if errors.Is(err, ErrProcessTreeUnproven) {
+	if errors.Is(err, ErrProcessContainmentIncomplete) {
 		if p.processSnapshot.Unproven != nil {
 			p.processSnapshot.Unproven()
 		}
@@ -447,11 +444,22 @@ func (p *process) Close() error {
 	p.beginWait()
 
 	if p.supervisor != nil {
-		<-p.waitDone
-		closeErr := processCloseError(p.waitErr)
-		p.finishProviderSnapshot(context.Background(), closeErr)
+		select {
+		case <-p.waitDone:
+			closeErr := processCloseError(p.waitErr)
+			p.finishProviderSnapshot(context.Background(), closeErr)
 
-		return closeErr
+			return closeErr
+		case <-time.After(processSupervisorCloseWait):
+			closeErr := fmt.Errorf(
+				"%w: supervised process did not finish within %s",
+				ErrProcessContainmentIncomplete,
+				processSupervisorCloseWait,
+			)
+			p.finishProviderSnapshot(context.Background(), closeErr)
+
+			return closeErr
+		}
 	}
 
 	// Escalate: stdin EOF → SIGTERM → SIGKILL. The first grace window lets
