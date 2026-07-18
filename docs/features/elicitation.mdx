@@ -16,6 +16,11 @@ MUST carry the non-empty `turnId` of the currently active native turn. Missing,
 stale, and post-turn requests receive an empty native answer without invoking
 the client.
 
+Codex only offers its clarifying-question tool (`item/tool/requestUserInput`)
+when the session runs in plan collaboration mode; in the default mode the tool
+is unavailable, so no clarifying question is raised (`TestCodexCLIClarifyingQuestionElicitation`
+runs a plan-mode session to elicit one).
+
 Codex also uses `mcpServer/elicitation/request` for MCP tool approval. The
 hard-cutover native shape marks those requests with
 `_meta.codex_approval_kind = "mcp_tool_call"` directly in the flattened `_meta`

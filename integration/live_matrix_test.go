@@ -572,6 +572,75 @@ func TestCodexCLIMCPStdioTool(t *testing.T) {
 	}
 }
 
+func TestCodexCLIClarifyingQuestionElicitation(t *testing.T) {
+	requireLiveTurn(t)
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	client := &recordingClient{}
+	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{
+		ClientCapabilities: acp.ClientCapabilities{
+			Elicitation: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}},
+		},
+	})
+
+	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+
+	// Codex only exposes the clarifying-question (requestUserInput) tool in plan
+	// mode; the default collaboration mode does not offer it.
+	if _, err := conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: session.SessionId,
+			ConfigId:  "mode",
+			Value:     "plan",
+		},
+	}); err != nil {
+		t.Fatalf("set session mode plan: %v", err)
+	}
+
+	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
+		return conn.Prompt(ctx, acp.PromptRequest{
+			Meta:      newTurnRouteMeta(),
+			SessionId: session.SessionId,
+			Prompt: []acp.ContentBlock{acp.TextBlock(
+				"Before doing anything else you MUST ask me exactly one clarifying question by " +
+					"calling your request-user-input clarifying-question tool. Do not answer, use " +
+					"any other tool, or write any file until I have replied. After I answer, reply " +
+					"with exactly ACP_ELICIT_OK.",
+			)},
+		})
+	})
+	if resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("stop reason = %s", resp.StopReason)
+	}
+
+	if client.elicitationCount() == 0 {
+		t.Fatalf("no elicitation/create was received for a clarifying-question turn; text = %q", client.text())
+	}
+	if !formElicitationSeen(client.elicitationSnapshot()) {
+		t.Fatalf("clarifying question did not land as an ACP form elicitation: %#v", client.elicitationSnapshot())
+	}
+
+	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+}
+
+func formElicitationSeen(requests []acp.UnstableCreateElicitationRequest) bool {
+	for _, request := range requests {
+		if request.Form != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
 func toolLocationContains(updates []acp.SessionUpdate, path string) bool {
 	for _, update := range updates {
 		if update.ToolCall != nil {

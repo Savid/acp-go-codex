@@ -288,6 +288,13 @@ func (c *recordingClient) elicitationCount() int {
 	return len(c.elicitations)
 }
 
+func (c *recordingClient) elicitationSnapshot() []acp.UnstableCreateElicitationRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]acp.UnstableCreateElicitationRequest(nil), c.elicitations...)
+}
+
 func (c *recordingClient) resetRecordedOutput() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
