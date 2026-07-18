@@ -22,23 +22,23 @@ Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
 | `-version` | `false` | Print adapter version and exit. |
 | `-codex-allow-account-logout` | `false` | Permit ACP logout to call Codex logout. |
 | `-seed-file` | unset | Seed file as `<relpath>=<hostpath>`, repeatable. Host file contents are written under `CODEX_HOME` before codex launches. Requires `-home`. |
-| `-config` | unset | Codex config override as `<key>=<value>`, repeatable. Passed to `codex app-server` as `-c key=value`; dotted keys set nested config and nothing is written to disk. |
+| `-codex-config` | unset | Codex config override as `<key>=<value>`, repeatable. Passed to `codex app-server` as `-c key=value`; dotted keys set nested config and nothing is written to disk. |
 
 ## Codex config
 
-Override Codex config directly on the app-server (repeat `-config` per key).
+Override Codex config directly on the app-server (repeat `-codex-config` per key).
 Dotted keys set nested config, string values are TOML-quoted automatically, and
 nothing is written to disk — so `-home` can point at the operator's real Codex
 dir and its `config.toml`/auth stay untouched. Point Codex at a LiteLLM gateway:
 
 ```sh
 acp-go-codex \
-  -config model=gpt-5.5 \
-  -config model_provider=litellm \
-  -config model_providers.litellm.name=LiteLLM \
-  -config model_providers.litellm.base_url=https://litellm.example/v1 \
-  -config model_providers.litellm.env_key=LITELLM_API_KEY \
-  -config model_providers.litellm.wire_api=responses
+  -codex-config model=gpt-5.5 \
+  -codex-config model_provider=litellm \
+  -codex-config model_providers.litellm.name=LiteLLM \
+  -codex-config model_providers.litellm.base_url=https://litellm.example/v1 \
+  -codex-config model_providers.litellm.env_key=LITELLM_API_KEY \
+  -codex-config model_providers.litellm.wire_api=responses
 ```
 
 Seed Codex config from host files (repeat `-seed-file` per file). Each host

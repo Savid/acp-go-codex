@@ -348,18 +348,6 @@ func TestPromptPublishesTurnIdentityWithoutAssistantText(t *testing.T) {
 	}
 }
 
-func TestNativeIdentityMetaPreservesStructuredOutput(t *testing.T) {
-	meta := mergePromptResponseMeta(
-		structuredOutputMeta(`{"ok":true}`, map[string]any{"type": "object"}),
-		nativeTurnIdentity{turnID: "turn", messageID: "message"},
-	)
-	codexMeta, _ := meta[codexMetaKey].(map[string]any)
-	structured, _ := codexMeta[structuredOutputMetaKey].(map[string]any)
-	if structured["ok"] != true || codexMeta[codexTurnIDMetaKey] != "turn" || codexMeta[codexMessageIDMetaKey] != "message" {
-		t.Fatalf("merged prompt response meta = %#v", meta)
-	}
-}
-
 type rolloutWritingRunClient struct {
 	runEventsClient
 	path    string

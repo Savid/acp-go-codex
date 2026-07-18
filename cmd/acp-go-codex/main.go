@@ -63,7 +63,7 @@ func (f *seedFileFlag) Set(value string) error {
 	return nil
 }
 
-// configOverrideFlag collects repeatable -config <key>=<value> flags into a map
+// configOverrideFlag collects repeatable -codex-config <key>=<value> flags into a map
 // of string-valued TOML config overrides passed to codex app-server as
 // `-c key=value`.
 type configOverrideFlag struct {
@@ -132,7 +132,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.Var(seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, repeatable; contents are written under CODEX_HOME before codex launches")
 
 	configOverrides := &configOverrideFlag{}
-	flags.Var(configOverrides, "config", "Codex config override as <key>=<value>, repeatable; passed to codex app-server as -c key=value (dotted keys set nested config, nothing is written to disk)")
+	flags.Var(configOverrides, "codex-config", "Codex config override as <key>=<value>, repeatable; passed to codex app-server as -c key=value (dotted keys set nested config, nothing is written to disk)")
 
 	if err := flags.Parse(args); err != nil {
 		return 2

@@ -7,7 +7,7 @@ GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$
 # term list never contains a literal forbidden term. Expanded with `printf %b`.
 REMOVED_PUBLIC_TERMS = codex\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|\\b\x4e\x45\x53\\b|SSE\x20MCP|mcpCapabilities\x2eacp|ExportSessio\x6e|ImportSessio\x6e|DeleteSessio\x6e|ParseConfi\x67|CodexSessio\x6e
 
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration test-integration-cover test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-cover test-integration-live test-integration-smoke tidy vuln
 
 ## build: build all packages
 build:
@@ -29,9 +29,6 @@ test-integration-smoke:
 ## test-integration-live: run full live integration tests
 test-integration-live:
 	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
-
-## test-integration: alias for full live integration tests
-test-integration: test-integration-live
 
 ## test-integration-cover: run token-free live integration tests with compiled binary coverage
 test-integration-cover:

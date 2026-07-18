@@ -72,7 +72,7 @@ Both environment surfaces reject the adapter-reserved
 
 ## Config overrides
 
-`WithCodexConfigOverrides` (CLI `-config <key>=<value>`, repeatable) passes TOML
+`WithCodexConfigOverrides` (CLI `-codex-config <key>=<value>`, repeatable) passes TOML
 config overrides to `codex app-server` as `-c key=value`. Keys may be dotted
 paths that set nested config, string values are TOML-quoted automatically, and
 **nothing is written to disk** — so it is non-destructive and safe against a real
@@ -100,12 +100,12 @@ codexacp.WithCodexConfigOverrides(map[string]any{
 
 ```sh
 acp-go-codex \
-  -config model=gpt-5.5 \
-  -config model_provider=litellm \
-  -config model_providers.litellm.name=LiteLLM \
-  -config model_providers.litellm.base_url=https://litellm.example/v1 \
-  -config model_providers.litellm.env_key=LITELLM_API_KEY \
-  -config model_providers.litellm.wire_api=responses
+  -codex-config model=gpt-5.5 \
+  -codex-config model_provider=litellm \
+  -codex-config model_providers.litellm.name=LiteLLM \
+  -codex-config model_providers.litellm.base_url=https://litellm.example/v1 \
+  -codex-config model_providers.litellm.env_key=LITELLM_API_KEY \
+  -codex-config model_providers.litellm.wire_api=responses
 ```
 
 The overrides point Codex at a LiteLLM gateway: `base_url` ends in `/v1`,

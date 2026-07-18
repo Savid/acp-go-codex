@@ -11,7 +11,7 @@ This project is a Go implementation of an ACP agent for Codex CLI. It builds on
 
 - `cmd/acp-go-codex`: process entrypoint for ACP stdio mode.
 - Root package: ACP agent surface, options, session lifecycle, prompt handling,
-  session import/load, auth, MCP bridge, and extension methods.
+  session load, auth, MCP bridge, and extension methods.
 - `internal/codex`: Codex provider boundary. Keep Codex CLI/app-server details
   here instead of leaking them into ACP handlers.
 
@@ -22,12 +22,12 @@ go test ./...
 go build ./...
 go test -tags=integration ./integration/...
 make test-integration-smoke
-make test-integration
+make test-integration-live
 ```
 
 Integration tests are opt-in. `make test-integration-smoke` requires a local
 `codex` CLI and runs live app-server checks that do not spend model tokens.
-`make test-integration` also sets `ACP_GO_CODEX_RUN_LIVE_TOKENS=1` and may spend model
+`make test-integration-live` also sets `ACP_GO_CODEX_RUN_LIVE_TOKENS=1` and may spend model
 tokens. Use `ACP_GO_CODEX_HARNESS_PATH`, `ACP_GO_CODEX_HOME`,
 `ACP_GO_CODEX_MODEL`, and `ACP_GO_CODEX_AGENT_BINARY` to point tests at a
 specific CLI, source Codex home, model, or compiled agent binary. Integration

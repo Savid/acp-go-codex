@@ -99,6 +99,9 @@ func TestRunErrorPathsAndVersion(t *testing.T) {
 	if code := run(context.Background(), []string{"-bad"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 2 {
 		t.Fatalf("bad flags code = %d", code)
 	}
+	if code := run(context.Background(), []string{"-config", "model=gpt-5.5"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 2 {
+		t.Fatalf("removed config flag code = %d", code)
+	}
 
 	var stdout bytes.Buffer
 	agentVersion = func() string { return "v1.2.3" }
@@ -178,7 +181,7 @@ func TestRunPassesConfigOverrides(t *testing.T) {
 
 	code := run(
 		context.Background(),
-		[]string{"-config", "model_provider=litellm", "-config", "model_providers.litellm.base_url=https://litellm.example/v1"},
+		[]string{"-codex-config", "model_provider=litellm", "-codex-config", "model_providers.litellm.base_url=https://litellm.example/v1"},
 		bytes.NewBuffer(nil),
 		bytes.NewBuffer(nil),
 		bytes.NewBuffer(nil),
