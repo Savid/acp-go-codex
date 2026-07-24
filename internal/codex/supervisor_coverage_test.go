@@ -426,6 +426,27 @@ func TestRunLivenessPipeAndExitFailures(t *testing.T) {
 		})
 		require.ErrorContains(t, err, "native root exited")
 	})
+
+	t.Run("native exit without quiescence proof", func(t *testing.T) {
+		preserveSupervisorGlobals(t)
+		oldTaskEntries := linuxTaskEntries
+		t.Cleanup(func() { linuxTaskEntries = oldTaskEntries })
+		linuxTaskEntries = func() ([]os.DirEntry, error) {
+			return nil, errors.New("task scan failed")
+		}
+
+		root := t.TempDir()
+		input, inputWriter := io.Pipe()
+		t.Cleanup(func() { _ = inputWriter.Close() })
+		supervisorInput = input
+		supervisorOutput = io.Discard
+		supervisorError = io.Discard
+		err := runLiveness(supervisorConfig{
+			NativePath: "/bin/true", NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root,
+			Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"), NativePIDFile: filepath.Join(root, "pid"),
+		})
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	})
 }
 
 func TestUnixQuiescenceSignalEscalationAndTimeout(t *testing.T) {

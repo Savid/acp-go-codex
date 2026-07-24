@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -13,6 +14,155 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 )
+
+type imagePromptClient struct {
+	*runEventsClient
+	models    []codex.Model
+	runCalls  int
+	lastStart codex.TurnStartRequest
+}
+
+func (c *imagePromptClient) ModelList(context.Context) ([]codex.Model, error) {
+	return append([]codex.Model(nil), c.models...), nil
+}
+
+func (c *imagePromptClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (<-chan codex.Event, error) {
+	c.runCalls++
+	c.lastStart = req
+
+	return c.runEventsClient.RunTurn(ctx, req)
+}
+
+func TestPromptImageModelGatePreparationAndMirrorFailures(t *testing.T) {
+	ctx := context.Background()
+	png, err := os.ReadFile(filepath.Join("testdata", "valid.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := TextPromptRequest("image", "turn", "describe it")
+	request.Prompt = append(request.Prompt, acp.ImageBlock(base64.StdEncoding.EncodeToString(png), "image/png"))
+
+	agent := NewAgent(WithImageLimits(ImageLimits{}))
+	agent.setAgentClient(newRecordingAgentClient())
+	client := &imagePromptClient{
+		runEventsClient: &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted}}},
+		models: []codex.Model{
+			{ID: "vision", InputModalities: []string{"text", "image"}},
+			{ID: "text", InputModalities: []string{"text"}},
+		},
+	}
+	promptSession := &session{
+		agent:         agent,
+		id:            "image",
+		cwd:           t.TempDir(),
+		codexThreadID: "thread",
+		model:         "vision",
+		client:        client,
+	}
+	resp, err := promptSession.Prompt(ctx, request)
+	if err != nil || resp.StopReason != acp.StopReasonEndTurn || client.runCalls != 1 {
+		t.Fatalf("supported image prompt resp=%#v calls=%d err=%v", resp, client.runCalls, err)
+	}
+	if len(client.lastStart.Prompt) != 2 {
+		t.Fatalf("native image prompt = %#v", client.lastStart.Prompt)
+	}
+	imageURL, ok := client.lastStart.Prompt[1]["url"].(string)
+	if client.lastStart.Prompt[1]["type"] != "image" || !ok ||
+		!strings.HasPrefix(imageURL, "data:image/png;base64,") {
+		t.Fatalf("native image prompt = %#v", client.lastStart.Prompt)
+	}
+
+	promptSession.mu.Lock()
+	promptSession.model = "text"
+	promptSession.mu.Unlock()
+	_, promptErr := promptSession.Prompt(ctx, request)
+	if promptErr == nil || client.runCalls != 1 {
+		t.Fatalf("text-only model prompt calls=%d err=%v", client.runCalls, promptErr)
+	}
+
+	promptSession.mu.Lock()
+	promptSession.model = "unlisted"
+	promptSession.mu.Unlock()
+	_, promptErr = promptSession.Prompt(ctx, request)
+	if promptErr != nil || client.runCalls != 2 {
+		t.Fatalf("unknown model image prompt calls=%d err=%v", client.runCalls, promptErr)
+	}
+
+	largePNG := append(append([]byte(nil), png...), make([]byte, codexInlineImageEnvelopeSize)...)
+	largeRequest := TextPromptRequest("image", "large", "describe it")
+	largeRequest.Prompt = append(largeRequest.Prompt, acp.ImageBlock(base64.StdEncoding.EncodeToString(largePNG), "image/png"))
+	originalCreate := createPromptImageTempDir
+	createPromptImageTempDir = func(string, string) (string, error) {
+		return "", errors.New("scratch unavailable")
+	}
+	_, err = promptSession.Prompt(ctx, largeRequest)
+	createPromptImageTempDir = originalCreate
+	if !isTurnFailure(err, codex.CauseTransport) {
+		t.Fatalf("scratch preparation err=%v", err)
+	}
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, []byte(
+		`{"type":"response_item","payload":{"type":"image_generation_call","id":"bad","status":"completed","result":"!"}}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mirrorAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()), WithImageLimits(ImageLimits{}))
+	mirrorAgent.setAgentClient(newRecordingAgentClient())
+	mirrorSession := &session{
+		agent:         mirrorAgent,
+		id:            "mirror",
+		cwd:           t.TempDir(),
+		codexThreadID: "thread",
+		rolloutPath:   rollout,
+		client:        &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted}}},
+	}
+	if _, err := mirrorSession.Prompt(ctx, TextPromptRequest("mirror", "turn", "draw")); err == nil {
+		t.Fatal("Prompt ignored final image mirror failure")
+	}
+}
+
+func TestEmitPromptImageUpdates(t *testing.T) {
+	ctx := context.Background()
+	png, err := os.ReadFile(filepath.Join("testdata", "valid.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := codex.Event{
+		Kind: codex.EventImageCompleted,
+		Image: codex.ImageEvent{
+			ID:     "image",
+			Status: "completed",
+			Result: base64.StdEncoding.EncodeToString(png),
+		},
+	}
+
+	agent := NewAgent(WithImageLimits(ImageLimits{}))
+	agent.setAgentClient(newRecordingAgentClient())
+	s := &session{agent: agent, id: "image"}
+	state := &promptEventState{imageTools: newImageToolState()}
+	if err := s.emitPromptUpdates(ctx, event, event, state); err != nil {
+		t.Fatalf("emit image update: %v", err)
+	}
+
+	invalid := codex.Event{
+		Kind:  codex.EventImageCompleted,
+		Image: codex.ImageEvent{ID: "invalid", Status: "completed", Result: "!"},
+	}
+	state = &promptEventState{imageTools: newImageToolState()}
+	if err := s.emitPromptUpdates(ctx, invalid, invalid, state); err == nil {
+		t.Fatal("invalid image output did not fail")
+	}
+
+	agent.setAgentClient(&errorAgentClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		updateErr:            errors.New("update failed"),
+	})
+	state = &promptEventState{imageTools: newImageToolState()}
+	if err := s.emitPromptUpdates(ctx, invalid, invalid, state); err == nil || err.Error() != "update failed" {
+		t.Fatalf("image failure update err=%v", err)
+	}
+}
 
 func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	ctx := context.Background()
@@ -868,7 +1018,7 @@ func TestRecordRawEmitFailure(t *testing.T) {
 
 // TestPromptContentFailsClosed pins the fail-closed prompt-content contract:
 // empty prompts, audio blocks, and unknown or empty content blocks reject with
-// the uniform unsupported/prompt shape, and images without data or a URI
+// the uniform unsupported/prompt shape, and images without embedded data
 // reject with the uniform prompt.image shape. Nothing is silently dropped.
 func TestPromptContentFailsClosed(t *testing.T) {
 	ctx := context.Background()
@@ -883,7 +1033,7 @@ func TestPromptContentFailsClosed(t *testing.T) {
 		{name: "audio block", prompt: []acp.ContentBlock{acp.AudioBlock("x", "audio/wav")}, wantField: "prompt", wantError: "unsupported"},
 		{name: "empty prompt", prompt: nil, wantField: "prompt", wantError: "unsupported"},
 		{name: "unknown block", prompt: []acp.ContentBlock{{}}, wantField: "prompt", wantError: "unsupported"},
-		{name: "data-less image", prompt: []acp.ContentBlock{acp.ImageBlock("", "image/png")}, wantField: "prompt.image", wantError: "missing image data or uri"},
+		{name: "data-less image", prompt: []acp.ContentBlock{acp.ImageBlock("", "image/png")}, wantField: "prompt.image", wantError: "missing_data"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := promptSession.Prompt(ctx, acp.PromptRequest{SessionId: "s", Prompt: tt.prompt, Meta: inboundRouteMeta("turn-1")})

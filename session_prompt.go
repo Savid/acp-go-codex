@@ -39,26 +39,57 @@ const (
 	sandboxTypeWorkspaceWrite   = "workspaceWrite"
 )
 
-// promptToCodex maps ACP prompt content into the native Codex user-input
-// representation. Mapping fails closed with -32602: empty prompts, audio
-// blocks, and unknown or empty content blocks surface as the uniform ACP
-// unsupported-content error, and images without data or a URI surface as the
-// uniform prompt-image error. Nothing is silently dropped.
-func promptToCodex(blocks []acp.ContentBlock) ([]codex.UserInput, error) {
+// promptToCodex maps validated ACP prompt content into native Codex input.
+func promptToCodex(blocks []acp.ContentBlock, images []codex.PromptImage) ([]codex.UserInput, error) {
 	if len(blocks) == 0 {
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
 	}
 
-	input, err := codex.PromptToUserInput(blocks)
-
-	switch {
-	case err == nil:
+	input, err := codex.PromptToUserInput(blocks, images)
+	if err == nil {
 		return input, nil
-	case errors.Is(err, codex.ErrImageMissingData):
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldField: "prompt.image", jsonFieldError: "missing image data or uri"})
-	default:
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
 	}
+
+	return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
+}
+
+func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBlock) (
+	[]codex.UserInput,
+	func(),
+	error,
+) {
+	images, imageErr := validatePromptImages(blocks, s.agent.options.ImageLimits)
+	if imageErr != nil {
+		return nil, nil, imageErr.invalidParams()
+	}
+
+	if err := s.ensureLiveClient(ctx); err != nil {
+		return nil, nil, s.mapTurnFailure(fmt.Errorf("%w: %w", codex.ErrConnectionClosed, err))
+	}
+
+	if len(images) > 0 &&
+		selectedModelImageSupport(modelList(ctx, s.client), s.currentModel()) == imageInputUnsupported {
+		imageErr = &promptImageError{code: imageErrorUnsupportedByModel}
+
+		return nil, nil, imageErr.invalidParams()
+	}
+
+	prepared, err := s.preparePromptImages(ctx, images)
+	if err != nil {
+		return nil, nil, s.mapTurnFailure(&codex.TurnFailedError{
+			Cause:   codex.CauseTransport,
+			Message: err.Error(),
+		})
+	}
+
+	input, err := promptToCodex(blocks, prepared.images)
+	if err != nil {
+		prepared.release()
+
+		return nil, nil, err
+	}
+
+	return input, prepared.release, nil
 }
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -73,14 +104,11 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 	defer releaseTurn()
 
-	input, err := promptToCodex(params.Prompt)
+	input, releaseImages, err := s.preparePromptInput(ctx, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-
-	if relaunchErr := s.ensureLiveClient(ctx); relaunchErr != nil {
-		return acp.PromptResponse{}, s.mapTurnFailure(fmt.Errorf("%w: %w", codex.ErrConnectionClosed, relaunchErr))
-	}
+	defer releaseImages()
 
 	turnCtx := s.beginTurn(ctx, route.TurnNonce)
 	defer s.finishTurn()
@@ -126,8 +154,10 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		snapshot:            snapshot,
 		agentDeltaItems:     map[string]struct{}{},
 		reasoningDeltaItems: map[string]struct{}{},
+		toolContents:        make(map[acp.ToolCallId][]acp.ToolCallContent),
 		agentText:           &agentText,
 		stopReason:          acp.StopReasonEndTurn,
+		imageTools:          newImageToolState(),
 	}
 
 	var (
@@ -224,6 +254,11 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 
 	if err := s.mirrorAndEmitRollout(context.WithoutCancel(ctx)); err != nil {
+		var imageErr *imageOutputError
+		if errors.As(err, &imageErr) {
+			return acp.PromptResponse{}, s.mapTurnFailure(imageErr)
+		}
+
 		return acp.PromptResponse{}, err
 	}
 
@@ -262,6 +297,8 @@ type promptEventState struct {
 
 	nativeIdentity        nativeTurnIdentity
 	emittedNativeIdentity nativeTurnIdentity
+	imageTools            imageToolState
+	toolContents          map[acp.ToolCallId][]acp.ToolCallContent
 }
 
 func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, state *promptEventState) error {
@@ -330,10 +367,23 @@ func (s *session) recordRawEmitFailure(ctx context.Context, err error) {
 }
 
 func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, visibleEvent codex.Event, state *promptEventState) (err error) {
+	if event.Kind == codex.EventImageStarted || event.Kind == codex.EventImageCompleted {
+		updates, imageErr := s.imageEventUpdates(turnCtx, event, &state.imageTools)
+		if imageErr != nil {
+			if emitErr := s.emitUpdates(turnCtx, updates...); emitErr != nil {
+				return emitErr
+			}
+
+			return s.mapTurnFailure(imageErr)
+		}
+
+		return s.emitUpdates(turnCtx, updates...)
+	}
+
 	toolPublication := s.preparePermissionToolEvent(visibleEvent)
 	defer func() { toolPublication.finish(err == nil) }()
 
-	updates := toolPublication.updates()
+	updates := toolPublication.updates(state.toolContents)
 	updates = append(updates, usageUpdatesForEvent(event, &state.streamedUsage, &state.streamedThreadUsage, &state.streamedUsageContextWindow)...)
 
 	checkpointIdentity := nativeTurnIdentity{turnID: state.nativeIdentity.turnID}
@@ -513,6 +563,13 @@ func (s *session) emitRawCodexEvent(ctx context.Context, event codex.Event) erro
 }
 
 func eventUpdates(event codex.Event) []acp.SessionUpdate {
+	return eventUpdatesWithToolSnapshots(event, make(map[acp.ToolCallId][]acp.ToolCallContent))
+}
+
+func eventUpdatesWithToolSnapshots(
+	event codex.Event,
+	snapshots map[acp.ToolCallId][]acp.ToolCallContent,
+) []acp.SessionUpdate {
 	switch event.Kind {
 	case codex.EventAgentMessageDelta:
 		if event.Text == "" {
@@ -531,9 +588,9 @@ func eventUpdates(event codex.Event) []acp.SessionUpdate {
 	case codex.EventToolStarted:
 		return []acp.SessionUpdate{startToolUpdate(event.Tool)}
 	case codex.EventToolDelta:
-		return toolDeltaUpdate(event.Tool, event.Text)
+		return toolDeltaUpdate(event.Tool, event.Text, snapshots)
 	case codex.EventToolCompleted:
-		return []acp.SessionUpdate{completeToolUpdate(event.Tool)}
+		return []acp.SessionUpdate{completeToolUpdate(event.Tool, snapshots)}
 	case codex.EventDiffUpdated:
 		if event.Diff == "" {
 			return nil
@@ -621,7 +678,11 @@ func startToolUpdate(tool codex.ToolEvent) acp.SessionUpdate {
 	)
 }
 
-func toolDeltaUpdate(tool codex.ToolEvent, text string) []acp.SessionUpdate {
+func toolDeltaUpdate(
+	tool codex.ToolEvent,
+	text string,
+	snapshotArgs ...map[acp.ToolCallId][]acp.ToolCallContent,
+) []acp.SessionUpdate {
 	if text == "" {
 		text = tool.Content
 	}
@@ -631,12 +692,18 @@ func toolDeltaUpdate(tool codex.ToolEvent, text string) []acp.SessionUpdate {
 	}
 
 	id := acp.ToolCallId(firstNonEmpty(tool.ID, "codex-tool"))
+	snapshots := toolSnapshotMap(snapshotArgs)
+	snapshots[id] = append(snapshots[id], textToolContent(text))
 
-	return []acp.SessionUpdate{acp.UpdateToolCall(id, acp.WithUpdateContent([]acp.ToolCallContent{textToolContent(text)}))}
+	return []acp.SessionUpdate{acp.UpdateToolCall(id, acp.WithUpdateContent(append([]acp.ToolCallContent(nil), snapshots[id]...)))}
 }
 
-func completeToolUpdate(tool codex.ToolEvent) acp.SessionUpdate {
+func completeToolUpdate(
+	tool codex.ToolEvent,
+	snapshotArgs ...map[acp.ToolCallId][]acp.ToolCallContent,
+) acp.SessionUpdate {
 	id := acp.ToolCallId(firstNonEmpty(tool.ID, "codex-tool"))
+	snapshots := toolSnapshotMap(snapshotArgs)
 
 	opts := []acp.ToolCallUpdateOpt{
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
@@ -648,10 +715,21 @@ func completeToolUpdate(tool codex.ToolEvent) acp.SessionUpdate {
 	}
 
 	if tool.Content != "" {
-		opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{textToolContent(tool.Content)}))
+		snapshots[id] = append(snapshots[id], textToolContent(tool.Content))
+		opts = append(opts, acp.WithUpdateContent(append([]acp.ToolCallContent(nil), snapshots[id]...)))
 	}
 
 	return acp.UpdateToolCall(id, opts...)
+}
+
+func toolSnapshotMap(
+	snapshotArgs []map[acp.ToolCallId][]acp.ToolCallContent,
+) map[acp.ToolCallId][]acp.ToolCallContent {
+	if len(snapshotArgs) > 0 && snapshotArgs[0] != nil {
+		return snapshotArgs[0]
+	}
+
+	return make(map[acp.ToolCallId][]acp.ToolCallContent)
 }
 
 func textToolContent(text string) acp.ToolCallContent {

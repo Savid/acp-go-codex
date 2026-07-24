@@ -44,6 +44,7 @@ escaped descendants are absent on Darwin.
 | `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |
 | `WithConcurrencyLimits(limits)` | Bounds active sessions, prompts, and client calls. |
 | `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |
+| `WithImageLimits(limits)` | Bounds decoded prompt and emitted image bytes. Each field defaults to 6 MiB; an explicit zero disables that policy bound. |
 | `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment()` | Explicitly accept Darwin's direct-child plus captured-process-group boundary. Rejected off Darwin; without it Darwin fails closed. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
@@ -132,6 +133,21 @@ Best-effort Darwin emits the containment selection but no provider-descendant
 snapshot, including no terminal zero. If cleanup returns
 `ErrProcessContainmentIncomplete`, hosts must retain the exact scratch and
 native-root reservations as quarantined resources.
+
+`ImageLimits` has four decoded-byte fields:
+
+```go
+type ImageLimits struct {
+	MaxInputBytesPerImage     int64
+	MaxInputBytesPerPrompt    int64
+	MaxOutputBytesPerImage    int64
+	MaxOutputBytesPerToolCall int64
+}
+```
+
+Negative values make initialization fail with invalid params. The prompt total
+is across every image in one request. The tool-call total is across the
+complete image content snapshot for one native image tool call.
 
 ## Store constants
 

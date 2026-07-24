@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 type rolloutRow struct {
@@ -35,7 +37,29 @@ func rolloutNativeThreadID(entries []SessionStoreEntry) string {
 }
 
 func (s *session) replayRollout(ctx context.Context, entries []SessionStoreEntry) error {
-	updates, err := rolloutReplayUpdates(entries)
+	imageState := newImageToolState()
+
+	updates, err := rolloutReplayUpdatesWithImages(entries, func(payload map[string]any) ([]acp.SessionUpdate, error) {
+		image := rolloutImageEvent(payload)
+		if reference, _ := payload[jsonFieldResult].(map[string]any); reference != nil {
+			subpath := stringFromAny(reference[imageArtifactRefKey])
+
+			artifact, loadErr := s.loadImageArtifact(ctx, subpath)
+			if loadErr != nil {
+				return nil, &imageOutputError{
+					reason:  imageOutputStorageFailure,
+					message: fmt.Sprintf("load image output for replay: %v", loadErr),
+				}
+			}
+
+			image.Result = artifact.Data
+		}
+
+		return s.imageEventUpdates(ctx, codex.Event{
+			Kind:  codex.EventImageCompleted,
+			Image: image,
+		}, &imageState)
+	})
 	if err != nil {
 		return err
 	}
@@ -58,6 +82,13 @@ func (s *session) replayRollout(ctx context.Context, entries []SessionStoreEntry
 }
 
 func rolloutReplayUpdates(entries []SessionStoreEntry) ([]acp.SessionUpdate, error) {
+	return rolloutReplayUpdatesWithImages(entries, nil)
+}
+
+func rolloutReplayUpdatesWithImages(
+	entries []SessionStoreEntry,
+	imageUpdates func(map[string]any) ([]acp.SessionUpdate, error),
+) ([]acp.SessionUpdate, error) {
 	rows := make([]rolloutRow, 0, len(entries))
 	hasEventUser := false
 	hasEventAgent := false
@@ -90,7 +121,18 @@ func rolloutReplayUpdates(entries []SessionStoreEntry) ([]acp.SessionUpdate, err
 		switch row.Type {
 		case valueEventMsg:
 			updates = append(updates, replayEventMsg(row.Payload)...)
-		case "response_item":
+		case valueResponseItem:
+			if stringFromAny(row.Payload[jsonFieldType]) == valueImageGenerationCall && imageUpdates != nil {
+				imageOutput, err := imageUpdates(row.Payload)
+				if err != nil {
+					return nil, err
+				}
+
+				updates = append(updates, imageOutput...)
+
+				continue
+			}
+
 			updates = append(updates, replayResponseItem(row.Payload, replayFallbacks{
 				messageUser:      !hasEventUser,
 				messageAgent:     !hasEventAgent,
@@ -220,16 +262,36 @@ func replayResponseItem(payload map[string]any, fallbacks replayFallbacks) []acp
 		return []acp.SessionUpdate{replayLocalShellCall(payload)}
 	case "web_search_call":
 		return []acp.SessionUpdate{replayToolStart(payload, "Web Search", acp.ToolKindSearch, acp.ToolCallStatusCompleted, payload)}
-	case "image_generation_call":
-		update := replayToolStart(payload, "Image generation", acp.ToolKindOther, replayStatus(stringFromAny(payload["status"])), payload)
-		if text := stringFromAny(payload["revised_prompt"]); text != "" && update.ToolCall != nil {
-			update.ToolCall.Content = []acp.ToolCallContent{textToolContent(text)}
-		}
-
-		return []acp.SessionUpdate{update}
+	case valueImageGenerationCall:
+		return nil
 	}
 
 	return nil
+}
+
+func rolloutImageEvent(payload map[string]any) codex.ImageEvent {
+	raw := make(map[string]any, len(payload))
+	for key, value := range payload {
+		switch key {
+		case jsonFieldResult:
+		case "saved_path", "savedPath":
+			if path := stringFromAny(value); path != "" {
+				raw["savedPath"] = filepath.Base(path)
+			}
+		default:
+			raw[key] = value
+		}
+	}
+
+	return codex.ImageEvent{
+		ID:            firstNonEmpty(stringFromAny(payload["id"]), stringFromAny(payload["call_id"])),
+		Kind:          valueImageGeneration,
+		Status:        stringFromAny(payload["status"]),
+		Result:        stringFromAny(payload[jsonFieldResult]),
+		SavedPath:     firstNonEmpty(stringFromAny(payload["saved_path"]), stringFromAny(payload["savedPath"])),
+		RevisedPrompt: firstNonEmpty(stringFromAny(payload["revised_prompt"]), stringFromAny(payload["revisedPrompt"])),
+		Raw:           raw,
+	}
 }
 
 func replayToolStart(payload map[string]any, title string, kind acp.ToolKind, status acp.ToolCallStatus, rawInput any) acp.SessionUpdate {
@@ -285,9 +347,9 @@ func replayLocalShellCall(payload map[string]any) acp.SessionUpdate {
 
 func replayStatus(status string) acp.ToolCallStatus {
 	switch strings.ToLower(status) {
-	case "completed", "complete", statusDone, "succeeded", "success":
+	case statusCompleted, "complete", statusDone, "succeeded", "success":
 		return acp.ToolCallStatusCompleted
-	case "failed", jsonFieldError, "errored":
+	case statusFailed, jsonFieldError, statusErrored:
 		return acp.ToolCallStatusFailed
 	case "pending":
 		return acp.ToolCallStatusPending

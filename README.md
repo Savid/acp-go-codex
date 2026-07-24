@@ -123,6 +123,12 @@ inherited environment markers can also be scrubbed.
 - Prompt streaming for messages, reasoning, plans, tool calls, diffs, usage, and
   session metadata, including durable native turn and terminal assistant
   identities.
+- Validated PNG, JPEG, GIF, and WebP prompt images, with selected-model input
+  gating and decoded-byte limits.
+- Native image generation and image-view results as ACP tool-call image
+  content. Image generation has full store-backed replay parity while the
+  bounded artifact record remains available; a replayed image view renders as
+  its plain tool call without re-materialized typed image content.
 - Structured output through session-level JSON Schema on `turn/start`.
 - Command, file, and generic permission prompts, tool user input, and MCP
   elicitation bridging.

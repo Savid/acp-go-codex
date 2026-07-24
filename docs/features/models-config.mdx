@@ -38,6 +38,13 @@ ACP config categories are:
 
 Change mode after session start with `session/set_config_option`.
 
+Prompt-image admission uses the currently selected model on every turn. When
+Codex model discovery supplies `inputModalities`, a list containing `image`
+accepts validated image input and a list without it rejects the prompt before
+`turn/start`. If the selected model or its modality field is absent, the
+adapter forwards the validated image and lets Codex decide. Model config
+metadata does not publish a separate inferred feature list.
+
 ## Seed files
 
 `WithSeedFiles` (CLI `-seed-file <relpath>=<hostpath>`) writes config files into

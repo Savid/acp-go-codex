@@ -133,6 +133,7 @@ type Thread struct {
 type ThreadHistory struct {
 	Thread Thread
 	Items  []map[string]any
+	Events []Event
 	Raw    map[string]any
 }
 
@@ -209,7 +210,10 @@ type Model struct {
 	Context                int64
 	DefaultReasoningEffort string
 	ReasoningEfforts       []ModelReasoningEffort
-	Raw                    map[string]any
+	// InputModalities is the app-server's authoritative list of input
+	// modalities for the model. nil means the field was absent upstream.
+	InputModalities []string
+	Raw             map[string]any
 }
 
 type EventKind string
@@ -221,6 +225,8 @@ const (
 	EventToolStarted       EventKind = "tool_started"
 	EventToolDelta         EventKind = "tool_delta"
 	EventToolCompleted     EventKind = "tool_completed"
+	EventImageStarted      EventKind = "image_started"
+	EventImageCompleted    EventKind = "image_completed"
 	EventDiffUpdated       EventKind = "diff_updated"
 	EventUsageUpdated      EventKind = "usage_updated"
 	EventAccountUpdated    EventKind = "account_updated"
@@ -261,6 +267,7 @@ type Event struct {
 	Diff       string
 	Plan       []PlanStep
 	Tool       ToolEvent
+	Image      ImageEvent
 	StopReason StopReason
 	Usage      Usage
 	TokenUsage TokenUsage
@@ -271,6 +278,17 @@ type Event struct {
 	RawParams  json.RawMessage
 	RawJSON    string
 	Err        error
+}
+
+type ImageEvent struct {
+	ID            string
+	Kind          string
+	Status        string
+	Result        string
+	SavedPath     string
+	RevisedPrompt string
+	ArtifactRef   string
+	Raw           map[string]any
 }
 
 type ToolEvent struct {

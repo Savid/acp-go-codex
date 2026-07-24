@@ -56,8 +56,10 @@ type SessionStore interface {
 ```
 
 Rows are stored in the `codex-rollout-jsonl-v1` format. The main session lives
-at the empty subpath (`SessionStoreMainSubpath`); additional subpaths hold
-related generations.
+at the empty subpath (`SessionStoreMainSubpath`). Session-owned image artifact
+records live under additional subpaths. Each generated image has one canonical
+record keyed by stable native identity and byte fingerprint; rollout rows carry
+only the artifact reference, while raw events carry sanitized metadata.
 
 The adapter derives the terminal native checkpoint from these unmodified rows:
 the last turn's `turn_id` and the final assistant `response_item.id` are exposed
@@ -85,6 +87,14 @@ must be present exactly once, and unlisted subpaths are hidden atomically.
 `Delete` writes a tombstone first; deleting the main subpath cascades to every
 subpath and hides the session from list, load, and resume before residual native
 cleanup is attempted.
+
+Image artifact records are bounded and are reclaimed by adapter cleanup in
+addition to cascading session deletion: each record expires 24 hours after it
+is written. A replay or load that needs bytes no
+longer present fails with `stage:"image_output"` and
+`reason:"storage_failed"`; it never emits a transcript with missing image
+content. A host that needs a longer image history should persist the image
+content when it is first delivered.
 
 Keys with an empty `SessionID` are rejected by `Append` and `Replace` with a
 "session id is required" error; `Delete` of such a key is a pure no-op and

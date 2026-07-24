@@ -117,6 +117,9 @@ type Options struct {
 	// codex_turn_failed error (cause "timeout"). The default of 0 disables the
 	// deadline.
 	TurnTimeout time.Duration
+	// ImageLimits bounds decoded image bytes accepted from prompts and emitted
+	// in session updates.
+	ImageLimits ImageLimits
 	// SeedFiles maps relative paths to file contents written into the resolved
 	// CODEX_HOME before each Codex process launches, so Codex reads them as its
 	// own config (e.g. config.toml). Paths are confined to CODEX_HOME.
@@ -154,6 +157,7 @@ func applyOptions(opts []Option) Options {
 		AgentTitle:              "acp-go-codex",
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
+		ImageLimits:             defaultImageLimits(),
 		clientFactory: func(ctx context.Context, options codex.Options) (codex.Client, error) {
 			return codex.NewAppServerClient(ctx, options)
 		},

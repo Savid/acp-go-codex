@@ -43,7 +43,7 @@ func TestRolloutReplayResponseItemVariants(t *testing.T) {
 			outputs++
 		}
 	}
-	if users != 1 || agents != 1 || thoughts != 1 || starts != 3 || outputs != 1 {
+	if users != 1 || agents != 1 || thoughts != 1 || starts != 2 || outputs != 1 {
 		t.Fatalf("counts users=%d agents=%d thoughts=%d starts=%d outputs=%d updates=%#v", users, agents, thoughts, starts, outputs, updates)
 	}
 

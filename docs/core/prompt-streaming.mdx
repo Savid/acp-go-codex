@@ -10,10 +10,33 @@ ends — successfully, by cancellation, or with a failure.
 
 Prompt content fails closed before any turn starts: an empty prompt, an audio
 block, or an unknown or empty content block is rejected with invalid params
-whose data is `{"error": "unsupported", "field": "prompt"}`, and an image with
-neither inline data nor a URI is rejected with
-`{"field": "prompt.image", "error": "missing image data or uri"}`. Nothing is
+whose data is `{"error": "unsupported", "field": "prompt"}`. Nothing is
 silently dropped.
+
+Image blocks and image-typed embedded blob resources require inline base64
+data. A URI is provenance only and is never fetched. Accepted MIME values are
+exactly `image/png`, `image/jpeg`, `image/gif`, and `image/webp`. The adapter
+decodes and structurally inspects every image, rejects animated GIF, WebP, and
+APNG input, verifies the declared MIME against the bytes, and applies
+`ImageLimits` before starting the native turn.
+
+Image invalid-params data always contains `field:"prompt.image"`, an `index`
+counted across image-bearing blocks, and one of these `error` values:
+
+- `missing_data`
+- `invalid_base64`
+- `invalid_media_type`
+- `media_type_mismatch`
+- `animated_not_supported`
+- `invalid_dimensions`
+- `too_large`
+- `unsupported_by_model`
+
+`too_large` also includes decoded `sizeBytes` and `maxBytes`. Validation stops
+at the first failing image in request order. At prompt time the selected
+model's native `inputModalities` field is authoritative when present: a
+text-only declaration rejects the image, an `image` declaration accepts it,
+and absent model metadata forwards the validated input to Codex.
 
 ## From Codex events to ACP updates
 
@@ -23,8 +46,17 @@ silently dropped.
 | reasoning text | `agent_thought_chunk` |
 | plan changes | `plan` |
 | tool start/output/complete | tool call updates |
+| image generation / image view | tool call with ACP image content |
 | usage | usage update |
 | account change | session metadata update |
+
+Image tool updates carry complete content snapshots. A native failed image
+tool emits failed tool state without fabricated content. Successful output is
+decoded, raster-sniffed, bounded, and emitted live with its sniffed MIME.
+Image generation is stored for replay, so `session/load` re-materializes it as
+typed image content; a replayed image view renders as its plain tool call
+without typed image content. Adapter failures in that path first publish failed
+tool state, then fail the turn with `stage:"image_output"`.
 
 At the terminal fence, a standard session metadata update carries the native
 turn checkpoint at `_meta.codex.turnId` plus the final assistant response-item

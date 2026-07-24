@@ -932,6 +932,20 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	if _, err := materializedLimitAgent.loadMaterializedSession(ctx, LoadSessionRequest("stored", "/tmp/project"), materializedEntries); err == nil {
 		t.Fatal("loadMaterializedSession ignored store backpressure")
 	}
+	replayErrorAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return newSpyCodexClient(), nil
+	}))
+	replayErrorAgent.setAgentClient(&errorAgentClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		updateErr:            errors.New("replay update failed"),
+	})
+	if _, err := replayErrorAgent.loadMaterializedSession(
+		ctx,
+		LoadSessionRequest("replay-error", "/tmp/project"),
+		materializedEntries,
+	); err == nil {
+		t.Fatal("loadMaterializedSession ignored post-start replay error")
+	}
 	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-replay", "/tmp/project"), []SessionStoreEntry{SessionStoreEntry(`not-json`)}); err == nil {
 		t.Fatal("loadMaterializedSession ignored replay error")
 	}

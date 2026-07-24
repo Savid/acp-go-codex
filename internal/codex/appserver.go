@@ -2,10 +2,12 @@ package codex
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +51,9 @@ const (
 	fieldChatGPTAccountID = "chatgptAccountId"
 	fieldChatGPTPlanType  = "chatgptPlanType"
 	fieldMessage          = "message"
+	fieldItem             = "item"
+	fieldResult           = "result"
+	fieldSavedPath        = "savedPath"
 
 	notifyItemAgentMessageDelta = "item/agentMessage/delta"
 	notifyItemStarted           = "item/started"
@@ -61,6 +66,8 @@ const (
 	itemTypeUserMessage      = "userMessage"
 	itemTypeCommandExecution = "commandExecution"
 	itemTypeMCPToolCall      = "mcpToolCall"
+	itemTypeImageGeneration  = "imageGeneration"
+	itemTypeImageView        = "imageView"
 
 	statusDone       = "done"
 	statusFailed     = "failed"
@@ -257,11 +264,63 @@ func (c *AppServerClient) ReadThread(ctx context.Context, req ThreadReadRequest)
 		return ThreadHistory{}, normalizeThreadError(err)
 	}
 
+	items := mapSlice(resp, "items", "messages")
+	events := threadHistoryEvents(items)
+	safeItems := sanitizedThreadHistoryItems(items)
+
+	safeResponse := make(map[string]any, len(resp))
+	for key, value := range resp {
+		safeResponse[key] = value
+	}
+
+	if _, ok := resp["items"]; ok {
+		safeResponse["items"] = safeItems
+	}
+
+	if _, ok := resp["messages"]; ok {
+		safeResponse["messages"] = safeItems
+	}
+
 	return ThreadHistory{
 		Thread: threadFromResponse(resp),
-		Items:  mapSlice(resp, "items", "messages"),
-		Raw:    resp,
+		Items:  safeItems,
+		Events: events,
+		Raw:    safeResponse,
 	}, nil
+}
+
+func threadHistoryEvents(items []map[string]any) []Event {
+	events := make([]Event, 0, len(items))
+	for _, item := range items {
+		params := map[string]any{fieldItem: item, fieldItemID: stringValue(item, fieldID)}
+
+		event := completedItemEvent(Event{ItemID: stringValue(item, fieldID)}, params)
+		if event.Kind == EventRaw {
+			continue
+		}
+
+		if event.Kind == EventImageCompleted {
+			event.RawParams = sanitizedImageEventParams(params)
+		}
+
+		events = append(events, event)
+	}
+
+	return events
+}
+
+func sanitizedThreadHistoryItems(items []map[string]any) []map[string]any {
+	safe := make([]map[string]any, len(items))
+	for index, item := range items {
+		switch stringValue(item, fieldType) {
+		case itemTypeImageGeneration, itemTypeImageView:
+			safe[index] = sanitizedImageItem(item)
+		default:
+			safe[index] = item
+		}
+	}
+
+	return safe
 }
 
 func (c *AppServerClient) ListTurns(ctx context.Context, req ThreadTurnsListRequest) (ThreadTurnsListResponse, error) {
@@ -546,6 +605,7 @@ func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {
 			Context:                int64Value(item, "contextWindow"),
 			DefaultReasoningEffort: stringValue(item, "defaultReasoningEffort"),
 			ReasoningEfforts:       modelReasoningEfforts(item),
+			InputModalities:        stringSliceValue(item["inputModalities"]),
 			Raw:                    item,
 		})
 	}
@@ -1021,6 +1081,10 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Kind = EventRaw
 	}
 
+	if event.Kind == EventImageStarted || event.Kind == EventImageCompleted {
+		event.RawParams = sanitizedImageEventParams(params)
+	}
+
 	return event
 }
 
@@ -1037,12 +1101,19 @@ func errorEventText(params map[string]any, raw json.RawMessage) string {
 }
 
 func startedItemEvent(event Event, params map[string]any) Event {
-	item := mapValue(params, "item")
+	item := mapValue(params, fieldItem)
 	if item == nil {
 		item = params
 	}
 
 	if !toolLikeItemType(stringValue(item, fieldType)) {
+		if stringValue(item, fieldType) == itemTypeImageGeneration {
+			event.Kind = EventImageStarted
+			event.Image = imageEventFromItem(params)
+
+			return event
+		}
+
 		event.Kind = EventRaw
 
 		return event
@@ -1069,7 +1140,7 @@ func accountFromResponse(resp map[string]any) Account {
 }
 
 func completedItemEvent(event Event, params map[string]any) Event {
-	item := mapValue(params, "item")
+	item := mapValue(params, fieldItem)
 	if item == nil {
 		item = params
 	}
@@ -1087,12 +1158,69 @@ func completedItemEvent(event Event, params map[string]any) Event {
 		event.Kind = EventRaw
 	case itemTypeCommandExecution, "fileChange", itemTypeMCPToolCall, "dynamicToolCall", "function_call", "custom_tool_call", valueTool:
 		event.Kind = EventToolCompleted
-		event.Tool = toolEventFromItem(params, "completed")
+		event.Tool = toolEventFromItem(params, string(EventCompleted))
+	case itemTypeImageGeneration, itemTypeImageView:
+		event.Kind = EventImageCompleted
+		event.Image = imageEventFromItem(params)
 	default:
 		event.Kind = EventRaw
 	}
 
 	return event
+}
+
+func imageEventFromItem(params map[string]any) ImageEvent {
+	item := mapValue(params, fieldItem)
+	if item == nil {
+		item = params
+	}
+
+	return ImageEvent{
+		ID:            firstNonEmpty(stringValue(item, fieldID), stringValue(params, "itemId")),
+		Kind:          stringValue(item, fieldType),
+		Status:        stringValue(item, fieldStatus),
+		Result:        stringValue(item, fieldResult),
+		SavedPath:     firstNonEmpty(stringValue(item, fieldSavedPath), stringValue(item, fieldPath)),
+		RevisedPrompt: stringValue(item, "revisedPrompt"),
+		Raw:           sanitizedImageItem(item),
+	}
+}
+
+func sanitizedImageEventParams(params map[string]any) json.RawMessage {
+	safe := make(map[string]any, len(params))
+	for key, value := range params {
+		safe[key] = value
+	}
+
+	if item := mapValue(params, fieldItem); item != nil {
+		safe[fieldItem] = sanitizedImageItem(item)
+	} else {
+		safe = sanitizedImageItem(params)
+	}
+
+	raw, _ := json.Marshal(safe)
+
+	return raw
+}
+
+func sanitizedImageItem(item map[string]any) map[string]any {
+	safe := make(map[string]any, len(item))
+	for key, value := range item {
+		switch key {
+		case fieldResult:
+			if encoded, ok := value.(string); ok && encoded != "" {
+				safe["resultBytes"] = base64.StdEncoding.DecodedLen(len(encoded))
+			}
+		case fieldSavedPath, fieldPath:
+			if value, ok := value.(string); ok && value != "" {
+				safe[key] = filepath.Base(value)
+			}
+		default:
+			safe[key] = value
+		}
+	}
+
+	return safe
 }
 
 func toolLikeItemType(itemType string) bool {
@@ -1124,7 +1252,7 @@ func planFromParams(params map[string]any) []PlanStep {
 }
 
 func toolEventFromItem(params map[string]any, status string) ToolEvent {
-	item := mapValue(params, "item")
+	item := mapValue(params, fieldItem)
 	if item == nil {
 		item = params
 	}
@@ -1140,10 +1268,10 @@ func toolEventFromItem(params map[string]any, status string) ToolEvent {
 		Locations: itemLocations(item),
 		Content: firstNonEmpty(
 			stringValue(item, "output"),
-			stringValue(item, "result"),
+			stringValue(item, fieldResult),
 			stringValue(item, fieldMessage),
 			contentText(item["output"]),
-			contentText(item["result"]),
+			contentText(item[fieldResult]),
 			contentText(item["content"]),
 		),
 		Raw: item,
@@ -1227,7 +1355,7 @@ func contentText(value any) string {
 			return nested
 		}
 
-		return contentText(typed["result"])
+		return contentText(typed[fieldResult])
 	default:
 		return ""
 	}
@@ -1342,7 +1470,7 @@ func planStatusFromString(status string) PlanStepStatus {
 	switch strings.ToLower(status) {
 	case "inprogress", "in_progress", "active", "running":
 		return PlanStepInProgress
-	case "completed", "complete", statusDone:
+	case string(EventCompleted), "complete", statusDone:
 		return PlanStepCompleted
 	default:
 		return PlanStepPending

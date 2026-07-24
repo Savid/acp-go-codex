@@ -2,7 +2,6 @@ package codex
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +13,10 @@ import (
 )
 
 const jsonRPCVersion = "2.0"
+
+// maxNativeLineBytes bounds one app-server stdout line so a single oversize
+// frame cannot force an unbounded buffer allocation before the JSON is parsed.
+const maxNativeLineBytes = 10 * 1024 * 1024
 
 // errSkippableLine marks a native stdout line that is malformed or empty but
 // does not indicate a dead connection. The read loop skips and counts these
@@ -54,7 +57,7 @@ func (e *rpcError) Error() string {
 }
 
 type lineTransport struct {
-	r    *bufio.Reader
+	s    *bufio.Scanner
 	w    io.Writer
 	proc *process
 	mu   sync.Mutex
@@ -66,8 +69,11 @@ type lineTransport struct {
 }
 
 func newLineTransport(r io.Reader, w io.Writer, proc *process) *lineTransport {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxNativeLineBytes)
+
 	return &lineTransport{
-		r:     bufio.NewReaderSize(r, 1024*1024),
+		s:     scanner,
 		w:     w,
 		proc:  proc,
 		grace: processExitGrace,
@@ -97,18 +103,22 @@ func (t *lineTransport) Send(ctx context.Context, msg rpcMessage) error {
 }
 
 func (t *lineTransport) Recv() (rpcMessage, string, error) {
-	line, err := t.r.ReadBytes('\n')
-	if err != nil {
+	if !t.s.Scan() {
+		err := t.s.Err()
+		if err == nil {
+			err = io.EOF
+		}
+
 		return rpcMessage{}, "", t.readError(err)
 	}
 
-	raw := string(bytes.TrimRight(line, "\r\n"))
+	raw := string(t.s.Bytes())
 	if raw == "" {
 		return rpcMessage{}, raw, fmt.Errorf("%w: empty line", errSkippableLine)
 	}
 
 	var msg rpcMessage
-	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+	if err := json.Unmarshal(t.s.Bytes(), &msg); err != nil {
 		return rpcMessage{}, raw, fmt.Errorf("%w: %w", errSkippableLine, err)
 	}
 

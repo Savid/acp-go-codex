@@ -85,3 +85,11 @@ JSON. Enable `_codex/rawEvent` only when the host is prepared to receive and
 protect that data. Telemetry never carries rollout rows, prompt text, or tool
 payloads by default; see [Observability](/docs/operations/observability) for the
 privacy defaults.
+
+Prompt images are read only from the base64 bytes in the ACP request; image
+URIs are never followed. Large validated inputs are materialized as mode-0600
+files in an adapter-owned scratch directory and removed when the prompt call
+returns. Native image output paths are accepted only when their resolved target
+is a regular file inside the workspace, adapter scratch roots, or Codex
+`generated_images` directory. Raw image events redact base64 and expose only
+path basenames.

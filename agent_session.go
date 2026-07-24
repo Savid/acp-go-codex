@@ -540,7 +540,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return resp, resumeErr
 	}
 
-	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)
+	path, scratchRelease, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -896,6 +896,12 @@ func (a *Agent) listStoredSessions(ctx context.Context, cwd *string, activeIDs m
 		return nil, err
 	}
 
+	for _, summary := range summaries {
+		if err := a.sweepSessionImageArtifacts(listCtx, summary.SessionID); err != nil {
+			return nil, err
+		}
+	}
+
 	filterCwd := ""
 	if cwd != nil {
 		filterCwd = *cwd
@@ -994,7 +1000,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse(resp), nil
 	}
 
-	path, scratchRelease, err := a.materializeStoredRollout(ctx, entries)
+	path, scratchRelease, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}

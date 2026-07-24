@@ -21,6 +21,10 @@
 // Terminal prompt responses and replay updates expose the native Codex turn ID
 // and final assistant response-item ID under _meta.codex.
 //
+// Prompt image blocks accept validated PNG, JPEG, GIF, and WebP data. Native
+// image generation and image-view results are emitted as ACP tool-call image
+// content. [WithImageLimits] controls decoded-byte bounds in both directions.
+//
 // Hosts that need structured output can attach [CodexOptions] with
 // [WithSessionCodexOptions] or use [WithSessionOutputSchema]. The schema is
 // sent to Codex on each turn/start and parsed response objects are returned

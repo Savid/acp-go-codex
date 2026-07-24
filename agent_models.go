@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -11,6 +12,14 @@ var (
 	codexEffortValues = []string{effortValueNone, "minimal", effortValueLow, effortValueMedium, effortValueHigh, "xhigh"}
 	codexTierValues   = []string{"auto", valueDefault, tierValueFlex, tierValuePriority}
 	codexPersonality  = []string{effortValueNone, personalityFriendly, personalityPragmatic}
+)
+
+type imageInputSupport uint8
+
+const (
+	imageInputUnknown imageInputSupport = iota
+	imageInputUnsupported
+	imageInputSupported
 )
 
 const (
@@ -88,7 +97,9 @@ func modelConfigValues(current string, models []codex.Model) []acp.SessionConfig
 	seen := map[string]struct{}{}
 
 	values := make([]acp.SessionConfigSelectOption, 0, len(models)+1)
-	for _, model := range models {
+	for index := range models {
+		model := &models[index]
+
 		id := firstNonEmpty(model.ID, model.Name)
 		if id == "" {
 			continue
@@ -103,7 +114,7 @@ func modelConfigValues(current string, models []codex.Model) []acp.SessionConfig
 			Name:        firstNonEmpty(model.Name, id),
 			Value:       acp.SessionConfigValueId(id),
 			Description: stringPtrIfNotEmpty(model.Description),
-			Meta:        modelMeta(model, id),
+			Meta:        modelMeta(*model, id),
 		})
 	}
 
@@ -131,23 +142,24 @@ func modelMeta(model codex.Model, id string) map[string]any {
 
 	if len(efforts) > 0 {
 		codexMeta["supportedEffortLevels"] = efforts
-		codexMeta["capabilities"] = []string{valueReasoning}
-	}
-
-	if rawCapabilities, ok := model.Raw["capabilities"].([]any); ok {
-		capabilities := make([]string, 0, len(rawCapabilities))
-		for _, raw := range rawCapabilities {
-			if value, ok := raw.(string); ok && value != "" {
-				capabilities = append(capabilities, value)
-			}
-		}
-
-		if len(capabilities) > 0 {
-			codexMeta["capabilities"] = capabilities
-		}
 	}
 
 	return map[string]any{codexMetaKey: codexMeta}
+}
+
+func selectedModelImageSupport(models []codex.Model, selected string) imageInputSupport {
+	model := modelByID(selected, models)
+	if model == nil || len(model.InputModalities) == 0 {
+		return imageInputUnknown
+	}
+
+	for _, modality := range model.InputModalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			return imageInputSupported
+		}
+	}
+
+	return imageInputUnsupported
 }
 
 func effortConfigValues(currentModel string, currentEffort string, models []codex.Model) (acp.SessionConfigValueId, []acp.SessionConfigSelectOption) {

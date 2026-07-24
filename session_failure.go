@@ -38,6 +38,24 @@ func (s *session) mapTurnFailure(err error) error {
 		jsonFieldMessage: err.Error(),
 	}
 
+	var imageErr *imageOutputError
+	if errors.As(err, &imageErr) {
+		data[jsonFieldCause] = codex.CauseTransport
+		data[jsonFieldMessage] = imageErr.message
+		data["stage"] = imageOutputStage
+
+		data[jsonFieldReason] = imageErr.reason
+		if imageErr.sizeBytes > 0 || imageErr.reason == imageOutputTooLarge {
+			data["sizeBytes"] = imageErr.sizeBytes
+		}
+
+		if imageErr.maxBytes > 0 || imageErr.reason == imageOutputTooLarge {
+			data["maxBytes"] = imageErr.maxBytes
+		}
+
+		return acp.NewInternalError(data)
+	}
+
 	var (
 		tf       *codex.TurnFailedError
 		procExit *codex.ProcessExitError

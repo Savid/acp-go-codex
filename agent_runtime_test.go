@@ -1277,14 +1277,14 @@ func (c deadlineEventClient) RunTurn(ctx context.Context, _ codex.TurnStartReque
 func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	path, release, err := agent.materializeStoredRollout(ctx, nil)
+	path, release, err := agent.materializeStoredRollout(ctx, "", nil)
 	require.NoError(t, err)
 	require.Empty(t, path)
 	release()
 	agent.options.RuntimeResourceHooks.ReserveScratchRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
 		return nil, errors.New("scratch admission failed")
 	}
-	_, _, err = agent.materializeStoredRollout(ctx, []SessionStoreEntry{json.RawMessage(`{}`)})
+	_, _, err = agent.materializeStoredRollout(ctx, "", []SessionStoreEntry{json.RawMessage(`{}`)})
 	require.ErrorContains(t, err, "scratch admission failed")
 
 	require.Equal(t, map[string]string{"a": "b"}, cloneAny(map[string]string{"a": "b"}))

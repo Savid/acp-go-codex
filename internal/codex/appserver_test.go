@@ -106,8 +106,12 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 		t.Fatalf("ListThreads len=%d err=%v", len(threads), err)
 	}
 	history, err := client.ReadThread(ctx, ThreadReadRequest{ThreadID: "thread-1"})
-	if err != nil || len(history.Items) != 1 {
+	if err != nil || len(history.Items) != 3 || len(history.Events) != 2 {
 		t.Fatalf("ReadThread items=%d err=%v", len(history.Items), err)
+	}
+	historyJSON, err := json.Marshal(history.Raw)
+	if err != nil || strings.Contains(string(historyJSON), "eA==") || strings.Contains(string(historyJSON), "/secret/") {
+		t.Fatalf("ReadThread exposed image payload: %s err=%v", historyJSON, err)
 	}
 	turns, err := client.ListTurns(ctx, ThreadTurnsListRequest{ThreadID: "thread-1", Limit: 2, SortDirection: "asc"})
 	if err != nil || len(turns.Turns) != 1 || turns.NextCursor != "next" {
@@ -156,7 +160,7 @@ func TestAppServerClientModelAndAccountMethods(t *testing.T) {
 
 	ctx := context.Background()
 	models, err := client.ModelList(ctx)
-	if err != nil || len(models) != 2 || models[0].ID != "gpt-a" || models[0].Name != "GPT A" || models[0].Description != "A model" || models[0].DefaultReasoningEffort != "medium" || len(models[0].ReasoningEfforts) != 2 {
+	if err != nil || len(models) != 2 || models[0].ID != "gpt-a" || models[0].Name != "GPT A" || models[0].Description != "A model" || models[0].DefaultReasoningEffort != "medium" || len(models[0].ReasoningEfforts) != 2 || len(models[0].InputModalities) != 2 {
 		t.Fatalf("ModelList = %#v err=%v", models, err)
 	}
 	account, err := client.AccountRead(ctx)
@@ -320,9 +324,11 @@ func TestAppServerItemMappingHelpers(t *testing.T) {
 	if startedItemEvent(Event{}, map[string]any{"item": map[string]any{"type": "agentMessage"}}).Kind != EventRaw {
 		t.Fatal("started agent message item should stay raw")
 	}
+
 	if !toolLikeItemType("commandExecution") || toolLikeItemType("agentMessage") {
 		t.Fatal("tool-like item type classification failed")
 	}
+
 	tool := toolEventFromItem(map[string]any{"itemId": "outer", "item": map[string]any{"id": "inner", "type": "commandExecution", "title": "Run", "status": "done", "output": "ok", "locations": []any{map[string]any{"path": "/tmp/a"}}}}, "completed")
 	if tool.ID != "inner" || tool.Kind != "commandExecution" || tool.Content != "ok" || len(tool.Locations) != 1 {
 		t.Fatalf("tool event = %#v", tool)
@@ -344,6 +350,68 @@ func TestAppServerItemMappingHelpers(t *testing.T) {
 	}
 	if locations := stringSliceValue([]string{"a.go"}); len(locations) != 1 || locations[0] != "a.go" {
 		t.Fatalf("string locations = %#v", locations)
+	}
+}
+
+func TestAppServerImageItemMapping(t *testing.T) {
+	startedImage := eventFromRPC(rpcEvent{Method: notifyItemStarted, Params: mustRaw(map[string]any{
+		"itemId": "outer",
+		"item": map[string]any{
+			"type":          itemTypeImageGeneration,
+			"status":        "inProgress",
+			"result":        "eA==",
+			"savedPath":     "/secret/generated.png",
+			"revisedPrompt": "draw it",
+		},
+	})})
+	if startedImage.Kind != EventImageStarted || startedImage.Image.ID != "outer" ||
+		startedImage.Image.SavedPath != "/secret/generated.png" ||
+		strings.Contains(string(startedImage.RawParams), "eA==") ||
+		strings.Contains(string(startedImage.RawParams), "/secret/") {
+		t.Fatalf("started image item = %#v raw=%s", startedImage, startedImage.RawParams)
+	}
+	completedImage := eventFromRPC(rpcEvent{Method: notifyItemCompleted, Params: mustRaw(map[string]any{
+		"item": map[string]any{
+			"id":            "image",
+			"type":          itemTypeImageView,
+			"status":        "completed",
+			"result":        "eA==",
+			"path":          "/secret/view.png",
+			"revisedPrompt": "view it",
+		},
+	})})
+	if completedImage.Kind != EventImageCompleted || completedImage.Image.ID != "image" ||
+		completedImage.Image.Kind != itemTypeImageView || completedImage.Image.RevisedPrompt != "view it" ||
+		completedImage.Image.Raw["resultBytes"] == nil || completedImage.Image.Raw["path"] != "view.png" {
+		t.Fatalf("completed image item = %#v", completedImage)
+	}
+	topLevelImage := imageEventFromItem(map[string]any{
+		"itemId": "top",
+		"type":   itemTypeImageGeneration,
+		"result": 42,
+		"path":   42,
+	})
+	if topLevelImage.ID != "top" {
+		t.Fatalf("top-level image item = %#v", topLevelImage)
+	}
+	if raw := sanitizedImageEventParams(map[string]any{
+		"type":       itemTypeImageGeneration,
+		"result":     "eA==",
+		"savedPath":  "/secret/top.png",
+		"otherValue": "kept",
+	}); strings.Contains(string(raw), "eA==") || strings.Contains(string(raw), "/secret/") {
+		t.Fatalf("top-level image params were not sanitized: %s", raw)
+	}
+	safe := sanitizedImageItem(map[string]any{
+		"type":       itemTypeImageGeneration,
+		"result":     "",
+		"savedPath":  "",
+		"path":       42,
+		"revised":    true,
+		"otherValue": "kept",
+	})
+	if _, ok := safe["result"]; ok || safe["otherValue"] != "kept" {
+		t.Fatalf("sanitized image item = %#v", safe)
 	}
 }
 
@@ -895,7 +963,23 @@ func (t *scriptTransport) response(method string) any {
 	case methodThreadList:
 		return map[string]any{"data": []any{map[string]any{"id": "thread-1"}}}
 	case methodThreadRead:
-		return map[string]any{"thread": map[string]any{"id": "thread-1"}, "items": []any{map[string]any{"id": "item-1"}}}
+		items := []any{
+			map[string]any{"id": "item-1"},
+			map[string]any{
+				"id":        "image-1",
+				"type":      itemTypeImageGeneration,
+				"status":    "completed",
+				"result":    "eA==",
+				"savedPath": "/secret/generated.png",
+			},
+			map[string]any{"id": "message-1", "type": itemTypeAgentMessage, "text": "done"},
+		}
+
+		return map[string]any{
+			"thread":   map[string]any{"id": "thread-1"},
+			"items":    items,
+			"messages": items,
+		}
 	case methodThreadTurnsList:
 		return map[string]any{"data": []any{map[string]any{"id": "turn-1"}}, "nextCursor": "next"}
 	case methodTurnStart:
@@ -917,6 +1001,7 @@ func (t *scriptTransport) response(method string) any {
 				"displayName":            "GPT A",
 				"description":            "A model",
 				"defaultReasoningEffort": "medium",
+				"inputModalities":        []any{"text", "image"},
 				"supportedReasoningEfforts": []any{
 					map[string]any{"description": "ignored"},
 					map[string]any{"reasoningEffort": "low", "description": "fast"},

@@ -53,6 +53,13 @@ func TestLineTransportErrors(t *testing.T) {
 	}
 }
 
+func TestLineTransportRejectsOversizeLine(t *testing.T) {
+	oversize := strings.Repeat("a", maxNativeLineBytes+1)
+	if _, _, err := newLineTransport(strings.NewReader(oversize), io.Discard, nil).Recv(); err == nil {
+		t.Fatal("oversize native line accepted")
+	}
+}
+
 func TestRPCConnErrorBranches(t *testing.T) {
 	transport := newScriptTransport()
 	conn := newRPCConn(transport, nil)

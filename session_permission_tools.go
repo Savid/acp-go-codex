@@ -301,9 +301,9 @@ func (p *permissionToolEventPublication) finish(published bool) {
 	}
 }
 
-func (p permissionToolEventPublication) updates() []acp.SessionUpdate {
+func (p permissionToolEventPublication) updates(snapshots map[acp.ToolCallId][]acp.ToolCallContent) []acp.SessionUpdate {
 	if !p.transition {
-		return eventUpdates(p.event)
+		return eventUpdatesWithToolSnapshots(p.event, snapshots)
 	}
 
 	tool := p.event.Tool

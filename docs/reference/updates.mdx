@@ -18,8 +18,14 @@ Codex `app-server` events are mapped to ACP session updates:
 | `agent_thought_chunk` | reasoning text |
 | `plan` | plan changes |
 | tool call updates | tool start / output / complete, including diffs |
+| tool call image content | image generation and image-view lifecycle |
 | usage update | usage events |
 | session metadata update | account changes |
+
+Image tools emit complete content snapshots. Successful content uses the
+standard ACP image block with sniffed MIME and base64 data. Native failed image
+tools emit failed status with no invented content. Adapter-side image
+materialization failures emit failed tool status and then fail the turn.
 
 The adapter also emits an identity-bearing session metadata update for the
 native turn checkpoint. Its notification metadata contains the native
@@ -44,6 +50,10 @@ error (code `-32603`) whose `data` object carries the uniform
 | `message` | Human-readable failure detail. |
 | `statusCode` | Provider HTTP status, when the cause is `provider`. |
 | `providerCode` | Provider error code, when present. |
+| `stage` | `image_output` when the adapter could not represent native image output. |
+| `reason` | Image output reason: `invalid_base64`, `not_a_raster`, `media_type_mismatch`, `missing_file`, `path_not_allowed`, `too_large`, or `storage_failed`. |
+| `sizeBytes` | Decoded image or aggregate bytes when known. |
+| `maxBytes` | Applied decoded-byte limit when known. |
 
 An auth failure instead resolves with the ACP authentication-required error
 (code `-32000`) rather than `codex_turn_failed`.

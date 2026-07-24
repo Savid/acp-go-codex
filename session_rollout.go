@@ -134,6 +134,13 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 		return err
 	}
 
+	if store != nil {
+		clean, err = s.prepareDurableImageRolloutEntries(ctx, clean)
+		if err != nil {
+			return err
+		}
+	}
+
 	rows := make([]rolloutMirrorRow, len(clean))
 	for index, entry := range clean {
 		rows[index] = rolloutMirrorRow{index: startRow + index, entry: entry}
@@ -322,27 +329,37 @@ func (s *session) emitRolloutEvents(rows []rolloutMirrorRow, events chan<- codex
 }
 
 func rolloutEvent(entry SessionStoreEntry) (codex.Event, bool) {
-	var row struct {
-		Type    string `json:"type"`
-		Payload struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"payload"`
-	}
-	if err := json.Unmarshal(entry, &row); err != nil {
+	row, err := decodeRolloutRow(entry)
+	if err != nil {
 		return codex.Event{}, false
 	}
 
-	if row.Type != valueEventMsg || row.Payload.Type != valueAgentMessage || row.Payload.Message == "" {
-		return codex.Event{}, false
+	if row.Type == valueEventMsg &&
+		stringFromAny(row.Payload[jsonFieldType]) == valueAgentMessage &&
+		stringFromAny(row.Payload[jsonFieldMessage]) != "" {
+		return codex.Event{
+			Kind:      codex.EventAgentMessageDelta,
+			Text:      stringFromAny(row.Payload[jsonFieldMessage]),
+			Completed: true,
+			RawJSON:   string(entry),
+		}, true
 	}
 
-	return codex.Event{
-		Kind:      codex.EventAgentMessageDelta,
-		Text:      row.Payload.Message,
-		Completed: true,
-		RawJSON:   string(entry),
-	}, true
+	if row.Type == valueResponseItem && stringFromAny(row.Payload[jsonFieldType]) == valueImageGenerationCall {
+		image := rolloutImageEvent(row.Payload)
+		if reference, _ := row.Payload[jsonFieldResult].(map[string]any); reference != nil {
+			image.ArtifactRef = stringFromAny(reference[imageArtifactRefKey])
+		}
+
+		return codex.Event{
+			Kind:    codex.EventImageCompleted,
+			ItemID:  image.ID,
+			Image:   image,
+			RawJSON: string(entry),
+		}, true
+	}
+
+	return codex.Event{}, false
 }
 
 func rolloutTaskComplete(entry SessionStoreEntry) bool {

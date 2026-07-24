@@ -55,6 +55,7 @@ type session struct {
 	interactions     map[string]*sessionInteraction
 	mirrorMu         sync.Mutex
 	mirroredRows     int
+	imageStoreMu     sync.Mutex
 	rawEventMu       sync.Mutex
 	rawEventSequence int64
 	completionRows   int

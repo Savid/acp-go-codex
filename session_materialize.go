@@ -4,11 +4,22 @@ import (
 	"context"
 	"fmt"
 	"os"
+
+	"github.com/coder/acp-go-sdk"
 )
 
-func (a *Agent) materializeStoredRollout(ctx context.Context, entries []SessionStoreEntry) (string, func(), error) {
+func (a *Agent) materializeStoredRollout(
+	ctx context.Context,
+	sessionID acp.SessionId,
+	entries []SessionStoreEntry,
+) (string, func(), error) {
 	if len(entries) == 0 {
 		return "", func() {}, nil
+	}
+
+	hydrated, err := a.hydrateStoredImageArtifacts(ctx, sessionID, entries)
+	if err != nil {
+		return "", nil, err
 	}
 
 	release, err := a.reserveScratchRoot(ctx, RuntimeResourceSession)
@@ -16,7 +27,7 @@ func (a *Agent) materializeStoredRollout(ctx context.Context, entries []SessionS
 		return "", nil, err
 	}
 
-	path, err := materializeRollout(a.options.ScratchDir, entries)
+	path, err := materializeRollout(a.options.ScratchDir, hydrated)
 	if err != nil {
 		release()
 

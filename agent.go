@@ -58,23 +58,29 @@ const (
 	jsonFieldNetworkAccess = "networkAccess"
 	jsonFieldResult        = "result"
 
-	valueBackpressure   = "backpressure"
-	valueSession        = "session"
-	valueForm           = "form"
-	valueReasoning      = "reasoning"
-	valueCommand        = "command"
-	valueAgentMessage   = "agent_message"
-	valueAgentReasoning = "agent_reasoning"
-	valueEventMsg       = "event_msg"
-	valueStored         = "stored"
-	valueLocalImage     = "localImage"
-	valueImage          = "image"
-	roleUser            = "user"
-	roleAgent           = "agent"
-	statusDone          = "done"
-	valueDefault        = "default"
-	roleAssistant       = "assistant"
-	eventUserMessage    = "user_message"
+	valueBackpressure        = "backpressure"
+	valueSession             = "session"
+	valueForm                = "form"
+	valueReasoning           = "reasoning"
+	valueCommand             = "command"
+	valueAgentMessage        = "agent_message"
+	valueAgentReasoning      = "agent_reasoning"
+	valueEventMsg            = "event_msg"
+	valueResponseItem        = "response_item"
+	valueStored              = "stored"
+	valueLocalImage          = "localImage"
+	valueImage               = "image"
+	valueImageGenerationCall = "image_generation_call"
+	valueImageGeneration     = "imageGeneration"
+	roleUser                 = "user"
+	roleAgent                = "agent"
+	statusDone               = "done"
+	statusCompleted          = "completed"
+	statusErrored            = "errored"
+	statusFailed             = "failed"
+	valueDefault             = "default"
+	roleAssistant            = "assistant"
+	eventUserMessage         = "user_message"
 
 	jsonFieldLimit        = "limit"
 	jsonFieldValue        = "value"
@@ -162,6 +168,7 @@ func NewAgent(opts ...Option) *Agent {
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
 	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
+	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
 	options.ConcurrencyLimits = limits
 
 	clientCallLimit := limits.MaxConcurrentClientCalls

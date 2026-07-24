@@ -18,10 +18,10 @@ var ErrAudioUnsupported = errors.New("audio prompt blocks are not supported by C
 // error; nothing is silently dropped.
 var ErrUnsupportedContentBlock = errors.New("unsupported prompt content block")
 
-// ErrImageMissingData reports an image prompt block that carries neither
-// inline data nor a URI. Callers map it to the uniform ACP invalid-params
-// error for prompt images.
-var ErrImageMissingData = errors.New("missing image data or uri")
+// ErrImageNotMaterialized reports that the caller supplied fewer or more
+// materialized images than the prompt carries image-bearing blocks. Every
+// image must be validated and materialized before native mapping.
+var ErrImageNotMaterialized = errors.New("prompt image count does not match materialized images")
 
 const (
 	inputText       = "text"
@@ -31,24 +31,62 @@ const (
 	inputMention    = "mention"
 )
 
+// PromptImage is one validated prompt image in its native transport form:
+// a wrapper-owned local file path, or a data URL when no local file exists.
+type PromptImage struct {
+	LocalPath string
+	DataURL   string
+}
+
+// IsImageBearingBlock reports whether a prompt content block maps to native
+// Codex image input: a standard image block, or an embedded blob resource
+// declaring an image media type.
+func IsImageBearingBlock(block acp.ContentBlock) bool {
+	if block.Image != nil {
+		return true
+	}
+
+	if block.Resource == nil || block.Resource.Resource.BlobResourceContents == nil {
+		return false
+	}
+
+	mimeType := block.Resource.Resource.BlobResourceContents.MimeType
+
+	return mimeType != nil && strings.HasPrefix(strings.ToLower(*mimeType), "image/")
+}
+
 // PromptToUserInput maps ACP prompt content blocks into the native Codex
-// app-server user-input representation. Mapping fails closed: audio blocks
-// return ErrAudioUnsupported, images without data or a URI return
-// ErrImageMissingData, and unknown or empty blocks return
-// ErrUnsupportedContentBlock.
-func PromptToUserInput(blocks []acp.ContentBlock) ([]UserInput, error) {
+// app-server user-input representation. Image-bearing blocks consume the
+// caller-validated materialized images in request order; embedded data is
+// authoritative and block URIs are provenance only, never followed. Mapping
+// fails closed: audio blocks return ErrAudioUnsupported, unknown or empty
+// blocks return ErrUnsupportedContentBlock, and an image count mismatch
+// returns ErrImageNotMaterialized.
+func PromptToUserInput(blocks []acp.ContentBlock, images []PromptImage) ([]UserInput, error) {
 	input := make([]UserInput, 0, len(blocks))
+	nextImage := 0
+
 	for _, block := range blocks {
-		switch {
-		case block.Text != nil:
-			input = append(input, UserInput{fieldType: inputText, inputText: block.Text.Text})
-		case block.Image != nil:
-			imageInput, err := imageUserInput(*block.Image)
+		if IsImageBearingBlock(block) {
+			if nextImage >= len(images) {
+				return nil, ErrImageNotMaterialized
+			}
+
+			imageInput, err := imageUserInput(images[nextImage])
 			if err != nil {
 				return nil, err
 			}
 
+			nextImage++
+
 			input = append(input, imageInput)
+
+			continue
+		}
+
+		switch {
+		case block.Text != nil:
+			input = append(input, UserInput{fieldType: inputText, inputText: block.Text.Text})
 		case block.ResourceLink != nil:
 			input = append(input, resourceLinkInput(*block.ResourceLink))
 		case block.Resource != nil:
@@ -60,34 +98,23 @@ func PromptToUserInput(blocks []acp.ContentBlock) ([]UserInput, error) {
 		}
 	}
 
+	if nextImage != len(images) {
+		return nil, ErrImageNotMaterialized
+	}
+
 	return input, nil
 }
 
-func imageUserInput(image acp.ContentBlockImage) (UserInput, error) {
-	if image.Uri != nil && *image.Uri != "" {
-		if strings.HasPrefix(*image.Uri, "file://") {
-			return UserInput{fieldType: inputLocalImage, fieldPath: strings.TrimPrefix(*image.Uri, "file://")}, nil
-		}
-
-		return UserInput{fieldType: inputImage, inputURL: *image.Uri}, nil
+func imageUserInput(image PromptImage) (UserInput, error) {
+	if image.LocalPath != "" {
+		return UserInput{fieldType: inputLocalImage, fieldPath: image.LocalPath}, nil
 	}
 
-	if image.Data == "" {
-		return nil, ErrImageMissingData
+	if image.DataURL != "" {
+		return UserInput{fieldType: inputImage, inputURL: image.DataURL}, nil
 	}
 
-	return UserInput{
-		fieldType: inputImage,
-		inputURL:  imageDataURL(image.MimeType, image.Data),
-	}, nil
-}
-
-func imageDataURL(mimeType string, data string) string {
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
-	}
-
-	return "data:" + mimeType + ";base64," + data
+	return nil, ErrImageNotMaterialized
 }
 
 func resourceLinkInput(resource acp.ContentBlockResourceLink) UserInput {
@@ -105,18 +132,7 @@ func resourceInput(resource acp.EmbeddedResourceResource) UserInput {
 
 		return UserInput{fieldType: inputText, inputText: fmt.Sprintf("\n<context ref=%q>\n%s\n</context>", contents.Uri, contents.Text)}
 	case resource.BlobResourceContents != nil:
-		contents := resource.BlobResourceContents
-
-		mimeType := ""
-		if contents.MimeType != nil {
-			mimeType = *contents.MimeType
-		}
-
-		if strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-			return UserInput{fieldType: inputImage, inputURL: imageDataURL(mimeType, contents.Blob)}
-		}
-
-		return UserInput{fieldType: inputText, inputText: fmt.Sprintf("[resource: %s]", contents.Uri)}
+		return UserInput{fieldType: inputText, inputText: fmt.Sprintf("[resource: %s]", resource.BlobResourceContents.Uri)}
 	default:
 		return UserInput{fieldType: inputText, inputText: "[resource]"}
 	}

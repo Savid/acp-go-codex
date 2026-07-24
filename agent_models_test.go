@@ -162,9 +162,8 @@ func TestCodexConfigOptionsEdgeBranches(t *testing.T) {
 	if modelMeta["contextWindow"] == nil {
 		t.Fatalf("model meta missing context: %#v", modelMeta)
 	}
-	capabilities, _ := modelMeta["capabilities"].([]string)
-	if len(capabilities) != 1 || capabilities[0] != "vision" {
-		t.Fatalf("model capabilities = %#v", modelMeta["capabilities"])
+	if _, present := modelMeta["capabilities"]; present {
+		t.Fatalf("model capabilities must be absent: %#v", modelMeta)
 	}
 	if modelByID("missing", models) != nil {
 		t.Fatal("modelByID found missing model")

@@ -28,7 +28,7 @@ type SessionStoreEntry = json.RawMessage
 type SessionKey struct {
 	// SessionID is the ACP-visible session ID being stored.
 	SessionID string
-	// Subpath is reserved for future Codex multi-file session artifacts.
+	// Subpath is empty for the main rollout or names a session-owned artifact.
 	Subpath string
 }
 
