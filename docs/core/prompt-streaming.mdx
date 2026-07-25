@@ -92,26 +92,30 @@ Form selection runs ahead of every other image gate, per block:
    URI — is the handoff form.
 3. Empty `data` with neither is `missing_data`, exactly as before.
 
-The handoff form then opens and verifies before any embedded gate runs, first
-failure winning:
+The handoff form then verifies before any embedded gate runs, first failure
+winning. The first three rows are decided from the request alone, so a block the
+adapter was never going to accept costs no filesystem access at all — and a
+refused declaration cannot be used to learn whether the path it named exists:
 
 | `error` | Cause |
 | --- | --- |
 | `invalid_handoff` | The block is malformed as a block: no handoff root is configured, the envelope is absent, not an object, carries a field other than `version`, `digest`, and `sizeBytes`, declares a version other than `1`, a digest that is not 64 lowercase hex characters, or a negative or non-integer `sizeBytes` — or the `uri` is absent, unparseable, not `file`, names another host, or is not an absolute path. |
+| `invalid_media_type` | The declared media type is outside the four-format allowlist. |
+| `too_large` | The declared `sizeBytes` is past the effective per-image limit. |
 | `path_not_allowed` | The confined root refused the open — a name that climbs out of the root, an absolute symlink, or a link whose target is outside it — or the opened file is not a regular file. |
 | `missing_file` | The name is inside the root but does not exist, including a relative symlink whose target has been removed — the expected outcome when a host cleans up early. |
-| `invalid_media_type` | The declared media type is outside the four-format allowlist. Checked after the location verdicts and before the file is read, so a type the adapter will never accept costs no read. |
 | `handoff_digest_mismatch` | The bytes do not match the declared size and sha256. Verification fails closed and never falls back to the embedded form. |
 
 The path is opened relative to the configured root through a confined directory
 handle, so containment is decided by the kernel at the moment of the open rather
 than by resolving the path first and reading it afterwards.
 
-A declared `sizeBytes` past the effective per-image limit is `too_large` before
-the file is opened. The read itself is bounded at that limit plus one byte, so a
-file larger than it declares is rejected `too_large` on the bytes actually read
-rather than being loaded whole, and no size reported by the filesystem takes part
-in any verdict.
+The read is bounded at one byte more than the block declared, not at the
+per-image limit: the work a block commits the adapter to is charged to the size
+its own envelope stood behind, so a host cannot provoke a large read without
+declaring one. A file larger than it declares is `handoff_digest_mismatch`,
+because it is not the file the declared digest covers, and no size reported by
+the filesystem takes part in any verdict.
 
 One prompt reads at most 64 handoff-form blocks. The block that crosses the cap
 is `too_large` with the block count as `sizeBytes` and 64 as `maxBytes`, and it

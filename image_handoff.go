@@ -148,19 +148,21 @@ func handoffIntent(media promptMedia) bool {
 // readPromptHandoff resolves, reads, and digest-verifies one handoff-form image
 // block, returning the bytes the embedded gate chain then validates.
 //
-// The verdicts are ordered so a host can tell a bad block from a bad
-// deployment: a block malformed as a block is invalid_handoff, a path the
+// Every verdict the request decides on its own comes first: a block malformed as
+// a block is invalid_handoff, a media type outside the allowlist is
+// invalid_media_type, and a declared size past the per-image bound is too_large.
+// None of them opens anything, so a block this adapter was never going to accept
+// costs no read and no hash, and a refused declaration does not report whether
+// the path it named exists. The filesystem then answers the rest: a path the
 // confined root refuses is path_not_allowed, and a name inside the root that is
 // absent — including a link whose target the host already removed — is
-// missing_file. Location verdicts come first whatever the media type, because
-// confining the open is what decides them; the allowlist then runs on the open
-// descriptor and before the bytes, so a media type this adapter will never
-// accept costs no read and no hash.
+// missing_file.
 //
-// Nothing about the file's own size reaches a verdict: the envelope's declared
-// size is gated before the read and the bytes actually read must equal it, so a
-// file that grows, shrinks, or is replaced fails verification rather than
-// passing on a measurement taken at another moment.
+// Nothing about the file's own size reaches a verdict. The read is bounded by the
+// envelope's own declared size, so the work one block commits this adapter to is
+// the work its host asked for, and a file that grows, shrinks, or is replaced
+// fails verification rather than passing on a measurement taken at another
+// moment.
 //
 // A cancelled context aborts the block rather than verdicting it: the caller is
 // no longer waiting for an answer, and the read is the longest thing the
@@ -185,6 +187,21 @@ func readPromptHandoff(
 		return nil, &handoffVerdict{code: imageErrorInvalidHandoff, message: message}, nil
 	}
 
+	if _, accepted := portableImageMediaTypes[media.mimeType]; !accepted {
+		return nil, &handoffVerdict{code: imageErrorInvalidMediaType}, nil
+	}
+
+	// The size gate reads the host's own declaration, so an oversize block is
+	// refused with nothing opened and without measuring a file the caller may not
+	// be entitled to measure.
+	if envelope.sizeBytes > maxBytes {
+		return nil, &handoffVerdict{
+			code:      imageErrorTooLarge,
+			sizeBytes: envelope.sizeBytes,
+			maxBytes:  maxBytes,
+		}, nil
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -198,28 +215,13 @@ func readPromptHandoff(
 	// released here rather than at each of them.
 	defer func() { _ = file.Close() }()
 
-	if _, accepted := portableImageMediaTypes[media.mimeType]; !accepted {
-		return nil, &handoffVerdict{code: imageErrorInvalidMediaType}, nil
-	}
-
-	if envelope.sizeBytes > maxBytes {
-		return nil, &handoffVerdict{
-			code:      imageErrorTooLarge,
-			sizeBytes: envelope.sizeBytes,
-			maxBytes:  maxBytes,
-		}, nil
-	}
-
-	// One byte past the bound is enough to see that a file is oversize and never
-	// enough to hold it, and the bytes read are the only thing the size verdict
-	// consults.
-	data, err := readImageFile(io.LimitReader(file, maxBytes+1))
+	// One byte past the declaration is enough to see that the file is not the one
+	// the envelope described and never enough to hold a file the host did not ask
+	// this adapter to read. Anything longer than declared fails verification
+	// below: a file bigger than it claims is not the file the digest covers.
+	data, err := readImageFile(io.LimitReader(file, envelope.sizeBytes+1))
 	if err != nil {
 		return nil, &handoffVerdict{code: imageErrorMissingFile, message: handoffCauseUnreadable}, nil
-	}
-
-	if size := int64(len(data)); size > maxBytes {
-		return nil, &handoffVerdict{code: imageErrorTooLarge, sizeBytes: size, maxBytes: maxBytes}, nil
 	}
 
 	if !handoffBytesMatch(data, envelope) {

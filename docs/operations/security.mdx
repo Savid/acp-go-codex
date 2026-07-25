@@ -106,11 +106,19 @@ configures it. Its guarantees are deliberately narrow:
   relative link whose target has been removed, is `missing_file`. No other prompt
   field can widen the root, and the root itself must be an absolute path or agent
   construction fails.
-- **Bytes are verified, not trusted.** Every read is bounded at the effective
-  per-image limit plus one byte, and the bytes read must match the sha256 and
-  size the block declares. A mismatch is `handoff_digest_mismatch` and fails the
-  turn; there is no fallback that would forward unverified bytes, and no size
-  reported by the filesystem takes part in any verdict.
+- **Bytes are verified, not trusted.** Every read is bounded at one byte more
+  than the block declared, and the bytes read must match the sha256 and size the
+  block declares. A mismatch is `handoff_digest_mismatch` and fails the turn;
+  there is no fallback that would forward unverified bytes, and no size reported
+  by the filesystem takes part in any verdict. Bounding the read by the
+  declaration rather than by the limit means the host cannot commit the adapter
+  to reading more than it stood behind: a declared size past the per-image limit
+  is `too_large` with nothing opened, and a file larger than its declaration is
+  refused after reading only as far as the declaration went.
+- **A malformed request never reaches the filesystem.** The envelope, the URI,
+  the declared media type, and the declared size are all judged before anything
+  is opened. A block that fails any of them is answered without a syscall, so it
+  cannot be used to probe which paths under the root exist.
 - **Bounded work, not just bounded bytes.** One prompt reads at most 64
   handoff-form blocks. The block that crosses the cap is `too_large` and is never
   read, so a host cannot turn one small request into unbounded file reads by

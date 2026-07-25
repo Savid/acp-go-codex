@@ -112,6 +112,26 @@ func countingImageReads(t *testing.T) *int {
 	return &reads
 }
 
+// countingHandoffReadBytes totals the bytes every read pulled back, which is how
+// a test observes the bound the caller actually applied rather than the one its
+// comments claim it applies.
+func countingHandoffReadBytes(t *testing.T) *int {
+	t.Helper()
+
+	total := 0
+	original := readImageFile
+	readImageFile = func(reader io.Reader) ([]byte, error) {
+		data, err := original(reader)
+		total += len(data)
+
+		return data, err
+	}
+
+	t.Cleanup(func() { readImageFile = original })
+
+	return &total
+}
+
 func TestValidatePromptImagesHandoffFormMirrorsEmbedded(t *testing.T) {
 	root := t.TempDir()
 	png := testdataFixture(t, "valid.png")
@@ -205,26 +225,38 @@ func TestValidatePromptImagesHandoffRasterGatesMatchEmbedded(t *testing.T) {
 	require.Equal(t, imageErrorMediaTypeMismatch, imageErr.code)
 }
 
-func TestHandoffAllowlistIsCheckedBeforeTheFileIsRead(t *testing.T) {
+// TestHandoffAllowlistIsCheckedBeforeTheFilesystem pins the media type ahead of
+// every filesystem verdict. The absent-path case is the decisive one: the only
+// way to answer it on the declared type is to never have looked, so an
+// implementation that locates the file first reports missing_file and thereby
+// tells the caller whether its guess about the path was right.
+func TestHandoffAllowlistIsCheckedBeforeTheFilesystem(t *testing.T) {
 	root := t.TempDir()
-	block := handoffFixture(t, root, "valid.png", testdataFixture(t, "valid.png"))
-	block.Image.MimeType = "image/heic"
-
 	reads := countingImageReads(t)
 
-	// A media type the adapter will never accept costs no read and no hash: the
-	// allowlist runs after the location verdicts and before the bytes.
-	_, imageErr, _ := validatePromptImages(t.Context(), []acp.ContentBlock{block}, defaultImageLimits(), root)
-	require.NotNil(t, imageErr)
-	require.Equal(t, imageErrorInvalidMediaType, imageErr.code)
-	require.Zero(t, *reads)
+	// A media type this adapter will never accept costs no open, no read and no
+	// hash, whether or not the path behind it exists.
+	original := openHandoffImage
+	openHandoffImage = func(string, string) (io.ReadCloser, *handoffVerdict) {
+		require.FailNow(t, "the filesystem was consulted for a media type the allowlist refuses")
 
-	// A location defect still wins over the media type, so a broken deployment
-	// is reported as one whatever the block declared.
-	absent := handoffBlock(filepath.Join(root, "absent.png"), "image/heic", handoffEnvelopeFor([]byte("x")))
-	_, imageErr, _ = validatePromptImages(t.Context(), []acp.ContentBlock{absent}, defaultImageLimits(), root)
-	require.NotNil(t, imageErr)
-	require.Equal(t, imageErrorMissingFile, imageErr.code)
+		return nil, nil
+	}
+
+	t.Cleanup(func() { openHandoffImage = original })
+
+	present := handoffFixture(t, root, "valid.png", testdataFixture(t, "valid.png"))
+	present.Image.MimeType = "image/heic"
+
+	absent := handoffBlock(filepath.Join(root, "absent.png"), "application/pdf", handoffEnvelopeFor([]byte("x")))
+
+	for _, block := range []acp.ContentBlock{present, absent} {
+		_, imageErr, _ := validatePromptImages(t.Context(), []acp.ContentBlock{block}, defaultImageLimits(), root)
+		require.NotNil(t, imageErr)
+		require.Equal(t, imageErrorInvalidMediaType, imageErr.code)
+	}
+
+	require.Zero(t, *reads)
 }
 
 func TestValidatePromptImagesHandoffFormSelection(t *testing.T) {
@@ -751,32 +783,44 @@ func TestHandoffRootReachedThroughASymlinkStillResolves(t *testing.T) {
 	}
 }
 
-func TestHandoffOverBoundReadIsRejectedAndForwardsNoBytes(t *testing.T) {
+// TestHandoffUnderDeclaredFileIsRejectedAndForwardsNoBytes pins the read to the
+// caller's own declaration. The declaration is well inside the gate and carries
+// the real digest of the bytes it describes, so the byte policy cannot be what
+// refuses this block: only reading to the declaration and finding more can.
+func TestHandoffUnderDeclaredFileIsRejectedAndForwardsNoBytes(t *testing.T) {
 	root := t.TempDir()
 
-	const gate int64 = 512
+	const (
+		gate     int64 = 512
+		declared int   = 448
+	)
 
 	limits := ImageLimits{MaxInputBytesPerImage: gate}
 
-	// The file holds twice the gate, and the envelope declares a size well
-	// inside it. Every number a host or the filesystem supplies about this file
-	// says it fits; only the bytes actually read say otherwise.
+	// The file holds twice the gate while the envelope describes its first 448
+	// bytes. Every number a host or the filesystem supplies says the declaration
+	// fits, and reading past it is work no host asked for.
 	whole := syntheticPNG(t, 1024)
 	require.NoError(t, os.WriteFile(filepath.Join(root, "grown.png"), whole, 0o600))
 
-	declared := whole[:448]
-	block := handoffBlock(filepath.Join(root, "grown.png"), mimeImagePNG, handoffEnvelopeFor(declared))
+	bytesRead := countingHandoffReadBytes(t)
+
+	block := handoffBlock(filepath.Join(root, "grown.png"), mimeImagePNG, handoffEnvelopeFor(whole[:declared]))
 	blocks := []acp.ContentBlock{acp.TextBlock("describe this"), block}
 
 	images, imageErr, err := validatePromptImages(t.Context(), blocks, limits, root)
 	require.NoError(t, err)
 	require.NotNil(t, imageErr)
 
-	// too_large decided on the bytes read: one past the gate, never the 448 the
-	// envelope declared and never a size taken from the file's metadata.
-	require.Equal(t, imageErrorTooLarge, imageErr.code)
-	require.Equal(t, gate+1, imageErr.sizeBytes)
-	require.Equal(t, gate, imageErr.maxBytes)
+	// A file bigger than its envelope claims is not the file the digest covers,
+	// so the answer names the envelope and reports no byte count at all.
+	require.Equal(t, imageErrorDigestMismatch, imageErr.code)
+	require.Zero(t, imageErr.sizeBytes)
+	require.Zero(t, imageErr.maxBytes)
+
+	// The read never went past one byte more than the block declared, so a block
+	// cannot provoke a large read without declaring one.
+	require.LessOrEqual(t, *bytesRead, declared+1)
 
 	// No bytes survive the refusal, and the native mapper refuses to build a
 	// request for an image block it was given no validated bytes for, so there
@@ -1343,27 +1387,18 @@ func TestHandoffRefusalsAfterTheOpenReleaseTheDescriptor(t *testing.T) {
 	overPath := filepath.Join(root, "over.png")
 	require.NoError(t, os.WriteFile(overPath, over, 0o600))
 
-	// Each of the four verdicts that can be reached with a descriptor already
-	// open, driven with the close counter live.
+	// Every verdict that can be reached with a descriptor already open, driven
+	// with the close counter live. The verdicts decidable from the request alone
+	// are not among them: they are settled before anything is opened.
 	cases := []struct {
 		name  string
 		block acp.ContentBlock
 		code  string
 	}{
 		{
-			name:  "allowlist",
-			block: handoffBlock(path, "image/heic", handoffEnvelopeFor(png)),
-			code:  imageErrorInvalidMediaType,
-		},
-		{
-			name:  "declared size past the gate",
-			block: handoffBlock(path, mimeImagePNG, handoffEnvelopeFor(syntheticPNG(t, int(gate)+1))),
-			code:  imageErrorTooLarge,
-		},
-		{
-			name:  "bytes read past the gate",
+			name:  "more bytes than the block declared",
 			block: handoffBlock(overPath, mimeImagePNG, handoffEnvelopeFor(png)),
-			code:  imageErrorTooLarge,
+			code:  imageErrorDigestMismatch,
 		},
 		{
 			name:  "digest mismatch",
