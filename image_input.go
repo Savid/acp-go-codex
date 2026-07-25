@@ -201,7 +201,11 @@ func validatePromptImages(
 			continue
 		}
 
-		if handoffForm(media) {
+		// An adapter with no read root reads nothing, so there is no work here
+		// for the count to bound, and the root-unset invalid_handoff the read
+		// reports is how a host learns its root never arrived. Nothing may stand
+		// in front of it, so the count sits behind the root.
+		if handoffRoot != "" && handoffForm(media) {
 			handoffBlocks++
 
 			// Counted before the block is read, because bounding the reads is

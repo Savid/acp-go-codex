@@ -911,6 +911,31 @@ func TestHandoffBlockCountIsCappedWithTheAggregateDisabled(t *testing.T) {
 	require.Len(t, images, maxHandoffBlocksPerPrompt+1)
 }
 
+// TestHandoffUnsetRootAnswersAheadOfTheBlockCap pins the order of the two
+// pre-gate refusals a single prompt can earn at once. An adapter with no read
+// root has no handoff work for the count to bound, and invalid_handoff is what
+// tells a host its read root never reached the agent, so a prompt carrying more
+// blocks than the cap must still be answered with the root and not with
+// too_large.
+func TestHandoffUnsetRootAnswersAheadOfTheBlockCap(t *testing.T) {
+	root := t.TempDir()
+	block := handoffFixture(t, root, "small.png", syntheticPNG(t, 64))
+
+	overCap := make([]acp.ContentBlock, 0, maxHandoffBlocksPerPrompt+1)
+	for range maxHandoffBlocksPerPrompt + 1 {
+		overCap = append(overCap, block)
+	}
+
+	_, imageErr, err := validatePromptImages(t.Context(), overCap, ImageLimits{}, "")
+	require.NoError(t, err)
+	require.NotNil(t, imageErr)
+	require.Equal(t, imageErrorInvalidHandoff, imageErr.code)
+	require.Equal(t, handoffCauseRootUnset, imageErr.message)
+	require.Equal(t, 0, imageErr.index)
+	require.Zero(t, imageErr.sizeBytes)
+	require.Zero(t, imageErr.maxBytes)
+}
+
 func TestHandoffFileSwappedAfterContainmentIsRejected(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
