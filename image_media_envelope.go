@@ -17,15 +17,13 @@ const (
 	mediaEnvelopeMaxDimension = 0
 )
 
-// mediaEnvelopeImageFormats is the inbound allowlist in advertisement order,
-// built from the same media-type constants the allowlist itself is built from.
-var mediaEnvelopeImageFormats = []string{mimeImagePNG, mimeImageJPEG, mimeImageGIF, mimeImageWebP}
-
 // mediaEnvelope reports the bounds this adapter actually enforces on inbound
 // prompt media, so a host can reject an oversize attachment before spending a
 // turn on it. Both byte values come from the same effective-limit functions the
 // gates call rather than from the configured fields, so an advertised number is
-// always the number a rejection reports.
+// always the number a rejection reports. imageFormats is a copy of the very
+// allowlist the media-type gate consults, in that list's own order, so it stays
+// deterministic and cannot drift from what the gate accepts.
 //
 // documentFormats is empty: Codex maps no media type to a native document
 // representation, so no host should route a document to it as embedded bytes.
@@ -36,7 +34,7 @@ func mediaEnvelope(limits ImageLimits) map[string]any {
 		mediaEnvelopeMaxBytesKey:        effectiveInputBytesPerImage(limits.MaxInputBytesPerImage),
 		mediaEnvelopeMaxPromptBytesKey:  effectiveInputBytesPerPrompt(limits.MaxInputBytesPerPrompt),
 		mediaEnvelopeMaxDimensionKey:    mediaEnvelopeMaxDimension,
-		mediaEnvelopeImageFormatsKey:    slices.Clone(mediaEnvelopeImageFormats),
+		mediaEnvelopeImageFormatsKey:    slices.Clone(portableImageMediaTypes),
 		mediaEnvelopeDocumentFormatsKey: []string{},
 	}
 }

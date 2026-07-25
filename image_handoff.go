@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -187,7 +188,7 @@ func readPromptHandoff(
 		return nil, &handoffVerdict{code: imageErrorInvalidHandoff, message: message}, nil
 	}
 
-	if _, accepted := portableImageMediaTypes[media.mimeType]; !accepted {
+	if !slices.Contains(portableImageMediaTypes, media.mimeType) {
 		return nil, &handoffVerdict{code: imageErrorInvalidMediaType}, nil
 	}
 

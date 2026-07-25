@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -53,12 +54,11 @@ const (
 	imageErrorDigestMismatch      = "handoff_digest_mismatch"
 )
 
-var portableImageMediaTypes = map[string]struct{}{
-	mimeImageGIF:  {},
-	mimeImageJPEG: {},
-	mimeImagePNG:  {},
-	mimeImageWebP: {},
-}
+// portableImageMediaTypes is the inbound image media-type allowlist, in the
+// order the media envelope advertises it. It is the only such list: the
+// advertisement is a copy of this slice rather than a second list beside it, so
+// an accepted format and an advertised format cannot become different sets.
+var portableImageMediaTypes = []string{mimeImagePNG, mimeImageJPEG, mimeImageGIF, mimeImageWebP}
 
 var (
 	createPromptImageTempDir = createPrivateTempDir
@@ -387,7 +387,7 @@ func decodeOpaquePromptBlob(media promptMedia, index int) ([]byte, *promptImageE
 // exactly as declared. Routing normalizes casing and parameters; acceptance does
 // not, so a non-canonical declaration is rejected rather than repaired.
 func checkPromptImageMediaType(mimeType string, field string, index int) *promptImageError {
-	if _, accepted := portableImageMediaTypes[mimeType]; !accepted {
+	if !slices.Contains(portableImageMediaTypes, mimeType) {
 		return &promptImageError{code: imageErrorInvalidMediaType, field: field, index: index}
 	}
 

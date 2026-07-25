@@ -61,28 +61,44 @@ func mustMarshal(t *testing.T, value any) []byte {
 	return raw
 }
 
+// TestMediaEnvelopeAdvertisesTheAllowlistTheGateReads drives the advertised
+// formats through the media-type gate itself rather than comparing them with a
+// second list. Two literal lists agree until someone edits one of them, and a
+// host cannot see the difference from outside; what this pins is that every
+// format the adapter advertises is one the gate admits, and every format it
+// admits is one it advertises.
 func TestMediaEnvelopeAdvertisesTheAllowlistTheGateReads(t *testing.T) {
-	// The advertised formats are exactly the allowlist the gate reads, so the
-	// two cannot drift apart.
-	advertised := slices.Clone(mediaEnvelopeImageFormats)
-	slices.Sort(advertised)
+	advertised, ok := mediaEnvelope(defaultImageLimits())[mediaEnvelopeImageFormatsKey].([]string)
+	require.True(t, ok)
+	require.NotEmpty(t, advertised)
 
-	allowed := make([]string, 0, len(portableImageMediaTypes))
-	for mimeType := range portableImageMediaTypes {
-		allowed = append(allowed, mimeType)
+	for _, mimeType := range advertised {
+		require.Nil(t, checkPromptImageMediaType(mimeType, promptImageField, 0), mimeType)
 	}
 
-	slices.Sort(allowed)
-	require.Equal(t, allowed, advertised)
+	// The other direction, over the portable media types this package declares:
+	// a format the gate admits but never advertises is the same defect read the
+	// other way round.
+	for _, mimeType := range []string{mimeImagePNG, mimeImageJPEG, mimeImageGIF, mimeImageWebP} {
+		require.True(t, slices.Contains(advertised, mimeType), mimeType)
+	}
 
-	// The advertised format list is a copy, so a host-side mutation of one
-	// response cannot rewrite what the next one advertises.
-	first, _ := mediaEnvelope(defaultImageLimits())[mediaEnvelopeImageFormatsKey].([]string)
-	require.NotEmpty(t, first)
-	first[0] = "image/mutated"
+	// A media type outside the list is refused by that same gate, so the
+	// advertisement describes the whole allowlist rather than a part of it.
+	for _, mimeType := range []string{"image/avif", "image/svg+xml", "image/heic", "application/pdf", "IMAGE/PNG"} {
+		refused := checkPromptImageMediaType(mimeType, promptImageField, 0)
+		require.NotNil(t, refused, mimeType)
+		require.Equal(t, imageErrorInvalidMediaType, refused.code)
+		require.False(t, slices.Contains(advertised, mimeType), mimeType)
+	}
+
+	// The advertised list is a copy, so a host-side mutation of one response
+	// rewrites neither the next advertisement nor what the gate accepts.
+	advertised[0] = "image/mutated"
 
 	second, _ := mediaEnvelope(defaultImageLimits())[mediaEnvelopeImageFormatsKey].([]string)
 	require.Equal(t, mimeImagePNG, second[0])
+	require.Nil(t, checkPromptImageMediaType(mimeImagePNG, promptImageField, 0))
 }
 
 func TestMediaEnvelopeAdvertisesTheBoundTheGateReports(t *testing.T) {
