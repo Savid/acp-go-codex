@@ -239,9 +239,17 @@ func TestAllowedImageFileMaterialization(t *testing.T) {
 	// directory of its own. Every root above was created before the narrowing
 	// and stays outside it, which keeps each root assertion below about that
 	// root alone.
+	//
+	// The narrowed root is a symlink to the directory that holds the file, which
+	// is what the temp directory itself is on macOS. Only a root resolved to the
+	// same degree as the candidate can match it, so an unresolved root fails
+	// this case on every host rather than only on the hosts whose temp directory
+	// happens to be a link.
 	private := t.TempDir()
+	tempTarget := filepath.Join(private, "tmp-target")
+	require.NoError(t, os.Mkdir(tempTarget, 0o700))
 	tempRoot := filepath.Join(private, "tmp")
-	require.NoError(t, os.Mkdir(tempRoot, 0o700))
+	require.NoError(t, os.Symlink(tempTarget, tempRoot))
 	outsideRoot := filepath.Join(private, "outside")
 	require.NoError(t, os.Mkdir(outsideRoot, 0o700))
 	narrowTempDir(t, tempRoot)
