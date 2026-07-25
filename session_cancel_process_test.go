@@ -17,8 +17,8 @@ type promptResult struct {
 	err      error
 }
 
-// The fake app-server reproduces the native behavior observed through Wagie:
-// turn/interrupt returns success while a command descendant remains alive.
+// The fake app-server reproduces the native behavior where turn/interrupt
+// returns success while a command descendant remains alive.
 // Cancellation must synchronously terminate the target thread's descendants,
 // preserve the shared app-server, and keep the logical session usable.
 func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {

@@ -70,16 +70,21 @@ attachment before it spends a turn on one:
 
 | Field | Meaning |
 | --- | --- |
-| `maxBytes` | Effective decoded bound on one prompt image — [`ImageLimits.MaxInputBytesPerImage`](/docs/reference/go-api#agent-options). |
-| `maxPromptBytes` | Effective decoded bound on every image in one prompt — `ImageLimits.MaxInputBytesPerPrompt`. |
+| `maxBytes` | Effective decoded bound on one prompt image: the tighter of [`ImageLimits.MaxInputBytesPerImage`](/docs/reference/go-api#agent-options) and the hard frame bound, which also applies when that limit is disabled. |
+| `maxPromptBytes` | Effective decoded bound on every image in one prompt — `ImageLimits.MaxInputBytesPerPrompt`. `0` means no aggregate byte bound is enforced. |
 | `maxDimension` | Per-dimension pixel bound. Always `0`: Codex reads dimensions only to prove they exist and rejects nothing for being large in pixels. |
 | `imageFormats` | The inbound allowlist, in this order. |
 | `documentFormats` | Media types mapped to a native document representation. Always an empty array: Codex has none, so a host should materialize documents rather than embedding their bytes. |
 
-The block is always present. Its byte values track the configured
-`WithImageLimits`, so they are the values the gates actually enforce rather than
-a documented approximation; `0` on a byte field means that adapter policy limit
-is disabled, and `0` on `maxDimension` means no bound rather than no pixels.
+The block is always present. Both byte values are read from the same
+effective-limit functions the gates call rather than from the configured fields,
+so an advertised number is always the number a `too_large` rejection reports.
+A disabled `MaxInputBytesPerImage` still advertises the frame bound that binds
+in its place; a disabled `MaxInputBytesPerPrompt` advertises `0`, because no
+aggregate byte bound is enforced at all — the cap on how many handoff-form
+blocks one prompt may read bounds that work instead, and it is a block count
+rather than a byte number. `0` on `maxDimension` means no bound rather than no
+pixels.
 
 The envelope is captured per agent instance, so it expresses only bounds the
 adapter enforces. It cannot express whether the session's currently selected

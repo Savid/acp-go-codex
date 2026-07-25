@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// strictPermissionClient models the Wagie hard-cutover invariant: a
-// permission request is accepted only when its toolCallId was already
-// published and has not reached a terminal state.
+// strictPermissionClient enforces the hard-cutover invariant: a permission
+// request is accepted only when its toolCallId was already published and has
+// not reached a terminal state.
 type strictPermissionClient struct {
 	*recordingAgentClient
 

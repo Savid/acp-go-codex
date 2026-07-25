@@ -15,8 +15,22 @@ import (
 
 const (
 	promptImageField             = "prompt.image"
+	promptResourceField          = "prompt.resource"
 	codexInlineImageEnvelopeSize = 1024 * 1024
 	promptImageTempDirPrefix     = "acp-go-codex-image-input-"
+
+	// promptImageScratchFailure is what a host is told when the adapter cannot
+	// stage validated prompt images. The underlying operating-system error names
+	// the adapter's scratch directory, which is the adapter's business.
+	promptImageScratchFailure = "prompt images could not be staged for the harness"
+
+	// maxHandoffBlocksPerPrompt bounds how many handoff-form blocks one prompt
+	// may read. The handoff form is what decouples a block's wire size from the
+	// bytes it costs, so the request frame no longer bounds the work a single
+	// prompt can demand and a count has to. It sits far above any conforming
+	// host's per-message image count, so it binds only a host that is hostile
+	// or misconfigured.
+	maxHandoffBlocksPerPrompt = 64
 
 	mimeImageGIF  = "image/gif"
 	mimeImageJPEG = "image/jpeg"
@@ -52,25 +66,21 @@ var (
 	removePromptImageDir     = os.RemoveAll
 )
 
+// promptImageError is one input gate's refusal. field names the inbound block
+// type the refusal is about, which is not the same question as which gate chain
+// the block's declared media type routed it into.
 type promptImageError struct {
 	code      string
+	field     string
 	message   string
 	index     int
 	sizeBytes int64
 	maxBytes  int64
 }
 
-func (e *promptImageError) Error() string {
-	if e.message == "" {
-		return fmt.Sprintf("prompt image %d: %s", e.index, e.code)
-	}
-
-	return fmt.Sprintf("prompt image %d: %s: %s", e.index, e.code, e.message)
-}
-
 func (e *promptImageError) invalidParams() error {
 	data := map[string]any{
-		jsonFieldField: promptImageField,
+		jsonFieldField: e.field,
 		jsonFieldError: e.code,
 		jsonFieldIndex: e.index,
 	}
@@ -92,6 +102,7 @@ func (e *promptImageError) invalidParams() error {
 type decodedPromptImage struct {
 	data     []byte
 	mimeType string
+	field    string
 	index    int
 }
 
@@ -114,12 +125,35 @@ const (
 	// type. Codex forwards it as a reference line and drops its bytes, but the
 	// bytes still crossed ACP, so they are still gated.
 	promptMediaOpaqueBlob
+	// promptMediaTextResource is an embedded text resource. Codex flattens its
+	// text straight into prompt text, so there is nothing to decode and no
+	// raster to inspect, but the bytes crossed ACP and spend the same prompt
+	// budget any other inbound bytes spend.
+	promptMediaTextResource
 )
 
 // nativeImage reports whether the block maps to native Codex image input and so
 // takes the raster gates and a materialized transport.
 func (k promptMediaKind) nativeImage() bool {
 	return k == promptMediaImageBlock || k == promptMediaImageBlob
+}
+
+// perImageBounded reports whether the block's bytes take the per-image byte
+// limit. A text resource carries no image, so an image limit is not its bound;
+// the per-prompt aggregate is the bound it shares with everything else.
+func (k promptMediaKind) perImageBounded() bool {
+	return k != promptMediaTextResource
+}
+
+// inputField is the error envelope's field for a block of this kind. A declared
+// media type decides which gate chain a block takes; it does not decide what the
+// block is, so a resource stays a resource however its bytes were gated.
+func (k promptMediaKind) inputField() string {
+	if k == promptMediaImageBlock {
+		return promptImageField
+	}
+
+	return promptResourceField
 }
 
 // promptMedia is one inbound block carrying bytes the input gates must account
@@ -132,68 +166,107 @@ type promptMedia struct {
 	meta     map[string]any
 }
 
-// gatedPromptBytes is one block's bytes after form-specific decoding, ready for
-// the byte limits. size is what a byte-limit rejection reports and can exceed
-// len(data) when a bounded handoff read truncated an oversize file.
-type gatedPromptBytes struct {
-	data []byte
-	size int64
-}
-
 // validatePromptImages runs the pinned input gate order over every media-bearing
 // block in request order and stops at the first failure. Indexes are assigned in
 // that same order across every gated block, so one rejection always names
 // exactly one block.
+//
+// A gate refusal and an abort are different answers: the refusal describes a
+// block the host can fix, while the error return means the caller stopped
+// waiting and no verdict was reached.
 func validatePromptImages(
+	ctx context.Context,
 	blocks []acp.ContentBlock,
 	limits ImageLimits,
 	handoffRoot string,
-) ([]decodedPromptImage, *promptImageError) {
+) ([]decodedPromptImage, *promptImageError, error) {
 	images := make([]decodedPromptImage, 0)
 
+	maxImageBytes := effectiveInputBytesPerImage(limits.MaxInputBytesPerImage)
+	maxPromptBytes := effectiveInputBytesPerPrompt(limits.MaxInputBytesPerPrompt)
+
 	var (
-		promptBytes int64
-		index       int
+		promptBytes   int64
+		handoffBlocks int64
+		index         int
 	)
 
 	for _, block := range blocks {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+
 		media, ok := promptMediaBlock(block)
 		if !ok {
 			continue
 		}
 
-		gated, mediaErr := decodePromptMedia(media, index, limits, handoffRoot)
-		if mediaErr != nil {
-			return nil, mediaErr
-		}
+		if handoffForm(media) {
+			handoffBlocks++
 
-		if limits.MaxInputBytesPerImage > 0 && gated.size > limits.MaxInputBytesPerImage {
-			return nil, &promptImageError{
-				code:      imageErrorTooLarge,
-				index:     index,
-				sizeBytes: gated.size,
-				maxBytes:  limits.MaxInputBytesPerImage,
+			// Counted before the block is read, because bounding the reads is
+			// the whole point of counting them.
+			if handoffBlocks > maxHandoffBlocksPerPrompt {
+				return nil, &promptImageError{
+					code:      imageErrorTooLarge,
+					field:     media.kind.inputField(),
+					index:     index,
+					sizeBytes: handoffBlocks,
+					maxBytes:  maxHandoffBlocksPerPrompt,
+				}, nil
 			}
 		}
 
-		promptBytes += gated.size
-		if limits.MaxInputBytesPerPrompt > 0 && promptBytes > limits.MaxInputBytesPerPrompt {
+		data, mediaErr, err := decodePromptMedia(ctx, media, index, maxImageBytes, handoffRoot)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if mediaErr != nil {
+			return nil, mediaErr, nil
+		}
+
+		size := int64(len(data))
+		if media.kind.perImageBounded() && size > maxImageBytes {
 			return nil, &promptImageError{
 				code:      imageErrorTooLarge,
+				field:     media.kind.inputField(),
+				index:     index,
+				sizeBytes: size,
+				maxBytes:  maxImageBytes,
+			}, nil
+		}
+
+		promptBytes += size
+		if maxPromptBytes > 0 && promptBytes > maxPromptBytes {
+			return nil, &promptImageError{
+				code:      imageErrorTooLarge,
+				field:     media.kind.inputField(),
 				index:     index,
 				sizeBytes: promptBytes,
-				maxBytes:  limits.MaxInputBytesPerPrompt,
-			}
+				maxBytes:  maxPromptBytes,
+			}, nil
 		}
 
 		if media.kind.nativeImage() {
-			images = append(images, decodedPromptImage{data: gated.data, mimeType: media.mimeType, index: index})
+			images = append(images, decodedPromptImage{
+				data:     data,
+				mimeType: media.mimeType,
+				field:    media.kind.inputField(),
+				index:    index,
+			})
 		}
 
 		index++
 	}
 
-	return images, nil
+	return images, nil, nil
+}
+
+// handoffForm reports whether a block selects the handoff transport: an image
+// block carrying no embedded bytes that asked for it.
+func handoffForm(media promptMedia) bool {
+	return media.kind == promptMediaImageBlock && media.data == "" && handoffIntent(media)
 }
 
 // decodePromptMedia runs every gate that precedes the byte limits for one block:
@@ -201,93 +274,117 @@ func validatePromptImages(
 // a block that maps to native image input. The byte limits stay with the caller,
 // because they are the only gates that depend on the running prompt total.
 func decodePromptMedia(
+	ctx context.Context,
 	media promptMedia,
 	index int,
-	limits ImageLimits,
+	maxImageBytes int64,
 	handoffRoot string,
-) (gatedPromptBytes, *promptImageError) {
+) ([]byte, *promptImageError, error) {
+	if media.kind == promptMediaTextResource {
+		// The text is already the bytes: there is nothing to decode, and the
+		// only gate it takes is the prompt aggregate its caller charges.
+		return []byte(media.data), nil, nil
+	}
+
 	if !media.kind.nativeImage() {
-		return decodeOpaquePromptBlob(media, index)
+		data, mediaErr := decodeOpaquePromptBlob(media, index)
+
+		return data, mediaErr, nil
 	}
 
-	if media.kind == promptMediaImageBlock && media.data == "" && handoffIntent(media) {
-		return decodeHandoffPromptImage(media, index, limits, handoffRoot)
+	if handoffForm(media) {
+		return decodeHandoffPromptImage(ctx, media, index, maxImageBytes, handoffRoot)
 	}
 
-	return decodeEmbeddedPromptImage(media, index)
+	data, mediaErr := decodeEmbeddedPromptImage(media, index)
+
+	return data, mediaErr, nil
 }
 
 // decodeEmbeddedPromptImage gates the embedded form: non-empty data wins over a
 // URI, which is provenance only and never fetched.
-func decodeEmbeddedPromptImage(media promptMedia, index int) (gatedPromptBytes, *promptImageError) {
+func decodeEmbeddedPromptImage(media promptMedia, index int) ([]byte, *promptImageError) {
+	field := media.kind.inputField()
 	if media.data == "" {
-		return gatedPromptBytes{}, &promptImageError{code: imageErrorMissingData, index: index}
+		return nil, &promptImageError{code: imageErrorMissingData, field: field, index: index}
 	}
 
-	if mediaErr := checkPromptImageMediaType(media.mimeType, index); mediaErr != nil {
-		return gatedPromptBytes{}, mediaErr
+	if mediaErr := checkPromptImageMediaType(media.mimeType, field, index); mediaErr != nil {
+		return nil, mediaErr
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(media.data)
 	if err != nil {
-		return gatedPromptBytes{}, &promptImageError{code: imageErrorInvalidBase64, index: index}
+		return nil, &promptImageError{code: imageErrorInvalidBase64, field: field, index: index}
 	}
 
-	if mediaErr := checkPromptRaster(decoded, media.mimeType, index); mediaErr != nil {
-		return gatedPromptBytes{}, mediaErr
+	if mediaErr := checkPromptRaster(decoded, media.mimeType, field, index); mediaErr != nil {
+		return nil, mediaErr
 	}
 
-	return gatedPromptBytes{data: decoded, size: int64(len(decoded))}, nil
+	return decoded, nil
 }
 
 // decodeHandoffPromptImage gates the handoff form. The pre-gate runs ahead of
-// every embedded gate, and the bytes it produces then take the same raster gates
-// embedded bytes take, so the two forms accept and reject identically.
+// every embedded gate — including the allowlist, which it applies itself so a
+// media type this adapter refuses costs no read — and the bytes it produces then
+// take the same raster gates embedded bytes take, so the two forms accept and
+// reject identically.
 func decodeHandoffPromptImage(
+	ctx context.Context,
 	media promptMedia,
 	index int,
-	limits ImageLimits,
+	maxImageBytes int64,
 	handoffRoot string,
-) (gatedPromptBytes, *promptImageError) {
-	read, handoffErr := readPromptHandoff(handoffRoot, media, limits.MaxInputBytesPerImage)
-	if handoffErr != nil {
-		return gatedPromptBytes{}, &promptImageError{
-			code:    handoffErr.code,
-			message: handoffErr.cause.Error(),
-			index:   index,
-		}
+) ([]byte, *promptImageError, error) {
+	field := media.kind.inputField()
+
+	data, verdict, err := readPromptHandoff(ctx, handoffRoot, media, maxImageBytes)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	if mediaErr := checkPromptImageMediaType(media.mimeType, index); mediaErr != nil {
-		return gatedPromptBytes{}, mediaErr
+	if verdict != nil {
+		return nil, &promptImageError{
+			code:      verdict.code,
+			field:     field,
+			message:   verdict.message,
+			index:     index,
+			sizeBytes: verdict.sizeBytes,
+			maxBytes:  verdict.maxBytes,
+		}, nil
 	}
 
-	if mediaErr := checkPromptRaster(read.data, media.mimeType, index); mediaErr != nil {
-		return gatedPromptBytes{}, mediaErr
+	if mediaErr := checkPromptRaster(data, media.mimeType, field, index); mediaErr != nil {
+		return nil, mediaErr, nil
 	}
 
-	return gatedPromptBytes{data: read.data, size: read.size}, nil
+	return data, nil, nil
 }
 
 // decodeOpaquePromptBlob gates a blob resource that reaches no native image
 // transport. Codex drops such bytes downstream, but they still arrived over ACP
 // and are still charged against the byte limits, so the channel cannot carry
 // unbounded or undecodable payloads.
-func decodeOpaquePromptBlob(media promptMedia, index int) (gatedPromptBytes, *promptImageError) {
+func decodeOpaquePromptBlob(media promptMedia, index int) ([]byte, *promptImageError) {
 	decoded, err := base64.StdEncoding.DecodeString(media.data)
 	if err != nil {
-		return gatedPromptBytes{}, &promptImageError{code: imageErrorInvalidBase64, index: index}
+		return nil, &promptImageError{
+			code:  imageErrorInvalidBase64,
+			field: media.kind.inputField(),
+			index: index,
+		}
 	}
 
-	return gatedPromptBytes{data: decoded, size: int64(len(decoded))}, nil
+	return decoded, nil
 }
 
 // checkPromptImageMediaType applies the four-format allowlist to the media type
 // exactly as declared. Routing normalizes casing and parameters; acceptance does
 // not, so a non-canonical declaration is rejected rather than repaired.
-func checkPromptImageMediaType(mimeType string, index int) *promptImageError {
+func checkPromptImageMediaType(mimeType string, field string, index int) *promptImageError {
 	if _, accepted := portableImageMediaTypes[mimeType]; !accepted {
-		return &promptImageError{code: imageErrorInvalidMediaType, index: index}
+		return &promptImageError{code: imageErrorInvalidMediaType, field: field, index: index}
 	}
 
 	return nil
@@ -295,22 +392,22 @@ func checkPromptImageMediaType(mimeType string, index int) *promptImageError {
 
 // checkPromptRaster runs the decode-free structural gates in their pinned order:
 // format recognition, dimensions, animation, then declared-versus-sniffed.
-func checkPromptRaster(data []byte, mimeType string, index int) *promptImageError {
+func checkPromptRaster(data []byte, mimeType string, field string, index int) *promptImageError {
 	raster, err := inspectPromptRaster(data)
 
 	switch {
 	case errors.Is(err, errUnknownRasterFormat):
-		return &promptImageError{code: imageErrorMediaTypeMismatch, index: index}
+		return &promptImageError{code: imageErrorMediaTypeMismatch, field: field, index: index}
 	case err != nil:
-		return &promptImageError{code: imageErrorInvalidDimensions, index: index}
+		return &promptImageError{code: imageErrorInvalidDimensions, field: field, index: index}
 	}
 
 	if raster.animated {
-		return &promptImageError{code: imageErrorAnimatedUnsupported, index: index}
+		return &promptImageError{code: imageErrorAnimatedUnsupported, field: field, index: index}
 	}
 
 	if raster.mimeType != mimeType {
-		return &promptImageError{code: imageErrorMediaTypeMismatch, index: index}
+		return &promptImageError{code: imageErrorMediaTypeMismatch, field: field, index: index}
 	}
 
 	return nil
@@ -333,7 +430,15 @@ func promptMediaBlock(block acp.ContentBlock) (promptMedia, bool) {
 		return media, true
 	}
 
-	if block.Resource == nil || block.Resource.Resource.BlobResourceContents == nil {
+	if block.Resource == nil {
+		return promptMedia{}, false
+	}
+
+	if text := block.Resource.Resource.TextResourceContents; text != nil {
+		return promptMedia{kind: promptMediaTextResource, data: text.Text, uri: text.Uri}, true
+	}
+
+	if block.Resource.Resource.BlobResourceContents == nil {
 		return promptMedia{}, false
 	}
 

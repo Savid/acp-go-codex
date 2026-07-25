@@ -23,17 +23,18 @@ var mediaEnvelopeImageFormats = []string{mimeImagePNG, mimeImageJPEG, mimeImageG
 
 // mediaEnvelope reports the bounds this adapter actually enforces on inbound
 // prompt media, so a host can reject an oversize attachment before spending a
-// turn on it. Every value is read from the same configuration the gates read,
-// which is what keeps the advertisement from drifting away from the verdict.
+// turn on it. Both byte values come from the same effective-limit functions the
+// gates call rather than from the configured fields, so an advertised number is
+// always the number a rejection reports.
 //
 // documentFormats is empty: Codex maps no media type to a native document
 // representation, so no host should route a document to it as embedded bytes.
-// A zero byte value means that adapter policy limit is disabled, matching
-// ImageLimits, and 0 for maxDimension means no bound rather than no pixels.
+// A zero maxPromptBytes means no aggregate byte bound is enforced at all, and 0
+// for maxDimension means no bound rather than no pixels.
 func mediaEnvelope(limits ImageLimits) map[string]any {
 	return map[string]any{
-		mediaEnvelopeMaxBytesKey:        limits.MaxInputBytesPerImage,
-		mediaEnvelopeMaxPromptBytesKey:  limits.MaxInputBytesPerPrompt,
+		mediaEnvelopeMaxBytesKey:        effectiveInputBytesPerImage(limits.MaxInputBytesPerImage),
+		mediaEnvelopeMaxPromptBytesKey:  effectiveInputBytesPerPrompt(limits.MaxInputBytesPerPrompt),
 		mediaEnvelopeMaxDimensionKey:    mediaEnvelopeMaxDimension,
 		mediaEnvelopeImageFormatsKey:    slices.Clone(mediaEnvelopeImageFormats),
 		mediaEnvelopeDocumentFormatsKey: []string{},

@@ -58,7 +58,16 @@ func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBl
 	func(),
 	error,
 ) {
-	images, imageErr := validatePromptImages(blocks, s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot)
+	images, imageErr, abortErr := validatePromptImages(
+		ctx,
+		blocks,
+		s.agent.options.ImageLimits,
+		s.agent.options.InputHandoffRoot,
+	)
+	if abortErr != nil {
+		return nil, nil, abortErr
+	}
+
 	if imageErr != nil {
 		return nil, nil, imageErr.invalidParams()
 	}
@@ -69,17 +78,24 @@ func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBl
 
 	if len(images) > 0 &&
 		selectedModelImageSupport(modelList(ctx, s.client), s.currentModel()) == imageInputUnsupported {
-		imageErr = &promptImageError{code: imageErrorUnsupportedByModel}
+		imageErr = &promptImageError{
+			code:  imageErrorUnsupportedByModel,
+			field: images[0].field,
+			index: images[0].index,
+		}
 
 		return nil, nil, imageErr.invalidParams()
 	}
 
 	prepared, err := s.preparePromptImages(ctx, images)
 	if err != nil {
-		return nil, nil, s.mapTurnFailure(&codex.TurnFailedError{
+		// The real failure stays in the chain for the caller to inspect; the
+		// client-visible text does not, because it names the adapter's own
+		// scratch directory.
+		return nil, nil, s.mapTurnFailure(fmt.Errorf("%w: %w", &codex.TurnFailedError{
 			Cause:   codex.CauseTransport,
-			Message: err.Error(),
-		})
+			Message: promptImageScratchFailure,
+		}, err))
 	}
 
 	input, err := promptToCodex(blocks, prepared.images)

@@ -101,6 +101,22 @@ func TestPromptImageModelGatePreparationAndMirrorFailures(t *testing.T) {
 		t.Fatalf("scratch preparation err=%v", err)
 	}
 
+	// The client is told the staging failed and nothing about where the adapter
+	// stages, while the real cause stays in the chain for the adapter to inspect.
+	var scratchErr *acp.RequestError
+	if !errors.As(err, &scratchErr) {
+		t.Fatalf("scratch preparation err=%v", err)
+	}
+
+	scratchData, _ := scratchErr.Data.(map[string]any)
+	if scratchData[jsonFieldMessage] != promptImageScratchFailure {
+		t.Fatalf("scratch message=%v", scratchData[jsonFieldMessage])
+	}
+
+	if strings.Contains(scratchErr.Error(), "scratch unavailable") {
+		t.Fatalf("client-visible text carries the underlying failure: %s", scratchErr.Error())
+	}
+
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	if err := os.WriteFile(rollout, []byte(
 		`{"type":"response_item","payload":{"type":"image_generation_call","id":"bad","status":"completed","result":"!"}}`+"\n",

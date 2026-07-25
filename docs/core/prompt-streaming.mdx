@@ -51,8 +51,11 @@ counted across every gated media block in request order, and one of these
 - `handoff_digest_mismatch`
 
 `too_large` also includes decoded `sizeBytes` and `maxBytes`. The four handoff
-values carry a `message` naming the real cause. Validation stops at the first
-failing block in request order. At prompt time the selected model's native
+values carry a fixed `message` naming the stage that refused; a refusal never
+reports a path, a filename, an observed digest, or an observed byte count.
+`field` names the inbound block type — `prompt.image` for an image block and
+`prompt.resource` for an embedded resource, whatever media type routed it.
+Validation stops at the first failing block in request order. At prompt time the selected model's native
 `inputModalities` field is authoritative when present: a text-only declaration
 rejects the image, an `image` declaration accepts it, and absent model metadata
 forwards the validated input to Codex.
@@ -89,20 +92,31 @@ Form selection runs ahead of every other image gate, per block:
    URI — is the handoff form.
 3. Empty `data` with neither is `missing_data`, exactly as before.
 
-The handoff form then resolves and verifies before any embedded gate runs, first
+The handoff form then opens and verifies before any embedded gate runs, first
 failure winning:
 
 | `error` | Cause |
 | --- | --- |
 | `invalid_handoff` | The block is malformed as a block: no handoff root is configured, the envelope is absent, not an object, carries a field other than `version`, `digest`, and `sizeBytes`, declares a version other than `1`, a digest that is not 64 lowercase hex characters, or a negative or non-integer `sizeBytes` — or the `uri` is absent, unparseable, not `file`, names another host, or is not an absolute path. |
-| `path_not_allowed` | The path resolves outside the root, escapes it through a symlink, or is not a regular file. |
-| `missing_file` | The path is inside the root but does not exist or cannot be opened — the expected outcome when a host cleans up early. |
+| `path_not_allowed` | The confined root refused the open — a name that climbs out of the root, an absolute symlink, or a link whose target is outside it — or the opened file is not a regular file. |
+| `missing_file` | The name is inside the root but does not exist, including a relative symlink whose target has been removed — the expected outcome when a host cleans up early. |
+| `invalid_media_type` | The declared media type is outside the four-format allowlist. Checked after the location verdicts and before the file is read, so a type the adapter will never accept costs no read. |
 | `handoff_digest_mismatch` | The bytes do not match the declared size and sha256. Verification fails closed and never falls back to the embedded form. |
 
-The read is bounded at the per-image limit plus one byte, so an oversize file is
-rejected `too_large` reporting its real size rather than being loaded whole. A
-file that large cannot be digest-verified, and is rejected for exactly that
-reason: nothing unverified is ever forwarded.
+The path is opened relative to the configured root through a confined directory
+handle, so containment is decided by the kernel at the moment of the open rather
+than by resolving the path first and reading it afterwards.
+
+A declared `sizeBytes` past the effective per-image limit is `too_large` before
+the file is opened. The read itself is bounded at that limit plus one byte, so a
+file larger than it declares is rejected `too_large` on the bytes actually read
+rather than being loaded whole, and no size reported by the filesystem takes part
+in any verdict.
+
+One prompt reads at most 64 handoff-form blocks. The block that crosses the cap
+is `too_large` with the block count as `sizeBytes` and 64 as `maxBytes`, and it
+is never read — so a prompt's file reads stay bounded even when the per-prompt
+byte limit is disabled.
 
 Everything after verification is identical to the embedded form. The bytes take
 the same allowlist, sniff, dimension, animation, and byte gates, count toward

@@ -339,6 +339,23 @@ func TestAllowedImageFileInjectedFailures(t *testing.T) {
 	require.False(t, pathWithinRoot(resolved, filepath.Join(t.TempDir(), "missing")))
 	require.False(t, pathWithinRoot(resolved, t.TempDir()))
 	require.True(t, pathWithinRoot(resolved, s.cwd))
+
+	// The two arguments are not interchangeable: a root is not contained in a
+	// path beneath it, and a directory whose name merely starts with the root's
+	// is not under the root at all.
+	require.False(t, pathWithinRoot(s.cwd, resolved))
+
+	sibling := s.cwd + "-sibling"
+	require.NoError(t, os.MkdirAll(sibling, 0o700))
+	t.Cleanup(func() { _ = os.RemoveAll(sibling) })
+
+	siblingFile := filepath.Join(sibling, "image.png")
+	require.NoError(t, os.WriteFile(siblingFile, []byte("x"), 0o600))
+
+	resolvedSibling, err := filepath.EvalSymlinks(siblingFile)
+	require.NoError(t, err)
+	require.False(t, pathWithinRoot(resolvedSibling, s.cwd))
+	require.True(t, pathWithinRoot(resolvedSibling, sibling))
 }
 
 func requireImageOutputReason(t *testing.T, err error, reason string) {

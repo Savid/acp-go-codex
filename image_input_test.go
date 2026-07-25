@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -32,7 +33,7 @@ func TestValidatePromptImagesContract(t *testing.T) {
 		block("valid.gif", "image/gif"),
 		block("valid.webp", "image/webp"),
 	}
-	images, err := validatePromptImages(valid, ImageLimits{}, "")
+	images, err, _ := validatePromptImages(t.Context(), valid, ImageLimits{}, "")
 	require.Nil(t, err)
 	require.Len(t, images, 4)
 
@@ -42,15 +43,16 @@ func TestValidatePromptImagesContract(t *testing.T) {
 		MimeType: &resourceMIME,
 		Blob:     base64.StdEncoding.EncodeToString(fixture("valid.png")),
 	}})
-	images, err = validatePromptImages([]acp.ContentBlock{acp.TextBlock("text"), resource}, ImageLimits{}, "")
+	images, err, _ = validatePromptImages(t.Context(), []acp.ContentBlock{acp.TextBlock("text"), resource}, ImageLimits{}, "")
 	require.Nil(t, err)
 	require.Len(t, images, 1)
 
 	pngSize := int64(len(fixture("valid.png")))
-	images, err = validatePromptImages([]acp.ContentBlock{block("valid.png", "image/png")}, ImageLimits{MaxInputBytesPerImage: pngSize}, "")
+	images, err, _ = validatePromptImages(t.Context(), []acp.ContentBlock{block("valid.png", "image/png")}, ImageLimits{MaxInputBytesPerImage: pngSize}, "")
 	require.Nil(t, err)
 	require.Len(t, images, 1)
-	images, err = validatePromptImages(
+	images, err, _ = validatePromptImages(
+		t.Context(),
 		[]acp.ContentBlock{block("valid.png", "image/png"), block("valid.png", "image/png")},
 		ImageLimits{MaxInputBytesPerPrompt: pngSize * 2},
 		"",
@@ -63,55 +65,60 @@ func TestValidatePromptImagesContract(t *testing.T) {
 		blocks    []acp.ContentBlock
 		limits    ImageLimits
 		code      string
+		field     string
 		sizeBytes int64
 		maxBytes  int64
 	}{
-		{name: "missing data", blocks: []acp.ContentBlock{acp.ImageBlock("", "image/png")}, code: imageErrorMissingData},
-		{name: "invalid media type", blocks: []acp.ContentBlock{acp.ImageBlock("eA==", "image/jpg")}, code: imageErrorInvalidMediaType},
-		{name: "non-canonical case", blocks: []acp.ContentBlock{acp.ImageBlock("eA==", "IMAGE/PNG")}, code: imageErrorInvalidMediaType},
-		{name: "invalid base64", blocks: []acp.ContentBlock{acp.ImageBlock("!", "image/png")}, code: imageErrorInvalidBase64},
-		{name: "per image limit", blocks: []acp.ContentBlock{block("valid.png", "image/png")}, limits: ImageLimits{MaxInputBytesPerImage: 1}, code: imageErrorTooLarge, sizeBytes: pngSize, maxBytes: 1},
+		{name: "missing data", blocks: []acp.ContentBlock{acp.ImageBlock("", "image/png")}, code: imageErrorMissingData, field: promptImageField},
+		{name: "invalid media type", blocks: []acp.ContentBlock{acp.ImageBlock("eA==", "image/jpg")}, code: imageErrorInvalidMediaType, field: promptImageField},
+		{name: "non-canonical case", blocks: []acp.ContentBlock{acp.ImageBlock("eA==", "IMAGE/PNG")}, code: imageErrorInvalidMediaType, field: promptImageField},
+		{name: "invalid base64", blocks: []acp.ContentBlock{acp.ImageBlock("!", "image/png")}, code: imageErrorInvalidBase64, field: promptImageField},
+		{name: "per image limit", blocks: []acp.ContentBlock{block("valid.png", "image/png")}, limits: ImageLimits{MaxInputBytesPerImage: 1}, code: imageErrorTooLarge, field: promptImageField, sizeBytes: pngSize, maxBytes: 1},
 		{
 			name:      "prompt aggregate",
 			blocks:    []acp.ContentBlock{block("valid.png", "image/png"), block("valid.png", "image/png")},
 			limits:    ImageLimits{MaxInputBytesPerPrompt: pngSize*2 - 1},
 			code:      imageErrorTooLarge,
+			field:     promptImageField,
 			sizeBytes: pngSize * 2,
 			maxBytes:  pngSize*2 - 1,
 		},
-		{name: "invalid dimensions", blocks: []acp.ContentBlock{block("truncated.png", "image/png")}, code: imageErrorInvalidDimensions},
-		{name: "unrecognized magic", blocks: []acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString([]byte("not a raster at all")), "image/png")}, code: imageErrorMediaTypeMismatch},
-		{name: "mime mismatch", blocks: []acp.ContentBlock{block("mismatch.png", "image/png")}, code: imageErrorMediaTypeMismatch},
-		{name: "animated gif", blocks: []acp.ContentBlock{block("animated.gif", "image/gif")}, code: imageErrorAnimatedUnsupported},
-		{name: "animated webp", blocks: []acp.ContentBlock{block("animated.webp", "image/webp")}, code: imageErrorAnimatedUnsupported},
-		{name: "animated png", blocks: []acp.ContentBlock{block("animated-apng.png", "image/png")}, code: imageErrorAnimatedUnsupported},
-		{name: "actl marker", blocks: []acp.ContentBlock{block("single-frame-actl.png", "image/png")}, code: imageErrorAnimatedUnsupported},
+		{name: "invalid dimensions", blocks: []acp.ContentBlock{block("truncated.png", "image/png")}, code: imageErrorInvalidDimensions, field: promptImageField},
+		{name: "unrecognized magic", blocks: []acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString([]byte("not a raster at all")), "image/png")}, code: imageErrorMediaTypeMismatch, field: promptImageField},
+		{name: "mime mismatch", blocks: []acp.ContentBlock{block("mismatch.png", "image/png")}, code: imageErrorMediaTypeMismatch, field: promptImageField},
+		{name: "animated gif", blocks: []acp.ContentBlock{block("animated.gif", "image/gif")}, code: imageErrorAnimatedUnsupported, field: promptImageField},
+		{name: "animated webp", blocks: []acp.ContentBlock{block("animated.webp", "image/webp")}, code: imageErrorAnimatedUnsupported, field: promptImageField},
+		{name: "animated png", blocks: []acp.ContentBlock{block("animated-apng.png", "image/png")}, code: imageErrorAnimatedUnsupported, field: promptImageField},
+		{name: "actl marker", blocks: []acp.ContentBlock{block("single-frame-actl.png", "image/png")}, code: imageErrorAnimatedUnsupported, field: promptImageField},
 		{
 			name:   "structural gate precedes per-image limit",
 			blocks: []acp.ContentBlock{block("animated.gif", "image/gif")},
 			limits: ImageLimits{MaxInputBytesPerImage: 1},
 			code:   imageErrorAnimatedUnsupported,
+			field:  promptImageField,
 		},
 		{
 			name:   "mismatch gate precedes per-image limit",
 			blocks: []acp.ContentBlock{block("mismatch.png", "image/png")},
 			limits: ImageLimits{MaxInputBytesPerImage: 1},
 			code:   imageErrorMediaTypeMismatch,
+			field:  promptImageField,
 		},
 		{
 			name:   "invalid dimensions gate precedes per-prompt limit",
 			blocks: []acp.ContentBlock{block("truncated.png", "image/png")},
 			limits: ImageLimits{MaxInputBytesPerPrompt: 1},
 			code:   imageErrorInvalidDimensions,
+			field:  promptImageField,
 		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := validatePromptImages(testCase.blocks, testCase.limits, "")
-			var imageErr *promptImageError
-			require.ErrorAs(t, err, &imageErr)
+			_, imageErr, err := validatePromptImages(t.Context(), testCase.blocks, testCase.limits, "")
+			require.NoError(t, err)
+			require.NotNil(t, imageErr)
 			require.Equal(t, testCase.code, imageErr.code)
-			require.Contains(t, imageErr.Error(), testCase.code)
+			require.Equal(t, testCase.field, imageErr.field)
 
 			if testCase.code == imageErrorTooLarge {
 				require.Equal(t, testCase.sizeBytes, imageErr.sizeBytes)
@@ -154,9 +161,21 @@ func TestPromptMediaBlockVariants(t *testing.T) {
 
 	_, ok = promptMediaBlock(acp.TextBlock("text"))
 	require.False(t, ok)
-	_, ok = promptMediaBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{
+	// A text resource carries bytes too. Codex flattens them into prompt text,
+	// so they reach no image gate, but they are still a block the prompt budget
+	// has to account for.
+	media, ok = promptMediaBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{
 		TextResourceContents: &acp.TextResourceContents{Uri: "file:///a", Text: "text"},
 	}))
+	require.True(t, ok)
+	require.Equal(t, promptMediaTextResource, media.kind)
+	require.Equal(t, "text", media.data)
+	require.False(t, media.kind.nativeImage())
+	require.False(t, media.kind.perImageBounded())
+	require.Equal(t, promptResourceField, media.kind.inputField())
+
+	// A resource carrying neither form has nothing to gate.
+	_, ok = promptMediaBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{}))
 	require.False(t, ok)
 
 	// A blob resource is always gated, whatever it declares — an absent or
@@ -200,7 +219,8 @@ func TestValidatePromptImagesGatesTheBlobChannelWhateverTheMIME(t *testing.T) {
 	oversize := make([]byte, defaultImageLimitBytes+4495)
 	require.Len(t, oversize, 6295951)
 
-	_, imageErr := validatePromptImages(
+	_, imageErr, _ := validatePromptImages(
+		t.Context(),
 		[]acp.ContentBlock{blobResourceBlock("blob://report", "application/pdf", base64.StdEncoding.EncodeToString(oversize))},
 		defaultImageLimits(),
 		"",
@@ -213,7 +233,8 @@ func TestValidatePromptImagesGatesTheBlobChannelWhateverTheMIME(t *testing.T) {
 
 	// Corrupt base64 in a blob is rejected rather than forwarded.
 	for _, mimeType := range []string{"application/pdf", "text/plain", "application/octet-stream"} {
-		_, imageErr = validatePromptImages(
+		_, imageErr, _ = validatePromptImages(
+			t.Context(),
 			[]acp.ContentBlock{blobResourceBlock("blob://a", mimeType, "!")},
 			defaultImageLimits(),
 			"",
@@ -226,7 +247,8 @@ func TestValidatePromptImagesGatesTheBlobChannelWhateverTheMIME(t *testing.T) {
 	// image bytes, and the rejection names the block that crossed the budget.
 	png := testdataFixture(t, "valid.png")
 	pdf := []byte("%PDF-1.7 document bytes")
-	_, imageErr = validatePromptImages(
+	_, imageErr, _ = validatePromptImages(
+		t.Context(),
 		[]acp.ContentBlock{
 			blobResourceBlock("blob://a", "application/pdf", base64.StdEncoding.EncodeToString(pdf)),
 			acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimeImagePNG),
@@ -243,7 +265,7 @@ func TestValidatePromptImagesGatesTheBlobChannelWhateverTheMIME(t *testing.T) {
 	// and still maps to the reference line Codex has always sent for it.
 	blocks := []acp.ContentBlock{blobResourceBlock("blob://a", "application/pdf", base64.StdEncoding.EncodeToString(pdf))}
 
-	images, imageErr := validatePromptImages(blocks, defaultImageLimits(), "")
+	images, imageErr, _ := validatePromptImages(t.Context(), blocks, defaultImageLimits(), "")
 	require.Nil(t, imageErr)
 	require.Empty(t, images)
 
@@ -268,7 +290,8 @@ func TestValidatePromptImagesNormalizesMediaTypeBeforeRouting(t *testing.T) {
 		"image/bmp",
 		"IMAGE/BMP",
 	} {
-		_, imageErr := validatePromptImages(
+		_, imageErr, _ := validatePromptImages(
+			t.Context(),
 			[]acp.ContentBlock{blobResourceBlock("blob://a", declared, png)},
 			defaultImageLimits(),
 			"",
@@ -478,4 +501,160 @@ func TestImageLimitsOptionAndValidation(t *testing.T) {
 		require.Error(t, validateImageLimits(invalid))
 	}
 	require.NoError(t, validateImageLimits(ImageLimits{}))
+}
+
+// cancelAfterFirstCheck reports a live context the first time it is asked and a
+// cancelled one afterwards. That is what a caller cancelling while a block is
+// being admitted looks like from inside the validation loop, without a race
+// deciding whether the test exercises it.
+type cancelAfterFirstCheck struct {
+	//nolint:containedctx // decorating the caller's context is what this is for.
+	context.Context
+
+	observed int
+}
+
+func (c *cancelAfterFirstCheck) Err() error {
+	c.observed++
+	if c.observed <= 1 {
+		return nil
+	}
+
+	return context.Canceled
+}
+
+func TestValidatePromptImagesAbortsRatherThanVerdictingOnCancellation(t *testing.T) {
+	root := t.TempDir()
+	block := handoffFixture(t, root, "valid.png", syntheticPNG(t, 64))
+
+	reads := countingImageReads(t)
+
+	// Cancelled after the loop admitted the block and before the read reached
+	// the filesystem: the caller gets its own error rather than a verdict
+	// describing a block that was never actually judged.
+	racing := &cancelAfterFirstCheck{Context: t.Context()}
+
+	images, imageErr, err := validatePromptImages(racing, []acp.ContentBlock{block}, defaultImageLimits(), root)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, imageErr)
+	require.Nil(t, images)
+	require.Zero(t, *reads)
+
+	// The same answer reaches the prompt path, so a cancelled turn never spends
+	// the scratch reservation that materializing images would take.
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	prompt := &session{agent: NewAgent(WithInputHandoffRoot(root))}
+
+	input, release, err := prompt.preparePromptInput(cancelled, []acp.ContentBlock{block})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, input)
+	require.Nil(t, release)
+}
+
+func TestValidatePromptImagesChargesTextResourcesToThePromptAggregate(t *testing.T) {
+	text := func(body string) acp.ContentBlock {
+		return acp.ResourceBlock(acp.EmbeddedResourceResource{
+			TextResourceContents: &acp.TextResourceContents{Uri: "file:///notes.md", Text: body},
+		})
+	}
+
+	body := strings.Repeat("a", 512)
+
+	// Declaring bytes as text rather than as a blob does not buy a second
+	// budget: the aggregate is the aggregate.
+	_, imageErr, err := validatePromptImages(
+		t.Context(),
+		[]acp.ContentBlock{text(body), text(body)},
+		ImageLimits{MaxInputBytesPerPrompt: int64(len(body))*2 - 1},
+		"",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, imageErr)
+	require.Equal(t, imageErrorTooLarge, imageErr.code)
+	require.Equal(t, int64(len(body))*2, imageErr.sizeBytes)
+	require.Equal(t, promptResourceField, imageErr.field)
+	require.Equal(t, 1, imageErr.index)
+
+	// Text shares the aggregate with image bytes rather than running beside it.
+	png := testdataFixture(t, "valid.png")
+	_, imageErr, _ = validatePromptImages(
+		t.Context(),
+		[]acp.ContentBlock{
+			text(body),
+			acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimeImagePNG),
+		},
+		ImageLimits{MaxInputBytesPerPrompt: int64(len(body)+len(png)) - 1},
+		"",
+	)
+	require.NotNil(t, imageErr)
+	require.Equal(t, imageErrorTooLarge, imageErr.code)
+	require.Equal(t, int64(len(body)+len(png)), imageErr.sizeBytes)
+	require.Equal(t, 1, imageErr.index)
+	require.Equal(t, promptImageField, imageErr.field)
+
+	// A text resource reaches no image transport and no image byte limit: the
+	// per-image bound is about images.
+	images, imageErr, _ := validatePromptImages(
+		t.Context(),
+		[]acp.ContentBlock{text(strings.Repeat("b", int(maxACPImageDecodedBytes)+1))},
+		ImageLimits{},
+		"",
+	)
+	require.Nil(t, imageErr)
+	require.Empty(t, images)
+}
+
+func TestPromptInputErrorsNameTheInboundBlockType(t *testing.T) {
+	png := testdataFixture(t, "valid.png")
+
+	// Routing is decided by the declared media type; the reported field is
+	// decided by the block that arrived. An image-typed resource takes the
+	// image gate chain and is still a resource.
+	_, imageErr, err := validatePromptImages(
+		t.Context(),
+		[]acp.ContentBlock{blobResourceBlock("blob://a", "image/png", base64.StdEncoding.EncodeToString([]byte("not a raster")))},
+		defaultImageLimits(),
+		"",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, imageErr)
+	require.Equal(t, imageErrorMediaTypeMismatch, imageErr.code)
+	require.Equal(t, promptResourceField, imageErr.field)
+
+	requestErr := &acp.RequestError{}
+	require.ErrorAs(t, imageErr.invalidParams(), &requestErr)
+
+	data, ok := requestErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, promptResourceField, data[jsonFieldField])
+
+	// A plain image block still reports the image field.
+	_, imageErr, _ = validatePromptImages(
+		t.Context(),
+		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString([]byte("not a raster")), mimeImagePNG)},
+		defaultImageLimits(),
+		"",
+	)
+	require.NotNil(t, imageErr)
+	require.Equal(t, promptImageField, imageErr.field)
+
+	// A model that cannot take images names the block that offered one rather
+	// than always naming the first block in the prompt.
+	unsupported := &promptImageError{
+		code:  imageErrorUnsupportedByModel,
+		field: promptResourceField,
+		index: 3,
+	}
+
+	unsupportedErr := &acp.RequestError{}
+	require.ErrorAs(t, unsupported.invalidParams(), &unsupportedErr)
+
+	unsupportedData, ok := unsupportedErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 3, unsupportedData[jsonFieldIndex])
+	require.Equal(t, promptResourceField, unsupportedData[jsonFieldField])
+
+	require.NotEmpty(t, png)
 }
