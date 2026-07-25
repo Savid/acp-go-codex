@@ -86,6 +86,8 @@ func TestPromptToUserInputFailsClosedOnUnknownBlocks(t *testing.T) {
 func TestIsImageBearingBlock(t *testing.T) {
 	mimeType := "image/png"
 	textMIME := "text/plain"
+	upperMIME := "IMAGE/PNG"
+	paramMIME := "image/png; charset=binary"
 
 	cases := []struct {
 		name  string
@@ -98,11 +100,43 @@ func TestIsImageBearingBlock(t *testing.T) {
 		{name: "non-image blob resource", block: acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://b", MimeType: &textMIME, Blob: "aW1hZ2U="}}), want: false},
 		{name: "blob resource without media type", block: acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://c", Blob: "aW1hZ2U="}}), want: false},
 		{name: "text resource", block: acp.ResourceBlock(acp.EmbeddedResourceResource{TextResourceContents: &acp.TextResourceContents{Uri: "file:///a", Text: "body"}}), want: false},
+		{name: "uppercase image blob resource", block: acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://d", MimeType: &upperMIME, Blob: "aW1hZ2U="}}), want: true},
+		{name: "parameterized image blob resource", block: acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://e", MimeType: &paramMIME, Blob: "aW1hZ2U="}}), want: true},
 	}
 
 	for _, testCase := range cases {
 		if got := IsImageBearingBlock(testCase.block); got != testCase.want {
 			t.Fatalf("%s: IsImageBearingBlock = %v, want %v", testCase.name, got, testCase.want)
+		}
+	}
+}
+
+func TestNormalizedMediaTypeRouting(t *testing.T) {
+	cases := []struct {
+		declared   string
+		normalized string
+		image      bool
+	}{
+		{declared: "image/png", normalized: "image/png", image: true},
+		{declared: "IMAGE/PNG", normalized: "image/png", image: true},
+		{declared: "Image/Png", normalized: "image/png", image: true},
+		{declared: "  image/png  ", normalized: "image/png", image: true},
+		{declared: "image/png;charset=binary", normalized: "image/png", image: true},
+		{declared: "IMAGE/PNG; q=1", normalized: "image/png", image: true},
+		{declared: "image/", normalized: "image/", image: true},
+		{declared: "", normalized: "", image: false},
+		{declared: "text/plain", normalized: "text/plain", image: false},
+		{declared: "application/pdf", normalized: "application/pdf", image: false},
+		{declared: "ximage/png", normalized: "ximage/png", image: false},
+	}
+
+	for _, testCase := range cases {
+		if got := NormalizedMediaType(testCase.declared); got != testCase.normalized {
+			t.Fatalf("NormalizedMediaType(%q) = %q, want %q", testCase.declared, got, testCase.normalized)
+		}
+
+		if got := IsImageMediaType(testCase.declared); got != testCase.image {
+			t.Fatalf("IsImageMediaType(%q) = %v, want %v", testCase.declared, got, testCase.image)
 		}
 	}
 }

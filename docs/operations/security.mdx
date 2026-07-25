@@ -86,10 +86,34 @@ protect that data. Telemetry never carries rollout rows, prompt text, or tool
 payloads by default; see [Observability](/docs/operations/observability) for the
 privacy defaults.
 
-Prompt images are read only from the base64 bytes in the ACP request; image
-URIs are never followed. Large validated inputs are materialized as mode-0600
-files in an adapter-owned scratch directory and removed when the prompt call
-returns. Native image output paths are accepted only when their resolved target
-is a regular file inside the workspace, adapter scratch roots, or Codex
+Prompt images are read from the base64 bytes in the ACP request, and an embedded
+block's image URI is never followed. Large validated inputs are materialized as
+mode-0600 files in an adapter-owned scratch directory and removed when the prompt
+call returns. Native image output paths are accepted only when their resolved
+target is a regular file inside the workspace, adapter scratch roots, or Codex
 `generated_images` directory. Raw image events redact base64 and expose only
 path basenames.
+
+[`WithInputHandoffRoot`](/docs/reference/go-api#agent-options) is the one option
+that lets a prompt name a local file to read, and it is off unless a host
+configures it. Its guarantees are deliberately narrow:
+
+- **One root, resolved safely.** A handoff path is checked against the
+  configured root, resolved through symlinks, checked again, and required to be
+  a regular file. An escape, a non-regular target, or an unresolvable path is
+  `path_not_allowed`; nothing outside the root is ever opened. No other prompt
+  field can widen the root, and the root itself must be an absolute path or
+  agent construction fails.
+- **Bytes are verified, not trusted.** Every read is bounded at the per-image
+  limit plus one byte and must match the sha256 and size the block declares.
+  A mismatch is `handoff_digest_mismatch` and fails the turn; there is no
+  fallback that would forward unverified bytes.
+- **The root is read-only.** The adapter never creates, modifies, or removes
+  anything under it.
+- **The host's path does not propagate.** Verified bytes are copied into the
+  adapter's own scratch directory before reaching Codex, so the handoff path
+  appears in no native request and nothing that outlives validation.
+
+Confining what the adapter can reach is the root's job; isolating the tree from
+the Codex process is not, since the harness runs as the same user as the adapter
+and can read any path that user can.

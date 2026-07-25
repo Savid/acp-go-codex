@@ -32,7 +32,7 @@ func TestValidatePromptImagesContract(t *testing.T) {
 		block("valid.gif", "image/gif"),
 		block("valid.webp", "image/webp"),
 	}
-	images, err := validatePromptImages(valid, ImageLimits{})
+	images, err := validatePromptImages(valid, ImageLimits{}, "")
 	require.Nil(t, err)
 	require.Len(t, images, 4)
 
@@ -42,17 +42,18 @@ func TestValidatePromptImagesContract(t *testing.T) {
 		MimeType: &resourceMIME,
 		Blob:     base64.StdEncoding.EncodeToString(fixture("valid.png")),
 	}})
-	images, err = validatePromptImages([]acp.ContentBlock{acp.TextBlock("text"), resource}, ImageLimits{})
+	images, err = validatePromptImages([]acp.ContentBlock{acp.TextBlock("text"), resource}, ImageLimits{}, "")
 	require.Nil(t, err)
 	require.Len(t, images, 1)
 
 	pngSize := int64(len(fixture("valid.png")))
-	images, err = validatePromptImages([]acp.ContentBlock{block("valid.png", "image/png")}, ImageLimits{MaxInputBytesPerImage: pngSize})
+	images, err = validatePromptImages([]acp.ContentBlock{block("valid.png", "image/png")}, ImageLimits{MaxInputBytesPerImage: pngSize}, "")
 	require.Nil(t, err)
 	require.Len(t, images, 1)
 	images, err = validatePromptImages(
 		[]acp.ContentBlock{block("valid.png", "image/png"), block("valid.png", "image/png")},
 		ImageLimits{MaxInputBytesPerPrompt: pngSize * 2},
+		"",
 	)
 	require.Nil(t, err)
 	require.Len(t, images, 2)
@@ -106,7 +107,7 @@ func TestValidatePromptImagesContract(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := validatePromptImages(testCase.blocks, testCase.limits)
+			_, err := validatePromptImages(testCase.blocks, testCase.limits, "")
 			var imageErr *promptImageError
 			require.ErrorAs(t, err, &imageErr)
 			require.Equal(t, testCase.code, imageErr.code)
@@ -123,28 +124,167 @@ func TestValidatePromptImagesContract(t *testing.T) {
 	}
 }
 
-func TestPromptImageBlockVariants(t *testing.T) {
-	mimeType := "image/png"
-	textMIME := "text/plain"
+func TestPromptMediaBlockVariants(t *testing.T) {
+	blobBlock := func(mimeType *string, blob string) acp.ContentBlock {
+		return acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{
+			Uri:      "blob://a",
+			MimeType: mimeType,
+			Blob:     blob,
+		}})
+	}
+	pointer := func(value string) *string { return &value }
 
-	data, mediaType, ok := promptImageBlock(acp.ImageBlock("data", mimeType))
+	uri := "file:///root/a.png"
+	meta := map[string]any{handoffMetaKey: map[string]any{}}
+	image := acp.ImageBlock("data", mimeImagePNG)
+	image.Image.Uri = &uri
+	image.Image.Meta = meta
+
+	media, ok := promptMediaBlock(image)
 	require.True(t, ok)
-	require.Equal(t, "data", data)
-	require.Equal(t, mimeType, mediaType)
+	require.Equal(t, promptMediaImageBlock, media.kind)
+	require.Equal(t, "data", media.data)
+	require.Equal(t, mimeImagePNG, media.mimeType)
+	require.Equal(t, uri, media.uri)
+	require.Equal(t, meta, media.meta)
 
-	_, _, ok = promptImageBlock(acp.TextBlock("text"))
-	require.False(t, ok)
-	_, _, ok = promptImageBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{TextResourceContents: &acp.TextResourceContents{Uri: "file:///a", Text: "text"}}))
-	require.False(t, ok)
-	_, _, ok = promptImageBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://a"}}))
-	require.False(t, ok)
-	_, _, ok = promptImageBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://a", MimeType: &textMIME}}))
-	require.False(t, ok)
-
-	upperMIME := "IMAGE/PNG"
-	_, mediaType, ok = promptImageBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{Uri: "blob://a", MimeType: &upperMIME, Blob: "eA=="}}))
+	media, ok = promptMediaBlock(acp.ImageBlock("data", mimeImagePNG))
 	require.True(t, ok)
-	require.Equal(t, upperMIME, mediaType)
+	require.Empty(t, media.uri)
+
+	_, ok = promptMediaBlock(acp.TextBlock("text"))
+	require.False(t, ok)
+	_, ok = promptMediaBlock(acp.ResourceBlock(acp.EmbeddedResourceResource{
+		TextResourceContents: &acp.TextResourceContents{Uri: "file:///a", Text: "text"},
+	}))
+	require.False(t, ok)
+
+	// A blob resource is always gated, whatever it declares — an absent or
+	// non-image media type routes it to the opaque channel rather than out of
+	// validation entirely.
+	for _, declared := range []*string{nil, pointer("text/plain"), pointer("application/pdf")} {
+		media, ok = promptMediaBlock(blobBlock(declared, "eA=="))
+		require.True(t, ok)
+		require.Equal(t, promptMediaOpaqueBlob, media.kind)
+		require.Equal(t, "eA==", media.data)
+	}
+
+	// Routing normalizes casing and parameters; the declared value the
+	// allowlist reads is preserved verbatim, so a non-canonical declaration
+	// still reaches the image path and is rejected there.
+	for _, declared := range []string{"IMAGE/PNG", " image/png ", "image/png; charset=binary", "Image/PNG;q=1"} {
+		media, ok = promptMediaBlock(blobBlock(pointer(declared), "eA=="))
+		require.True(t, ok)
+		require.Equal(t, promptMediaImageBlob, media.kind, declared)
+		require.Equal(t, declared, media.mimeType)
+	}
+
+	require.True(t, promptMediaImageBlock.nativeImage())
+	require.True(t, promptMediaImageBlob.nativeImage())
+	require.False(t, promptMediaOpaqueBlob.nativeImage())
+}
+
+// blobResourceBlock builds an embedded blob resource declaring mimeType.
+func blobResourceBlock(uri string, mimeType string, blob string) acp.ContentBlock {
+	return acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{
+		Uri:      uri,
+		MimeType: &mimeType,
+		Blob:     blob,
+	}})
+}
+
+func TestValidatePromptImagesGatesTheBlobChannelWhateverTheMIME(t *testing.T) {
+	// A document blob larger than the per-image limit the same adapter enforces
+	// for an image blob. The channel is gated by bytes, not by media type, so
+	// this is a rejection rather than an unbounded forward.
+	oversize := make([]byte, defaultImageLimitBytes+4495)
+	require.Len(t, oversize, 6295951)
+
+	_, imageErr := validatePromptImages(
+		[]acp.ContentBlock{blobResourceBlock("blob://report", "application/pdf", base64.StdEncoding.EncodeToString(oversize))},
+		defaultImageLimits(),
+		"",
+	)
+	require.NotNil(t, imageErr)
+	require.Equal(t, imageErrorTooLarge, imageErr.code)
+	require.Equal(t, int64(len(oversize)), imageErr.sizeBytes)
+	require.Equal(t, defaultImageLimitBytes, imageErr.maxBytes)
+	require.Equal(t, 0, imageErr.index)
+
+	// Corrupt base64 in a blob is rejected rather than forwarded.
+	for _, mimeType := range []string{"application/pdf", "text/plain", "application/octet-stream"} {
+		_, imageErr = validatePromptImages(
+			[]acp.ContentBlock{blobResourceBlock("blob://a", mimeType, "!")},
+			defaultImageLimits(),
+			"",
+		)
+		require.NotNil(t, imageErr, mimeType)
+		require.Equal(t, imageErrorInvalidBase64, imageErr.code, mimeType)
+	}
+
+	// A blob's decoded bytes are charged to the per-prompt aggregate alongside
+	// image bytes, and the rejection names the block that crossed the budget.
+	png := testdataFixture(t, "valid.png")
+	pdf := []byte("%PDF-1.7 document bytes")
+	_, imageErr = validatePromptImages(
+		[]acp.ContentBlock{
+			blobResourceBlock("blob://a", "application/pdf", base64.StdEncoding.EncodeToString(pdf)),
+			acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimeImagePNG),
+		},
+		ImageLimits{MaxInputBytesPerPrompt: int64(len(png))},
+		"",
+	)
+	require.NotNil(t, imageErr)
+	require.Equal(t, imageErrorTooLarge, imageErr.code)
+	require.Equal(t, int64(len(pdf)+len(png)), imageErr.sizeBytes)
+	require.Equal(t, 1, imageErr.index)
+
+	// A conforming blob still passes, still reaches no native image transport,
+	// and still maps to the reference line Codex has always sent for it.
+	blocks := []acp.ContentBlock{blobResourceBlock("blob://a", "application/pdf", base64.StdEncoding.EncodeToString(pdf))}
+
+	images, imageErr := validatePromptImages(blocks, defaultImageLimits(), "")
+	require.Nil(t, imageErr)
+	require.Empty(t, images)
+
+	input, err := promptToCodex(blocks, nil)
+	require.NoError(t, err)
+	require.Equal(t, "[resource: blob://a]", input[0][jsonFieldText])
+}
+
+func TestValidatePromptImagesNormalizesMediaTypeBeforeRouting(t *testing.T) {
+	png := base64.StdEncoding.EncodeToString(testdataFixture(t, "valid.png"))
+
+	// A raster declaration the allowlist does not accept is invalid_media_type
+	// whatever its casing or parameters: normalization decides that the block
+	// routes to the image path, and the image path rejects it there. It is never
+	// silently forwarded down the generic resource path.
+	for _, declared := range []string{
+		"IMAGE/PNG",
+		"Image/Png",
+		"image/png; charset=binary",
+		"IMAGE/PNG;q=1",
+		" image/png ",
+		"image/bmp",
+		"IMAGE/BMP",
+	} {
+		_, imageErr := validatePromptImages(
+			[]acp.ContentBlock{blobResourceBlock("blob://a", declared, png)},
+			defaultImageLimits(),
+			"",
+		)
+		require.NotNil(t, imageErr, declared)
+		require.Equal(t, imageErrorInvalidMediaType, imageErr.code, declared)
+	}
+
+	// The same normalization decides the count of image-bearing blocks on the
+	// native mapping side, so a non-canonical declaration cannot desynchronize
+	// validation from mapping.
+	blocks := []acp.ContentBlock{blobResourceBlock("blob://a", "IMAGE/PNG", png)}
+	require.True(t, codex.IsImageBearingBlock(blocks[0]))
+
+	_, err := promptToCodex(blocks, nil)
+	require.Error(t, err)
 }
 
 func TestPreparePromptImagesTransportsAndFailures(t *testing.T) {

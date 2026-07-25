@@ -23,7 +23,11 @@
 //
 // Prompt image blocks accept validated PNG, JPEG, GIF, and WebP data. Native
 // image generation and image-view results are emitted as ACP tool-call image
-// content. [WithImageLimits] controls decoded-byte bounds in both directions.
+// content. [WithImageLimits] controls decoded-byte bounds in both directions,
+// and the effective inbound bounds are advertised at initialize under
+// _meta["acp-go.dev/mediaEnvelope"]. [WithInputHandoffRoot] additionally accepts
+// prompt images as digest-verified local files under one read-only root, which
+// keeps a multi-image prompt's JSON-RPC frame small.
 //
 // Hosts that need structured output can attach [CodexOptions] with
 // [WithSessionCodexOptions] or use [WithSessionOutputSchema]. The schema is

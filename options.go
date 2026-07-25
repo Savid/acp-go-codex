@@ -120,6 +120,10 @@ type Options struct {
 	// ImageLimits bounds decoded image bytes accepted from prompts and emitted
 	// in session updates.
 	ImageLimits ImageLimits
+	// InputHandoffRoot is the read-only root for the local handoff prompt
+	// transport. Empty rejects the handoff form. It must be an absolute path,
+	// and nothing under it is ever created, modified, or removed.
+	InputHandoffRoot string
 	// SeedFiles maps relative paths to file contents written into the resolved
 	// CODEX_HOME before each Codex process launches, so Codex reads them as its
 	// own config (e.g. config.toml). Paths are confined to CODEX_HOME.
@@ -219,6 +223,23 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+// WithInputHandoffRoot enables the local handoff prompt transport and confines
+// it to dir: a prompt image block with empty data, a `file://` URI under dir,
+// and an `acp-go.dev/handoff` envelope declaring the file's sha256 and size is
+// read from disk instead of from embedded base64. Every byte is digest-verified
+// before the ordinary image gates run, and validated bytes are copied into the
+// scratch directory, so the host's path never reaches Codex.
+//
+// dir is a read root: nothing under it is created, modified, or removed, and the
+// host may delete a handoff file as soon as session/prompt returns. An absolute
+// path is required. Unset, the handoff form is rejected and only embedded base64
+// is accepted.
+func WithInputHandoffRoot(dir string) Option {
+	return func(options *Options) {
+		options.InputHandoffRoot = dir
 	}
 }
 

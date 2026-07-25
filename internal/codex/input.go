@@ -29,6 +29,8 @@ const (
 	inputLocalImage = "localImage"
 	inputImage      = "image"
 	inputMention    = "mention"
+
+	imageMediaTypePrefix = "image/"
 )
 
 // PromptImage is one validated prompt image in its native transport form:
@@ -36,6 +38,25 @@ const (
 type PromptImage struct {
 	LocalPath string
 	DataURL   string
+}
+
+// NormalizedMediaType reduces a declared media type to the form every routing
+// test reads: surrounding space trimmed, any parameters dropped, lowercased.
+// Routing must never depend on the casing or parameters a host happened to
+// send, and normalizing in one place is what keeps the routing tests that
+// select native image input from disagreeing with each other.
+func NormalizedMediaType(declared string) string {
+	base, _, _ := strings.Cut(declared, ";")
+
+	return strings.ToLower(strings.TrimSpace(base))
+}
+
+// IsImageMediaType reports whether a declared media type routes to native Codex
+// image input. It decides routing only: whether the declared type is an
+// accepted image format is a separate validation step against the allowlist,
+// which reads the type as declared.
+func IsImageMediaType(declared string) bool {
+	return strings.HasPrefix(NormalizedMediaType(declared), imageMediaTypePrefix)
 }
 
 // IsImageBearingBlock reports whether a prompt content block maps to native
@@ -52,7 +73,7 @@ func IsImageBearingBlock(block acp.ContentBlock) bool {
 
 	mimeType := block.Resource.Resource.BlobResourceContents.MimeType
 
-	return mimeType != nil && strings.HasPrefix(strings.ToLower(*mimeType), "image/")
+	return mimeType != nil && IsImageMediaType(*mimeType)
 }
 
 // PromptToUserInput maps ACP prompt content blocks into the native Codex

@@ -1,10 +1,11 @@
 ---
 title: "Metadata"
-description: "The _meta.codex vocabulary for session options, capabilities, and native turn identity."
+description: "The _meta.codex vocabulary for session options, capabilities, and native turn identity, plus the reserved acp-go.dev keys."
 ---
 
-The adapter reserves the `_meta.codex` namespace for its extension vocabulary.
-This page lists the metadata it reads and writes.
+The adapter reserves the `_meta.codex` namespace for its extension vocabulary,
+and reads and writes a small set of `acp-go.dev/*` keys that are not
+vendor-specific. This page lists the metadata it reads and writes.
 
 ## Session options
 
@@ -43,6 +44,67 @@ Accepted initialize capability metadata under `_meta.codex`:
 | `rawEvent` | `_codex/rawEvent` notification opt-in details. |
 | `sessionStore` | Store format and key shape. |
 | `structuredOutput` | JSON Schema request and response paths. |
+
+## Media envelope
+
+Every initialize response advertises the bounds this adapter enforces on inbound
+prompt media, under the reserved `acp-go.dev/mediaEnvelope` key in
+`agentCapabilities._meta`. A host reads it to reject an oversize or unsupported
+attachment before it spends a turn on one:
+
+```json
+{
+  "agentCapabilities": {
+    "_meta": {
+      "acp-go.dev/mediaEnvelope": {
+        "maxBytes": 6291456,
+        "maxPromptBytes": 6291456,
+        "maxDimension": 0,
+        "imageFormats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        "documentFormats": []
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `maxBytes` | Effective decoded bound on one prompt image — [`ImageLimits.MaxInputBytesPerImage`](/docs/reference/go-api#agent-options). |
+| `maxPromptBytes` | Effective decoded bound on every image in one prompt — `ImageLimits.MaxInputBytesPerPrompt`. |
+| `maxDimension` | Per-dimension pixel bound. Always `0`: Codex reads dimensions only to prove they exist and rejects nothing for being large in pixels. |
+| `imageFormats` | The inbound allowlist, in this order. |
+| `documentFormats` | Media types mapped to a native document representation. Always an empty array: Codex has none, so a host should materialize documents rather than embedding their bytes. |
+
+The block is always present. Its byte values track the configured
+`WithImageLimits`, so they are the values the gates actually enforce rather than
+a documented approximation; `0` on a byte field means that adapter policy limit
+is disabled, and `0` on `maxDimension` means no bound rather than no pixels.
+
+The envelope is captured per agent instance, so it expresses only bounds the
+adapter enforces. It cannot express whether the session's currently selected
+model accepts images, which stays a prompt-time result
+([`unsupported_by_model`](/docs/core/prompt-streaming)).
+
+## Handoff advertisement
+
+When — and only when — [`WithInputHandoffRoot`](/docs/reference/go-api#agent-options)
+is configured, initialize also advertises the local handoff input transport:
+
+```json
+{
+  "agentCapabilities": {
+    "_meta": {
+      "acp-go.dev/handoff": {"versions": [1]}
+    }
+  }
+}
+```
+
+The key's absence is the actionable signal that no handoff root reached this
+adapter, so a host can check its own configuration rather than discovering the
+gap on a rejected prompt. The inbound envelope a host sends per block is
+documented with the [handoff input form](/docs/core/prompt-streaming).
 
 ## Rules
 

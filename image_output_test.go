@@ -329,11 +329,16 @@ func TestAllowedImageFileInjectedFailures(t *testing.T) {
 	require.False(t, pathWithinRoot(path, s.cwd))
 	relativeImagePath = originalRelative
 
+	// pathWithinRoot takes an already-resolved path, which is what the read path
+	// hands it; spelling one through a symlinked parent is not containment.
+	resolved, err := filepath.EvalSymlinks(path)
+	require.NoError(t, err)
+
 	require.False(t, pathWithinRoot("", s.cwd))
-	require.False(t, pathWithinRoot(path, ""))
-	require.False(t, pathWithinRoot(path, filepath.Join(t.TempDir(), "missing")))
-	require.False(t, pathWithinRoot(path, t.TempDir()))
-	require.True(t, pathWithinRoot(path, s.cwd))
+	require.False(t, pathWithinRoot(resolved, ""))
+	require.False(t, pathWithinRoot(resolved, filepath.Join(t.TempDir(), "missing")))
+	require.False(t, pathWithinRoot(resolved, t.TempDir()))
+	require.True(t, pathWithinRoot(resolved, s.cwd))
 }
 
 func requireImageOutputReason(t *testing.T, err error, reason string) {

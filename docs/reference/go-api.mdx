@@ -45,6 +45,7 @@ escaped descendants are absent on Darwin.
 | `WithConcurrencyLimits(limits)` | Bounds active sessions, prompts, and client calls. |
 | `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |
 | `WithImageLimits(limits)` | Bounds decoded prompt and emitted image bytes. Each field defaults to 6 MiB; an explicit zero disables that policy bound. |
+| `WithInputHandoffRoot(dir)` | Enable the local handoff prompt transport and confine it to `dir`, a read-only root. Requires an absolute path. Unset, the handoff form is rejected. |
 | `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment()` | Explicitly accept Darwin's direct-child plus captured-process-group boundary. Rejected off Darwin; without it Darwin fails closed. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |

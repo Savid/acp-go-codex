@@ -124,7 +124,12 @@ inherited environment markers can also be scrubbed.
   session metadata, including durable native turn and terminal assistant
   identities.
 - Validated PNG, JPEG, GIF, and WebP prompt images, with selected-model input
-  gating and decoded-byte limits.
+  gating, decoded-byte limits advertised at initialize as
+  `acp-go.dev/mediaEnvelope`, and a gated embedded blob channel whatever the
+  declared media type.
+- Optional digest-verified local handoff for prompt images, so a co-located host
+  hands over a file under one read-only root instead of base64
+  (`WithInputHandoffRoot`).
 - Native image generation and image-view results as ACP tool-call image
   content. Image generation has full store-backed replay parity while the
   bounded artifact record remains available; a replayed image view renders as

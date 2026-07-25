@@ -58,7 +58,7 @@ func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBl
 	func(),
 	error,
 ) {
-	images, imageErr := validatePromptImages(blocks, s.agent.options.ImageLimits)
+	images, imageErr := validatePromptImages(blocks, s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot)
 	if imageErr != nil {
 		return nil, nil, imageErr.invalidParams()
 	}

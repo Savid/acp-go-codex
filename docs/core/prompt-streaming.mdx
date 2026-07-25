@@ -13,15 +13,29 @@ block, or an unknown or empty content block is rejected with invalid params
 whose data is `{"error": "unsupported", "field": "prompt"}`. Nothing is
 silently dropped.
 
-Image blocks and image-typed embedded blob resources require inline base64
-data. A URI is provenance only and is never fetched. Accepted MIME values are
-exactly `image/png`, `image/jpeg`, `image/gif`, and `image/webp`. The adapter
+Image blocks and image-typed embedded blob resources carry inline base64 data.
+A URI on an embedded block is provenance only and is never fetched. Accepted
+MIME values are exactly `image/png`, `image/jpeg`, `image/gif`, and
+`image/webp`; the declared type is matched as written, while routing ignores
+casing and MIME parameters, so `IMAGE/PNG` reaches the image path and is
+rejected there rather than slipping down the generic resource path. The adapter
 decodes and structurally inspects every image, rejects animated GIF, WebP, and
 APNG input, verifies the declared MIME against the bytes, and applies
 `ImageLimits` before starting the native turn.
 
+An embedded blob resource is gated whatever it declares. A blob whose media type
+is not an image reaches no native image transport — Codex receives a
+`[resource: <uri>]` reference line, as it always has — but its base64 must still
+decode and its decoded bytes are still charged against `MaxInputBytesPerImage`
+and the per-prompt total. The channel cannot carry undecodable or unbounded
+payloads.
+
+The advertised bounds a host can pre-check against are published at initialize
+under [`acp-go.dev/mediaEnvelope`](/docs/reference/meta#media-envelope).
+
 Image invalid-params data always contains `field:"prompt.image"`, an `index`
-counted across image-bearing blocks, and one of these `error` values:
+counted across every gated media block in request order, and one of these
+`error` values:
 
 - `missing_data`
 - `invalid_base64`
@@ -31,12 +45,77 @@ counted across image-bearing blocks, and one of these `error` values:
 - `invalid_dimensions`
 - `too_large`
 - `unsupported_by_model`
+- `invalid_handoff`
+- `path_not_allowed`
+- `missing_file`
+- `handoff_digest_mismatch`
 
-`too_large` also includes decoded `sizeBytes` and `maxBytes`. Validation stops
-at the first failing image in request order. At prompt time the selected
-model's native `inputModalities` field is authoritative when present: a
-text-only declaration rejects the image, an `image` declaration accepts it,
-and absent model metadata forwards the validated input to Codex.
+`too_large` also includes decoded `sizeBytes` and `maxBytes`. The four handoff
+values carry a `message` naming the real cause. Validation stops at the first
+failing block in request order. At prompt time the selected model's native
+`inputModalities` field is authoritative when present: a text-only declaration
+rejects the image, an `image` declaration accepts it, and absent model metadata
+forwards the validated input to Codex.
+
+### Local handoff input
+
+A co-located host can hand an image over as a file instead of as base64, which
+keeps a multi-image prompt's JSON-RPC frame small.
+[`WithInputHandoffRoot`](/docs/reference/go-api#agent-options) enables the form and
+confines it to one read-only root. A handoff block carries empty `data`, a
+`file://` URI under that root, and an envelope:
+
+```json
+{
+  "type": "image",
+  "mimeType": "image/png",
+  "data": "",
+  "uri": "file:///var/lib/host/handoff/2f/9c3a.png",
+  "_meta": {
+    "acp-go.dev/handoff": {
+      "version": 1,
+      "digest": "<sha256 hex>",
+      "sizeBytes": 123456
+    }
+  }
+}
+```
+
+Form selection runs ahead of every other image gate, per block:
+
+1. Non-empty `data` is the embedded form — data still wins over a URI, even
+   when a handoff envelope is also present.
+2. Empty `data` plus handoff intent — an `acp-go.dev/handoff` key or a `file://`
+   URI — is the handoff form.
+3. Empty `data` with neither is `missing_data`, exactly as before.
+
+The handoff form then resolves and verifies before any embedded gate runs, first
+failure winning:
+
+| `error` | Cause |
+| --- | --- |
+| `invalid_handoff` | The block is malformed as a block: no handoff root is configured, the envelope is absent, not an object, carries a field other than `version`, `digest`, and `sizeBytes`, declares a version other than `1`, a digest that is not 64 lowercase hex characters, or a negative or non-integer `sizeBytes` — or the `uri` is absent, unparseable, not `file`, names another host, or is not an absolute path. |
+| `path_not_allowed` | The path resolves outside the root, escapes it through a symlink, or is not a regular file. |
+| `missing_file` | The path is inside the root but does not exist or cannot be opened — the expected outcome when a host cleans up early. |
+| `handoff_digest_mismatch` | The bytes do not match the declared size and sha256. Verification fails closed and never falls back to the embedded form. |
+
+The read is bounded at the per-image limit plus one byte, so an oversize file is
+rejected `too_large` reporting its real size rather than being loaded whole. A
+file that large cannot be digest-verified, and is rejected for exactly that
+reason: nothing unverified is ever forwarded.
+
+Everything after verification is identical to the embedded form. The bytes take
+the same allowlist, sniff, dimension, animation, and byte gates, count toward
+the same per-prompt total, and convert to the same native input — a handoff turn
+and an embedded turn over the same bytes build the same native request. The
+host's path never reaches Codex: when the native transport is a file, the
+verified bytes are copied into the adapter's own scratch directory under
+[`WithScratchDir`](/docs/reference/go-api#agent-options) and removed when the turn
+ends.
+
+The root is read-only. The adapter never creates, modifies, or removes anything
+under it, and the host may delete a handoff file as soon as `session/prompt`
+returns.
 
 ## From Codex events to ACP updates
 

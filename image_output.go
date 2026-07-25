@@ -113,6 +113,7 @@ type storedImageArtifact struct {
 var (
 	evalImageSymlinks = filepath.EvalSymlinks
 	statImageFile     = os.Stat
+	lstatImageFile    = os.Lstat
 	openImageFile     = func(path string) (io.ReadCloser, error) { return os.Open(path) }
 	readImageFile     = io.ReadAll
 	relativeImagePath = filepath.Rel
@@ -417,6 +418,25 @@ func (s *session) allowedImageRoots() []string {
 	return roots
 }
 
+// pathContainedIn reports whether path is root itself or sits beneath it,
+// comparing the two lexically. The answer is about spelling, so it describes the
+// filesystem only when both arguments are already cleaned and resolved to the
+// same degree — comparing a raw path against a resolved root asks whether the
+// caller happened to spell it the resolved way.
+func pathContainedIn(root string, path string) bool {
+	relative, err := relativeImagePath(root, path)
+	if err != nil {
+		return false
+	}
+
+	return relative != ".." && relative != "."+string(filepath.Separator)+".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// pathWithinRoot reports whether an already-resolved path sits under root,
+// resolving root so a root reached through a symlink still matches. path must be
+// resolved by the caller; passing a raw path asks whether it happens to be
+// spelled the resolved way.
 func pathWithinRoot(path string, root string) bool {
 	if path == "" || root == "" {
 		return false
@@ -427,13 +447,7 @@ func pathWithinRoot(path string, root string) bool {
 		return false
 	}
 
-	relative, err := relativeImagePath(resolvedRoot, path)
-	if err != nil {
-		return false
-	}
-
-	return relative != ".." && relative != "."+string(filepath.Separator)+".." &&
-		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	return pathContainedIn(resolvedRoot, path)
 }
 
 func sniffRasterMIME(data []byte) (string, bool) {

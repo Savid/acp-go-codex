@@ -169,6 +169,7 @@ func NewAgent(opts ...Option) *Agent {
 	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
 	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
 	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
+	optionsErr = errors.Join(optionsErr, validateInputHandoffRoot(options.InputHandoffRoot))
 	options.ConcurrencyLimits = limits
 
 	clientCallLimit := limits.MaxConcurrentClientCalls
@@ -429,10 +430,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		AuthMethods: a.authMethods(params),
 		AgentCapabilities: acp.AgentCapabilities{
-			Meta: map[string]any{
-				codexMetaKey: codexMeta,
-				routeMetaKey: map[string]any{routeVersionsKey: []int{routeVersion}},
-			},
+			Meta:        a.capabilityMeta(codexMeta),
 			LoadSession: true,
 			Auth:        a.authCapabilities(),
 			McpCapabilities: acp.McpCapabilities{
