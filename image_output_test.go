@@ -95,10 +95,9 @@ func TestImageEventUpdatesLifecycleLimitsAndDedupe(t *testing.T) {
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "invalid", Kind: "imageGeneration", Status: "completed", Result: "!"},
 	}, &failedState)
+	requireImageRefusal(t, invalid, err, imageGuidanceInvalidBase64)
+
 	var outputErr *imageOutputError
-	require.ErrorAs(t, err, &outputErr)
-	require.Equal(t, imageOutputInvalidBase64, outputErr.reason)
-	require.Equal(t, acp.ToolCallStatusFailed, *invalid[len(invalid)-1].ToolCallUpdate.Status)
 
 	atLimit := outputSession(t, WithImageLimits(ImageLimits{MaxOutputBytesPerImage: int64(len(png))}))
 	_, err = atLimit.imageEventUpdates(ctx, codex.Event{
@@ -108,12 +107,11 @@ func TestImageEventUpdatesLifecycleLimitsAndDedupe(t *testing.T) {
 	require.NoError(t, err)
 
 	perImage := outputSession(t, WithImageLimits(ImageLimits{MaxOutputBytesPerImage: int64(len(png) - 1)}))
-	_, err = perImage.imageEventUpdates(ctx, codex.Event{
+	large, err := perImage.imageEventUpdates(ctx, codex.Event{
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "large", Status: "completed", Result: encodedPNG},
 	}, ptrImageToolState(newImageToolState()))
-	require.ErrorAs(t, err, &outputErr)
-	require.Equal(t, imageOutputTooLarge, outputErr.reason)
+	requireImageRefusal(t, large, err, imageGuidanceTooLarge)
 
 	atAggregate := outputSession(t, WithImageLimits(ImageLimits{MaxOutputBytesPerToolCall: int64(len(png) + len(jpeg))}))
 	atAggregateState := newImageToolState()
@@ -136,12 +134,11 @@ func TestImageEventUpdatesLifecycleLimitsAndDedupe(t *testing.T) {
 		Image: codex.ImageEvent{ID: "aggregate", Status: "completed", Result: encodedPNG},
 	}, &aggregateState)
 	require.NoError(t, err)
-	_, err = aggregateSession.imageEventUpdates(ctx, codex.Event{
+	overAggregate, err := aggregateSession.imageEventUpdates(ctx, codex.Event{
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "aggregate", Status: "completed", Result: base64.StdEncoding.EncodeToString(jpeg)},
 	}, &aggregateState)
-	require.ErrorAs(t, err, &outputErr)
-	require.Equal(t, aggregateLimit, outputErr.maxBytes)
+	requireImageRefusal(t, overAggregate, err, imageGuidanceTooLarge)
 
 	storageSession := &session{agent: NewAgent(WithSessionStore(appendErrorStore{}), WithImageLimits(ImageLimits{})), id: "storage"}
 	_, err = storageSession.imageEventUpdates(ctx, codex.Event{
@@ -238,6 +235,17 @@ func TestAllowedImageFileMaterialization(t *testing.T) {
 	agent.runtimeScratchRoot = t.TempDir()
 	s := &session{agent: agent, id: "paths", cwd: workspace}
 
+	// The temp directory is an allowed root, so this case narrows it to a
+	// directory of its own. Every root above was created before the narrowing
+	// and stays outside it, which keeps each root assertion below about that
+	// root alone.
+	private := t.TempDir()
+	tempRoot := filepath.Join(private, "tmp")
+	require.NoError(t, os.Mkdir(tempRoot, 0o700))
+	outsideRoot := filepath.Join(private, "outside")
+	require.NoError(t, os.Mkdir(outsideRoot, 0o700))
+	narrowTempDir(t, tempRoot)
+
 	path := filepath.Join(workspace, "image.png")
 	require.NoError(t, os.WriteFile(path, png, 0o600))
 	data, mimeType, err := s.readAllowedImageFile(path)
@@ -251,12 +259,17 @@ func TestAllowedImageFileMaterialization(t *testing.T) {
 		_, _, err = s.readAllowedImageFile(candidate)
 		require.NoError(t, err)
 	}
-	require.Len(t, s.allowedImageRoots(), 4)
+	tempCandidate := filepath.Join(tempRoot, "image.png")
+	require.NoError(t, os.WriteFile(tempCandidate, png, 0o600))
+	_, _, err = s.readAllowedImageFile(tempCandidate)
+	require.NoError(t, err)
+
+	require.Len(t, s.allowedImageRoots(), 5)
 
 	_, _, err = s.readAllowedImageFile(filepath.Join(workspace, "missing.png"))
 	requireImageOutputReason(t, err, imageOutputMissingFile)
 
-	outside := filepath.Join(t.TempDir(), "outside.png")
+	outside := filepath.Join(outsideRoot, "outside.png")
 	require.NoError(t, os.WriteFile(outside, png, 0o600))
 	_, _, err = s.readAllowedImageFile(outside)
 	requireImageOutputReason(t, err, imageOutputPathDenied)
@@ -290,6 +303,65 @@ func TestAllowedImageFileMaterialization(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, png, saved)
 	require.Equal(t, int64(len(png)), savedSize)
+
+	deniedData, _, deniedSize, err := s.materializeImageEvent(codex.ImageEvent{SavedPath: outside})
+	requireImageOutputReason(t, err, imageOutputPathDenied)
+	require.Nil(t, deniedData)
+	require.Zero(t, deniedSize)
+}
+
+// TestImageOutputReadsFromTheOSTempDir pins the temp directory as an allowed
+// root against the real os.TempDir, not a narrowed one: the fixture is created
+// through os.MkdirTemp so it sits wherever this platform actually puts temp
+// files, symlinked parents included.
+func TestImageOutputReadsFromTheOSTempDir(t *testing.T) {
+	png := outputFixture(t, "valid.png")
+	s := outputSession(t, WithImageLimits(ImageLimits{}))
+
+	dir, err := os.MkdirTemp("", "codex-image-output")
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	path := filepath.Join(dir, "frame_01.png")
+	require.NoError(t, os.WriteFile(path, png, 0o600))
+
+	require.False(t, pathWithinRoot(path, s.cwd))
+
+	data, mimeType, err := s.readAllowedImageFile(path)
+	require.NoError(t, err)
+	require.Equal(t, png, data)
+	require.Equal(t, "image/png", mimeType)
+}
+
+// TestImageOutputGuidanceSplitsRecoverableFromFatal pins the blast radius of
+// every image-output verdict: an ordinary mistake the model can retry carries
+// guidance and keeps the turn, the adapter's own store breaking does not.
+func TestImageOutputGuidanceSplitsRecoverableFromFatal(t *testing.T) {
+	recoverable := map[string]string{
+		imageOutputPathDenied:    imageGuidancePathDenied,
+		imageOutputMissingFile:   imageGuidanceMissingFile,
+		imageOutputTooLarge:      imageGuidanceTooLarge,
+		imageOutputNotRaster:     imageGuidanceNotRaster,
+		imageOutputInvalidBase64: imageGuidanceInvalidBase64,
+		imageOutputMIMEConflict:  imageGuidanceMIMEMismatched,
+	}
+
+	for reason, guidance := range recoverable {
+		message, ok := imageOutputGuidance(&imageOutputError{reason: reason})
+		require.True(t, ok, reason)
+		require.Equal(t, guidance, message)
+
+		// The guidance says what to do next and never describes the input.
+		require.NotContains(t, message, "root")
+		require.NotContains(t, message, "path")
+	}
+
+	_, ok := imageOutputGuidance(&imageOutputError{reason: imageOutputStorageFailure})
+	require.False(t, ok)
+
+	_, ok = imageOutputGuidance(errors.New("not an image verdict"))
+	require.False(t, ok)
 }
 
 func TestAllowedImageFileInjectedFailures(t *testing.T) {
@@ -358,12 +430,45 @@ func TestAllowedImageFileInjectedFailures(t *testing.T) {
 	require.True(t, pathWithinRoot(resolvedSibling, sibling))
 }
 
+// narrowTempDir points os.TempDir at dir for the duration of one test, so a
+// case can hold a directory the adapter must refuse even though the real temp
+// directory is an allowed root. Every variable os.TempDir consults on any
+// supported platform is set.
+func narrowTempDir(t *testing.T, dir string) {
+	t.Helper()
+
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, dir)
+	}
+
+	require.Equal(t, dir, os.TempDir())
+}
+
 func requireImageOutputReason(t *testing.T, err error, reason string) {
 	t.Helper()
 
 	var outputErr *imageOutputError
 	require.ErrorAs(t, err, &outputErr)
 	require.Equal(t, reason, outputErr.reason)
+}
+
+// requireImageRefusal asserts a recoverable image-output verdict left the turn
+// running and handed its guidance to the client as the tool call's own
+// content, rather than returning a turn-fatal error.
+func requireImageRefusal(t *testing.T, updates []acp.SessionUpdate, err error, guidance string) {
+	t.Helper()
+
+	require.NoError(t, err)
+	require.NotEmpty(t, updates)
+
+	last := updates[len(updates)-1].ToolCallUpdate
+	require.NotNil(t, last)
+	require.NotNil(t, last.Status)
+	require.Equal(t, acp.ToolCallStatusFailed, *last.Status)
+	require.Len(t, last.Content, 1)
+	require.NotNil(t, last.Content[0].Content)
+	require.NotNil(t, last.Content[0].Content.Content.Text)
+	require.Equal(t, guidance, last.Content[0].Content.Content.Text.Text)
 }
 
 type fixedImageStore struct {
@@ -593,14 +698,22 @@ func TestDurableRolloutImageExtractionHydrationAndReplay(t *testing.T) {
 
 	_, err = s.prepareDurableImageRolloutEntries(ctx, []SessionStoreEntry{json.RawMessage(`bad`)})
 	require.Error(t, err)
-	_, err = s.prepareDurableImageRolloutEntries(ctx, []SessionStoreEntry{
-		json.RawMessage(`{"type":"response_item","payload":{"type":"image_generation_call","id":"bad","status":"completed","result":"!"}}`),
+
+	// A recoverable verdict has already reached the client on the live wire,
+	// so the durable rollout keeps the call and carries no bytes for it rather
+	// than failing the mirror and with it the turn.
+	refused, err := s.prepareDurableImageRolloutEntries(ctx, []SessionStoreEntry{
+		json.RawMessage(`{"type":"response_item","payload":{"type":"image_generation_call","id":"bad","status":"completed","result":"!","saved_path":"/secret/path"}}`),
 	})
-	requireImageOutputReason(t, err, imageOutputInvalidBase64)
+	require.NoError(t, err)
+	require.NotContains(t, string(refused[0]), imageArtifactRefKey)
+	require.NotContains(t, string(refused[0]), "/secret/path")
+	require.Contains(t, string(refused[0]), "image_generation_call")
 
 	limited := outputSession(t, WithImageLimits(ImageLimits{MaxOutputBytesPerImage: int64(len(png) - 1)}))
-	_, err = limited.prepareDurableImageRolloutEntries(ctx, entries[3:])
-	requireImageOutputReason(t, err, imageOutputTooLarge)
+	oversize, err := limited.prepareDurableImageRolloutEntries(ctx, entries[3:])
+	require.NoError(t, err)
+	require.NotContains(t, string(oversize[0]), imageArtifactRefKey)
 
 	storage := &session{agent: NewAgent(WithSessionStore(appendErrorStore{}), WithImageLimits(ImageLimits{})), id: "storage"}
 	_, err = storage.prepareDurableImageRolloutEntries(ctx, entries[3:])
@@ -724,16 +837,17 @@ func TestImageOutputFrameCapEnforcedRegardlessOfPolicy(t *testing.T) {
 
 	for _, limit := range []int64{0, maxACPImageDecodedBytes + 4_000_000} {
 		s := outputSession(t, WithImageLimits(ImageLimits{MaxOutputBytesPerImage: limit}))
-		_, err := s.imageEventUpdates(ctx, codex.Event{
+		updates, err := s.imageEventUpdates(ctx, codex.Event{
 			Kind:  codex.EventImageCompleted,
 			Image: codex.ImageEvent{ID: "oversize", Status: "completed", Result: encoded},
 		}, ptrImageToolState(newImageToolState()))
 
-		var outputErr *imageOutputError
-		require.ErrorAs(t, err, &outputErr)
-		require.Equal(t, imageOutputTooLarge, outputErr.reason)
-		require.Equal(t, maxACPImageDecodedBytes, outputErr.maxBytes)
-		require.Equal(t, int64(len(oversize)), outputErr.sizeBytes)
+		requireImageRefusal(t, updates, err, imageGuidanceTooLarge)
+
+		_, _, size, materializeErr := s.materializeImageEvent(codex.ImageEvent{Result: encoded})
+		require.NoError(t, materializeErr)
+		require.Equal(t, int64(len(oversize)), size)
+		require.Equal(t, maxACPImageDecodedBytes, effectiveImageOutputLimit(limit))
 	}
 }
 

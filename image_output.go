@@ -35,6 +35,17 @@ const (
 
 	imageOutputTooLargeMessage = "image output exceeds the configured per-image limit"
 
+	// Guidance carried back to the client when an image output is refused.
+	// Each string is a fixed constant keyed only by the verdict token: it says
+	// what to do next and never describes the path, filename, size, or
+	// operating-system error that produced the verdict.
+	imageGuidancePathDenied     = "write the image inside the workspace and try again"
+	imageGuidanceMissingFile    = "the image file could not be read; write the image inside the workspace and try again"
+	imageGuidanceTooLarge       = "the image is too large to send; write a smaller image and try again"
+	imageGuidanceNotRaster      = "the file is not a supported raster image; write a PNG, JPEG, GIF, WebP, BMP, ICO, or TIFF and try again"
+	imageGuidanceInvalidBase64  = "the image payload could not be decoded; write the image to a file inside the workspace and try again"
+	imageGuidanceMIMEMismatched = "the declared media type does not match the image; write the image again with a matching media type"
+
 	// maxACPImageDecodedBytes is the largest decoded image the pinned ACP Go
 	// SDK can carry in one JSON-RPC frame. A single update frame above the
 	// SDK's 10 MiB scanner bound disconnects a Go-SDK consumer's whole
@@ -52,6 +63,35 @@ type imageOutputError struct {
 
 func (e *imageOutputError) Error() string {
 	return e.message
+}
+
+// imageOutputGuidance classifies an image output failure. A recoverable
+// verdict is an ordinary mistake the model can retry — the bytes were written
+// somewhere the adapter may not read, are gone, are too big, or are not an
+// image — and comes back with fixed guidance. A storage failure is the
+// adapter's own durability breaking and is not something the model can act on.
+func imageOutputGuidance(err error) (string, bool) {
+	var failure *imageOutputError
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+
+	switch failure.reason {
+	case imageOutputPathDenied:
+		return imageGuidancePathDenied, true
+	case imageOutputMissingFile:
+		return imageGuidanceMissingFile, true
+	case imageOutputTooLarge:
+		return imageGuidanceTooLarge, true
+	case imageOutputNotRaster:
+		return imageGuidanceNotRaster, true
+	case imageOutputInvalidBase64:
+		return imageGuidanceInvalidBase64, true
+	case imageOutputMIMEConflict:
+		return imageGuidanceMIMEMismatched, true
+	default:
+		return "", false
+	}
 }
 
 // effectiveImageOutputLimit clamps a configured output byte limit to the hard
@@ -194,9 +234,7 @@ func (s *session) imageEventUpdates(ctx context.Context, event codex.Event, stat
 	}
 
 	if err != nil {
-		updates = append(updates, failedImageToolUpdate(id, image.Raw))
-
-		return updates, err
+		return refuseImageOutput(updates, id, image.Raw, err)
 	}
 
 	fingerprint := sha256.Sum256(data)
@@ -208,37 +246,31 @@ func (s *session) imageEventUpdates(ctx context.Context, event codex.Event, stat
 
 	limit := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
 	if size > limit {
-		updates = append(updates, failedImageToolUpdate(id, image.Raw))
-
-		return updates, &imageOutputError{
+		return refuseImageOutput(updates, id, image.Raw, &imageOutputError{
 			reason:    imageOutputTooLarge,
 			message:   imageOutputTooLargeMessage,
 			sizeBytes: size,
 			maxBytes:  limit,
-		}
+		})
 	}
 
 	aggregate := state.decodedBytes[id] + size
 
 	aggregateLimit := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerToolCall)
 	if aggregate > aggregateLimit {
-		updates = append(updates, failedImageToolUpdate(id, image.Raw))
-
-		return updates, &imageOutputError{
+		return refuseImageOutput(updates, id, image.Raw, &imageOutputError{
 			reason:    imageOutputTooLarge,
 			message:   "image output exceeds the configured per-tool-call limit",
 			sizeBytes: aggregate,
 			maxBytes:  aggregateLimit,
-		}
+		})
 	}
 
 	if _, err := s.storeImageArtifact(ctx, image.ID, data, mimeType); err != nil {
-		updates = append(updates, failedImageToolUpdate(id, image.Raw))
-
-		return updates, &imageOutputError{
+		return refuseImageOutput(updates, id, image.Raw, &imageOutputError{
 			reason:  imageOutputStorageFailure,
 			message: fmt.Sprintf("store image output: %v", err),
-		}
+		})
 	}
 
 	content := acp.ToolContent(acp.ImageBlock(base64.StdEncoding.EncodeToString(data), mimeType))
@@ -279,6 +311,30 @@ func failedImageToolUpdate(id acp.ToolCallId, raw map[string]any) acp.SessionUpd
 		acp.WithUpdateKind(acp.ToolKindOther),
 		acp.WithUpdateRawOutput(raw),
 	)
+}
+
+// refuseImageOutput reports an image output the adapter will not ship. A
+// recoverable verdict fails only the tool call and carries its guidance as
+// that call's own content, so the thread keeps its context and can write the
+// image somewhere readable; the error is not returned and the turn runs on. A
+// storage failure fails the tool call and stays turn-fatal.
+func refuseImageOutput(
+	updates []acp.SessionUpdate,
+	id acp.ToolCallId,
+	raw map[string]any,
+	err error,
+) ([]acp.SessionUpdate, error) {
+	guidance, recoverable := imageOutputGuidance(err)
+	if !recoverable {
+		return append(updates, failedImageToolUpdate(id, raw)), err
+	}
+
+	return append(updates, acp.UpdateToolCall(id,
+		acp.WithUpdateStatus(acp.ToolCallStatusFailed),
+		acp.WithUpdateKind(acp.ToolKindOther),
+		acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(guidance))}),
+		acp.WithUpdateRawOutput(raw),
+	)), nil
 }
 
 func (s *session) materializeImageEvent(image codex.ImageEvent) ([]byte, string, int64, error) {
@@ -412,6 +468,15 @@ func (s *session) allowedImageRoots() []string {
 
 	if home := s.agent.resolvedCodexHome(); home != "" {
 		roots = append(roots, filepath.Join(home, "generated_images"))
+	}
+
+	// The harness sandbox already permits writing to the OS temp directory, so
+	// a root set without it refuses reads of files the model was allowed to
+	// create. Temp files stay subject to every other check here: the temp
+	// directory is shared with every process on the host and nothing in it is
+	// trusted for being there.
+	if temp := os.TempDir(); temp != "" {
+		roots = append(roots, temp)
 	}
 
 	return roots
@@ -623,6 +688,33 @@ func (a *Agent) sweepSessionImageArtifacts(ctx context.Context, sessionID string
 	return nil
 }
 
+// durableImageArtifact stores one rollout image and returns its artifact
+// subpath. An empty subpath with a nil error means the image has no durable
+// form: every verdict materialization can raise here — unreadable path,
+// missing file, oversize, non-raster, bad base64 — is recoverable and already
+// reached the client on the live wire, so the rollout keeps the call and drops
+// the bytes. Only the adapter's own store breaking is returned as an error.
+func (s *session) durableImageArtifact(ctx context.Context, image codex.ImageEvent) (string, error) {
+	data, mimeType, size, refusal := s.materializeImageEvent(image)
+
+	durable := refusal == nil && size <= effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
+	if !durable {
+		return "", nil
+	}
+
+	subpath, err := s.storeImageArtifact(ctx, image.ID, data, mimeType)
+	if err != nil {
+		return "", &imageOutputError{reason: imageOutputStorageFailure, message: fmt.Sprintf("store image output: %v", err)}
+	}
+
+	return subpath, nil
+}
+
+func dropDurableImagePath(payload map[string]any) {
+	delete(payload, "saved_path")
+	delete(payload, "savedPath")
+}
+
 func (s *session) prepareDurableImageRolloutEntries(ctx context.Context, entries []SessionStoreEntry) ([]SessionStoreEntry, error) {
 	out := make([]SessionStoreEntry, len(entries))
 	for index, entry := range entries {
@@ -649,42 +741,29 @@ func (s *session) prepareDurableImageRolloutEntries(ctx context.Context, entries
 			continue
 		}
 
-		if imageNativeFailed(status) {
-			delete(payload, jsonFieldResult)
-			delete(payload, "saved_path")
-			delete(payload, "savedPath")
-		} else {
-			image := codex.ImageEvent{
+		subpath := ""
+
+		if !imageNativeFailed(status) {
+			ref, err := s.durableImageArtifact(ctx, codex.ImageEvent{
 				ID:        firstNonEmpty(stringFromAny(payload["id"]), stringFromAny(payload["call_id"])),
 				Kind:      valueImageGeneration,
 				Status:    status,
 				Result:    result,
 				SavedPath: savedPath,
-			}
-
-			data, mimeType, size, err := s.materializeImageEvent(image)
+			})
 			if err != nil {
 				return nil, err
 			}
 
-			limit := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
-			if size > limit {
-				return nil, &imageOutputError{
-					reason:    imageOutputTooLarge,
-					message:   imageOutputTooLargeMessage,
-					sizeBytes: size,
-					maxBytes:  limit,
-				}
-			}
+			subpath = ref
+		}
 
-			subpath, err := s.storeImageArtifact(ctx, image.ID, data, mimeType)
-			if err != nil {
-				return nil, &imageOutputError{reason: imageOutputStorageFailure, message: fmt.Sprintf("store image output: %v", err)}
-			}
+		dropDurableImagePath(payload)
 
+		if subpath == "" {
+			delete(payload, jsonFieldResult)
+		} else {
 			payload[jsonFieldResult] = map[string]any{imageArtifactRefKey: subpath}
-			delete(payload, "saved_path")
-			delete(payload, "savedPath")
 		}
 
 		sanitized, err := marshalImageJSON(row)

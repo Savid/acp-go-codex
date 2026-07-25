@@ -90,9 +90,15 @@ Prompt images are read from the base64 bytes in the ACP request, and an embedded
 block's image URI is never followed. Large validated inputs are materialized as
 mode-0600 files in an adapter-owned scratch directory and removed when the prompt
 call returns. Native image output paths are accepted only when their resolved
-target is a regular file inside the workspace, adapter scratch roots, or Codex
-`generated_images` directory. Raw image events redact base64 and expose only
-path basenames.
+target is a regular file inside the workspace, adapter scratch roots, the Codex
+`generated_images` directory, or the operating-system temporary directory —
+the roots the harness sandbox already lets a turn write to. The roots stop
+accidental reads of arbitrary paths; they are not an exfiltration boundary
+against a shell-capable agent, which can copy any readable file into the
+workspace. Every accepted path is still resolved through its symlinks,
+required to be a regular file, and read under the per-image byte bound. A
+refused path fails that tool call and returns fixed guidance; it does not end
+the turn. Raw image events redact base64 and expose only path basenames.
 
 [`WithInputHandoffRoot`](/docs/reference/go-api#agent-options) is the one option
 that lets a prompt name a local file to read, and it is off unless a host

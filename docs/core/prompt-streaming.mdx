@@ -152,8 +152,15 @@ tool emits failed tool state without fabricated content. Successful output is
 decoded, raster-sniffed, bounded, and emitted live with its sniffed MIME.
 Image generation is stored for replay, so `session/load` re-materializes it as
 typed image content; a replayed image view renders as its plain tool call
-without typed image content. Adapter failures in that path first publish failed
-tool state, then fail the turn with `stage:"image_output"`.
+without typed image content.
+
+An image output the adapter will not ship — resolving outside the allowed
+roots, missing, not a regular file, over the byte bound, not a raster, or
+declaring a media type its bytes contradict — fails **that tool call only**.
+The failed tool call carries fixed guidance as its own content, saying what to
+do next without naming the path, filename, size, or operating-system error,
+and the turn keeps running with its context. Only a session-store failure
+(`reason:"storage_failed"`) still ends the turn with `stage:"image_output"`.
 
 At the terminal fence, a standard session metadata update carries the native
 turn checkpoint at `_meta.codex.turnId` plus the final assistant response-item

@@ -51,7 +51,7 @@ error (code `-32603`) whose `data` object carries the uniform
 | `statusCode` | Provider HTTP status, when the cause is `provider`. |
 | `providerCode` | Provider error code, when present. |
 | `stage` | `image_output` when the adapter could not represent native image output. |
-| `reason` | Image output reason: `invalid_base64`, `not_a_raster`, `media_type_mismatch`, `missing_file`, `path_not_allowed`, `too_large`, or `storage_failed`. |
+| `reason` | Image output reason, always `storage_failed`: the other image-output verdicts refuse the tool call without ending the turn. |
 | `sizeBytes` | Decoded image or aggregate bytes when known. |
 | `maxBytes` | Applied decoded-byte limit when known. |
 

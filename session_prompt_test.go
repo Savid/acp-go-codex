@@ -117,25 +117,73 @@ func TestPromptImageModelGatePreparationAndMirrorFailures(t *testing.T) {
 		t.Fatalf("client-visible text carries the underlying failure: %s", scratchErr.Error())
 	}
 
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, []byte(
-		`{"type":"response_item","payload":{"type":"image_generation_call","id":"bad","status":"completed","result":"!"}}`+"\n",
-	), 0o600); err != nil {
-		t.Fatal(err)
+	rolloutDir := t.TempDir()
+
+	writeRollout := func(name, result string) string {
+		path := filepath.Join(rolloutDir, name)
+		if err := os.WriteFile(path, []byte(
+			`{"type":"response_item","payload":{"type":"image_generation_call","id":"img","status":"completed","result":"`+result+`"}}`+"\n",
+		), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		return path
 	}
-	mirrorAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()), WithImageLimits(ImageLimits{}))
-	mirrorAgent.setAgentClient(newRecordingAgentClient())
-	mirrorSession := &session{
-		agent:         mirrorAgent,
-		id:            "mirror",
-		cwd:           t.TempDir(),
-		codexThreadID: "thread",
-		rolloutPath:   rollout,
-		client:        &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted}}},
+
+	rollout := writeRollout("refused.jsonl", "!")
+
+	newMirrorSession := func(store SessionStore) *session {
+		mirrorAgent := NewAgent(WithSessionStore(store), WithImageLimits(ImageLimits{}))
+		mirrorAgent.setAgentClient(newRecordingAgentClient())
+
+		return &session{
+			agent:         mirrorAgent,
+			id:            "mirror",
+			cwd:           t.TempDir(),
+			codexThreadID: "thread",
+			rolloutPath:   rollout,
+			client:        &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted}}},
+		}
 	}
-	if _, err := mirrorSession.Prompt(ctx, TextPromptRequest("mirror", "turn", "draw")); err == nil {
-		t.Fatal("Prompt ignored final image mirror failure")
+
+	// An image the mirror cannot materialize is a recoverable verdict: the
+	// durable rollout drops the bytes and the turn still returns its answer.
+	recoverable, mirrorErr := newMirrorSession(NewInMemorySessionStore()).Prompt(ctx, TextPromptRequest("mirror", "turn", "draw"))
+	if mirrorErr != nil {
+		t.Fatalf("recoverable image mirror verdict ended the turn: %v", mirrorErr)
 	}
+
+	if recoverable.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("mirror stop reason=%v", recoverable.StopReason)
+	}
+
+	// The adapter's own store breaking is not something the model can act on,
+	// so it stays turn-fatal.
+	storageSession := newMirrorSession(imageAppendErrorStore{SessionStore: NewInMemorySessionStore()})
+	storageSession.rolloutPath = writeRollout("stored.jsonl", base64.StdEncoding.EncodeToString(png))
+
+	storageErr := func() error {
+		_, err := storageSession.Prompt(ctx, TextPromptRequest("mirror", "turn", "draw"))
+
+		return err
+	}()
+	if !isTurnFailure(storageErr, codex.CauseTransport) {
+		t.Fatalf("durable image storage failure err=%v", storageErr)
+	}
+}
+
+// imageAppendErrorStore breaks only the image-artifact append, so a turn can
+// reach the durable image mirror before the store fails under it.
+type imageAppendErrorStore struct {
+	SessionStore
+}
+
+func (s imageAppendErrorStore) Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
+	if strings.HasPrefix(key.Subpath, imageArtifactStorePrefix) {
+		return errors.New("append failed")
+	}
+
+	return s.SessionStore.Append(ctx, key, entries)
 }
 
 func TestEmitPromptImageUpdates(t *testing.T) {
@@ -161,13 +209,54 @@ func TestEmitPromptImageUpdates(t *testing.T) {
 		t.Fatalf("emit image update: %v", err)
 	}
 
+	// A refused image output fails its own tool call, hands the model the
+	// guidance it can act on, and leaves the turn running with its context.
+	client := newRecordingAgentClient()
+	agent.setAgentClient(client)
+
 	invalid := codex.Event{
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "invalid", Status: "completed", Result: "!"},
 	}
 	state = &promptEventState{imageTools: newImageToolState()}
-	if err := s.emitPromptUpdates(ctx, invalid, invalid, state); err == nil {
-		t.Fatal("invalid image output did not fail")
+	if err := s.emitPromptUpdates(ctx, invalid, invalid, state); err != nil {
+		t.Fatalf("refused image output ended the turn: %v", err)
+	}
+
+	refusal := client.updates[len(client.updates)-1].Update.ToolCallUpdate
+	if refusal == nil || refusal.Status == nil || *refusal.Status != acp.ToolCallStatusFailed {
+		t.Fatalf("refused image output tool call update=%+v", refusal)
+	}
+
+	if len(refusal.Content) != 1 || refusal.Content[0].Content == nil ||
+		refusal.Content[0].Content.Content.Text == nil ||
+		refusal.Content[0].Content.Content.Text.Text != imageGuidanceInvalidBase64 {
+		t.Fatalf("refused image output content=%+v", refusal.Content)
+	}
+
+	// The turn keeps making progress after the refusal.
+	if err := s.emitPromptUpdates(ctx, event, event, &promptEventState{imageTools: newImageToolState()}); err != nil {
+		t.Fatalf("turn did not continue after a refusal: %v", err)
+	}
+
+	// A storage failure is the adapter's own durability breaking: the tool call
+	// still reports failed, and the turn ends.
+	storageAgent := NewAgent(WithSessionStore(appendErrorStore{}), WithImageLimits(ImageLimits{}))
+	storageAgent.setAgentClient(newRecordingAgentClient())
+	storage := &session{agent: storageAgent, id: "storage"}
+
+	state = &promptEventState{imageTools: newImageToolState()}
+	if err := storage.emitPromptUpdates(ctx, event, event, state); !isTurnFailure(err, codex.CauseTransport) {
+		t.Fatalf("image storage failure err=%v", err)
+	}
+
+	storageAgent.setAgentClient(&errorAgentClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		updateErr:            errors.New("update failed"),
+	})
+	state = &promptEventState{imageTools: newImageToolState()}
+	if err := storage.emitPromptUpdates(ctx, event, event, state); err == nil || err.Error() != "update failed" {
+		t.Fatalf("image failure update err=%v", err)
 	}
 
 	agent.setAgentClient(&errorAgentClient{
@@ -176,7 +265,7 @@ func TestEmitPromptImageUpdates(t *testing.T) {
 	})
 	state = &promptEventState{imageTools: newImageToolState()}
 	if err := s.emitPromptUpdates(ctx, invalid, invalid, state); err == nil || err.Error() != "update failed" {
-		t.Fatalf("image failure update err=%v", err)
+		t.Fatalf("refusal update err=%v", err)
 	}
 }
 
