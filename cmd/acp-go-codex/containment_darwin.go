@@ -3,15 +3,9 @@
 package main
 
 import (
-	"io"
-
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
-var diagnoseContainment = func(scratchDir string, output io.Writer) error {
-	return codex.DiagnoseDarwinContainment(scratchDir, output)
-}
+var diagnoseContainment = codex.DiagnoseDarwinContainment
 
-var cleanupContainment = func(scratchDir, runtimeID string, force bool, output io.Writer) error {
-	return codex.CleanupDarwinContainment(scratchDir, runtimeID, force, output)
-}
+var cleanupContainment = codex.CleanupDarwinContainment
