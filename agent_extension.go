@@ -32,6 +32,10 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 
 		return a.rateLimits(ctx), nil
 	default:
+		if result, handled, err := a.handleAuthExtensionMethod(ctx, method, params); handled {
+			return result, err
+		}
+
 		return nil, acp.NewMethodNotFound(method)
 	}
 }

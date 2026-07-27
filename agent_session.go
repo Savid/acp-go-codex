@@ -143,6 +143,10 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	session.lifecycle.Lock()
 	defer session.lifecycle.Unlock()
 
+	if a.providerAuth != nil {
+		a.providerAuth.closeSession(params.SessionId)
+	}
+
 	if unsubscribeErr := session.unsubscribe(ctx); unsubscribeErr != nil {
 		a.abortSessionClose(params.SessionId, session)
 

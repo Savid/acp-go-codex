@@ -1,10 +1,15 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"path/filepath"
+	"sync"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -18,6 +23,445 @@ const (
 	authMetaAuthKey               = "auth"
 	authMethodTypeTerminal        = "terminal"
 )
+
+// Session-scoped provider-auth extension methods. Injection is not on this
+// surface: a brokered ChatGPT credential returns through the existing
+// codex-chatgpt-auth-tokens ACP auth method, so there is no injection key and a
+// supplied _meta.codex.options.providerAuth is an unsupported option field.
+const (
+	AuthMethodsMethod    = "_codex/auth/methods"
+	AuthAuthorizeMethod  = "_codex/auth/authorize"
+	AuthCallbackMethod   = "_codex/auth/callback"
+	AuthStatusMethod     = "_codex/auth/status"
+	AuthCancelMethod     = "_codex/auth/cancel"
+	AuthInventoryMethod  = "_codex/auth/inventory"
+	AuthCredentialMethod = "_codex/auth/credential" // #nosec G101 -- extension method name, not a credential.
+	AuthDisconnectMethod = "_codex/auth/disconnect"
+)
+
+const (
+	providerAuthCapabilityKey = "providerAuth"
+	providerAuthMethodsField  = "methods"
+
+	authFailedErrorTag = "codex_auth_failed"
+
+	authFieldSessionID          = "sessionId"
+	authFieldProviderID         = "providerId"
+	authFieldConnectionID       = "connectionId"
+	authFieldMethodsGeneration  = "methodsGeneration"
+	authFieldMethod             = "method"
+	authFieldAuthorizeRequestID = "authorizeRequestId"
+	authFieldInputs             = "inputs"
+	authFieldFlowID             = "flowId"
+	authFieldInput              = "input"
+	authFieldBindingGeneration  = "bindingGeneration"
+
+	errValueInvalid = "invalid"
+)
+
+// Closed cause enum returned by a provider-auth leg.
+const (
+	authCauseNativeVeto         = "native_veto"
+	authCauseProviderRefused    = "provider_refused"
+	authCauseTransport          = "transport"
+	authCauseProcess            = "process"
+	authCauseTimeout            = "timeout"
+	authCauseHarvestFailed      = "harvest_failed"
+	authCauseUnsupportedVariant = "unsupported_variant"
+	authCauseFlowExpired        = "flow_expired"
+	authCauseFlowState          = "flow_state"
+	authCauseFlowCancelled      = "flow_cancelled"
+	authCausePolicy             = "policy"
+)
+
+// codexAuthClient is the native surface the provider-auth legs drive. It is
+// narrower than the session client on purpose: these legs mint logins, read the
+// account, and clear it, and nothing here reaches a thread or a turn.
+type codexAuthClient interface {
+	StartDeviceCodeLogin(context.Context) (codex.DeviceCodeLogin, error)
+	StartAPIKeyLogin(context.Context, string) error
+	AccountRead(context.Context) (codex.Account, error)
+	Logout(context.Context) error
+}
+
+// providerAuth is the agent-scoped broker behind the provider-auth legs. It
+// owns the current method catalog, the per-session flow records, and the
+// durable values-free ledger.
+type providerAuth struct {
+	agent  *Agent
+	ledger *authLedger
+	// directHome is the canonical CODEX_HOME the host consented to. Empty
+	// leaves the two account-level legs unadvertised.
+	directHome string
+
+	mu         sync.Mutex
+	generation string
+	catalog    map[string][]authCatalogMethod
+	flows      map[authFlowKey]*authFlow
+	byID       map[string]*authFlow
+}
+
+type authFlowKey struct {
+	sessionID  acp.SessionId
+	providerID string
+}
+
+// newProviderAuth builds the broker when a usable durable ledger root is
+// configured. Without one the adapter cannot record what a leg does, so it
+// advertises no leg at all.
+func newProviderAuth(agent *Agent) *providerAuth {
+	if !authLedgerRootConfigured(agent.options) {
+		return nil
+	}
+
+	ledger, err := newAuthLedger(agent.options)
+	if err != nil {
+		agent.log.WarnContext(context.Background(), "provider auth surface is unavailable", loggableError(err))
+
+		return nil
+	}
+
+	return &providerAuth{
+		agent:      agent,
+		ledger:     ledger,
+		directHome: consentedDirectHome(agent.options),
+		flows:      make(map[authFlowKey]*authFlow),
+		byID:       make(map[string]*authFlow),
+	}
+}
+
+// consentedDirectHome resolves the exact-home consent gate. It authorizes the
+// one home it names and never a parent, a child, or a symlink target, so the
+// comparison is a cleaned-path equality against the resolved CODEX_HOME.
+func consentedDirectHome(options Options) string {
+	if options.ProviderAuthDirectHome == "" || options.Home == "" {
+		return ""
+	}
+
+	consented := filepath.Clean(options.ProviderAuthDirectHome)
+	if consented != filepath.Clean(options.Home) {
+		return ""
+	}
+
+	return consented
+}
+
+// accountLegsGated reports whether the two legs that read or clear credentials
+// in the operator's own CODEX_HOME may answer.
+func (p *providerAuth) accountLegsGated() bool {
+	return p.directHome != ""
+}
+
+// authMethodNames lists every advertised leg, in the order the capability
+// reports them. Without the exact-home consent gate the two account-level legs
+// are omitted, leaving six.
+func (p *providerAuth) authMethodNames() []string {
+	names := []string{
+		AuthMethodsMethod,
+		AuthAuthorizeMethod,
+		AuthCallbackMethod,
+		AuthStatusMethod,
+		AuthCancelMethod,
+		AuthInventoryMethod,
+	}
+	if p.accountLegsGated() {
+		names = append(names, AuthCredentialMethod, AuthDisconnectMethod)
+	}
+
+	return names
+}
+
+// capability reports the enabled leg names and no injection key. The array is
+// the host's only discovery surface for which legs exist, so an absent leg is
+// omitted rather than reported false.
+func (p *providerAuth) capability() map[string]any {
+	return map[string]any{providerAuthMethodsField: p.authMethodNames()}
+}
+
+func (a *Agent) handleAuthExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, bool, error) {
+	broker := a.providerAuth
+	if broker == nil {
+		return nil, false, nil
+	}
+
+	switch method {
+	case AuthMethodsMethod:
+		result, err := broker.methods(ctx, params)
+
+		return result, true, err
+	case AuthAuthorizeMethod:
+		result, err := broker.authorize(ctx, params)
+
+		return result, true, err
+	case AuthCallbackMethod:
+		result, err := broker.callback(ctx, params)
+
+		return result, true, err
+	case AuthStatusMethod:
+		result, err := broker.status(ctx, params)
+
+		return result, true, err
+	case AuthCancelMethod:
+		result, err := broker.cancel(ctx, params)
+
+		return result, true, err
+	case AuthInventoryMethod:
+		result, err := broker.inventory(ctx, params)
+
+		return result, true, err
+	case AuthCredentialMethod:
+		if !broker.accountLegsGated() {
+			return nil, false, nil
+		}
+
+		result, err := broker.credential(ctx, params)
+
+		return result, true, err
+	case AuthDisconnectMethod:
+		if !broker.accountLegsGated() {
+			return nil, false, nil
+		}
+
+		result, err := broker.disconnect(ctx, params)
+
+		return result, true, err
+	default:
+		return nil, false, nil
+	}
+}
+
+// authFailedError is the uniform provider-auth leg failure. Native message
+// text, native response bodies, and child stderr never reach it: every failure
+// becomes this closed shape.
+type authFailedError struct {
+	cause      string
+	providerID string
+	method     string
+	flowID     string
+}
+
+func (f *authFailedError) Error() string {
+	return authFailedErrorTag + ": " + f.cause
+}
+
+func (f *authFailedError) requestError() *acp.RequestError {
+	data := map[string]any{
+		jsonFieldError: authFailedErrorTag,
+		jsonFieldCause: f.cause,
+		"retryable":    authCauseRetryable(f.cause),
+	}
+	if f.providerID != "" {
+		data[authFieldProviderID] = f.providerID
+	}
+
+	if f.method != "" {
+		data[authFieldMethod] = f.method
+	}
+
+	if f.flowID != "" {
+		data[authFieldFlowID] = f.flowID
+	}
+
+	return acp.NewAuthRequired(data)
+}
+
+// authCauseRetryable reports whether the same call could succeed unchanged. The
+// three transport-shaped causes can; a refusal, a veto, and every flow-state
+// answer cannot, because repeating them changes nothing.
+func authCauseRetryable(cause string) bool {
+	switch cause {
+	case authCauseTransport, authCauseProcess, authCauseTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func authFailed(cause string, providerID string, method string, flowID string) error {
+	failure := &authFailedError{cause: cause, providerID: providerID, method: method, flowID: flowID}
+
+	return failure.requestError()
+}
+
+// authFlowTransition maps a leg cause to the flow transition it must also
+// perform. An empty state means the cause carries no transition: a refusal the
+// adapter made itself never consumes the owner's authorization.
+func authFlowTransition(cause string, materialInFlight bool) (string, string) {
+	switch cause {
+	case authCauseNativeVeto, authCauseUnsupportedVariant:
+		return authStateFailed, authReasonNativeVeto
+	case authCauseProviderRefused:
+		return authStateFailed, authReasonProviderRefused
+	case authCauseTransport:
+		if materialInFlight {
+			return authStateFailed, authReasonAcceptanceUnknown
+		}
+
+		return authStateFailed, authReasonTransport
+	case authCauseProcess:
+		if materialInFlight {
+			return authStateFailed, authReasonAcceptanceUnknown
+		}
+
+		return authStateFailed, authReasonProcess
+	case authCauseTimeout:
+		if materialInFlight {
+			return authStateFailed, authReasonAcceptanceUnknown
+		}
+
+		return authStateFailed, authReasonTransport
+	case authCauseHarvestFailed:
+		return authStateFailed, authReasonHarvestFailed
+	case authCauseFlowExpired:
+		return authStateExpired, authReasonDeadline
+	default:
+		return "", ""
+	}
+}
+
+// authSession resolves the session a leg addresses. An unknown, unloaded, or
+// closing session gets the uniform unknown-session rejection.
+func (p *providerAuth) authSession(id string) (*session, error) {
+	return p.agent.session(acp.SessionId(id))
+}
+
+// nativeAuthClient reports the session's live native client narrowed to the
+// provider-auth surface.
+func (s *session) nativeAuthClient() codexAuthClient {
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+
+	auth, ok := client.(codexAuthClient)
+	if !ok {
+		return nil
+	}
+
+	return auth
+}
+
+// authParamFields walks a leg's params object once, rejecting an unknown field,
+// a duplicate field, and a non-object body with the offending field path. Every
+// request object on this surface is closed, and encoding/json alone would let a
+// duplicate key silently win.
+func authParamFields(raw json.RawMessage, allowed ...string) (map[string]json.RawMessage, error) {
+	permitted := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		permitted[name] = struct{}{}
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, invalidAuthField("params")
+	}
+
+	fields := make(map[string]json.RawMessage, len(allowed))
+
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, invalidAuthField("params")
+		}
+
+		key, _ := keyToken.(string)
+		if _, ok := permitted[key]; !ok {
+			return nil, unsupportedAuthField(key)
+		}
+
+		if _, duplicate := fields[key]; duplicate {
+			return nil, unsupportedAuthField(key)
+		}
+
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, invalidAuthField(key)
+		}
+
+		fields[key] = value
+	}
+
+	if _, err := decoder.Token(); err != nil {
+		return nil, invalidAuthField("params")
+	}
+
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, invalidAuthField("params")
+	}
+
+	return fields, nil
+}
+
+// authRequiredString decodes a non-empty string field.
+func authRequiredString(fields map[string]json.RawMessage, name string) (string, error) {
+	raw, ok := fields[name]
+	if !ok {
+		return "", invalidAuthField(name)
+	}
+
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return "", invalidAuthField(name)
+	}
+
+	return value, nil
+}
+
+// authString decodes a string field that may be empty but must be present.
+func authString(fields map[string]json.RawMessage, name string) (string, error) {
+	raw, ok := fields[name]
+	if !ok {
+		return "", invalidAuthField(name)
+	}
+
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", invalidAuthField(name)
+	}
+
+	return value, nil
+}
+
+func authRequiredInt64(fields map[string]json.RawMessage, name string) (int64, error) {
+	raw, ok := fields[name]
+	if !ok {
+		return 0, invalidAuthField(name)
+	}
+
+	var value int64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, invalidAuthField(name)
+	}
+
+	return value, nil
+}
+
+func (p *providerAuth) goSafe(name string, fn func()) {
+	go func() {
+		defer recoverAgentGoroutine(context.Background(), agentLogger(p.agent), name)
+
+		fn()
+	}()
+}
+
+func loggableError(err error) slog.Attr {
+	return slog.String(jsonFieldError, err.Error())
+}
+
+func invalidAuthField(path string) error {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: errValueInvalid,
+		jsonFieldField: path,
+	})
+}
+
+func unsupportedAuthField(path string) error {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: errValueUnsupported,
+		jsonFieldField: path,
+	})
+}
 
 func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 	methods := []acp.AuthMethod{}

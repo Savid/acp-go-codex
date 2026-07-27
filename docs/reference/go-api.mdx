@@ -46,6 +46,8 @@ escaped descendants are absent on Darwin.
 | `WithTurnTimeout(d)` | Bounds a single `session/prompt` turn; `0` disables the deadline. |
 | `WithImageLimits(limits)` | Bounds decoded prompt and emitted image bytes. Each field defaults to 6 MiB; an explicit zero disables that policy bound. |
 | `WithInputHandoffRoot(dir)` | Enable the local handoff prompt transport and confine it to `dir`, a read-only root. Requires an absolute path. Unset, the handoff form is rejected. |
+| `WithProviderAuthRoot(path)` | Absolute durable directory holding the values-free provider-auth ledger. Unset — or set to a path that cannot be prepared — leaves every `_codex/auth/*` method unadvertised. |
+| `WithProviderAuthDirectHome(path)` | Exact `CODEX_HOME` the host consents to the `credential` and `disconnect` legs touching. Both legs are advertised only while this equals the resolved `WithHome`. |
 | `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment()` | Explicitly accept Darwin's direct-child plus captured-process-group boundary. Rejected off Darwin; without it Darwin fails closed. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
@@ -156,3 +158,33 @@ complete image content snapshot for one native image tool call.
 const SessionStoreFormat = "codex-rollout-jsonl-v1"
 const SessionStoreMainSubpath = ""
 ```
+
+## Provider-auth types
+
+The `_codex/auth/credential` leg returns the harvested login through these
+exported shapes. They are the only public Go types a brokered credential
+crosses in, and they are the same shapes the wire carries.
+
+```go
+type ProviderCredentialType string
+
+const ProviderCredentialOAuth ProviderCredentialType = "oauth"
+
+type ProviderOAuthCredential struct {
+	Refresh         string `json:"refresh"`
+	Access          string `json:"access"`
+	AccessExpiresAt int64  `json:"accessExpiresAt"`
+	AccountID       string `json:"accountId,omitempty"`
+	EnterpriseURL   string `json:"enterpriseUrl,omitempty"`
+}
+
+type ProviderCredential struct {
+	Type  ProviderCredentialType
+	OAuth *ProviderOAuthCredential
+}
+```
+
+`ProviderCredential` marshals to one flat object whose `type` selects the
+variant. Decoding is strict: an unknown field, a duplicate field, an empty
+required string, and any variant this adapter does not emit are rejected rather
+than partially decoded. `AccessExpiresAt` is Unix epoch milliseconds.

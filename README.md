@@ -140,8 +140,10 @@ inherited environment markers can also be scrubbed.
 - Thread-scoped MCP stdio and streamable HTTP configuration, including
   per-thread re-supply after runtime replacement; other transports are rejected.
 - Codex account status, contained and writable-home-exclusive terminal login,
-  external ChatGPT token login/refresh, and guarded logout for adapter-owned
-  `CODEX_HOME` directories.
+  external ChatGPT token login/refresh, guarded logout for adapter-owned
+  `CODEX_HOME` directories, and brokered device-code or API-key provider logins
+  over `_codex/auth/*` behind a durable ledger root and an exact-home consent
+  gate.
 - Store-authoritative lifecycle through a default in-memory `SessionStore`,
   replaceable by a host-provided durable store; stored rows are Codex rollout
   JSONL keyed by `{SessionID, Subpath}`, and residual native threads are never

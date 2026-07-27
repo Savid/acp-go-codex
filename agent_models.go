@@ -10,7 +10,7 @@ import (
 
 var (
 	codexEffortValues = []string{effortValueNone, "minimal", effortValueLow, effortValueMedium, effortValueHigh, "xhigh"}
-	codexTierValues   = []string{"auto", valueDefault, tierValueFlex, tierValuePriority}
+	codexTierValues   = []string{tierValueAuto, valueDefault, tierValueFlex, tierValuePriority}
 	codexPersonality  = []string{effortValueNone, personalityFriendly, personalityPragmatic}
 )
 
@@ -31,6 +31,7 @@ const (
 	effortValueNone      = "none"
 	effortValueLow       = "low"
 	effortValueMedium    = "medium"
+	tierValueAuto        = "auto"
 	tierValueFlex        = "flex"
 	tierValuePriority    = "priority"
 	personalityPragmatic = "pragmatic"

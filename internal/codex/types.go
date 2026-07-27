@@ -230,6 +230,7 @@ const (
 	EventDiffUpdated       EventKind = "diff_updated"
 	EventUsageUpdated      EventKind = "usage_updated"
 	EventAccountUpdated    EventKind = "account_updated"
+	EventLoginCompleted    EventKind = "login_completed"
 	EventRateLimitsUpdated EventKind = "rate_limits_updated"
 	EventRaw               EventKind = "raw"
 	EventWarning           EventKind = "warning"
@@ -272,6 +273,7 @@ type Event struct {
 	Usage      Usage
 	TokenUsage TokenUsage
 	Account    Account
+	Login      LoginCompletion
 	RateLimits *RateLimitSnapshot
 	Completed  bool
 	RawMethod  string
@@ -321,6 +323,7 @@ type Account struct {
 	ID       string
 	Email    string
 	PlanType string
+	AuthMode string
 	Raw      map[string]any
 }
 

@@ -23,6 +23,8 @@ go build ./...
 go test -tags=integration ./integration/...
 make test-integration-smoke
 make test-integration-live
+make test-integration-attended
+make test-integration-keystore
 ```
 
 Integration tests are opt-in. `make test-integration-smoke` requires a local
@@ -31,7 +33,13 @@ Integration tests are opt-in. `make test-integration-smoke` requires a local
 tokens. Use `ACP_GO_CODEX_HARNESS_PATH`, `ACP_GO_CODEX_HOME`,
 `ACP_GO_CODEX_MODEL`, and `ACP_GO_CODEX_AGENT_BINARY` to point tests at a
 specific CLI, source Codex home, model, or compiled agent binary. Integration
-tests always launch Codex with an isolated temp `CODEX_HOME`. When `OPENAI_API_KEY`
+tests always launch Codex with an isolated temp `CODEX_HOME`.
+`make test-integration-attended` sets `ACP_GO_CODEX_RUN_ATTENDED=1` and runs the
+provider-auth flows a human must approve at the provider; it fails rather than
+skips when nobody answers. `make test-integration-keystore` sets
+`ACP_GO_CODEX_RUN_KEYSTORE=1` and runs the credential-residence matrix against
+the container fixture in `integration/keystore`; it fails rather than skips when
+no container runtime is available. Neither joins `make audit`. When `OPENAI_API_KEY`
 is set and `ACP_GO_CODEX_HOME` is unset, tests use a fresh temp home. Otherwise
 they copy the source home into the temp home and clear copied auth refresh
 tokens. If neither env auth nor copied `auth.json` is available, tests fail
@@ -55,8 +63,9 @@ instead of launching without isolated auth.
   or cancellation changes.
 - Run `golangci-lint run ./...` before considering work complete.
 - Integration tests are double-gated: `ACP_GO_CODEX_RUN_INTEGRATION=1` opts into
-  the live suite, and `ACP_GO_CODEX_RUN_LIVE_TOKENS=1` additionally opts into
-  turns that spend model tokens. `make test-integration-smoke` runs live
+  the live suite, and `ACP_GO_CODEX_RUN_LIVE_TOKENS=1`,
+  `ACP_GO_CODEX_RUN_ATTENDED=1`, or `ACP_GO_CODEX_RUN_KEYSTORE=1` each select one
+  further tier. `make test-integration-smoke` runs live
   app-server checks that do not spend tokens.
 - Live integration tests launch the actual `codex` binary from `PATH` (or
   `ACP_GO_CODEX_HARNESS_PATH`). Use `ACP_GO_CODEX_AGENT_BINARY` to exercise a

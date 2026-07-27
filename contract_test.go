@@ -237,3 +237,148 @@ func runTurnText(turn codex.TurnStartRequest) string {
 
 	return text
 }
+
+// TestProviderAuthContractCapabilityShape pins the wire shape of the
+// provider-auth advertisement: the exact enabled leg names, and no injection
+// key, because a brokered ChatGPT credential returns through the existing
+// codex-chatgpt-auth-tokens auth method instead.
+func TestProviderAuthContractCapabilityShape(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	resp, err := fixture.agent.Initialize(context.Background(), acp.InitializeRequest{})
+	if err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+
+	raw, err := json.Marshal(resp.AgentCapabilities.Meta)
+	if err != nil {
+		t.Fatalf("marshal capabilities: %v", err)
+	}
+
+	var meta struct {
+		Codex struct {
+			ProviderAuth struct {
+				Methods      []string `json:"methods"`
+				InjectionKey *string  `json:"injectionKey"`
+			} `json:"providerAuth"`
+		} `json:"codex"`
+	}
+
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+
+	want := []string{
+		"_codex/auth/methods",
+		"_codex/auth/authorize",
+		"_codex/auth/callback",
+		"_codex/auth/status",
+		"_codex/auth/cancel",
+		"_codex/auth/inventory",
+		"_codex/auth/credential",
+		"_codex/auth/disconnect",
+	}
+
+	if !reflect.DeepEqual(meta.Codex.ProviderAuth.Methods, want) {
+		t.Fatalf("advertised legs = %v, want %v", meta.Codex.ProviderAuth.Methods, want)
+	}
+
+	if meta.Codex.ProviderAuth.InjectionKey != nil {
+		t.Fatalf("codex advertised an injection key: %q", *meta.Codex.ProviderAuth.InjectionKey)
+	}
+}
+
+// TestProviderAuthContractMethodConstants pins the exported constant set against
+// the closed suffix set. A sibling declares a constant only for a leg it
+// advertises.
+func TestProviderAuthContractMethodConstants(t *testing.T) {
+	constants := map[string]string{
+		AuthMethodsMethod:    "_codex/auth/methods",
+		AuthAuthorizeMethod:  "_codex/auth/authorize",
+		AuthCallbackMethod:   "_codex/auth/callback",
+		AuthStatusMethod:     "_codex/auth/status",
+		AuthCancelMethod:     "_codex/auth/cancel",
+		AuthInventoryMethod:  "_codex/auth/inventory",
+		AuthCredentialMethod: "_codex/auth/credential",
+		AuthDisconnectMethod: "_codex/auth/disconnect",
+	}
+
+	for got, want := range constants {
+		if got != want {
+			t.Fatalf("constant = %q, want %q", got, want)
+		}
+	}
+}
+
+// TestProviderAuthContractLegShapes pins every field a leg returns, so a field
+// this surface does not fix cannot appear and a fixed one cannot disappear.
+func TestProviderAuthContractLegShapes(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	seedStoredLogin(t, fixture.home, testStoredLogin)
+
+	methods, err := fixture.call(t, AuthMethodsMethod, map[string]any{"sessionId": fixture.sessionID})
+	if err != nil {
+		t.Fatalf("methods: %v", err)
+	}
+
+	assertContractKeys(t, methods, []string{"providers", "generation"})
+
+	catalog, _ := methods.(authMethodsResult)
+	entry := catalog.Providers[authProviderOpenAI][0]
+	assertContractKeys(t, entry, []string{"id", "type", "label"})
+
+	authorization := fixture.authorize(t, authMethodDeviceCode, "contract-request")
+	assertContractKeys(t, authorization, []string{"interaction", "url", "message", "userCode", "flowId", "flowExpiresAt"})
+
+	status := fixture.status(t, authorization.FlowID)
+	assertContractKeys(t, status, []string{"flowId", "state"})
+
+	inventory, err := fixture.call(t, AuthInventoryMethod, map[string]any{"sessionId": fixture.sessionID})
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+
+	resident, _ := inventory.(authInventoryResult)
+	entries := resident.Entries
+	assertContractKeys(t, entries[0], []string{"providerId", "connectionId", "revision", "bindingGeneration", "proofSource"})
+
+	fixture.client.account = codex.Account{AuthMode: codex.AuthModeChatGPT}
+	fixture.broker.loginCompleted(t.Context(), codex.LoginCompletion{LoginID: "login-1", Success: true})
+
+	credential, err := fixture.call(t, AuthCredentialMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"flowId":     authorization.FlowID,
+	})
+	if err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+
+	assertContractKeys(t, credential, []string{"connectionId", "revision", "bindingGeneration", "credential"})
+	harvested, _ := credential.(authCredentialResult)
+	assertContractKeys(t, harvested.Credential, []string{"type", "refresh", "access", "accessExpiresAt", "accountId"})
+}
+
+func assertContractKeys(t *testing.T, value any, want []string) {
+	t.Helper()
+
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(fields) != len(want) {
+		t.Fatalf("keys = %v, want %v", fields, want)
+	}
+
+	for _, key := range want {
+		if _, ok := fields[key]; !ok {
+			t.Fatalf("keys = %v, want %v", fields, want)
+		}
+	}
+}

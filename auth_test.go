@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -222,4 +224,599 @@ func TestAuthErrorBranches(t *testing.T) {
 	if _, err := logoutAgent.Logout(ctx, acp.LogoutRequest{}); !errors.Is(err, logoutErr) {
 		t.Fatalf("Logout error = %v", err)
 	}
+}
+
+type authSpyClient struct {
+	*spyCodexClient
+
+	deviceLogin codex.DeviceCodeLogin
+	deviceErr   error
+	deviceCalls int
+	apiKeyErr   error
+	apiKeyValue string
+	apiKeyCalls int
+	account     codex.Account
+	accountErr  error
+	accountRead int
+	logoutErr   error
+	logoutCalls int
+}
+
+func newAuthSpyClient() *authSpyClient {
+	return &authSpyClient{
+		spyCodexClient: newSpyCodexClient(),
+		deviceLogin: codex.DeviceCodeLogin{
+			LoginID:         "login-1",
+			VerificationURL: "https://auth.openai.com/codex/device",
+			UserCode:        "U9KH-GPDJ7",
+		},
+	}
+}
+
+func (c *authSpyClient) StartDeviceCodeLogin(context.Context) (codex.DeviceCodeLogin, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deviceCalls++
+
+	return c.deviceLogin, c.deviceErr
+}
+
+func (c *authSpyClient) StartAPIKeyLogin(_ context.Context, key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.apiKeyCalls++
+	c.apiKeyValue = key
+
+	return c.apiKeyErr
+}
+
+func (c *authSpyClient) AccountRead(context.Context) (codex.Account, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.accountRead++
+
+	return c.account, c.accountErr
+}
+
+func (c *authSpyClient) Logout(context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.logoutCalls++
+
+	return c.logoutErr
+}
+
+// providerAuthFixture is one agent with a durable ledger root, a consented
+// CODEX_HOME, and a single live session.
+type providerAuthFixture struct {
+	agent     *Agent
+	broker    *providerAuth
+	client    *authSpyClient
+	sessionID string
+	home      string
+	root      string
+}
+
+func newProviderAuthFixture(t *testing.T, opts ...Option) *providerAuthFixture {
+	t.Helper()
+
+	home := t.TempDir()
+	root := t.TempDir()
+	client := newAuthSpyClient()
+
+	all := append([]Option{
+		WithHome(home),
+		WithProviderAuthRoot(root),
+		WithProviderAuthDirectHome(home),
+	}, opts...)
+
+	agent := NewAgent(all...)
+	if agent.providerAuth == nil {
+		t.Fatal("provider auth broker was not built")
+	}
+
+	t.Cleanup(func() { _ = agent.Close() })
+
+	storeRateLimitsSession(t, agent, "thread-1", client)
+
+	return &providerAuthFixture{
+		agent:     agent,
+		broker:    agent.providerAuth,
+		client:    client,
+		sessionID: "thread-1",
+		home:      home,
+		root:      root,
+	}
+}
+
+func (f *providerAuthFixture) call(t *testing.T, method string, params map[string]any) (any, error) {
+	t.Helper()
+
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+
+	return f.agent.HandleExtensionMethod(context.Background(), method, raw)
+}
+
+func (f *providerAuthFixture) mintGeneration(t *testing.T) string {
+	t.Helper()
+
+	result, err := f.call(t, AuthMethodsMethod, map[string]any{"sessionId": f.sessionID})
+	if err != nil {
+		t.Fatalf("methods: %v", err)
+	}
+
+	methods, _ := result.(authMethodsResult)
+
+	return methods.Generation
+}
+
+func (f *providerAuthFixture) authorize(t *testing.T, method string, requestID string) authAuthorizeResult {
+	t.Helper()
+
+	generation := f.mintGeneration(t)
+
+	result, err := f.call(t, AuthAuthorizeMethod, map[string]any{
+		"sessionId":          f.sessionID,
+		"providerId":         authProviderOpenAI,
+		"connectionId":       "connection-1",
+		"methodsGeneration":  generation,
+		"method":             method,
+		"authorizeRequestId": requestID,
+	})
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	presentation, _ := result.(authAuthorizeResult)
+
+	return presentation
+}
+
+func authErrorData(t *testing.T, err error) map[string]any {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) {
+		t.Fatalf("error %v is not a request error", err)
+	}
+
+	data, ok := requestErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error data %v is not an object", requestErr.Data)
+	}
+
+	return data
+}
+
+func requireAuthCause(t *testing.T, err error, cause string) {
+	t.Helper()
+
+	data := authErrorData(t, err)
+	if data[jsonFieldError] != authFailedErrorTag {
+		t.Fatalf("error tag = %v, want %v", data[jsonFieldError], authFailedErrorTag)
+	}
+
+	if data[jsonFieldCause] != cause {
+		t.Fatalf("cause = %v, want %v", data[jsonFieldCause], cause)
+	}
+}
+
+func requireInvalidField(t *testing.T, err error, field string) {
+	t.Helper()
+
+	data := authErrorData(t, err)
+	if data[jsonFieldField] != field {
+		t.Fatalf("field = %v, want %v", data[jsonFieldField], field)
+	}
+}
+
+func TestProviderAuthSurfaceIsUnadvertisedWithoutARoot(t *testing.T) {
+	agent := NewAgent(WithHome(t.TempDir()))
+	if agent.providerAuth != nil {
+		t.Fatal("provider auth broker was built without a ledger root")
+	}
+
+	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
+	if err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	meta, _ := resp.AgentCapabilities.Meta[codexMetaKey].(map[string]any)
+	if _, present := meta[providerAuthCapabilityKey]; present {
+		t.Fatal("provider auth capability was advertised without a ledger root")
+	}
+
+	if _, err := agent.HandleExtensionMethod(context.Background(), AuthMethodsMethod, json.RawMessage(`{}`)); err == nil {
+		t.Fatal("an unadvertised leg answered")
+	}
+}
+
+func TestProviderAuthUnusableRootLeavesSurfaceUnadvertised(t *testing.T) {
+	root := t.TempDir()
+	blocked := root + "/blocked"
+
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("seed blocked root: %v", err)
+	}
+
+	agent := NewAgent(WithHome(t.TempDir()), WithProviderAuthRoot(blocked))
+	if agent.providerAuth != nil {
+		t.Fatal("provider auth broker was built on an unusable root")
+	}
+}
+
+func TestProviderAuthRelativeRootFailsTheAgentClosed(t *testing.T) {
+	agent := NewAgent(WithProviderAuthRoot("relative/root"), WithProviderAuthDirectHome("also/relative"))
+	if agent.providerAuth != nil {
+		t.Fatal("provider auth broker was built under a failed options verdict")
+	}
+
+	if _, err := agent.Initialize(context.Background(), acp.InitializeRequest{}); err == nil {
+		t.Fatal("initialize succeeded under a failed options verdict")
+	}
+}
+
+func TestProviderAuthCapabilityListsTheEnabledLegs(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	resp, err := fixture.agent.Initialize(context.Background(), acp.InitializeRequest{})
+	if err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	meta, _ := resp.AgentCapabilities.Meta[codexMetaKey].(map[string]any)
+	capability, _ := meta[providerAuthCapabilityKey].(map[string]any)
+
+	methods, _ := capability[providerAuthMethodsField].([]string)
+	if len(methods) != 8 {
+		t.Fatalf("advertised %d legs, want 8", len(methods))
+	}
+
+	if _, present := capability["injectionKey"]; present {
+		t.Fatal("codex advertised an injection key")
+	}
+}
+
+func TestProviderAuthWithoutConsentGateAdvertisesSixLegs(t *testing.T) {
+	home := t.TempDir()
+	agent := NewAgent(WithHome(home), WithProviderAuthRoot(t.TempDir()))
+
+	if got := len(agent.providerAuth.authMethodNames()); got != 6 {
+		t.Fatalf("advertised %d legs, want 6", got)
+	}
+
+	for _, method := range []string{AuthCredentialMethod, AuthDisconnectMethod} {
+		if _, err := agent.HandleExtensionMethod(context.Background(), method, json.RawMessage(`{}`)); err == nil {
+			t.Fatalf("%s answered without the consent gate", method)
+		}
+	}
+}
+
+func TestProviderAuthConsentGateRequiresExactHomeEquality(t *testing.T) {
+	home := t.TempDir()
+
+	cases := map[string]Options{
+		"unset":  {Home: home},
+		"parent": {Home: home, ProviderAuthDirectHome: filepath.Dir(home)},
+		"child":  {Home: home, ProviderAuthDirectHome: filepath.Join(home, "nested")},
+		"nohome": {ProviderAuthDirectHome: home},
+		"equal":  {Home: home, ProviderAuthDirectHome: home + "/."},
+	}
+
+	for name, options := range cases {
+		granted := consentedDirectHome(options)
+		if name == "equal" {
+			if granted != filepath.Clean(home) {
+				t.Fatalf("%s: gate = %q, want %q", name, granted, home)
+			}
+
+			continue
+		}
+
+		if granted != "" {
+			t.Fatalf("%s: gate granted %q", name, granted)
+		}
+	}
+}
+
+func TestProviderAuthClosedParamObjects(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	cases := []struct {
+		name   string
+		params json.RawMessage
+		field  string
+	}{
+		{"unknown", json.RawMessage(`{"sessionId":"thread-1","extra":1}`), "extra"},
+		{"duplicate", json.RawMessage(`{"sessionId":"thread-1","sessionId":"thread-1"}`), "sessionId"},
+		{"nonobject", json.RawMessage(`[]`), "params"},
+		{"trailing", json.RawMessage(`{"sessionId":"thread-1"} {}`), "params"},
+		{"unclosed", json.RawMessage(`{"sessionId":"thread-1"`), "params"},
+		{"truncated", json.RawMessage(`{"sessionId":`), "sessionId"},
+		{"badvalue", json.RawMessage(`{"sessionId":@}`), "sessionId"},
+		{"missing", json.RawMessage(`{}`), "sessionId"},
+		{"empty", json.RawMessage(`{"sessionId":""}`), "sessionId"},
+		{"wrongtype", json.RawMessage(`{"sessionId":7}`), "sessionId"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := fixture.agent.HandleExtensionMethod(context.Background(), AuthMethodsMethod, testCase.params)
+			if err == nil {
+				t.Fatal("malformed params were accepted")
+			}
+
+			requireInvalidField(t, err, testCase.field)
+		})
+	}
+}
+
+func TestProviderAuthUnknownSessionIsRejected(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	_, err := fixture.call(t, AuthMethodsMethod, map[string]any{"sessionId": "absent"})
+	if err == nil {
+		t.Fatal("an unknown session was accepted")
+	}
+
+	requireInvalidField(t, err, jsonFieldSessionID)
+}
+
+func TestProviderAuthCauseRetryability(t *testing.T) {
+	retryable := map[string]bool{
+		authCauseTransport:          true,
+		authCauseProcess:            true,
+		authCauseTimeout:            true,
+		authCauseNativeVeto:         false,
+		authCauseProviderRefused:    false,
+		authCauseHarvestFailed:      false,
+		authCauseUnsupportedVariant: false,
+		authCauseFlowExpired:        false,
+		authCauseFlowState:          false,
+		authCauseFlowCancelled:      false,
+		authCausePolicy:             false,
+	}
+
+	for cause, want := range retryable {
+		if got := authCauseRetryable(cause); got != want {
+			t.Fatalf("%s retryable = %v, want %v", cause, got, want)
+		}
+	}
+}
+
+func TestProviderAuthFailedErrorShape(t *testing.T) {
+	failure := &authFailedError{cause: authCauseTransport, providerID: "openai", method: "apiKey", flowID: "flow-1"}
+	if failure.Error() != authFailedErrorTag+": "+authCauseTransport {
+		t.Fatalf("error text = %q", failure.Error())
+	}
+
+	request := failure.requestError()
+	if request.Code != -32000 {
+		t.Fatalf("code = %d, want -32000", request.Code)
+	}
+
+	data, _ := request.Data.(map[string]any)
+	for _, key := range []string{jsonFieldError, jsonFieldCause, "retryable", authFieldProviderID, authFieldMethod, authFieldFlowID} {
+		if _, ok := data[key]; !ok {
+			t.Fatalf("error data is missing %q", key)
+		}
+	}
+
+	bare, _ := (&authFailedError{cause: authCausePolicy}).requestError().Data.(map[string]any)
+	for _, key := range []string{authFieldProviderID, authFieldMethod, authFieldFlowID} {
+		if _, ok := bare[key]; ok {
+			t.Fatalf("bare error data carries %q", key)
+		}
+	}
+}
+
+func TestProviderAuthFlowTransitions(t *testing.T) {
+	cases := []struct {
+		cause    string
+		inFlight bool
+		state    string
+		reason   string
+	}{
+		{authCauseNativeVeto, false, authStateFailed, authReasonNativeVeto},
+		{authCauseUnsupportedVariant, false, authStateFailed, authReasonNativeVeto},
+		{authCauseProviderRefused, false, authStateFailed, authReasonProviderRefused},
+		{authCauseTransport, false, authStateFailed, authReasonTransport},
+		{authCauseTransport, true, authStateFailed, authReasonAcceptanceUnknown},
+		{authCauseProcess, false, authStateFailed, authReasonProcess},
+		{authCauseProcess, true, authStateFailed, authReasonAcceptanceUnknown},
+		{authCauseTimeout, false, authStateFailed, authReasonTransport},
+		{authCauseTimeout, true, authStateFailed, authReasonAcceptanceUnknown},
+		{authCauseHarvestFailed, false, authStateFailed, authReasonHarvestFailed},
+		{authCauseFlowExpired, false, authStateExpired, authReasonDeadline},
+		{authCausePolicy, false, "", ""},
+		{authCauseFlowState, false, "", ""},
+		{authCauseFlowCancelled, false, "", ""},
+	}
+
+	for _, testCase := range cases {
+		state, reason := authFlowTransition(testCase.cause, testCase.inFlight)
+		if state != testCase.state || reason != testCase.reason {
+			t.Fatalf("%s(inFlight=%v) = %q/%q, want %q/%q", testCase.cause, testCase.inFlight, state, reason, testCase.state, testCase.reason)
+		}
+	}
+}
+
+func TestProviderAuthNativeClientRequiresTheAuthSurface(t *testing.T) {
+	agent := NewAgent(WithHome(t.TempDir()), WithProviderAuthRoot(t.TempDir()))
+	storeRateLimitsSession(t, agent, "plain", newSpyCodexClient())
+
+	session, err := agent.session("plain")
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	if session.nativeAuthClient() != nil {
+		t.Fatal("a client without the auth surface was accepted")
+	}
+}
+
+func TestProviderAuthInjectionOptionKeyIsUnsupported(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	_, err := fixture.agent.NewSession(context.Background(), acp.NewSessionRequest{
+		Cwd: "/tmp/project",
+		Meta: map[string]any{
+			codexMetaKey: map[string]any{
+				"options": map[string]any{"providerAuth": map[string]any{}},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("codex accepted an injection option key")
+	}
+
+	requireInvalidField(t, err, "_meta.codex.options.providerAuth")
+}
+
+func TestProviderAuthGoSafeRecoversAPanic(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	done := make(chan struct{})
+
+	fixture.broker.goSafe("panicking", func() {
+		defer close(done)
+
+		panic("provider auth goroutine")
+	})
+
+	<-done
+}
+
+func TestLoggableErrorCarriesTheMessage(t *testing.T) {
+	attr := loggableError(errors.New("boom"))
+	if attr.Value.String() != "boom" {
+		t.Fatalf("attr = %v", attr)
+	}
+}
+
+func TestProviderAuthUnknownExtensionMethodFallsThrough(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	if _, err := fixture.call(t, "_codex/auth/invented", map[string]any{}); err == nil {
+		t.Fatal("an invented leg answered")
+	}
+}
+
+func TestAuthParamFieldsRejectsANonStringKey(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	_, err := fixture.agent.HandleExtensionMethod(t.Context(), AuthMethodsMethod, json.RawMessage(`{1:2}`))
+	if err == nil {
+		t.Fatal("a non-string key was accepted")
+	}
+
+	requireInvalidField(t, err, "params")
+}
+
+// TestProviderAuthLegsRejectMalformedParams runs the closed-object and
+// unknown-session rules over every leg, because each leg decodes its own params.
+func TestProviderAuthLegsRejectMalformedParams(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	legs := map[string]map[string]any{
+		AuthMethodsMethod:    {"sessionId": "absent"},
+		AuthAuthorizeMethod:  {"sessionId": "absent", "providerId": authProviderOpenAI, "connectionId": "c", "methodsGeneration": "g", "method": "m", "authorizeRequestId": "r"},
+		AuthCallbackMethod:   {"sessionId": "absent", "providerId": authProviderOpenAI, "method": "m", "flowId": "f", "input": "i"},
+		AuthStatusMethod:     {"sessionId": "absent", "providerId": authProviderOpenAI, "flowId": "f"},
+		AuthCancelMethod:     {"sessionId": "absent", "providerId": authProviderOpenAI, "flowId": "f"},
+		AuthInventoryMethod:  {"sessionId": "absent"},
+		AuthCredentialMethod: {"sessionId": "absent", "providerId": authProviderOpenAI, "flowId": "f"},
+		AuthDisconnectMethod: {"sessionId": "absent", "providerId": authProviderOpenAI, "connectionId": "c", "bindingGeneration": 1},
+	}
+
+	for method, params := range legs {
+		t.Run(method, func(t *testing.T) {
+			if _, err := fixture.agent.HandleExtensionMethod(t.Context(), method, json.RawMessage(`{"unknown":1}`)); err == nil {
+				t.Fatal("an unknown field was accepted")
+			}
+
+			_, err := fixture.call(t, method, params)
+			if err == nil {
+				t.Fatal("an unknown session was accepted")
+			}
+
+			requireInvalidField(t, err, jsonFieldSessionID)
+		})
+	}
+}
+
+func TestProviderAuthTypedFieldDecoding(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"method":     authMethodAPIKey,
+		"flowId":     flow.FlowID,
+		"input":      7,
+	})
+	if err == nil {
+		t.Fatal("a non-string input was accepted")
+	}
+
+	requireInvalidField(t, err, authFieldInput)
+
+	_, err = fixture.call(t, AuthDisconnectMethod, map[string]any{
+		"sessionId":         fixture.sessionID,
+		"providerId":        authProviderOpenAI,
+		"connectionId":      "connection-1",
+		"bindingGeneration": "one",
+	})
+	if err == nil {
+		t.Fatal("a non-integer binding generation was accepted")
+	}
+
+	requireInvalidField(t, err, authFieldBindingGeneration)
+}
+
+func TestAuthFlowStopCompleterIsIdempotent(t *testing.T) {
+	flow := &authFlow{disarm: make(chan struct{})}
+
+	flow.stopCompleter()
+	flow.stopCompleter()
+
+	select {
+	case <-flow.disarm:
+	default:
+		t.Fatal("the completer was not disarmed")
+	}
+}
+
+func TestProviderAuthLegsRejectAnUnknownFlowID(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	legs := map[string]map[string]any{
+		AuthCallbackMethod:   {"sessionId": fixture.sessionID, "providerId": authProviderOpenAI, "method": authMethodAPIKey, "flowId": "absent", "input": "i"},
+		AuthCredentialMethod: {"sessionId": fixture.sessionID, "providerId": authProviderOpenAI, "flowId": "absent"},
+	}
+
+	for method, params := range legs {
+		t.Run(method, func(t *testing.T) {
+			_, err := fixture.call(t, method, params)
+			if err == nil {
+				t.Fatal("an unknown flow id was accepted")
+			}
+
+			requireInvalidField(t, err, authFieldFlowID)
+		})
+	}
+}
+
+func TestAuthInventoryRejectsAnEmptySessionID(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	_, err := fixture.agent.HandleExtensionMethod(t.Context(), AuthInventoryMethod, json.RawMessage(`{"sessionId":""}`))
+	if err == nil {
+		t.Fatal("an empty session id was accepted")
+	}
+
+	requireInvalidField(t, err, jsonFieldSessionID)
 }

@@ -34,6 +34,21 @@ Codex extension methods live under the `_codex/*` namespace:
 | `_codex/session/fork` | implemented through `HandleExtensionMethod` |
 | `_codex/rateLimits` | implemented through `HandleExtensionMethod` |
 | `_codex/rawEvent` | notification only |
+| `_codex/auth/methods` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/authorize` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/callback` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/status` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/cancel` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/inventory` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/credential` | implemented through `HandleExtensionMethod`, consent-gated |
+| `_codex/auth/disconnect` | implemented through `HandleExtensionMethod`, consent-gated |
+
+The eight `_codex/auth/*` legs broker a ChatGPT or API-key login for the
+account `CODEX_HOME` holds. They are advertised together under
+`agentCapabilities._meta.codex.providerAuth` only while `-provider-auth-root`
+is configured, and `credential` and `disconnect` additionally require
+`-provider-auth-direct-home` equal to `-home`; every unadvertised leg returns
+method-not-found (see [Authentication](/docs/features/authentication)).
 
 Unsupported or removed methods return method-not-found uniformly. `session/fork`
 and `session/set_mode` are intentionally not routed.

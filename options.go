@@ -124,6 +124,17 @@ type Options struct {
 	// transport. Empty rejects the handoff form. It must be an absolute path,
 	// and nothing under it is ever created, modified, or removed.
 	InputHandoffRoot string
+	// ProviderAuthRoot is the durable host-owned directory housing the
+	// values-free provider-auth ledger. Empty leaves the provider-auth surface
+	// unadvertised. It must be an absolute path outside session scratch, it
+	// holds no credential material, and no session lifecycle ever sweeps it.
+	ProviderAuthRoot string
+	// ProviderAuthDirectHome is the exact canonical CODEX_HOME the host
+	// consents to a provider-auth leg reading credentials from or clearing.
+	// The gated legs are advertised only while it is set and equal to the
+	// resolved Home; the gate authorizes that home and never a parent, a
+	// child, or a symlink target of it.
+	ProviderAuthDirectHome string
 	// SeedFiles maps relative paths to file contents written into the resolved
 	// CODEX_HOME before each Codex process launches, so Codex reads them as its
 	// own config (e.g. config.toml). Paths are confined to CODEX_HOME.
@@ -240,6 +251,39 @@ func WithScratchDir(dir string) Option {
 func WithInputHandoffRoot(dir string) Option {
 	return func(options *Options) {
 		options.InputHandoffRoot = dir
+	}
+}
+
+// WithProviderAuthRoot supplies the durable host-owned directory that houses
+// the values-free provider-auth ledger. The path must be absolute and on
+// durable storage outside session scratch; a relative path fails the agent
+// closed. The directory is created 0700 when missing and ledger entries are
+// written 0600.
+//
+// The ledger records which native credential slot each connection generation
+// owns and nothing else: no credential material, no authorization URLs, no user
+// codes, and no prompt answers. Unset — or set to a path that cannot be
+// prepared — every _codex/auth leg is absent from the initialize advertisement
+// and returns method-not-found.
+func WithProviderAuthRoot(path string) Option {
+	return func(options *Options) {
+		options.ProviderAuthRoot = path
+	}
+}
+
+// WithProviderAuthDirectHome names the exact CODEX_HOME the host consents to
+// the account-level provider-auth legs touching. The credential leg reads that
+// home's configured credential store and the disconnect leg clears the account
+// in it, so both are advertised and answered only while this equals the
+// resolved Home after path cleaning; otherwise both are absent from the
+// advertisement and return method-not-found.
+//
+// The gate authorizes exactly the named home — never a parent, a child, or a
+// symlink target — and is independent of WithCodexAllowAccountLogout, which
+// governs the ACP logout method instead. A relative path fails the agent closed.
+func WithProviderAuthDirectHome(path string) Option {
+	return func(options *Options) {
+		options.ProviderAuthDirectHome = path
 	}
 }
 

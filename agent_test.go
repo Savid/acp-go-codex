@@ -1172,7 +1172,14 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	goleak.VerifyTestMain(m)
+	// The Secret Service client keeps one library-owned session-bus connection
+	// for the process lifetime and exposes no way to close it, so the
+	// credential-residence matrix would otherwise report it as a leak.
+	goleak.VerifyTestMain(m,
+		goleak.IgnoreAnyFunction("github.com/godbus/dbus/v5.(*Conn).inWorker"),
+		goleak.IgnoreAnyFunction("github.com/godbus/dbus/v5.(*Conn).outWorker"),
+		goleak.IgnoreAnyFunction("github.com/godbus/dbus/v5.newConn.func1"),
+	)
 }
 
 // fakeCodexStderrTail is emitted on the fake app-server's stderr so a mid-turn

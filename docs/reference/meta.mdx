@@ -44,6 +44,7 @@ Accepted initialize capability metadata under `_meta.codex`:
 | `rawEvent` | `_codex/rawEvent` notification opt-in details. |
 | `sessionStore` | Store format and key shape. |
 | `structuredOutput` | JSON Schema request and response paths. |
+| `providerAuth` | A single `methods` array naming the enabled `_codex/auth/*` extension names. Present only while `-provider-auth-root` is configured, and it carries no `injectionKey`: a brokered ChatGPT credential returns through the existing `codex-chatgpt-auth-tokens` auth method, so `_meta.codex.options.providerAuth` is an unsupported option field. |
 
 ## Media envelope
 
@@ -144,3 +145,19 @@ the final assistant `response_item.id` from that turn; it is not an
 adapter-generated ACP message id. A completion with no assistant item carries
 `turnId` alone. Store-backed `session/load` replays the same terminal identity
 from the mirrored rollout.
+
+## Provider-auth error data
+
+A failed `_codex/auth/*` leg returns JSON-RPC `-32000` whose `data` carries:
+
+| Field | Meaning |
+| --- | --- |
+| `error` | Always `codex_auth_failed`. |
+| `cause` | One of `native_veto`, `provider_refused`, `transport`, `process`, `timeout`, `harvest_failed`, `unsupported_variant`, `flow_expired`, `flow_state`, `flow_cancelled`, `policy`. |
+| `retryable` | Always present; `true` only for the transport-shaped causes. |
+| `providerId` / `method` / `flowId` | Present when the failure names one. |
+
+There is no free-form field and no native message text. A caller-owned
+addressing failure — an unknown, superseded, or cross-session `flowId`, a stale
+`methodsGeneration`, or a `method` that does not match the flow — is invalid
+params (`-32602`) carrying the offending field path instead.

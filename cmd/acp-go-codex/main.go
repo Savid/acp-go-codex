@@ -122,6 +122,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	codexPath := flags.String("path", "", "path to codex CLI")
 	codexHome := flags.String("home", "", "Codex home directory")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
+	providerAuthRoot := flags.String("provider-auth-root", "", "durable host-owned root housing the provider-auth ledger; empty leaves the provider-auth surface unadvertised")
+	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "exact CODEX_HOME the operator consents to the credential and disconnect legs touching; empty leaves those two legs unadvertised")
 	model := flags.String("model", "", "default Codex model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
@@ -186,6 +188,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		codexacp.WithExecutablePath(*codexPath),
 		codexacp.WithHome(*codexHome),
 		codexacp.WithScratchDir(*scratchDir),
+		codexacp.WithProviderAuthRoot(*providerAuthRoot),
+		codexacp.WithProviderAuthDirectHome(*providerAuthDirectHome),
 		codexacp.WithDefaultModel(*model),
 		codexacp.WithCodexAllowAccountLogout(*allowAccountLogout),
 		codexacp.WithLogger(logger),

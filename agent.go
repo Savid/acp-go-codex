@@ -105,10 +105,11 @@ const (
 
 // Agent exposes Codex through ACP.
 type Agent struct {
-	options    Options
-	log        *slog.Logger
-	observe    *observer.Observer
-	optionsErr error
+	options      Options
+	log          *slog.Logger
+	observe      *observer.Observer
+	optionsErr   error
+	providerAuth *providerAuth
 
 	mu                sync.Mutex
 	closed            bool
@@ -170,6 +171,7 @@ func NewAgent(opts ...Option) *Agent {
 	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
 	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
 	optionsErr = errors.Join(optionsErr, validateInputHandoffRoot(options.InputHandoffRoot))
+	optionsErr = errors.Join(optionsErr, validateProviderAuthOptions(options))
 	options.ConcurrencyLimits = limits
 
 	clientCallLimit := limits.MaxConcurrentClientCalls
@@ -202,7 +204,7 @@ func NewAgent(opts ...Option) *Agent {
 		)
 	}
 
-	return &Agent{
+	agent := &Agent{
 		options:           options,
 		log:               log,
 		optionsErr:        optionsErr,
@@ -214,6 +216,12 @@ func NewAgent(opts ...Option) *Agent {
 		containmentMode:   mode,
 		retainedThreads:   make(map[acp.SessionId]*retainedRuntimeThread),
 	}
+
+	if optionsErr == nil {
+		agent.providerAuth = newProviderAuth(agent)
+	}
+
+	return agent
 }
 
 func (a *Agent) ContainmentMode() RuntimeContainmentMode {
@@ -317,6 +325,10 @@ func (a *Agent) Close() error {
 	closeDone := make(chan struct{})
 	a.closeDone = closeDone
 
+	if a.providerAuth != nil {
+		defer a.providerAuth.closeAll()
+	}
+
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
@@ -419,6 +431,10 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			jsonFieldResult: "_meta.codex.structuredOutput",
 			"schema":        "json_schema",
 		},
+	}
+
+	if a.providerAuth != nil {
+		codexMeta[providerAuthCapabilityKey] = a.providerAuth.capability()
 	}
 
 	return acp.InitializeResponse{
@@ -582,6 +598,10 @@ func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, 
 	switch event.Kind {
 	case codex.EventAccountUpdated:
 		a.updateAccountForClient(client, event.ThreadID, event.Account)
+	case codex.EventLoginCompleted:
+		if a.providerAuth != nil {
+			a.providerAuth.loginCompleted(ctx, event.Login)
+		}
 	case codex.EventRateLimitsUpdated:
 		if event.RateLimits != nil {
 			a.cacheRateLimits(*event.RateLimits)

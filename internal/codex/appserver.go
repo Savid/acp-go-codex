@@ -755,7 +755,7 @@ func (c *AppServerClient) dispatchEvent(event Event) {
 		if c.options.EventHandler != nil {
 			c.options.EventHandler(context.Background(), event)
 		}
-	case EventRateLimitsUpdated:
+	case EventLoginCompleted, EventRateLimitsUpdated:
 		if c.options.EventHandler != nil {
 			c.options.EventHandler(context.Background(), event)
 		}
@@ -1064,6 +1064,9 @@ func eventFromRPC(raw rpcEvent) Event {
 	case notifyAccountUpdated:
 		event.Kind = EventAccountUpdated
 		event.Account = accountFromResponse(params)
+	case notifyAccountLoginDone:
+		event.Kind = EventLoginCompleted
+		event.Login = loginCompletionFromParams(params)
 	case notifyRateLimitsUpdated:
 		event.Kind = EventRateLimitsUpdated
 		snapshot := rateLimitSnapshotFromMap(rateLimitSnapshotPayload(params))
@@ -1135,6 +1138,7 @@ func accountFromResponse(resp map[string]any) Account {
 		ID:       firstNonEmpty(stringValue(rawAccount, fieldChatGPTAccountID), stringValue(rawAccount, fieldID)),
 		Email:    stringValue(rawAccount, "email"),
 		PlanType: firstNonEmpty(stringValue(rawAccount, fieldChatGPTPlanType), stringValue(rawAccount, "planType")),
+		AuthMode: NormalizeAuthMode(firstNonEmpty(stringValue(rawAccount, fieldType), stringValue(resp, fieldAuthMode))),
 		Raw:      rawAccount,
 	}
 }

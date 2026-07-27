@@ -16,6 +16,8 @@ Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
 | `-path` | `codex` on `PATH` | Codex CLI executable path. |
 | `-home` | unset | Codex home directory passed as `CODEX_HOME`. |
 | `-scratch-dir` | system temp | Parent directory for ephemeral session scratch; empty means the system temp directory. |
+| `-provider-auth-root` | unset | Durable host-owned root holding the values-free provider-auth ledger. Empty leaves the whole provider-auth surface unadvertised. |
+| `-provider-auth-direct-home` | unset | Exact `CODEX_HOME` the operator consents to the `credential` and `disconnect` legs touching. It must equal `-home`; empty leaves those two legs unadvertised. |
 | `-darwin-best-effort-containment` | `false` | On Darwin only, explicitly accept captured process-group containment and its escaped-descendant and numeric-PGID-reuse risks. Rejected on every other platform. |
 | `-model` | unset | Default model preference. |
 | `-debug` | `false` | Write adapter debug logs to stderr. |
