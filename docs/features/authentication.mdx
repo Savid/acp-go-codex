@@ -34,6 +34,18 @@ cannot mutate credentials alongside an active cooperating app-server. Codex
 CLI 0.144.1 or newer and a supported local writable-home filesystem are
 required.
 
+`login` also runs with every browser launcher neutralised. The Codex child
+receives a private scratch directory of no-op `open`, `xdg-open`,
+`x-www-browser`, `www-browser`, and `sensible-browser` programs ahead of every
+other `PATH` entry, plus `BROWSER` pointed at one of them, because a launcher
+that execs `open` directly never reads `BROWSER`. Without both, `codex login`
+opens a tab on the operator's desktop that reaches its loopback listener and
+completes a grant with no further action. The directory is removed with the
+command's scratch. On Windows the launch cannot be shadowed this way, so
+`login` refuses to run rather than open a browser. `logout` opens nothing: it
+keeps the environment it would otherwise have had, on every platform, so a
+resident credential can always be removed.
+
 During ACP initialize, the terminal auth method is advertised only when the
 client declares terminal auth support. The agent auth method
 `codex-chatgpt-auth-tokens` is always advertised.

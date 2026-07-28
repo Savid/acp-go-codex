@@ -71,6 +71,24 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return fmt.Errorf("resolve account-command scratch parent: %w", err)
 	}
 
+	// Only the login leg execs a browser launcher. Logout removes a resident
+	// credential and opens nothing, so it keeps its environment and stays
+	// available on platforms where no launch can be neutralised.
+	var shim *browserShim
+
+	if options.Mode == accountCommandLogin {
+		shim, err = newBrowserShim(scratchParent)
+		if err != nil {
+			return err
+		}
+	}
+
+	defer func() {
+		if !errors.Is(returnErr, ErrProcessContainmentIncomplete) {
+			returnErr = errors.Join(returnErr, shim.remove())
+		}
+	}()
+
 	if _, versionErr := runAccountVersionProbe(ctx, path, scratchParent, options); versionErr != nil {
 		return versionErr
 	}
@@ -88,7 +106,7 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	cmd, proof, err := accountSupervisorCommand(ctx, supervisorConfig{
 		NativePath:       path,
 		NativeArgs:       args,
-		NativeEnv:        upsertEnv(os.Environ(), envCodexHome, options.CodexHome),
+		NativeEnv:        shim.environ(upsertEnv(os.Environ(), envCodexHome, options.CodexHome)),
 		Home:             options.CodexHome,
 		Scratch:          scratch,
 		ScratchParent:    scratchParent,

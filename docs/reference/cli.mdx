@@ -60,7 +60,10 @@ Both subcommands require Codex CLI 0.144.1 or newer and run under the same
 writable-home lock and selected containment backend as app-server mode.
 `-scratch-dir` selects the parent for their private supervisor scratch and
 defaults to system temp. A command fails closed when the home is already
-claimed or is not on an approved local filesystem.
+claimed or is not on an approved local filesystem. `login` also neutralises
+browser launches from the same scratch parent, and fails closed on Windows,
+where that is not possible; `logout` is unaffected on every platform. See
+[Authentication](/docs/features/authentication).
 
 On Darwin, serve, login, and logout all remain fail closed unless
 `-darwin-best-effort-containment` is present. The binary writes an unconditional
