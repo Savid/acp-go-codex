@@ -1,6 +1,7 @@
-# Secret Service fixture for the credential-residence tier. The base is pinned by
-# digest: an unpinned base drifts the test's own dependency on a schedule nobody
-# controls.
+# Linux fixture for the container tier: a Secret Service the credential-residence
+# matrix reads through, and the platform the account-command launcher legs run
+# on. The base is pinned by digest: an unpinned base drifts the test's own
+# dependency on a schedule nobody controls.
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 RUN apt-get update \

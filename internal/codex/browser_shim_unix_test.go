@@ -21,27 +21,31 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "launched")
 	probe := t.TempDir()
 
-	for _, name := range []string{"open", "xdg-open"} {
+	for _, name := range browserLauncherNames {
 		script := fmt.Sprintf("#!/bin/sh\necho \"$0 $*\" >> %q\nexit 0\n", marker)
 		require.NoError(t, os.WriteFile(filepath.Join(probe, name), []byte(script), 0o700))
 	}
 
 	t.Setenv("PATH", probe+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	control := exec.Command("open", "https://example.invalid/")
-	control.Env = os.Environ()
-	require.NoError(t, control.Run())
-	require.FileExists(t, marker)
-	require.NoError(t, os.Remove(marker))
+	for _, name := range browserLauncherNames {
+		control := exec.Command(name, "https://example.invalid/")
+		control.Env = os.Environ()
+		require.NoError(t, control.Run())
+		require.FileExists(t, marker)
+		require.NoError(t, os.Remove(marker))
+	}
 
 	cli := writeAccountCommandScript(t, fmt.Sprintf(`#!/bin/sh
 if [ "$1" = %q ]; then
   echo codex-cli 0.144.1
   exit 0
 fi
-open "https://example.invalid/"
+for launcher in %s; do
+  "$launcher" "https://example.invalid/"
+done
 exit 0
-`, codexVersionArgument))
+`, codexVersionArgument, strings.Join(browserLauncherNames, " ")))
 
 	accountSupervisorCommand = func(_ context.Context, config supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
 		cmd := exec.Command(config.NativePath, config.NativeArgs...)

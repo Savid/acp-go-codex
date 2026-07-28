@@ -40,7 +40,9 @@ skips when nobody answers. `make test-integration-keystore` sets
 `ACP_GO_CODEX_RUN_KEYSTORE=1` and runs the credential-residence matrix in all
 three configurations: the keystore-present and keystore-absent Linux halves
 inside the container fixture in `integration/keystore`, and the macOS third on a
-macOS host. It fails rather than skips when no container runtime is available.
+macOS host. The same fixture runs the account-command browser legs on Linux,
+where `xdg-open` and the other launchers a macOS host never execs are the ones
+that matter. It fails rather than skips when no container runtime is available.
 Neither joins `make audit`. When `OPENAI_API_KEY`
 is set and `ACP_GO_CODEX_HOME` is unset, tests use a fresh temp home. Otherwise
 they copy the source home into the temp home and clear copied auth refresh

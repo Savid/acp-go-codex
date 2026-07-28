@@ -56,30 +56,7 @@ func TestKeystoreProviderAuthResidence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			FromDockerfile: testcontainers.FromDockerfile{
-				Context:    filepath.Join(".", "keystore"),
-				Dockerfile: "Dockerfile",
-				KeepImage:  true,
-			},
-			// Readiness is a store/lookup round trip executed in the container.
-			// A log line and a bus-name check both report ready against a
-			// service that answers no lookup.
-			WaitingFor: wait.ForExec([]string{keystoreRoundTrip}).WithStartupTimeout(3 * time.Minute),
-		},
-		Started: true,
-	})
-	if err != nil {
-		t.Fatalf("start keystore fixture: %v", err)
-	}
-
-	t.Cleanup(func() {
-		if err := container.Terminate(context.WithoutCancel(ctx)); err != nil {
-			t.Errorf("terminate keystore fixture: %v", err)
-		}
-	})
-
+	container := startLinuxFixture(t, ctx)
 	probe := buildResidenceProbe(t)
 
 	if err := container.CopyFileToContainer(ctx, probe, keystoreProbePath, 0o755); err != nil {
@@ -117,6 +94,37 @@ func TestKeystoreProviderAuthResidence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// startLinuxFixture builds the tier's Linux fixture and returns it running.
+func startLinuxFixture(t *testing.T, ctx context.Context) testcontainers.Container {
+	t.Helper()
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			FromDockerfile: testcontainers.FromDockerfile{
+				Context:    filepath.Join(".", "keystore"),
+				Dockerfile: "Dockerfile",
+				KeepImage:  true,
+			},
+			// Readiness is a store/lookup round trip executed in the container.
+			// A log line and a bus-name check both report ready against a
+			// service that answers no lookup.
+			WaitingFor: wait.ForExec([]string{keystoreRoundTrip}).WithStartupTimeout(3 * time.Minute),
+		},
+		Started: true,
+	})
+	if err != nil {
+		t.Fatalf("start linux fixture: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := container.Terminate(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("terminate linux fixture: %v", err)
+		}
+	})
+
+	return container
 }
 
 // buildResidenceProbe compiles the package that owns the read path for the
