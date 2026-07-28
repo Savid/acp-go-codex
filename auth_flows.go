@@ -78,6 +78,14 @@ type authFlow struct {
 	// loginID is codex's own handle for a pending device login. It never
 	// crosses the boundary; a caller addresses a flow only by flowId.
 	loginID string
+	// baseline is the account CODEX_HOME named before this login started. The
+	// account/read backstop measures against it, so a home that already held a
+	// ChatGPT credential cannot answer for a login nobody completed.
+	baseline authAccountIdentity
+	// nativeCompleted records codex naming this flow's loginId in its own
+	// account/login/completed notification. That names the login directly, so it
+	// proves what the backstop can only infer.
+	nativeCompleted bool
 
 	createdAt           int64
 	state               string
@@ -362,6 +370,13 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *session, f
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
 
+	// The baseline is read before the login exists, so what the backstop later
+	// compares against is the account this flow inherited.
+	baseline, err := client.AccountRead(callCtx)
+	if err != nil {
+		return authAuthorizeResult{}, authNativeCause(callCtx, err)
+	}
+
 	login, err := client.StartDeviceCodeLogin(callCtx)
 	if err != nil {
 		return authAuthorizeResult{}, authNativeCause(callCtx, err)
@@ -383,6 +398,7 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *session, f
 
 	p.mu.Lock()
 	flow.loginID = login.LoginID
+	flow.baseline = authAccountIdentityOf(baseline)
 	p.mu.Unlock()
 
 	result.Interaction = authInteractionWait
@@ -641,6 +657,13 @@ func (p *providerAuth) status(ctx context.Context, params json.RawMessage) (any,
 // floor, serving the cached state in between so a consumer's poll cadence never
 // reaches the provider. Codex publishes no poll hint of its own, so the floor is
 // the whole interval.
+//
+// account/read answers for CODEX_HOME rather than for a login, so a ChatGPT
+// account alone is never completion: it reads the same before the owner has
+// visited the verification URL as after. The backstop completes a flow only
+// where the account it names differs from the one the flow started against;
+// where codex named this flow's loginId itself, that notification is the proof
+// and the comparison has nothing left to add.
 func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFlow) {
 	p.mu.Lock()
 
@@ -652,6 +675,8 @@ func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFl
 	}
 
 	flow.nextProbeAt = now.Add(flow.probeInterval)
+	baseline := flow.baseline
+	correlated := flow.nativeCompleted
 	p.mu.Unlock()
 
 	client := session.nativeAuthClient()
@@ -667,7 +692,31 @@ func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFl
 		return
 	}
 
+	if !correlated && authAccountIdentityOf(account) == baseline {
+		return
+	}
+
 	p.completeDeviceFlow(flow)
+}
+
+// authAccountIdentity is the comparable projection of one account/read answer.
+// The native payload's raw body is deliberately excluded: it is the whole
+// upstream object, and a member added upstream would make two readings of one
+// unchanged account differ.
+type authAccountIdentity struct {
+	id       string
+	email    string
+	planType string
+	authMode string
+}
+
+func authAccountIdentityOf(account codex.Account) authAccountIdentity {
+	return authAccountIdentity{
+		id:       account.ID,
+		email:    account.Email,
+		planType: account.PlanType,
+		authMode: account.AuthMode,
+	}
 }
 
 // completeDeviceFlow records the confirmation and terminalizes an approved
@@ -682,9 +731,10 @@ func (p *providerAuth) completeDeviceFlow(flow *authFlow) {
 	p.terminalize(flow, authStateAuthenticated, "", authNow().Add(codexAccessTokenLifetime).UnixMilli())
 }
 
-// loginCompleted applies codex's own completion notification. It is the
-// event-driven half of the same confirmation the account/read backstop reaches:
-// a success re-probes immediately, and a refusal fails the flow closed.
+// loginCompleted applies codex's own completion notification. It names this
+// flow's loginId, which is the one signal on this surface that addresses a
+// login rather than a home: a success records that correlation and re-probes
+// immediately, and a refusal fails the flow closed.
 func (p *providerAuth) loginCompleted(ctx context.Context, completion codex.LoginCompletion) {
 	if completion.LoginID == "" {
 		return
@@ -709,6 +759,7 @@ func (p *providerAuth) loginCompleted(ctx context.Context, completion codex.Logi
 	}
 
 	pending.nextProbeAt = time.Time{}
+	pending.nativeCompleted = completion.Success
 	sessionID := pending.sessionID
 	p.mu.Unlock()
 

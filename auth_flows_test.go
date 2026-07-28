@@ -846,18 +846,22 @@ func TestAuthStatusDrivesTheBackstopBehindItsFloor(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
 
+	// authorize read the account the backstop measures against; the polls this
+	// test counts are the reads after it.
+	baselineReads := fixture.client.accountRead
+
 	if status := fixture.status(t, flow.FlowID); status.State != authStatePending {
 		t.Fatalf("state = %q, want pending", status.State)
 	}
 
-	if fixture.client.accountRead != 1 {
-		t.Fatalf("first status drove %d reads", fixture.client.accountRead)
+	if fixture.client.accountRead != baselineReads+1 {
+		t.Fatalf("first status drove %d reads", fixture.client.accountRead-baselineReads)
 	}
 
 	fixture.status(t, flow.FlowID)
 
-	if fixture.client.accountRead != 1 {
-		t.Fatalf("a second status inside the floor drove %d reads", fixture.client.accountRead)
+	if fixture.client.accountRead != baselineReads+1 {
+		t.Fatalf("a second status inside the floor drove %d reads", fixture.client.accountRead-baselineReads)
 	}
 
 	base := time.Now()
@@ -877,6 +881,66 @@ func TestAuthStatusDrivesTheBackstopBehindItsFloor(t *testing.T) {
 	wantExpiry := authNow().Add(codexAccessTokenLifetime).UnixMilli()
 	if status.ExpiresAt != wantExpiry {
 		t.Fatalf("expiresAt = %d, want %d", status.ExpiresAt, wantExpiry)
+	}
+}
+
+// TestAuthStatusProbeRefusesAnAccountThatDidNotChange pins the backstop against
+// the flow rather than against CODEX_HOME. The home already holds a ChatGPT
+// credential, nobody has visited the verification URL, and account/read answers
+// exactly what it answered before the flow started — so the flow has learned
+// nothing and must stay pending.
+func TestAuthStatusProbeRefusesAnAccountThatDidNotChange(t *testing.T) {
+	restoreAuthClock(t)
+
+	fixture := newProviderAuthFixture(t)
+	fixture.client.account = codex.Account{
+		ID:       "acct-resident",
+		Email:    "resident@example.test",
+		PlanType: "plus",
+		AuthMode: codex.AuthModeChatGPT,
+	}
+
+	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	if status := fixture.status(t, flow.FlowID); status.State != authStatePending {
+		t.Fatalf("state = %q, want pending", status.State)
+	}
+}
+
+// TestAuthStatusProbeCompletesWhenTheAccountSwitched pins the other half: a
+// login that replaced the resident account is a change the backstop can see.
+func TestAuthStatusProbeCompletesWhenTheAccountSwitched(t *testing.T) {
+	restoreAuthClock(t)
+
+	fixture := newProviderAuthFixture(t)
+	fixture.client.account = codex.Account{ID: "acct-resident", AuthMode: codex.AuthModeChatGPT}
+
+	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	fixture.client.account = codex.Account{ID: "acct-new", AuthMode: codex.AuthModeChatGPT}
+
+	if status := fixture.status(t, flow.FlowID); status.State != authStateAuthenticated {
+		t.Fatalf("state = %q, want authenticated", status.State)
+	}
+}
+
+// TestLoginCompletedConfirmsAReloginOfTheSameAccount pins the correlated path
+// against the differential one. codex names this flow's loginId in its own
+// completion notification, which proves the login the backstop could only
+// infer, so an owner logging back into the account the home already held is
+// still a completed login.
+func TestLoginCompletedConfirmsAReloginOfTheSameAccount(t *testing.T) {
+	restoreAuthClock(t)
+
+	fixture := newProviderAuthFixture(t)
+	fixture.client.account = codex.Account{ID: "acct-resident", AuthMode: codex.AuthModeChatGPT}
+
+	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	fixture.broker.loginCompleted(t.Context(), codex.LoginCompletion{LoginID: "login-1", Success: true})
+
+	if status := fixture.status(t, flow.FlowID); status.State != authStateAuthenticated {
+		t.Fatalf("state = %q, want authenticated", status.State)
 	}
 }
 
