@@ -27,20 +27,20 @@ const (
 	logoutLegTest = "TestLogoutRunsWithoutABrowserShim"
 )
 
-// TestKeystoreContainerBrowserLauncherContainment runs the account-command
+// TestKeystoreLinuxLoginNeverExecsABrowserLauncher runs both account-command
 // browser legs on Linux, where `xdg-open`, `x-www-browser`, `www-browser`, and
 // `sensible-browser` are the launchers a login would otherwise exec. macOS
 // exercises only `open`, so every other name on that list is a claim no host in
 // this family ever runs. The probe is the internal package's own test binary,
 // built for the fixture's platform, so the code under test is the production
 // launch path rather than a restatement of it.
-func TestKeystoreContainerBrowserLauncherContainment(t *testing.T) {
-	requireKeystoreTier(t)
+func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
+	requireKeystoreRuntime(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	container := startLinuxFixture(t, ctx)
+	container := startKeystoreFixture(ctx, t)
 	probe := buildBrowserShimProbe(t)
 
 	if err := container.CopyFileToContainer(ctx, probe, browserProbePath, 0o755); err != nil {

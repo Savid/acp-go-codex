@@ -19,16 +19,31 @@ const (
 	// the keystore-present and keystore-absent Linux halves are the same image
 	// run with and without it.
 	envSessionBus = "DBUS_SESSION_BUS_ADDRESS"
+
+	// keystoreFixtureMarker is written by the credential-residence fixture's
+	// entrypoint. Seeding a live Secret Service is only safe inside that
+	// container, so the Linux configurations run nowhere else.
+	keystoreFixtureMarker = "/run/acp-go-codex-keystore/marker"
 )
 
-// requireKeystoreTier answers to both gates. Below them the tier is not
-// selected and the matrix does not run; above them it fails rather than skips,
-// because a silently green residence suite is worse than a red one.
-func requireKeystoreTier(t *testing.T) {
+// requireResidenceTier answers to both tier gates. On Linux it additionally
+// requires the fixture container: planting a canary in a developer's live
+// Secret Service is not something a test may do, and the container is where the
+// driver runs this binary once per Linux configuration.
+func requireResidenceTier(t *testing.T) {
 	t.Helper()
 
 	if os.Getenv(envRunIntegration) != "1" || os.Getenv(envRunKeystore) != "1" {
-		t.Skipf("set %s=1 and %s=1 to run the credential-residence tier", envRunIntegration, envRunKeystore)
+		t.Skipf("set %s=1 and %s=1 to run the credential-residence matrix",
+			envRunIntegration, envRunKeystore)
+	}
+
+	if runtime.GOOS == "darwin" {
+		return
+	}
+
+	if _, err := os.Stat(keystoreFixtureMarker); err != nil {
+		t.Skipf("the Linux configurations run inside the keystore fixture container: %v", err)
 	}
 }
 
@@ -47,7 +62,7 @@ func keystoreServicePresent() bool {
 // keystore-present Linux, and macOS — because which store is authoritative is a
 // behavioral fork in the harness rather than an environment caveat.
 func TestKeystoreResidenceMatrix(t *testing.T) {
-	requireKeystoreTier(t)
+	requireResidenceTier(t)
 
 	keystorePresent := keystoreServicePresent()
 

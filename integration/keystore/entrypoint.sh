@@ -17,9 +17,8 @@ printf '%s\n' "$UNLOCK_PASSWORD" | gnome-keyring-daemon --unlock --components=se
 
 printf 'export DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS" >"$FIXTURE_DIR/env"
 
-# Readiness is a store/lookup round trip run against this service, never a log
-# line and never a bus-name check: both report ready against a service that
-# answers no lookup.
+# Readiness is the store/lookup round trip in roundtrip.sh, run against this
+# service; this marker only tells the matrix it is inside the fixture.
 touch "$FIXTURE_DIR/marker"
 
 exec sleep infinity
