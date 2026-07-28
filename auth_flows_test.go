@@ -1155,7 +1155,7 @@ func TestAuthDisconnectClearsTheFencedAccount(t *testing.T) {
 	}); repeatErr == nil {
 		t.Fatal("disconnect answered against a record it had already removed")
 	} else {
-		requireAuthCause(t, repeatErr, authCausePolicy)
+		requireAuthCause(t, repeatErr, authCauseBindingConflict)
 	}
 
 	if fixture.client.logoutCalls != 1 {
@@ -1178,18 +1178,45 @@ func TestAuthDisconnectFencing(t *testing.T) {
 		t.Fatal("disconnect answered with no ledger entry")
 	}
 
-	requireAuthCause(t, err, authCausePolicy)
+	requireAuthCause(t, err, authCauseBindingConflict)
 
-	if writeErr := fixture.broker.ledger.write(sampleLedgerRecord()); writeErr != nil {
+	seeded := sampleLedgerRecord()
+	if writeErr := fixture.broker.ledger.write(seeded); writeErr != nil {
 		t.Fatalf("seed ledger: %v", writeErr)
 	}
 
+	// The seeded entry names connection-1 at generation 3, so base is a stale
+	// generation against a live entry.
 	_, err = fixture.call(t, AuthDisconnectMethod, base)
+	if err == nil {
+		t.Fatal("disconnect accepted a stale binding generation")
+	}
+
+	requireAuthCause(t, err, authCauseBindingConflict)
+
+	wrongConnection := map[string]any{}
+	for key, value := range base {
+		wrongConnection[key] = value
+	}
+
+	wrongConnection["connectionId"] = "connection-other"
+	wrongConnection["bindingGeneration"] = seeded.BindingGeneration
+
+	_, err = fixture.call(t, AuthDisconnectMethod, wrongConnection)
 	if err == nil {
 		t.Fatal("disconnect accepted a differently fenced connection")
 	}
 
-	requireAuthCause(t, err, authCausePolicy)
+	requireAuthCause(t, err, authCauseBindingConflict)
+
+	if fixture.client.logoutCalls != 0 {
+		t.Fatalf("a refused fence drove %d native removals", fixture.client.logoutCalls)
+	}
+
+	live, _, readErr := fixture.broker.ledger.read(authProviderOpenAI)
+	if readErr != nil || live.BindingGeneration != seeded.BindingGeneration || live.State != seeded.State {
+		t.Fatalf("a refused fence mutated the ledger: %#v/%v", live, readErr)
+	}
 
 	for _, field := range []string{"sessionId", "providerId", "connectionId", "bindingGeneration"} {
 		params := map[string]any{}

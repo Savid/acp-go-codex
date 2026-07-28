@@ -578,6 +578,7 @@ func TestProviderAuthCauseRetryability(t *testing.T) {
 		authCauseFlowState:          false,
 		authCauseFlowCancelled:      false,
 		authCausePolicy:             false,
+		authCauseBindingConflict:    false,
 	}
 
 	for cause, want := range retryable {
@@ -632,6 +633,7 @@ func TestProviderAuthFlowTransitions(t *testing.T) {
 		{authCauseHarvestFailed, false, authStateFailed, authReasonHarvestFailed},
 		{authCauseFlowExpired, false, authStateExpired, authReasonDeadline},
 		{authCausePolicy, false, "", ""},
+		{authCauseBindingConflict, false, "", ""},
 		{authCauseFlowState, false, "", ""},
 		{authCauseFlowCancelled, false, "", ""},
 	}

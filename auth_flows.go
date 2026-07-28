@@ -818,7 +818,7 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 	}
 
 	if !ok || record.State == authLedgerRemoved || record.ConnectionID != connectionID || record.BindingGeneration != bindingGeneration {
-		return nil, authFailed(authCausePolicy, providerID, "", "")
+		return nil, authFailed(authCauseBindingConflict, providerID, "", "")
 	}
 
 	record.BindingGeneration++

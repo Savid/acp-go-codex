@@ -72,6 +72,7 @@ const (
 	authCauseFlowState          = "flow_state"
 	authCauseFlowCancelled      = "flow_cancelled"
 	authCausePolicy             = "policy"
+	authCauseBindingConflict    = "binding_conflict"
 )
 
 // codexAuthClient is the native surface the provider-auth legs drive. It is
