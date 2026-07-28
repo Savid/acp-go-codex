@@ -84,9 +84,9 @@ func TestKeystoreLinuxCredentialResidence(t *testing.T) {
 func runResidenceMatrix(ctx context.Context, t *testing.T, container testcontainers.Container, bus bool) {
 	t.Helper()
 
-	name, prelude := "keystore absent", "unset "+envSessionBus+"; "
+	name, prelude := "keystore-absent", "unset "+envSessionBus+"; "
 	if bus {
-		name, prelude = "keystore present", ". "+keystoreEnvFile+"; export "+envSessionBus+"; "
+		name, prelude = "keystore-present", ". "+keystoreEnvFile+"; export "+envSessionBus+"; "
 	}
 
 	t.Run(name, func(t *testing.T) {
