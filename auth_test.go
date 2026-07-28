@@ -235,11 +235,14 @@ type authSpyClient struct {
 	apiKeyErr   error
 	apiKeyValue string
 	apiKeyCalls int
-	account     codex.Account
-	accountErr  error
-	accountRead int
-	logoutErr   error
-	logoutCalls int
+	// beforeAPIKeyLogin runs where the native write blocks, which is the window
+	// a cancel, a supersede, or an expiry lands in on a real app-server.
+	beforeAPIKeyLogin func()
+	account           codex.Account
+	accountErr        error
+	accountRead       int
+	logoutErr         error
+	logoutCalls       int
 }
 
 func newAuthSpyClient() *authSpyClient {
@@ -262,6 +265,13 @@ func (c *authSpyClient) StartDeviceCodeLogin(context.Context) (codex.DeviceCodeL
 }
 
 func (c *authSpyClient) StartAPIKeyLogin(_ context.Context, key string) error {
+	if c.beforeAPIKeyLogin != nil {
+		hook := c.beforeAPIKeyLogin
+		c.beforeAPIKeyLogin = nil
+
+		hook()
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.apiKeyCalls++
@@ -498,27 +508,92 @@ func TestProviderAuthWithoutConsentGateAdvertisesSixLegs(t *testing.T) {
 func TestProviderAuthConsentGateRequiresExactHomeEquality(t *testing.T) {
 	home := t.TempDir()
 
+	file := filepath.Join(home, "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed a non-directory: %v", err)
+	}
+
 	cases := map[string]Options{
-		"unset":  {Home: home},
-		"parent": {Home: home, ProviderAuthDirectHome: filepath.Dir(home)},
-		"child":  {Home: home, ProviderAuthDirectHome: filepath.Join(home, "nested")},
-		"nohome": {ProviderAuthDirectHome: home},
-		"equal":  {Home: home, ProviderAuthDirectHome: home + "/."},
+		"unset":      {Home: home},
+		"parent":     {Home: home, ProviderAuthDirectHome: filepath.Dir(home)},
+		"child":      {Home: home, ProviderAuthDirectHome: filepath.Join(home, "nested")},
+		"nohome":     {ProviderAuthDirectHome: home},
+		"absenthome": {Home: filepath.Join(home, "absent"), ProviderAuthDirectHome: home},
+		"notadir":    {Home: file, ProviderAuthDirectHome: file},
+		"equal":      {Home: home, ProviderAuthDirectHome: home + "/."},
+	}
+
+	resolved, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("resolve home: %v", err)
 	}
 
 	for name, options := range cases {
-		granted := consentedDirectHome(options)
+		granted := consentDirectHome(options)
+
+		t.Cleanup(granted.close)
+
 		if name == "equal" {
-			if granted != filepath.Clean(home) {
-				t.Fatalf("%s: gate = %q, want %q", name, granted, home)
+			if granted.path != resolved || granted.root == nil {
+				t.Fatalf("%s: gate = %+v, want the open %q", name, granted, resolved)
 			}
 
 			continue
 		}
 
-		if granted != "" {
-			t.Fatalf("%s: gate granted %q", name, granted)
+		if granted.root != nil {
+			t.Fatalf("%s: gate granted %q", name, granted.path)
 		}
+	}
+}
+
+// TestConsentedHomeRefusesADirectoryReplacedAfterConsent pins what consent is
+// held over. A name is not a directory: anything at this agent's uid can point
+// the consented path somewhere else, and the account legs drive native calls
+// that resolve the path again when they run.
+func TestConsentedHomeRefusesADirectoryReplacedAfterConsent(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	other := filepath.Join(root, "other")
+
+	for _, dir := range []string{home, other} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+
+	granted := consentDirectHome(Options{Home: home, ProviderAuthDirectHome: home})
+
+	t.Cleanup(granted.close)
+
+	if !granted.unchanged() {
+		t.Fatal("the gate refused the directory it opened")
+	}
+
+	if err := os.Rename(home, filepath.Join(root, "moved")); err != nil {
+		t.Fatalf("move the consented home: %v", err)
+	}
+
+	if granted.unchanged() {
+		t.Fatal("a path reaching nothing still read as the consented home")
+	}
+
+	if err := os.Symlink(other, home); err != nil {
+		t.Fatalf("point the consented path elsewhere: %v", err)
+	}
+
+	if granted.unchanged() {
+		t.Fatal("a repointed path still read as the consented home")
+	}
+
+	if (consentedHome{}).unchanged() {
+		t.Fatal("an ungranted gate read as consented")
+	}
+
+	granted.close()
+
+	if granted.unchanged() {
+		t.Fatal("a released directory still read as the consented home")
 	}
 }
 

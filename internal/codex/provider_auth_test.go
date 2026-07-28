@@ -137,8 +137,12 @@ func TestStartAPIKeyLogin(t *testing.T) {
 		t.Fatalf("StartAPIKeyLogin returned error: %v", err)
 	}
 
+	// The parameter name is asserted as a literal. Looking it up through the
+	// constant the request sends would move the assertion with the code under
+	// exactly the edit that breaks it: renaming the login type upstream would
+	// rename the field too, and the app-server would still read "apiKey".
 	params := transport.params()
-	if params["type"] != loginTypeAPIKey || params[loginTypeAPIKey] != "sk-canary" {
+	if params["type"] != loginTypeAPIKey || params["apiKey"] != "sk-canary" {
 		t.Fatalf("params = %v", params)
 	}
 }

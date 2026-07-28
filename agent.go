@@ -563,7 +563,7 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	}
 
 	switch event.Kind {
-	case codex.EventAccountUpdated, codex.EventRateLimitsUpdated, codex.EventError:
+	case codex.EventAccountUpdated, codex.EventLoginCompleted, codex.EventRateLimitsUpdated, codex.EventError:
 	default:
 		return
 	}

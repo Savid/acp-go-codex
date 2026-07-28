@@ -554,8 +554,18 @@ func (p *providerAuth) applySecret(ctx context.Context, session *session, flow *
 		return nil, p.fail(flow, authNativeCause(callCtx, err), true)
 	}
 
-	if err := p.confirmLedger(flow); err != nil {
-		return nil, err
+	// The native write landed, so the key is resident whatever became of the
+	// flow while the call blocked. Its provenance is recorded first — a
+	// credential nothing names can be neither removed nor reported — and only
+	// then does the leg find out whether the outcome is still its to report.
+	confirmCause := p.confirmLedger(flow)
+
+	if abandoned, ok := p.abandonedCause(flow); ok {
+		return nil, authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	if confirmCause != "" {
+		return nil, p.fail(flow, confirmCause, true)
 	}
 
 	p.terminalize(flow, authStateSaved, "", 0)
@@ -563,9 +573,33 @@ func (p *providerAuth) applySecret(ctx context.Context, session *session, flow *
 	return authFlowIDResult{FlowID: flow.id}, nil
 }
 
+// abandonedCause reports the cause a leg answers with when the flow reached a
+// terminal state while the native call this leg started was still in flight.
+// Such a leg owns no transition and reports no outcome: the record it addressed
+// is already closed, and what it carries is no longer the flow's.
+func (p *providerAuth) abandonedCause(flow *authFlow) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	switch {
+	case !authTerminal(flow.state):
+		return "", false
+	case flow.state == authStateCancelled:
+		return authCauseFlowCancelled, true
+	default:
+		return authCauseFlowState, true
+	}
+}
+
 // confirmLedger records the post-mutation confirmation that lets inventory
-// report residence rather than intent.
-func (p *providerAuth) confirmLedger(flow *authFlow) error {
+// report residence rather than intent, and answers the cause that stopped it
+// rather than performing a transition: whether the flow is still the caller's
+// to close is the caller's question. The provider owns one entry, so a leg
+// whose native call outlived its flow would otherwise rename its own lineage
+// over whatever replaced it — the confirmation is refused where the recorded
+// lineage has already moved past this flow's, which is exactly the case where
+// writing it would name a binding the host no longer holds.
+func (p *providerAuth) confirmLedger(flow *authFlow) string {
 	record := authLedgerRecord{
 		ProviderID:         flow.providerID,
 		ConnectionID:       flow.connectionID,
@@ -578,21 +612,49 @@ func (p *providerAuth) confirmLedger(flow *authFlow) error {
 		UpdatedAt:          authNow().UnixMilli(),
 	}
 
-	if err := p.ledger.write(record); err != nil {
-		return p.fail(flow, authCauseProcess, true)
+	prior, ok, err := p.ledger.read(flow.providerID)
+	if err != nil {
+		return authCauseProcess
 	}
 
-	return nil
+	if ok && authLedgerAdvancedPast(prior, record) {
+		return authCauseBindingConflict
+	}
+
+	if err := p.ledger.write(record); err != nil {
+		return authCauseProcess
+	}
+
+	return ""
+}
+
+// authLedgerAdvancedPast reports whether the recorded lineage already belongs
+// to something later than the record offered. A removal moves the binding
+// generation and every fresh authorize moves the revision, so either one ahead
+// means a successor owns the provider's entry.
+func authLedgerAdvancedPast(prior authLedgerRecord, record authLedgerRecord) bool {
+	if prior.BindingGeneration != record.BindingGeneration {
+		return prior.BindingGeneration > record.BindingGeneration
+	}
+
+	return prior.Revision > record.Revision
 }
 
 // fail returns the leg's closed error and performs the transition its cause
 // pairs with. A cause with no transition consumes nothing.
 func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool) error {
+	p.terminalizeCause(flow, cause, materialInFlight)
+
+	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
+}
+
+// terminalizeCause performs the transition a cause pairs with for a path that
+// has no caller to answer: the backstop runs off a status poll and reports its
+// outcome through the flow record alone.
+func (p *providerAuth) terminalizeCause(flow *authFlow, cause string, materialInFlight bool) {
 	if state, reason := authFlowTransition(cause, materialInFlight); state != "" {
 		p.terminalize(flow, state, reason, 0)
 	}
-
-	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 }
 
 func (p *providerAuth) terminalize(flow *authFlow, state string, reason string, credentialExpiresAt int64) {
@@ -724,7 +786,9 @@ func authAccountIdentityOf(account codex.Account) authAccountIdentity {
 // store records no absolute access-token expiry, and the only exact value lives
 // inside a token this surface never decodes.
 func (p *providerAuth) completeDeviceFlow(flow *authFlow) {
-	if err := p.confirmLedger(flow); err != nil {
+	if cause := p.confirmLedger(flow); cause != "" {
+		p.terminalizeCause(flow, cause, true)
+
 		return
 	}
 
@@ -863,6 +927,14 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, err
 	}
 
+	// The app-server resolves CODEX_HOME for itself, so the account this clears
+	// is whatever the configured path reaches when the logout runs. A path
+	// repointed since consent was granted names a home nobody authorized, and an
+	// account-level logout is not undoable.
+	if !p.home.unchanged() {
+		return nil, authFailed(authCausePolicy, providerID, "", "")
+	}
+
 	record, ok, err := p.ledger.read(providerID)
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
@@ -915,9 +987,12 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 }
 
 // closeAll cancels every pending flow when the whole agent shuts down, so no
-// completer outlives the process that armed it.
+// completer outlives the process that armed it, and releases the consented
+// home the account legs read through.
 func (p *providerAuth) closeAll() {
 	p.cancelFlows(func(authFlowKey) bool { return true })
+
+	p.home.close()
 }
 
 func (p *providerAuth) cancelFlows(match func(authFlowKey) bool) {

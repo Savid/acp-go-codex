@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -154,7 +153,13 @@ const (
 	authConfigFileName = "config.toml"
 )
 
-var authReadFile = os.ReadFile
+// authReadFile reads one file out of the consented home. Every read on this
+// path goes through the directory the consent gate opened, so a link planted
+// under that home cannot reach a store outside it and a path component
+// repointed since consent cannot redirect the read.
+var authReadFile = func(root *os.Root, name string) ([]byte, error) {
+	return root.ReadFile(name)
+}
 
 // Native store keys. Codex writes its own spelling, so the read pulls the
 // allowlisted keys by name rather than mapping the whole object onto a struct.
@@ -319,7 +324,7 @@ func (p *providerAuth) harvestFailed(flow *authFlow) error {
 // store that may not be authoritative: auto resolves to whichever store answers
 // first, and ephemeral leaves nothing anywhere.
 func (p *providerAuth) readStoredCredential() (codexStoredLogin, error) {
-	mode, err := resolveAuthStoreMode(p.agent.options, p.directHome)
+	mode, err := resolveAuthStoreMode(p.agent.options, p.home)
 	if err != nil {
 		return codexStoredLogin{}, err
 	}
@@ -328,9 +333,9 @@ func (p *providerAuth) readStoredCredential() (codexStoredLogin, error) {
 
 	switch mode {
 	case authStoreModeFile:
-		raw, err = authReadFile(filepath.Join(p.directHome, authAuthFileName))
+		raw, err = authReadFile(p.home.root, authAuthFileName)
 	case authStoreModeKeyring:
-		raw, err = readKeystoreCredential(p.directHome)
+		raw, err = readKeystoreCredential(p.home.name)
 	default:
 		return codexStoredLogin{}, fmt.Errorf("credential store mode %q has no determinate authority", mode)
 	}
@@ -365,12 +370,12 @@ const codexAuthModeChatGPT = "chatgpt"
 // cannot be read establishes nothing, and a home configured keyring or
 // ephemeral whose selector went unread would take a file-shaped harvest of a
 // store that is not authoritative.
-func resolveAuthStoreMode(options Options, home string) (string, error) {
+func resolveAuthStoreMode(options Options, home consentedHome) (string, error) {
 	if value, ok := options.Config[authStoreConfigKey].(string); ok && value != "" {
 		return value, nil
 	}
 
-	contents, err := authReadFile(filepath.Join(home, authConfigFileName))
+	contents, err := authReadFile(home.root, authConfigFileName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return authStoreModeFile, nil

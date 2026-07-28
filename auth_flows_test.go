@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -643,6 +645,183 @@ func TestAuthCallbackAppliesASecret(t *testing.T) {
 	}
 }
 
+// TestSecretApplyOutlivingACancelAnswersForTheClosedFlow pins the answer a leg
+// gives when the owner closed the flow while the native write was in flight.
+// The write landed, so the key is resident and its provenance is still
+// recorded — but the outcome is no longer this flow's to report.
+func TestSecretApplyOutlivingACancelAnswersForTheClosedFlow(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	fixture.client.beforeAPIKeyLogin = func() {
+		if _, err := fixture.call(t, AuthCancelMethod, map[string]any{
+			"sessionId":  fixture.sessionID,
+			"providerId": authProviderOpenAI,
+			"flowId":     flow.FlowID,
+		}); err != nil {
+			t.Errorf("cancel: %v", err)
+		}
+	}
+
+	_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"method":     authMethodAPIKey,
+		"flowId":     flow.FlowID,
+		"input":      "sk-canary",
+	})
+	requireAuthCause(t, err, authCauseFlowCancelled)
+
+	if status := fixture.status(t, flow.FlowID); status.State != authStateCancelled {
+		t.Fatalf("state = %q, want cancelled", status.State)
+	}
+
+	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil || !ok {
+		t.Fatalf("ledger read: %v ok=%v", err, ok)
+	}
+
+	if record.State != authLedgerConfirmed {
+		t.Fatalf("ledger state = %q, want the resident key recorded", record.State)
+	}
+}
+
+// TestALateConfirmationLeavesTheSuccessorsLineageAlone pins the provider's one
+// ledger entry against a leg that outlived its own flow. A fresh authorize
+// supersedes the old record and mints the next revision; the superseded flow's
+// confirmation would otherwise rename its own lineage over it, leaving the host
+// holding one generation and the ledger naming another.
+func TestALateConfirmationLeavesTheSuccessorsLineageAlone(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	first := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	var second authAuthorizeResult
+
+	fixture.client.beforeAPIKeyLogin = func() {
+		second = fixture.authorize(t, authMethodAPIKey, "request-2")
+	}
+
+	_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"method":     authMethodAPIKey,
+		"flowId":     first.FlowID,
+		"input":      "sk-canary",
+	})
+	requireAuthCause(t, err, authCauseFlowCancelled)
+
+	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil || !ok {
+		t.Fatalf("ledger read: %v ok=%v", err, ok)
+	}
+
+	if record.FlowID != second.FlowID || record.Revision != 2 {
+		t.Fatalf("ledger names %+v, want the successor at revision 2", record)
+	}
+}
+
+// TestSecretApplyOutlivingAnExpiryAnswersForTheClosedFlow is the other closed
+// record a late apply can land in. Expiry is not the owner's cancel, so the
+// answer names the flow's state rather than an owner decision nobody made.
+func TestSecretApplyOutlivingAnExpiryAnswersForTheClosedFlow(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	fixture.client.beforeAPIKeyLogin = func() {
+		fixture.broker.terminalize(fixture.broker.byID[flow.FlowID], authStateExpired, authReasonDeadline, 0)
+	}
+
+	_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"method":     authMethodAPIKey,
+		"flowId":     flow.FlowID,
+		"input":      "sk-canary",
+	})
+	requireAuthCause(t, err, authCauseFlowState)
+}
+
+// TestSecretApplyFailsClosedWhenTheLedgerCannotBeRead pins the confirmation
+// against a ledger it could not compare. Writing over an entry nobody read is
+// how a late leg renames its lineage over a successor's.
+func TestSecretApplyFailsClosedWhenTheLedgerCannotBeRead(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	restoreLedgerHooks(t)
+
+	ledgerReadFile = func(string) ([]byte, error) { return nil, errors.New("read") }
+
+	_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"method":     authMethodAPIKey,
+		"flowId":     flow.FlowID,
+		"input":      "sk-canary",
+	})
+	requireAuthCause(t, err, authCauseProcess)
+}
+
+func TestAuthLedgerAdvancedPast(t *testing.T) {
+	record := authLedgerRecord{Revision: 2, BindingGeneration: 3}
+
+	cases := map[string]struct {
+		prior authLedgerRecord
+		want  bool
+	}{
+		"same":             {authLedgerRecord{Revision: 2, BindingGeneration: 3}, false},
+		"older generation": {authLedgerRecord{Revision: 9, BindingGeneration: 2}, false},
+		"newer generation": {authLedgerRecord{Revision: 1, BindingGeneration: 4}, true},
+		"older revision":   {authLedgerRecord{Revision: 1, BindingGeneration: 3}, false},
+		"newer revision":   {authLedgerRecord{Revision: 3, BindingGeneration: 3}, true},
+	}
+
+	for name, testCase := range cases {
+		if got := authLedgerAdvancedPast(testCase.prior, record); got != testCase.want {
+			t.Fatalf("%s: advancedPast = %v, want %v", name, got, testCase.want)
+		}
+	}
+}
+
+// TestDisconnectRefusesAHomeReplacedAfterConsent pins the account-level logout
+// to the directory consent was granted over. The app-server resolves CODEX_HOME
+// when the call runs, so a path repointed since then would log out an account
+// nobody authorized this agent to touch.
+func TestDisconnectRefusesAHomeReplacedAfterConsent(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	other := filepath.Join(root, "other")
+
+	for _, dir := range []string{home, other} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+
+	fixture := newProviderAuthFixture(t, WithHome(home), WithProviderAuthDirectHome(home))
+	fixture.authenticatedFlow(t)
+
+	if err := os.Rename(home, filepath.Join(root, "moved")); err != nil {
+		t.Fatalf("move the consented home: %v", err)
+	}
+
+	if err := os.Symlink(other, home); err != nil {
+		t.Fatalf("point the consented path elsewhere: %v", err)
+	}
+
+	_, err := fixture.call(t, AuthDisconnectMethod, map[string]any{
+		"sessionId":         fixture.sessionID,
+		"providerId":        authProviderOpenAI,
+		"connectionId":      "connection-1",
+		"bindingGeneration": 1,
+	})
+	requireAuthCause(t, err, authCausePolicy)
+
+	if fixture.client.logoutCalls != 0 {
+		t.Fatal("a repointed home still drove an account-level logout")
+	}
+}
+
 func (f *providerAuthFixture) status(t *testing.T, flowID string) authStatusResult {
 	t.Helper()
 
@@ -1155,6 +1334,52 @@ func TestProviderAuthEventRoutesLoginCompletion(t *testing.T) {
 
 	if status := fixture.status(t, flow.FlowID); status.State != authStateAuthenticated {
 		t.Fatalf("state = %q, want authenticated", status.State)
+	}
+}
+
+// TestLoginCompletionReachesTheBrokerThroughTheEventSink enters where
+// production enters. The app-server hands every decoded notification to the
+// sink, and the sink is the only handler an agent installs, so a completion the
+// sink drops is a completion no running agent ever sees however faithfully the
+// broker handles one delivered by hand.
+func TestLoginCompletionReachesTheBrokerThroughTheEventSink(t *testing.T) {
+	restoreAuthClock(t)
+
+	fixture := newProviderAuthFixture(t)
+	fixture.client.account = codex.Account{ID: "acct-resident", AuthMode: codex.AuthModeChatGPT}
+
+	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	sink := &codexClientEventSink{agent: fixture.agent}
+	sink.SetClient(fixture.client)
+	sink.Handle(t.Context(), codex.Event{
+		Kind:  codex.EventLoginCompleted,
+		Login: codex.LoginCompletion{LoginID: "login-1", Success: true},
+	})
+
+	if status := fixture.status(t, flow.FlowID); status.State != authStateAuthenticated {
+		t.Fatalf("state = %q, want authenticated", status.State)
+	}
+}
+
+// TestRejectedLoginFailsThroughTheEventSink pins the other half of the same
+// notification. A declined grant is the only prompt refusal signal this surface
+// has; without it the flow waits out the safety deadline and reports an expiry
+// for a login the owner actively refused.
+func TestRejectedLoginFailsThroughTheEventSink(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	sink := &codexClientEventSink{agent: fixture.agent}
+	sink.SetClient(fixture.client)
+	sink.Handle(t.Context(), codex.Event{
+		Kind:  codex.EventLoginCompleted,
+		Login: codex.LoginCompletion{LoginID: "login-1", Success: false},
+	})
+
+	status := fixture.status(t, flow.FlowID)
+	if status.State != authStateFailed || status.Reason != authReasonProviderRefused {
+		t.Fatalf("status = %+v, want failed/provider_refused", status)
 	}
 }
 

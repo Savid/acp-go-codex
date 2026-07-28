@@ -3,8 +3,13 @@ package codex
 import "context"
 
 const (
-	loginTypeAPIKey          = "apiKey"
-	loginTypeChatGPTDevice   = "chatgptDeviceCode"
+	loginTypeAPIKey        = "apiKey"
+	loginTypeChatGPTDevice = "chatgptDeviceCode"
+	// fieldAPIKey is the request parameter carrying the key. It spells the same
+	// as the login type it accompanies and means something else: one is the
+	// value of the type discriminator, the other is a parameter name, and they
+	// move independently upstream.
+	fieldAPIKey              = "apiKey"
 	notifyAccountLoginDone   = "account/login/completed"
 	fieldLoginID             = "loginId"
 	fieldVerificationURL     = "verificationUrl"
@@ -53,8 +58,8 @@ func (c *AppServerClient) StartDeviceCodeLogin(ctx context.Context) (DeviceCodeL
 // it into the configured credential store and answers once the write lands.
 func (c *AppServerClient) StartAPIKeyLogin(ctx context.Context, key string) error {
 	return c.rpc.Call(ctx, methodAccountLoginStart, map[string]any{
-		fieldType:       loginTypeAPIKey,
-		loginTypeAPIKey: key,
+		fieldType:   loginTypeAPIKey,
+		fieldAPIKey: key,
 	}, nil)
 }
 

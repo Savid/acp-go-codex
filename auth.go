@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -91,9 +92,9 @@ type codexAuthClient interface {
 type providerAuth struct {
 	agent  *Agent
 	ledger *authLedger
-	// directHome is the canonical CODEX_HOME the host consented to. Empty
-	// leaves the two account-level legs unadvertised.
-	directHome string
+	// home is the CODEX_HOME the host consented to. An unheld one leaves the two
+	// account-level legs unadvertised.
+	home consentedHome
 
 	mu         sync.Mutex
 	generation string
@@ -127,35 +128,92 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	}
 
 	return &providerAuth{
-		agent:      agent,
-		ledger:     ledger,
-		directHome: consentedDirectHome(agent.options),
-		flows:      make(map[authFlowKey]*authFlow),
-		byID:       make(map[string]*authFlow),
-		retired:    make(map[authFlowKey]map[string]struct{}),
+		agent:   agent,
+		ledger:  ledger,
+		home:    consentDirectHome(agent.options),
+		flows:   make(map[authFlowKey]*authFlow),
+		byID:    make(map[string]*authFlow),
+		retired: make(map[authFlowKey]map[string]struct{}),
 	}
 }
 
-// consentedDirectHome resolves the exact-home consent gate. It authorizes the
-// one home it names and never a parent, a child, or a symlink target, so the
-// comparison is a cleaned-path equality against the resolved CODEX_HOME.
-func consentedDirectHome(options Options) string {
+// consentedHome is the CODEX_HOME the exact-home consent gate authorized, held
+// as the directory itself rather than as the name that reached it. The gate
+// decides once and the legs it enables run whenever the host asks, so a name is
+// not what consent can be granted over: anything at this agent's uid may
+// repoint one, and every read the account legs make would follow it.
+type consentedHome struct {
+	// name is the CODEX_HOME spelling the harness itself runs under. Its
+	// keystore item is partitioned by that string rather than by the directory
+	// it reaches, so a lookup under a resolved path addresses another item.
+	name string
+	path string
+	root *os.Root
+}
+
+// consentDirectHome resolves the exact-home consent gate. It authorizes the one
+// directory both options resolve to and never a parent, a child, or a symlink
+// target, and it opens that directory so later reads are confined to it.
+func consentDirectHome(options Options) consentedHome {
 	if options.ProviderAuthDirectHome == "" || options.Home == "" {
-		return ""
+		return consentedHome{}
 	}
 
-	consented := filepath.Clean(options.ProviderAuthDirectHome)
-	if consented != filepath.Clean(options.Home) {
-		return ""
+	consented, err := filepath.EvalSymlinks(options.ProviderAuthDirectHome)
+	if err != nil {
+		return consentedHome{}
 	}
 
-	return consented
+	home, err := filepath.EvalSymlinks(options.Home)
+	if err != nil || consented != home {
+		return consentedHome{}
+	}
+
+	root, err := os.OpenRoot(consented)
+	if err != nil {
+		return consentedHome{}
+	}
+
+	return consentedHome{name: filepath.Clean(options.Home), path: consented, root: root}
+}
+
+// unchanged reports whether the consented path still reaches the directory the
+// gate opened. The two account legs drive native calls the app-server resolves
+// for itself, and a path repointed since consent would send them somewhere
+// nobody authorized.
+func (h consentedHome) unchanged() bool {
+	if h.root == nil {
+		return false
+	}
+
+	opened, err := h.root.Stat(".")
+	if err != nil {
+		return false
+	}
+
+	current, err := os.Stat(h.path)
+	if err != nil {
+		return false
+	}
+
+	return os.SameFile(opened, current)
+}
+
+// close releases the open directory. Nothing reads through it after the agent
+// shuts down, and a failure to release a descriptor at that point answers
+// nothing a caller could act on.
+func (h consentedHome) close() {
+	if h.root == nil {
+		return
+	}
+
+	_ = h.root.Close()
 }
 
 // accountLegsGated reports whether the two legs that read or clear credentials
 // in the operator's own CODEX_HOME may answer.
 func (p *providerAuth) accountLegsGated() bool {
-	return p.directHome != ""
+	return p.home.root != nil
 }
 
 // authMethodNames lists every advertised leg, in the order the capability

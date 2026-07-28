@@ -92,11 +92,19 @@ returns method-not-found.
 
 `credential` and `disconnect` read and clear credentials in the operator's own
 `CODEX_HOME`, so both are additionally gated on `WithProviderAuthDirectHome`
-(`-provider-auth-direct-home`) being set **and** equal to the resolved `WithHome`
-after path cleaning. The gate authorizes exactly that home — never a parent, a
-child, or a symlink target — and it is independent of
-`WithCodexAllowAccountLogout`, which governs ACP `logout` instead. Without it
-codex advertises six legs rather than eight.
+(`-provider-auth-direct-home`) being set **and** resolving to the same directory
+as `WithHome`. The gate authorizes exactly that home — never a parent, a child,
+or a symlink target — and it is independent of `WithCodexAllowAccountLogout`,
+which governs ACP `logout` instead. Without it codex advertises six legs rather
+than eight.
+
+Consent is granted over the directory, not over the name that reached it. The
+adapter opens that directory when it starts and reads the credential store
+through it, so a link planted under the home cannot point the harvest at a store
+outside it. `disconnect` drives an account-level logout the app-server resolves
+`CODEX_HOME` for itself, so it additionally checks that the configured path still
+reaches the directory consent was granted over and answers `policy` when it does
+not.
 
 ### The catalog
 

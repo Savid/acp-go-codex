@@ -188,6 +188,34 @@ func TestAuthCredentialHarvestsTheFencedSlot(t *testing.T) {
 	}
 }
 
+// TestAuthCredentialRefusesAStorePointedOutsideTheConsentedHome pins the read
+// to the directory consent was granted over rather than to a name under it.
+// Anything running at this agent's uid can drop a link at auth.json, and a read
+// that follows it hands whatever it points at — the operator's own CODEX_HOME,
+// for instance — back over ACP as this connection's credential, while the gate
+// truthfully reports it authorized the consented home.
+func TestAuthCredentialRefusesAStorePointedOutsideTheConsentedHome(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	flowID := fixture.authenticatedFlow(t)
+
+	elsewhere := filepath.Join(t.TempDir(), authAuthFileName)
+	if err := os.WriteFile(elsewhere, []byte(testStoredLogin), 0o600); err != nil {
+		t.Fatalf("seed the store nobody consented to: %v", err)
+	}
+
+	if err := os.Symlink(elsewhere, filepath.Join(fixture.home, authAuthFileName)); err != nil {
+		t.Fatalf("link the consented home at it: %v", err)
+	}
+
+	_, err := fixture.call(t, AuthCredentialMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"flowId":     flowID,
+	})
+	requireAuthCause(t, err, authCauseHarvestFailed)
+}
+
 func TestAuthCredentialHarvestsAtMostOncePerFlow(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 	seedStoredLogin(t, fixture.home, testStoredLogin)
@@ -512,11 +540,14 @@ func TestAuthKeystoreAccountPartitionsByHome(t *testing.T) {
 
 func TestResolveAuthStoreMode(t *testing.T) {
 	home := t.TempDir()
+	consented := consentDirectHome(Options{Home: home, ProviderAuthDirectHome: home})
+
+	t.Cleanup(consented.close)
 
 	requireMode := func(t *testing.T, options Options, want string, label string) {
 		t.Helper()
 
-		mode, err := resolveAuthStoreMode(options, home)
+		mode, err := resolveAuthStoreMode(options, consented)
 		if err != nil {
 			t.Fatalf("%s: %v", label, err)
 		}
@@ -553,10 +584,13 @@ func TestResolveAuthStoreModeFailsClosedOnAnUnreadableConfig(t *testing.T) {
 	restoreCredentialHooks(t)
 
 	home := t.TempDir()
+	consented := consentDirectHome(Options{Home: home, ProviderAuthDirectHome: home})
 
-	authReadFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+	t.Cleanup(consented.close)
 
-	if _, err := resolveAuthStoreMode(Options{}, home); err == nil {
+	authReadFile = func(*os.Root, string) ([]byte, error) { return nil, errors.New("permission denied") }
+
+	if _, err := resolveAuthStoreMode(Options{}, consented); err == nil {
 		t.Fatal("an unreadable config resolved to a store mode")
 	}
 
