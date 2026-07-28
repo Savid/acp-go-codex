@@ -155,6 +155,31 @@ A ChatGPT-side gating refusal is protocol-silent â€” the client is never told â€
 so a native call that never answers is reported as `cause: "timeout"` rather
 than left to hang.
 
+### Legs that arrive at once
+
+Every ACP request runs concurrently, so a host may have two legs in flight
+against one flow, one session, or one account. The adapter admits one writer at
+each of those, and the loser is answered rather than queued behind the harness
+forever:
+
+- Two `_codex/auth/authorize` calls carrying one `authorizeRequestId` produce
+  one flow and one native mint. The second is answered from the first's
+  presentation, exactly as a later repeat is.
+- A second `_codex/auth/callback` submitted while the first is still writing is
+  refused with `cause: "flow_state"`. The key that lands is the claimant's, and
+  never whichever native write happened to finish last.
+- `_codex/auth/disconnect` and any login completing into the same account run
+  in some order, never interleaved. A login that finds the binding generation
+  already bumped is refused with `cause: "binding_conflict"` **before** it
+  writes, so a cleared account stays cleared.
+- A leg still waiting for one of these when its own request is abandoned answers
+  `cause: "timeout"` and touches nothing.
+
+`session/close` and agent shutdown cancel every flow the session owns. A leg
+admitted just before that is refused when it goes to register its flow, so it
+never starts a login against a session the host has already closed; it answers
+as though the session were unknown, because by then it is.
+
 ### Which credential store the harvest reads
 
 Codex's credential store is a configured choice rather than a platform fact.

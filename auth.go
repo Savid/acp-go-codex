@@ -89,6 +89,16 @@ type codexAuthClient interface {
 // providerAuth is the agent-scoped broker behind the provider-auth legs. It
 // owns the current method catalog, the per-session flow records, and the
 // durable values-free ledger.
+//
+// Every inbound ACP request is dispatched on its own goroutine and only
+// notifications are serialized, so two legs naming one flow, one session, or
+// one provider's credential slot run at the same time by default. Every
+// read-state, call-native, write-state sequence on this surface is therefore a
+// check-then-set whose window is the whole native call, and holding mu across
+// that call is not an option because the call is unbounded. mu guards the maps
+// and the flow fields only; the gates and claims in auth_admission.go are what
+// make each of those sequences single-writer. A wide check-then-set loses
+// writes without ever racing a field, so -race reports nothing about it.
 type providerAuth struct {
 	agent  *Agent
 	ledger *authLedger
@@ -105,6 +115,19 @@ type providerAuth struct {
 	// authorize replaced. Only the newest flow can be replayed verbatim, so an
 	// older key is remembered to be refused rather than treated as new.
 	retired map[authFlowKey]map[string]struct{}
+	// closedSessions names every session whose flows have been swept, and
+	// shutdown says the same of the whole agent. A leg admitted before the sweep
+	// is refused at publication rather than drained.
+	closedSessions map[acp.SessionId]struct{}
+	shutdown       bool
+	// admissions serializes authorize per (sessionId, providerId), so the
+	// replay check, the retire check, the supersede, the ledger intent, and the
+	// mint settle as one decision against a second identical request.
+	admissions map[authFlowKey]chan struct{}
+	// slots serializes every leg that rewrites one provider's native credential:
+	// the account-level removal and the completions that install one. The key is
+	// the providerId because that is what names the store a mutation rewrites.
+	slots map[string]chan struct{}
 }
 
 type authFlowKey struct {
@@ -128,12 +151,15 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	}
 
 	return &providerAuth{
-		agent:   agent,
-		ledger:  ledger,
-		home:    consentDirectHome(agent.options),
-		flows:   make(map[authFlowKey]*authFlow),
-		byID:    make(map[string]*authFlow),
-		retired: make(map[authFlowKey]map[string]struct{}),
+		agent:          agent,
+		ledger:         ledger,
+		home:           consentDirectHome(agent.options),
+		flows:          make(map[authFlowKey]*authFlow),
+		byID:           make(map[string]*authFlow),
+		retired:        make(map[authFlowKey]map[string]struct{}),
+		closedSessions: make(map[acp.SessionId]struct{}),
+		admissions:     make(map[authFlowKey]chan struct{}),
+		slots:          make(map[string]chan struct{}),
 	}
 }
 
@@ -383,9 +409,13 @@ func authFlowTransition(cause string, materialInFlight bool) (string, string) {
 	}
 }
 
-// authSession resolves the session a leg addresses. An unknown, unloaded, or
-// closing session gets the uniform unknown-session rejection.
+// authSession resolves the session a leg addresses. An unknown, unloaded,
+// closing, or already-swept session gets the uniform unknown-session rejection.
 func (p *providerAuth) authSession(id string) (*session, error) {
+	if p.sessionClosed(acp.SessionId(id)) {
+		return nil, newUnknownSession()
+	}
+
 	return p.agent.session(acp.SessionId(id))
 }
 

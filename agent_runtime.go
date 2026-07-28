@@ -248,6 +248,8 @@ func (a *Agent) storeRetainedRuntimeSession(session *session, retained *retained
 	a.sessions[session.id] = session
 	a.mu.Unlock()
 
+	a.readmitProviderAuth(session.id)
+
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil

@@ -238,11 +238,29 @@ type authSpyClient struct {
 	// beforeAPIKeyLogin runs where the native write blocks, which is the window
 	// a cancel, a supersede, or an expiry lands in on a real app-server.
 	beforeAPIKeyLogin func()
+	// beforeDeviceLogin and beforeLogout are the same window for the other two
+	// mutating native calls, so a test can hold one leg inside its call and run
+	// the leg that races it.
+	beforeDeviceLogin func()
+	beforeLogout      func()
 	account           codex.Account
 	accountErr        error
 	accountRead       int
 	logoutErr         error
 	logoutCalls       int
+}
+
+// takeHook claims a one-shot native-call hook. Claiming under the mutex is what
+// lets two goroutines call one spy method at once: the hook fires for the first
+// caller only, and the second never sees a half-written field.
+func (c *authSpyClient) takeHook(hook *func()) func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	claimed := *hook
+	*hook = nil
+
+	return claimed
 }
 
 func newAuthSpyClient() *authSpyClient {
@@ -257,6 +275,10 @@ func newAuthSpyClient() *authSpyClient {
 }
 
 func (c *authSpyClient) StartDeviceCodeLogin(context.Context) (codex.DeviceCodeLogin, error) {
+	if hook := c.takeHook(&c.beforeDeviceLogin); hook != nil {
+		hook()
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.deviceCalls++
@@ -265,10 +287,7 @@ func (c *authSpyClient) StartDeviceCodeLogin(context.Context) (codex.DeviceCodeL
 }
 
 func (c *authSpyClient) StartAPIKeyLogin(_ context.Context, key string) error {
-	if c.beforeAPIKeyLogin != nil {
-		hook := c.beforeAPIKeyLogin
-		c.beforeAPIKeyLogin = nil
-
+	if hook := c.takeHook(&c.beforeAPIKeyLogin); hook != nil {
 		hook()
 	}
 
@@ -289,6 +308,10 @@ func (c *authSpyClient) AccountRead(context.Context) (codex.Account, error) {
 }
 
 func (c *authSpyClient) Logout(context.Context) error {
+	if hook := c.takeHook(&c.beforeLogout); hook != nil {
+		hook()
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.logoutCalls++

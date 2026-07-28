@@ -7,12 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 )
+
+// authAdmissionSettle bounds how long a test waits for a second leg to decide
+// what it is doing. A leg queued on an admission gate never decides on its own,
+// so the wait ends and the leg ahead of it is released.
+const authAdmissionSettle = time.Second
 
 func restoreAuthClock(t *testing.T) {
 	t.Helper()
@@ -161,7 +167,9 @@ func TestAuthorizeReplaysTheSameRequestIDAfterTheFlowTerminalized(t *testing.T) 
 }
 
 // TestAuthorizeStopsReplayingOnceTheSessionCloses pins the other half: the
-// record lives exactly as long as the session that owns it.
+// record lives exactly as long as the session that owns it. A closed id answers
+// nothing at all until the same thread is loaded again, and what comes back is a
+// session with no history rather than the replay the id once had.
 func TestAuthorizeStopsReplayingOnceTheSessionCloses(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 
@@ -169,8 +177,16 @@ func TestAuthorizeStopsReplayingOnceTheSessionCloses(t *testing.T) {
 
 	fixture.broker.closeSession(acp.SessionId(fixture.sessionID))
 
+	if _, err := fixture.call(t, AuthMethodsMethod, map[string]any{"sessionId": fixture.sessionID}); err == nil {
+		t.Fatal("a closed session still answered a provider-auth leg")
+	} else {
+		requireInvalidField(t, err, "sessionId")
+	}
+
+	storeRateLimitsSession(t, fixture.agent, fixture.sessionID, fixture.client)
+
 	if second := fixture.authorize(t, authMethodDeviceCode, "request-1"); second.FlowID == first.FlowID {
-		t.Fatal("a closed session still replayed its idempotency key")
+		t.Fatal("a reloaded session still replayed the closed session's idempotency key")
 	}
 }
 
@@ -466,6 +482,10 @@ func TestAuthorizeMintFailures(t *testing.T) {
 	}{
 		"native": {
 			install: func(f *providerAuthFixture) { f.client.deviceErr = errors.New("refused") },
+			cause:   authCauseTransport,
+		},
+		"baseline": {
+			install: func(f *providerAuthFixture) { f.client.accountErr = errors.New("refused") },
 			cause:   authCauseTransport,
 		},
 		"process": {
@@ -1815,4 +1835,428 @@ func TestConnectionIDAcceptsTheOpaqueTokenAConsumerMints(t *testing.T) {
 			t.Fatalf("connection id %q was refused", connectionID)
 		}
 	}
+}
+
+// TestDisconnectAndSecretApplyAdmitOneWriterToTheSlot holds a disconnect inside
+// its native removal and starts the secret apply that races it. Both rewrite the
+// one credential slot the provider owns, and an apply that compares lineage only
+// after its native write leaves the key resident under an entry that says
+// removed: inventory skips a removed entry, so the credential is live on the
+// provider and invisible on every host surface, and no later disconnect can
+// fence what no record names.
+func TestDisconnectAndSecretApplyAdmitOneWriterToTheSlot(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	removing := make(chan struct{})
+	release := make(chan struct{})
+
+	fixture.client.beforeLogout = func() {
+		close(removing)
+		<-release
+	}
+
+	disconnected := make(chan error, 1)
+
+	go func() {
+		_, err := fixture.call(t, AuthDisconnectMethod, map[string]any{
+			"sessionId":         fixture.sessionID,
+			"providerId":        authProviderOpenAI,
+			"connectionId":      "connection-1",
+			"bindingGeneration": 1,
+		})
+		disconnected <- err
+	}()
+
+	<-removing
+
+	applied := make(chan error, 1)
+
+	go func() {
+		_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+			"sessionId":  fixture.sessionID,
+			"providerId": authProviderOpenAI,
+			"method":     authMethodAPIKey,
+			"flowId":     flow.FlowID,
+			"input":      "sk-canary",
+		})
+		applied <- err
+	}()
+
+	close(release)
+
+	disconnectErr := <-disconnected
+	applyErr := <-applied
+
+	if disconnectErr != nil {
+		t.Fatalf("disconnect: %v", disconnectErr)
+	}
+
+	if fixture.client.apiKeyCalls != 0 {
+		t.Fatalf("the apply wrote %d keys into a slot disconnect had already cleared", fixture.client.apiKeyCalls)
+	}
+
+	requireAuthCause(t, applyErr, authCauseBindingConflict)
+
+	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil || !ok || record.State != authLedgerRemoved {
+		t.Fatalf("ledger record = %+v ok=%v err=%v", record, ok, err)
+	}
+}
+
+// TestASecondCallbackIsRefusedWhileTheFirstIsWriting holds one callback inside
+// its native write and submits a second against the same flow. The flow is still
+// pending for as long as the first call blocks, so a state check taken before
+// the write and released for its duration admits both: two secrets are applied,
+// both legs answer saved, and the resident key is whichever native write landed
+// last.
+func TestASecondCallbackIsRefusedWhileTheFirstIsWriting(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	submit := func(secret string) (any, error) {
+		return fixture.call(t, AuthCallbackMethod, map[string]any{
+			"sessionId":  fixture.sessionID,
+			"providerId": authProviderOpenAI,
+			"method":     authMethodAPIKey,
+			"flowId":     flow.FlowID,
+			"input":      secret,
+		})
+	}
+
+	writing := make(chan struct{})
+	secondAnswered := make(chan struct{})
+
+	fixture.client.beforeAPIKeyLogin = func() {
+		close(writing)
+		<-secondAnswered
+	}
+
+	first := make(chan error, 1)
+
+	go func() {
+		_, err := submit("sk-first")
+		first <- err
+	}()
+
+	<-writing
+
+	_, secondErr := submit("sk-second")
+
+	close(secondAnswered)
+
+	firstErr := <-first
+
+	if secondErr == nil {
+		t.Fatal("two callbacks were admitted to one flow, and the last native write won")
+	}
+
+	requireAuthCause(t, secondErr, authCauseFlowState)
+
+	if firstErr != nil {
+		t.Fatalf("first callback: %v", firstErr)
+	}
+
+	if fixture.client.apiKeyCalls != 1 {
+		t.Fatalf("one flow drove %d native key writes", fixture.client.apiKeyCalls)
+	}
+
+	if fixture.client.apiKeyValue != "sk-first" {
+		t.Fatalf("the resident key is %q rather than the claimant's", fixture.client.apiKeyValue)
+	}
+}
+
+// TestConcurrentIdenticalAuthorizesMintOneFlow holds one authorize inside its
+// native mint and issues the same request again. Neither the replay check nor
+// the retired-key check can see a flow the first call has not published yet, so
+// an unserialized authorize mints twice for one idempotency key — which is the
+// one outcome the key exists to prevent.
+func TestConcurrentIdenticalAuthorizesMintOneFlow(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	request := map[string]any{
+		"sessionId":          fixture.sessionID,
+		"providerId":         authProviderOpenAI,
+		"connectionId":       "connection-1",
+		"methodsGeneration":  fixture.mintGeneration(t),
+		"method":             authMethodDeviceCode,
+		"authorizeRequestId": "request-1",
+	}
+
+	minting := make(chan struct{})
+	release := make(chan struct{})
+
+	fixture.client.beforeDeviceLogin = func() {
+		close(minting)
+		<-release
+	}
+
+	type answer struct {
+		presentation authAuthorizeResult
+		err          error
+	}
+
+	answers := make(chan answer, 2)
+
+	authorize := func() {
+		result, err := fixture.call(t, AuthAuthorizeMethod, request)
+		presentation, _ := result.(authAuthorizeResult)
+
+		answers <- answer{presentation: presentation, err: err}
+	}
+
+	go authorize()
+
+	<-minting
+
+	// The first leg is parked inside its native mint and has already taken its
+	// own flow id, so from here a flow id being minted is the second leg
+	// deciding to start a login of its own rather than to be answered from the
+	// first. Waiting for that decision is what makes the interleaving this test
+	// describes the one it actually runs.
+	deciding := make(chan struct{}, 1)
+	entropy := authRandRead
+
+	t.Cleanup(func() { authRandRead = entropy })
+
+	authRandRead = func(value []byte) (int, error) {
+		select {
+		case deciding <- struct{}{}:
+		default:
+		}
+
+		return entropy(value)
+	}
+
+	go authorize()
+
+	select {
+	case <-deciding:
+	case <-time.After(authAdmissionSettle):
+	}
+
+	close(release)
+
+	first, second := <-answers, <-answers
+
+	if first.err != nil || second.err != nil {
+		t.Fatalf("authorize: %v / %v", first.err, second.err)
+	}
+
+	if first.presentation.FlowID != second.presentation.FlowID {
+		t.Fatalf("one idempotency key minted %q and %q", first.presentation.FlowID, second.presentation.FlowID)
+	}
+
+	if fixture.client.deviceCalls != 1 {
+		t.Fatalf("one idempotency key drove %d native mints", fixture.client.deviceCalls)
+	}
+
+	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil || !ok || record.Revision != 1 || record.FlowID != first.presentation.FlowID {
+		t.Fatalf("ledger record = %+v ok=%v err=%v", record, ok, err)
+	}
+}
+
+// TestAuthorizeCannotPublishIntoAClosedSession holds an authorize between the
+// session lookup that admitted it and the publication that makes its flow
+// addressable, and closes the session in that window. Close sweeps what is
+// published, so an authorize that publishes afterwards escapes the sweep
+// entirely: it goes on to mint a device login against a session the host has
+// already torn down, and arms a completer nothing will ever cancel.
+func TestAuthorizeCannotPublishIntoAClosedSession(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	request := map[string]any{
+		"sessionId":          fixture.sessionID,
+		"providerId":         authProviderOpenAI,
+		"connectionId":       "connection-1",
+		"methodsGeneration":  fixture.mintGeneration(t),
+		"method":             authMethodDeviceCode,
+		"authorizeRequestId": "request-1",
+	}
+
+	admitted := make(chan struct{})
+	release := make(chan struct{})
+	entropy := authRandRead
+
+	t.Cleanup(func() { authRandRead = entropy })
+
+	var once sync.Once
+
+	authRandRead = func(value []byte) (int, error) {
+		once.Do(func() {
+			close(admitted)
+			<-release
+		})
+
+		return entropy(value)
+	}
+
+	answered := make(chan error, 1)
+
+	go func() {
+		_, err := fixture.call(t, AuthAuthorizeMethod, request)
+		answered <- err
+	}()
+
+	<-admitted
+
+	fixture.broker.closeSession(acp.SessionId(fixture.sessionID))
+
+	close(release)
+
+	err := <-answered
+	if err == nil {
+		t.Fatal("an authorize published a flow into a session that had already been swept")
+	}
+
+	requireInvalidField(t, err, "sessionId")
+
+	if fixture.client.deviceCalls != 0 {
+		t.Fatalf("a closed session still drove %d native mints", fixture.client.deviceCalls)
+	}
+
+	fixture.broker.mu.Lock()
+	defer fixture.broker.mu.Unlock()
+
+	if len(fixture.broker.flows) != 0 || len(fixture.broker.byID) != 0 {
+		t.Fatal("a swept session kept an addressable flow")
+	}
+}
+
+// holdSlot takes the provider's credential-slot gate the way a leg in the
+// middle of a native mutation holds it, so the next leg to name that provider
+// meets a gate it cannot have.
+func (f *providerAuthFixture) holdSlot(t *testing.T) func() {
+	t.Helper()
+
+	release, held := authAdmitGate(context.Background(), f.broker, f.broker.slots, authProviderOpenAI)
+	if !held {
+		t.Fatal("the credential slot gate was not free")
+	}
+
+	return release
+}
+
+// TestAContendedGateAnswersRatherThanWaitForever pins what a queued leg does
+// when its own request is abandoned. The leg ahead of it is inside a native call
+// this adapter cannot bound, so waiting for the gate is waiting on the harness:
+// every queued leg drops out with the request that owns it and reports a timeout
+// it can honestly claim.
+func TestAContendedGateAnswersRatherThanWaitForever(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	abandoned, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("authorize", func(t *testing.T) {
+		key := authFlowKey{sessionID: acp.SessionId(fixture.sessionID), providerID: authProviderOpenAI}
+
+		release, held := authAdmitGate(context.Background(), fixture.broker, fixture.broker.admissions, key)
+		if !held {
+			t.Fatal("the admission gate was not free")
+		}
+
+		defer release()
+
+		_, err := fixture.broker.authorize(abandoned, mustAuthParams(t, map[string]any{
+			"sessionId":          fixture.sessionID,
+			"providerId":         authProviderOpenAI,
+			"connectionId":       "connection-1",
+			"methodsGeneration":  fixture.mintGeneration(t),
+			"method":             authMethodDeviceCode,
+			"authorizeRequestId": "request-2",
+		}))
+		requireAuthCause(t, err, authCauseTimeout)
+	})
+
+	t.Run("callback", func(t *testing.T) {
+		defer fixture.holdSlot(t)()
+
+		_, err := fixture.broker.callback(abandoned, mustAuthParams(t, map[string]any{
+			"sessionId":  fixture.sessionID,
+			"providerId": authProviderOpenAI,
+			"method":     authMethodAPIKey,
+			"flowId":     flow.FlowID,
+			"input":      "sk-canary",
+		}))
+		requireAuthCause(t, err, authCauseTimeout)
+
+		if fixture.client.apiKeyCalls != 0 {
+			t.Fatal("a leg that never held the slot still wrote to it")
+		}
+
+		if state := fixture.status(t, flow.FlowID).State; state != authStatePending {
+			t.Fatalf("state = %q, want a flow still open to a resubmission", state)
+		}
+	})
+
+	t.Run("disconnect", func(t *testing.T) {
+		defer fixture.holdSlot(t)()
+
+		_, err := fixture.broker.disconnect(abandoned, mustAuthParams(t, map[string]any{
+			"sessionId":         fixture.sessionID,
+			"providerId":        authProviderOpenAI,
+			"connectionId":      "connection-1",
+			"bindingGeneration": 1,
+		}))
+		requireAuthCause(t, err, authCauseTimeout)
+
+		if fixture.client.logoutCalls != 0 {
+			t.Fatal("a leg that never held the slot still cleared it")
+		}
+	})
+
+	t.Run("probe", func(t *testing.T) {
+		device := fixture.authorize(t, authMethodDeviceCode, "request-3")
+
+		session, err := fixture.agent.session(acp.SessionId(fixture.sessionID))
+		if err != nil {
+			t.Fatalf("session: %v", err)
+		}
+
+		reads := fixture.client.accountRead
+
+		defer fixture.holdSlot(t)()
+
+		fixture.broker.probe(abandoned, session, fixture.broker.byID[device.FlowID])
+
+		if fixture.client.accountRead != reads {
+			t.Fatal("a backstop that never held the slot still read the account")
+		}
+	})
+}
+
+func mustAuthParams(t *testing.T, params map[string]any) json.RawMessage {
+	t.Helper()
+
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+
+	return raw
+}
+
+// TestProviderAuthLegsStopAtShutdown pins the broker against the window in which
+// the agent has swept every flow but a leg dispatched before that is still
+// running. The session it named is gone whatever the agent's own bookkeeping
+// still says, so the leg is answered as addressing a session nobody knows.
+func TestProviderAuthLegsStopAtShutdown(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	if err := fixture.agent.Close(); err != nil {
+		t.Fatalf("close agent: %v", err)
+	}
+
+	_, err := fixture.broker.methods(context.Background(), mustAuthParams(t, map[string]any{
+		"sessionId": fixture.sessionID,
+	}))
+	if err == nil {
+		t.Fatal("a leg answered after the broker shut down")
+	}
+
+	requireInvalidField(t, err, "sessionId")
 }

@@ -819,6 +819,8 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.sessions[session.id] = session
 	a.mu.Unlock()
 
+	a.readmitProviderAuth(session.id)
+
 	if previous != nil {
 		if err := previous.Close(context.Background()); err != nil {
 			a.log.WarnContext(context.Background(), "close replaced Codex session failed", slog.String(jsonFieldError, err.Error()))
@@ -830,6 +832,18 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil
+}
+
+// readmitProviderAuth tells the provider-auth broker that a session id is live
+// again. The broker refuses every leg naming a session it has swept, and codex
+// names a session by the thread it drives, so an id can come back through
+// session/load and must not stay refused for the rest of the agent's life.
+func (a *Agent) readmitProviderAuth(id acp.SessionId) {
+	if a.providerAuth == nil {
+		return
+	}
+
+	a.providerAuth.openSession(id)
 }
 
 func newAgentClosedError() *acp.RequestError {
