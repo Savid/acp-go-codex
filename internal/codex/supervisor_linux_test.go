@@ -371,6 +371,11 @@ done
 		if runtime.rootPID > 0 {
 			_ = syscall.Kill(-runtime.rootPID, syscall.SIGKILL)
 		}
+		// The descendant sets its own session, so the group kill above never
+		// reaches it.
+		if runtime.descPID > 0 && syscall.Kill(runtime.descPID, 0) == nil {
+			_ = syscall.Kill(runtime.descPID, syscall.SIGKILL)
+		}
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}

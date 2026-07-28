@@ -474,6 +474,10 @@ func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
 	if startErr := liveness.Start(command); startErr != nil {
 		t.Fatal(startErr)
 	}
+	t.Cleanup(func() {
+		_ = liveness.Quiesce(command.Process.Pid, supervisorQuiesceWindow)
+		reapSetsidEscape(t, pidFile)
+	})
 
 	var escapedPID int
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
@@ -489,15 +493,6 @@ func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
 	if escapedPID <= 0 {
 		t.Fatal("setsid helper did not publish its pid")
 	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(escapedPID, syscall.SIGKILL)
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-			if errors.Is(syscall.Kill(escapedPID, 0), syscall.ESRCH) {
-				return
-			}
-		}
-		t.Errorf("setsid escapee pid %d remained after test cleanup", escapedPID)
-	})
 
 	if err := liveness.Quiesce(command.Process.Pid, supervisorQuiesceWindow); err != nil {
 		t.Fatal(err)
@@ -508,6 +503,34 @@ func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
 	if err := syscall.Kill(escapedPID, 0); err != nil {
 		t.Fatalf("setsid descendant did not survive selected-boundary completion: %v", err)
 	}
+}
+
+// reapSetsidEscape kills the setsid helper the selected boundary deliberately
+// leaves running and fails when it survives. It resolves the PID from the
+// fixture's own file so it reaps on every exit path, including the t.Fatal
+// taken when the helper never publishes a usable PID.
+func reapSetsidEscape(t *testing.T, pidFile string) {
+	t.Helper()
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		return
+	}
+
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return
+		}
+	}
+
+	t.Errorf("setsid escapee pid %d remained after test cleanup", pid)
 }
 
 func runCodexDarwinSetsidHelper(role string) {

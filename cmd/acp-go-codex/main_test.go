@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -440,25 +441,42 @@ func TestRunCodexCLI(t *testing.T) {
 
 	signalScript := filepath.Join(dir, "codex-signal")
 	readyPath := filepath.Join(dir, "ready")
+	harnessPIDPath := filepath.Join(dir, "signal-pid")
 	if writeSignalErr := os.WriteFile(signalScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo codex-cli 0.144.1
   exit 0
 fi
 if [ "$1" = "logout" ]; then
+  echo $$ > "$TEST_PID_LOG"
   echo ready > "$TEST_READY_LOG"
-  while :; do sleep 1; done
+  read release
+  exit 0
 fi
 exit 2
 `), 0o700); writeSignalErr != nil {
 		t.Fatalf("write signal script: %v", writeSignalErr)
 	}
 	t.Setenv("TEST_READY_LOG", readyPath)
+	t.Setenv("TEST_PID_LOG", harnessPIDPath)
+
+	// The fake harness stays terminal-logout-live by blocking on its own stdin,
+	// so it burns no CPU and cannot outlive the pipe this process holds.
+	holdRead, holdWrite, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("open harness stdin hold: %v", pipeErr)
+	}
+	t.Cleanup(func() { _ = holdRead.Close() })
+
 	accountSignals := make(chan os.Signal, 1)
 	errCh := make(chan error, 1)
+	runDone := make(chan struct{})
 	go func() {
-		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
+		defer close(runDone)
+
+		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, "", "logout", false, true, holdRead, bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
 	}()
+	t.Cleanup(func() { reapSignalHarness(t, holdWrite, harnessPIDPath, runDone) })
 	waitUntilFor(t, 7*time.Second, func() bool {
 		_, statErr := os.Stat(readyPath)
 
@@ -562,6 +580,44 @@ type testSignal string
 
 func (s testSignal) String() string { return string(s) }
 func (s testSignal) Signal()        {}
+
+// reapSignalHarness releases the fake harness's stdin so its blocked read
+// returns, then kills the harness by the PID it recorded when the supervised
+// tree does not collapse on its own. It runs on every exit path, including
+// t.Fatal, so no harness process survives the test.
+func reapSignalHarness(t *testing.T, hold *os.File, pidPath string, done <-chan struct{}) {
+	t.Helper()
+
+	_ = hold.Close()
+	if awaitClose(done, 15*time.Second) {
+		return
+	}
+
+	if raw, readErr := os.ReadFile(pidPath); readErr == nil {
+		if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw))); parseErr == nil && pid > 0 {
+			harness, findErr := os.FindProcess(pid)
+			if findErr == nil {
+				_ = harness.Kill()
+			}
+		}
+	}
+
+	if !awaitClose(done, 15*time.Second) {
+		t.Error("fake harness outlived the test")
+	}
+}
+
+func awaitClose(done <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
 
 func waitUntilFor(t *testing.T, timeout time.Duration, ready func() bool) {
 	t.Helper()

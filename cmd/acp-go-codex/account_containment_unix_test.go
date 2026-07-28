@@ -23,6 +23,7 @@ func TestTerminalAuthContainsDescendantsAndHoldsHomeUntilQuiescence(t *testing.T
 	home := filepath.Join(root, "home")
 	ready := filepath.Join(root, "ready")
 	pidPath := filepath.Join(root, "child.pid")
+	rootPIDPath := filepath.Join(root, "root.pid")
 	writes := filepath.Join(root, "writes")
 	script := filepath.Join(root, "codex")
 	requireWriteFile(t, script, `#!/bin/sh
@@ -37,20 +38,26 @@ fi
   done
 ) &
 echo $! > "$AUTH_CHILD_PID"
+echo $$ > "$AUTH_ROOT_PID"
 echo ready > "$AUTH_READY"
 wait
 `)
 	t.Setenv("AUTH_READY", ready)
 	t.Setenv("AUTH_CHILD_PID", pidPath)
+	t.Setenv("AUTH_ROOT_PID", rootPIDPath)
 	t.Setenv("AUTH_WRITES", writes)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
+	runDone := make(chan struct{})
 	var commandStderr bytes.Buffer
 	scratch := t.TempDir()
 	go func() {
+		defer close(runDone)
+
 		errCh <- runCodexCLI(ctx, script, home, scratch, loginCommand, false, true, bytes.NewReader(nil), bytes.NewBuffer(nil), &commandStderr)
 	}()
+	t.Cleanup(func() { reapAuthFixture(t, cancel, runDone, rootPIDPath, pidPath) })
 
 	waitUntilWithFailure(t, func() bool {
 		_, err := os.Stat(ready)
@@ -107,6 +114,57 @@ wait
 	if err := lock.Release(); err != nil {
 		t.Fatalf("release home lock: %v", err)
 	}
+}
+
+// reapAuthFixture cancels the terminal-auth command and, when the auth tree
+// does not collapse with it, kills the fixture's process group and the
+// write-capable descendant that leaves it. It runs on every exit path,
+// including t.Fatal, so no fixture process survives the test.
+func reapAuthFixture(t *testing.T, cancel context.CancelFunc, done <-chan struct{}, rootPIDPath string, descendantPIDPath string) {
+	t.Helper()
+
+	cancel()
+
+	collapsed := awaitAuthTree(done)
+	if !collapsed {
+		if pid := fixturePID(rootPIDPath); pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}
+
+	if pid := fixturePID(descendantPIDPath); pid > 0 && syscall.Kill(pid, 0) == nil {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+
+	if !collapsed && !awaitAuthTree(done) {
+		t.Error("terminal auth fixture outlived the test")
+	}
+}
+
+func awaitAuthTree(done <-chan struct{}) bool {
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func fixturePID(path string) int {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0
+	}
+
+	return pid
 }
 
 func waitUntilWithFailure(t *testing.T, ready func() bool, failure func() string) {

@@ -430,16 +430,32 @@ func TestProcessCloserSendsTermBeforeKill(t *testing.T) {
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 trap 'printf term > "$TERM_MARK"; exit 0' TERM
 printf ready > "$READY_MARK"
-while :; do :; done
+read release
 `), 0o700); err != nil {
 		t.Fatalf("write trap script: %v", err)
 	}
 
+	// The script waits for the signal in a blocking read, so it burns no CPU
+	// and cannot outlive the pipe this process holds.
+	holdRead, holdWrite, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("open trap process stdin hold: %v", pipeErr)
+	}
+
 	cmd := exec.Command(script)
 	cmd.Env = append(os.Environ(), "TERM_MARK="+marker, "READY_MARK="+ready)
+	cmd.Stdin = holdRead
 	if err := startProcess(cmd); err != nil {
 		t.Fatalf("start trap process: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = holdWrite.Close()
+		_ = holdRead.Close()
+
+		if cmd.ProcessState == nil {
+			_ = killProcess(cmd)
+		}
+	})
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
