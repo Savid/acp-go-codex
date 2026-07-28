@@ -199,26 +199,10 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	p.supersede(key, authReasonSuperseded)
 
 	now := authNow()
-	record := authLedgerRecord{
-		ProviderID:         request.providerID,
-		ConnectionID:       request.connectionID,
-		Revision:           1,
-		BindingGeneration:  1,
-		FlowID:             flowID,
-		AuthorizeRequestID: request.authorizeRequestID,
-		State:              authLedgerIntent,
-		CreatedAt:          now.UnixMilli(),
-		UpdatedAt:          now.UnixMilli(),
-	}
 
-	if prior, ok, readErr := p.ledger.read(request.providerID); readErr == nil && ok {
-		record.Revision = prior.Revision + 1
-		record.BindingGeneration = prior.BindingGeneration
-		record.CreatedAt = prior.CreatedAt
-	}
-
-	if writeErr := p.ledger.write(record); writeErr != nil {
-		return nil, authFailed(authCauseProcess, request.providerID, request.method, "")
+	record, err := p.recordIntent(ctx, request, flowID, now)
+	if err != nil {
+		return nil, err
 	}
 
 	flow := &authFlow{
@@ -259,6 +243,49 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	p.armCompleter(flow)
 
 	return presentation, nil
+}
+
+// recordIntent writes the flow's ledger intent, deriving its lineage from the
+// entry the provider already holds. The read and the write are one mutation of
+// that entry, so they take the provider's slot gate: a removal landing between
+// them has its bumped generation read back as this flow's own and then
+// overwritten by it, which leaves the entry naming a binding the removal had
+// already released and erases the removed record that said so.
+//
+// The gate is taken inside the caller's key gate. That is the only nesting on
+// this surface and it is always in that order — nothing that holds a slot gate
+// reaches for a key gate — so the two cannot close a cycle.
+func (p *providerAuth) recordIntent(ctx context.Context, request authorizeRequest, flowID string, now time.Time) (authLedgerRecord, error) {
+	record := authLedgerRecord{
+		ProviderID:         request.providerID,
+		ConnectionID:       request.connectionID,
+		Revision:           1,
+		BindingGeneration:  1,
+		FlowID:             flowID,
+		AuthorizeRequestID: request.authorizeRequestID,
+		State:              authLedgerIntent,
+		CreatedAt:          now.UnixMilli(),
+		UpdatedAt:          now.UnixMilli(),
+	}
+
+	release, admitted := authAdmitGate(ctx, p, p.slots, request.providerID)
+	if !admitted {
+		return authLedgerRecord{}, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	defer release()
+
+	if prior, ok, readErr := p.ledger.read(request.providerID); readErr == nil && ok {
+		record.Revision = prior.Revision + 1
+		record.BindingGeneration = prior.BindingGeneration
+		record.CreatedAt = prior.CreatedAt
+	}
+
+	if writeErr := p.ledger.write(record); writeErr != nil {
+		return authLedgerRecord{}, authFailed(authCauseProcess, request.providerID, request.method, "")
+	}
+
+	return record, nil
 }
 
 type authorizeRequest struct {

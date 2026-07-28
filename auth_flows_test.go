@@ -711,20 +711,53 @@ func TestALateConfirmationLeavesTheSuccessorsLineageAlone(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 	first := fixture.authorize(t, authMethodAPIKey, "request-1")
 
-	var second authAuthorizeResult
+	applying := make(chan struct{})
+	release := make(chan struct{})
 
 	fixture.client.beforeAPIKeyLogin = func() {
-		second = fixture.authorize(t, authMethodAPIKey, "request-2")
+		close(applying)
+		<-release
 	}
 
-	_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
-		"sessionId":  fixture.sessionID,
-		"providerId": authProviderOpenAI,
-		"method":     authMethodAPIKey,
-		"flowId":     first.FlowID,
-		"input":      "sk-canary",
-	})
-	requireAuthCause(t, err, authCauseFlowCancelled)
+	applied := make(chan error, 1)
+
+	go func() {
+		_, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+			"sessionId":  fixture.sessionID,
+			"providerId": authProviderOpenAI,
+			"method":     authMethodAPIKey,
+			"flowId":     first.FlowID,
+			"input":      "sk-canary",
+		})
+		applied <- err
+	}()
+
+	<-applying
+
+	// The replacing authorize supersedes the live flow immediately and then
+	// queues for the provider's entry, which the apply is holding. Both legs are
+	// therefore live at once, which is the only way the late confirmation this
+	// pins can happen at all.
+	var second authAuthorizeResult
+
+	superseded := make(chan struct{})
+
+	go func() {
+		defer close(superseded)
+
+		second = fixture.authorize(t, authMethodAPIKey, "request-2")
+	}()
+
+	select {
+	case <-superseded:
+	case <-time.After(authAdmissionSettle):
+	}
+
+	close(release)
+
+	<-superseded
+
+	requireAuthCause(t, <-applied, authCauseFlowCancelled)
 
 	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
 	if err != nil || !ok {
@@ -2208,6 +2241,41 @@ func TestAContendedGateAnswersRatherThanWaitForever(t *testing.T) {
 		}
 	})
 
+	t.Run("intent", func(t *testing.T) {
+		generation := fixture.mintGeneration(t)
+
+		abandonable, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		entropy := authRandRead
+
+		t.Cleanup(func() { authRandRead = entropy })
+
+		// The key gate is free and has to be taken cleanly, so the request is
+		// abandoned only once this leg is past it and reaching for the slot.
+		authRandRead = func(value []byte) (int, error) {
+			cancel()
+
+			return entropy(value)
+		}
+
+		defer fixture.holdSlot(t)()
+
+		_, err := fixture.broker.authorize(abandonable, mustAuthParams(t, map[string]any{
+			"sessionId":          fixture.sessionID,
+			"providerId":         authProviderOpenAI,
+			"connectionId":       "connection-1",
+			"methodsGeneration":  generation,
+			"method":             authMethodDeviceCode,
+			"authorizeRequestId": "request-4",
+		}))
+		requireAuthCause(t, err, authCauseTimeout)
+
+		if record, ok, readErr := fixture.broker.ledger.read(authProviderOpenAI); readErr != nil || !ok || record.FlowID == "" {
+			t.Fatalf("a leg that never held the slot rewrote the entry: %+v ok=%v err=%v", record, ok, readErr)
+		}
+	})
+
 	t.Run("probe", func(t *testing.T) {
 		device := fixture.authorize(t, authMethodDeviceCode, "request-3")
 
@@ -2259,4 +2327,147 @@ func TestProviderAuthLegsStopAtShutdown(t *testing.T) {
 	}
 
 	requireInvalidField(t, err, "sessionId")
+}
+
+// TestAuthorizeCannotWriteItsIntentAcrossARemoval holds an authorize between the
+// ledger read that derives its lineage and the write that records it, and runs
+// the disconnect that races it. Both rewrite the provider's one entry: an intent
+// written from a generation read before the removal bumped it puts the entry
+// back at a binding the removal has already released, over the removed record
+// that was the only thing naming it as released.
+func TestAuthorizeCannotWriteItsIntentAcrossARemoval(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	seed := authLedgerRecord{
+		ProviderID:         authProviderOpenAI,
+		ConnectionID:       "connection-1",
+		Revision:           1,
+		BindingGeneration:  1,
+		FlowID:             "seed-flow",
+		AuthorizeRequestID: "seed-request",
+		State:              authLedgerConfirmed,
+		CreatedAt:          1,
+		UpdatedAt:          1,
+	}
+	if err := fixture.broker.ledger.write(seed); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	request := map[string]any{
+		"sessionId":          fixture.sessionID,
+		"providerId":         authProviderOpenAI,
+		"connectionId":       "connection-1",
+		"methodsGeneration":  fixture.mintGeneration(t),
+		"method":             authMethodAPIKey,
+		"authorizeRequestId": "request-1",
+	}
+
+	recording := make(chan struct{})
+	release := make(chan struct{})
+
+	restoreLedgerHooks(t)
+
+	entry := ledgerCreateTemp
+
+	// The claim is a buffered slot rather than a sync.Once because every other
+	// ledger write in this test — the removal's included — runs while the first
+	// one is held, and Once would park them all behind it.
+	first := make(chan struct{}, 1)
+	first <- struct{}{}
+
+	ledgerCreateTemp = func(dir string, pattern string) (ledgerFile, error) {
+		select {
+		case <-first:
+			close(recording)
+			<-release
+		default:
+		}
+
+		return entry(dir, pattern)
+	}
+
+	authorized := make(chan error, 1)
+
+	go func() {
+		_, err := fixture.call(t, AuthAuthorizeMethod, request)
+		authorized <- err
+	}()
+
+	<-recording
+
+	var disconnectErr error
+
+	finished := make(chan struct{})
+
+	go func() {
+		defer close(finished)
+
+		_, disconnectErr = fixture.call(t, AuthDisconnectMethod, map[string]any{
+			"sessionId":         fixture.sessionID,
+			"providerId":        authProviderOpenAI,
+			"connectionId":      "connection-1",
+			"bindingGeneration": 1,
+		})
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(authAdmissionSettle):
+	}
+
+	close(release)
+
+	<-finished
+
+	if err := <-authorized; err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	if disconnectErr != nil {
+		t.Fatalf("disconnect: %v", disconnectErr)
+	}
+
+	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil || !ok {
+		t.Fatalf("ledger read: %v ok=%v", err, ok)
+	}
+
+	if record.BindingGeneration != seed.BindingGeneration+1 {
+		t.Fatalf("the entry names generation %d after a removal bumped it to %d",
+			record.BindingGeneration, seed.BindingGeneration+1)
+	}
+}
+
+// TestADeviceLoginCompletingAfterARemovalRecordsNothing pins the device half of
+// the credential slot. The removal bumped the binding generation and cleared the
+// account, so a login that completes afterwards names a binding the host no
+// longer holds. Recording it would put the provider's entry back at a generation
+// nothing released and have inventory report a credential the removal took.
+func TestADeviceLoginCompletingAfterARemovalRecordsNothing(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	if _, err := fixture.call(t, AuthDisconnectMethod, map[string]any{
+		"sessionId":         fixture.sessionID,
+		"providerId":        authProviderOpenAI,
+		"connectionId":      "connection-1",
+		"bindingGeneration": 1,
+	}); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+
+	fixture.client.account = codex.Account{ID: "account-2", AuthMode: codex.AuthModeChatGPT}
+
+	if status := fixture.status(t, flow.FlowID); status.State != authStatePending {
+		t.Fatalf("state = %q, want a flow that recorded nothing", status.State)
+	}
+
+	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil || !ok {
+		t.Fatalf("ledger read: %v ok=%v", err, ok)
+	}
+
+	if record.State != authLedgerRemoved || record.BindingGeneration != 2 {
+		t.Fatalf("a completion wrote over the removal: %+v", record)
+	}
 }

@@ -172,6 +172,10 @@ forever:
   in some order, never interleaved. A login that finds the binding generation
   already bumped is refused with `cause: "binding_conflict"` **before** it
   writes, so a cleared account stays cleared.
+- A fresh `_codex/auth/authorize` derives its revision and binding generation
+  from the entry the provider already holds, and it does that in the same order
+  as a removal rather than across one. It cannot record an entry at a generation
+  a removal has already released, nor write over the record that says so.
 - A leg still waiting for one of these when its own request is abandoned answers
   `cause: "timeout"` and touches nothing.
 
