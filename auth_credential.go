@@ -247,19 +247,19 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 
 	record, ok, err := p.ledger.read(providerID)
 	if err != nil || !ok {
-		return nil, authFailed(authCauseHarvestFailed, providerID, flow.method.ID, flowID)
+		return nil, p.harvestFailed(flow)
 	}
 
 	if record.FlowID != flow.id ||
 		record.ConnectionID != flow.connectionID ||
 		record.Revision != flow.revision ||
 		record.BindingGeneration != flow.bindingGeneration {
-		return nil, authFailed(authCauseHarvestFailed, providerID, flow.method.ID, flowID)
+		return nil, p.harvestFailed(flow)
 	}
 
 	stored, err := p.readStoredCredential()
 	if err != nil {
-		return nil, authFailed(authCauseHarvestFailed, providerID, flow.method.ID, flowID)
+		return nil, p.harvestFailed(flow)
 	}
 
 	return authCredentialResult{
@@ -278,9 +278,10 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 	}, nil
 }
 
-// claimHarvest admits the single harvest a completed flow allows. A flow-state
-// refusal is one the adapter made itself, so it consumes nothing and performs no
-// transition.
+// claimHarvest admits the single harvest a completed flow allows and holds the
+// claim for the duration of the attempt, so two concurrent calls cannot both
+// read the slot. A flow-state refusal is one the adapter made itself, so it
+// consumes nothing and performs no transition.
 func (p *providerAuth) claimHarvest(flow *authFlow) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -296,6 +297,21 @@ func (p *providerAuth) claimHarvest(flow *authFlow) error {
 	flow.harvested = true
 
 	return nil
+}
+
+// harvestFailed releases the claim the attempt was holding and returns the
+// leg's closed error. At-most-once governs the credential a harvest hands back,
+// and an attempt that handed back nothing has nothing to be once about — so
+// spending the claim on it would answer every retry flow_state and make the
+// cause that actually stopped the harvest unrecoverable. The flow itself is
+// left where it was: credential runs only against an already-terminal flow, and
+// terminalizing one of those again is what the no-transition rows forbid.
+func (p *providerAuth) harvestFailed(flow *authFlow) error {
+	p.mu.Lock()
+	flow.harvested = false
+	p.mu.Unlock()
+
+	return authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
 }
 
 // readStoredCredential reads the consented home's configured credential store.

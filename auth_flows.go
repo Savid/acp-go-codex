@@ -159,6 +159,10 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		return replay, nil
 	}
 
+	if p.requestRetired(key, request.authorizeRequestID) {
+		return nil, invalidAuthField(authFieldAuthorizeRequestID)
+	}
+
 	method, err := p.resolveMethod(request)
 	if err != nil {
 		return nil, err
@@ -302,6 +306,19 @@ func (p *providerAuth) replayAuthorize(key authFlowKey, requestID string) (authA
 	return flow.presentation, true
 }
 
+// requestRetired reports whether the key names a flow a later authorize already
+// replaced. Only the newest record can be replayed verbatim, so an older key is
+// unanswerable — and minting in its place would destroy the live flow it never
+// named, which is the one thing an idempotency key exists to prevent.
+func (p *providerAuth) requestRetired(key authFlowKey, requestID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	_, retired := p.retired[key][requestID]
+
+	return retired
+}
+
 // resolveMethod fences a method id against the generation that produced it.
 func (p *providerAuth) resolveMethod(request authorizeRequest) (authCatalogMethod, error) {
 	p.mu.Lock()
@@ -395,23 +412,43 @@ func (p *providerAuth) armCompleter(flow *authFlow) {
 }
 
 // supersede terminalizes the flow a new authorize replaces. The superseded
-// flowId then addresses nothing. A flow that already terminalized was not
-// superseded by anything and keeps both its record and its id.
+// flowId then addresses nothing, and its idempotency key is retired so a repeat
+// of it is refused rather than answered with a fresh destructive mint. A flow
+// that already reached a terminal state is dropped on the same terms: it kept
+// answering status for its whole life, and being replaced is what ends that
+// life rather than the transition it happened to end on.
 func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	flow, ok := p.flows[key]
-	if !ok || authTerminal(flow.state) {
+	if !ok {
 		return
 	}
 
 	delete(p.flows, key)
 	delete(p.byID, flow.id)
+	p.retire(key, flow.authorizeRequestID)
+
+	if authTerminal(flow.state) {
+		return
+	}
 
 	flow.state = authStateCancelled
 	flow.reason = reason
 	flow.stopCompleter()
+}
+
+// retire records a key the broker can no longer answer. The caller holds the
+// mutex.
+func (p *providerAuth) retire(key authFlowKey, requestID string) {
+	keys, ok := p.retired[key]
+	if !ok {
+		keys = make(map[string]struct{})
+		p.retired[key] = keys
+	}
+
+	keys[requestID] = struct{}{}
 }
 
 func (f *authFlow) stopCompleter() {
@@ -740,7 +777,10 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*session, *auth
 // disconnect bumps the binding generation before it touches anything else, then
 // clears the exactly-fenced account and verifies absence. It removes nothing
 // ambient and promises no provider-side revocation: the account stays live at
-// OpenAI until the owner revokes it there.
+// OpenAI until the owner revokes it there. A removed record names no binding
+// left to release, so it is refused on the same terms as an absent one rather
+// than driving a second account-level logout against whatever now occupies the
+// slot.
 func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID, authFieldProviderID, authFieldConnectionID, authFieldBindingGeneration)
 	if err != nil {
@@ -777,7 +817,7 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
 	}
 
-	if !ok || record.ConnectionID != connectionID || record.BindingGeneration != bindingGeneration {
+	if !ok || record.State == authLedgerRemoved || record.ConnectionID != connectionID || record.BindingGeneration != bindingGeneration {
 		return nil, authFailed(authCausePolicy, providerID, "", "")
 	}
 
@@ -832,6 +872,12 @@ func (p *providerAuth) closeAll() {
 func (p *providerAuth) cancelFlows(match func(authFlowKey) bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	for key := range p.retired {
+		if match(key) {
+			delete(p.retired, key)
+		}
+	}
 
 	for key, flow := range p.flows {
 		if !match(key) {

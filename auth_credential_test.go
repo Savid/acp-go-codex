@@ -370,6 +370,52 @@ func TestAuthCredentialFailsWhenTheStoreCannotBeRead(t *testing.T) {
 	requireAuthCause(t, err, authCauseHarvestFailed)
 }
 
+// TestCredentialFailureLeavesTheClaimIntact pins what at-most-once governs: the
+// credential a harvest hands back, not the attempt. A failed attempt handed
+// nothing back, so the retry must still be able to reach the real cause instead
+// of being told the flow is in the wrong state.
+func TestCredentialFailureLeavesTheClaimIntact(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	flowID := fixture.authenticatedFlow(t)
+
+	params := map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"flowId":     flowID,
+	}
+
+	_, err := fixture.call(t, AuthCredentialMethod, params)
+	if err == nil {
+		t.Fatal("credential answered with no stored login")
+	}
+
+	requireAuthCause(t, err, authCauseHarvestFailed)
+
+	if status := fixture.status(t, flowID); status.State != authStateAuthenticated {
+		t.Fatalf("a refused harvest moved the flow to %q/%q", status.State, status.Reason)
+	}
+
+	_, err = fixture.call(t, AuthCredentialMethod, params)
+	if err == nil {
+		t.Fatal("credential answered with no stored login")
+	}
+
+	requireAuthCause(t, err, authCauseHarvestFailed)
+
+	seedStoredLogin(t, fixture.home, testStoredLogin)
+
+	result, err := fixture.call(t, AuthCredentialMethod, params)
+	if err != nil {
+		t.Fatalf("a claim spent by two failures refused the harvest that could succeed: %v", err)
+	}
+
+	harvested, _ := result.(authCredentialResult)
+	if harvested.Credential.OAuth.Access != "canary-access" {
+		t.Fatalf("harvested = %+v", harvested)
+	}
+}
+
 func TestReadStoredCredentialAcrossStoreModes(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 	seedStoredLogin(t, fixture.home, testStoredLogin)

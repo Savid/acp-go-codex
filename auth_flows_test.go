@@ -235,6 +235,87 @@ func TestAuthorizeSupersedesTheEarlierFlow(t *testing.T) {
 	requireInvalidField(t, err, authFieldFlowID)
 }
 
+// TestAuthorizeDropsASupersededTerminalFlow covers the flow a supersede finds
+// already terminal. It was addressable for its whole life, and being replaced
+// is what ends that life rather than the transition it happened to end on, so
+// its id stops addressing anything and stops being held.
+func TestAuthorizeDropsASupersededTerminalFlow(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	first := fixture.authorize(t, authMethodAPIKey, "request-1")
+
+	if _, err := fixture.call(t, AuthCallbackMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"method":     authMethodAPIKey,
+		"flowId":     first.FlowID,
+		"input":      "sk-canary",
+	}); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	if state := fixture.status(t, first.FlowID).State; state != authStateSaved {
+		t.Fatalf("state = %q, want saved", state)
+	}
+
+	fixture.authorize(t, authMethodAPIKey, "request-2")
+
+	_, err := fixture.call(t, AuthStatusMethod, map[string]any{
+		"sessionId":  fixture.sessionID,
+		"providerId": authProviderOpenAI,
+		"flowId":     first.FlowID,
+	})
+	if err == nil {
+		t.Fatal("a superseded terminal flow id still addressed a flow")
+	}
+
+	requireInvalidField(t, err, authFieldFlowID)
+
+	fixture.broker.mu.Lock()
+	addressable := len(fixture.broker.byID)
+	fixture.broker.mu.Unlock()
+
+	if addressable != 1 {
+		t.Fatalf("the addressing map holds %d flows after one supersede", addressable)
+	}
+}
+
+// TestAuthorizeRefusesAKeyASupersedeRetired pins the idempotency key's whole
+// promise: a repeat never destroys. Once a later authorize replaced the flow a
+// key named, that key has no presentation to replay and no live flow to speak
+// for, so a repeat of it is a caller addressing failure rather than a fresh
+// mint that would cancel the flow the caller never asked about.
+func TestAuthorizeRefusesAKeyASupersedeRetired(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	fixture.authorize(t, authMethodDeviceCode, "request-1")
+	live := fixture.authorize(t, authMethodDeviceCode, "request-2")
+
+	generation := fixture.mintGeneration(t)
+
+	_, err := fixture.call(t, AuthAuthorizeMethod, map[string]any{
+		"sessionId":          fixture.sessionID,
+		"providerId":         authProviderOpenAI,
+		"connectionId":       "connection-1",
+		"methodsGeneration":  generation,
+		"method":             authMethodDeviceCode,
+		"authorizeRequestId": "request-1",
+	})
+	if err == nil {
+		t.Fatal("a retired idempotency key minted a new flow")
+	}
+
+	requireInvalidField(t, err, authFieldAuthorizeRequestID)
+
+	if status := fixture.status(t, live.FlowID); status.State != authStatePending {
+		t.Fatalf("the live flow is %q/%q after a retired key was repeated", status.State, status.Reason)
+	}
+
+	if fixture.client.deviceCalls != 2 {
+		t.Fatalf("a retired key drove %d native mints", fixture.client.deviceCalls)
+	}
+}
+
 func TestAuthorizeBumpsTheRevisionOnAPriorLedgerEntry(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 
@@ -1064,6 +1145,21 @@ func TestAuthDisconnectClearsTheFencedAccount(t *testing.T) {
 
 	if after.BindingGeneration != record.BindingGeneration+1 {
 		t.Fatalf("binding generation went %d -> %d", record.BindingGeneration, after.BindingGeneration)
+	}
+
+	if _, repeatErr := fixture.call(t, AuthDisconnectMethod, map[string]any{
+		"sessionId":         fixture.sessionID,
+		"providerId":        authProviderOpenAI,
+		"connectionId":      after.ConnectionID,
+		"bindingGeneration": after.BindingGeneration,
+	}); repeatErr == nil {
+		t.Fatal("disconnect answered against a record it had already removed")
+	} else {
+		requireAuthCause(t, repeatErr, authCausePolicy)
+	}
+
+	if fixture.client.logoutCalls != 1 {
+		t.Fatalf("a repeat drove %d native account removals", fixture.client.logoutCalls)
 	}
 }
 

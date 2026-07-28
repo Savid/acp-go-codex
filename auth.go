@@ -99,6 +99,10 @@ type providerAuth struct {
 	catalog    map[string][]authCatalogMethod
 	flows      map[authFlowKey]*authFlow
 	byID       map[string]*authFlow
+	// retired holds, per key, every idempotency key whose flow a later
+	// authorize replaced. Only the newest flow can be replayed verbatim, so an
+	// older key is remembered to be refused rather than treated as new.
+	retired map[authFlowKey]map[string]struct{}
 }
 
 type authFlowKey struct {
@@ -127,6 +131,7 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		directHome: consentedDirectHome(agent.options),
 		flows:      make(map[authFlowKey]*authFlow),
 		byID:       make(map[string]*authFlow),
+		retired:    make(map[authFlowKey]map[string]struct{}),
 	}
 }
 
