@@ -2,8 +2,6 @@ package codexacp
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/zalando/go-keyring"
 )
 
 // ProviderCredentialType discriminates the closed credential union.
@@ -154,15 +150,11 @@ const (
 	authStoreModeAuto      = "auto"
 	authStoreModeEphemeral = "ephemeral"
 
-	authKeystoreService = "Codex Auth"
-	authAuthFileName    = "auth.json"
-	authConfigFileName  = "config.toml"
+	authAuthFileName   = "auth.json"
+	authConfigFileName = "config.toml"
 )
 
-var (
-	authReadFile     = os.ReadFile
-	authKeystoreRead = keyring.Get
-)
+var authReadFile = os.ReadFile
 
 // Native store keys. Codex writes its own spelling, so the read pulls the
 // allowlisted keys by name rather than mapping the whole object onto a struct.
@@ -322,10 +314,7 @@ func (p *providerAuth) readStoredCredential() (codexStoredLogin, error) {
 	case authStoreModeFile:
 		raw, err = authReadFile(filepath.Join(p.directHome, authAuthFileName))
 	case authStoreModeKeyring:
-		var secret string
-
-		secret, err = authKeystoreRead(authKeystoreService, authKeystoreAccount(p.directHome))
-		raw = []byte(secret)
+		raw, err = readKeystoreCredential(p.directHome)
 	default:
 		return codexStoredLogin{}, fmt.Errorf("credential store mode %q has no determinate authority", mode)
 	}
@@ -352,14 +341,6 @@ func (p *providerAuth) readStoredCredential() (codexStoredLogin, error) {
 
 // codexAuthModeChatGPT is the auth_mode a completed ChatGPT login writes.
 const codexAuthModeChatGPT = "chatgpt"
-
-// authKeystoreAccount rebuilds codex's keystore account name, which partitions
-// the item by CODEX_HOME.
-func authKeystoreAccount(home string) string {
-	sum := sha256.Sum256([]byte(home))
-
-	return "cli|" + hex.EncodeToString(sum[:])[:16]
-}
 
 // resolveAuthStoreMode reads the configured store rather than assuming the
 // default. An adapter-supplied override wins because it is what the app-server

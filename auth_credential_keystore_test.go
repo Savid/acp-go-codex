@@ -11,12 +11,14 @@ import (
 )
 
 const (
-	envRunIntegration  = "ACP_GO_CODEX_RUN_INTEGRATION"
-	envRunKeystore     = "ACP_GO_CODEX_RUN_KEYSTORE"
-	envKeystoreService = "ACP_GO_CODEX_KEYSTORE_SERVICE"
+	envRunIntegration = "ACP_GO_CODEX_RUN_INTEGRATION"
+	envRunKeystore    = "ACP_GO_CODEX_RUN_KEYSTORE"
 
-	keystoreServicePresent = "present"
-	keystoreServiceAbsent  = "absent"
+	// envSessionBus is the address of the session bus a Secret Service answers
+	// on. Its presence is the configuration itself rather than a label for one:
+	// the keystore-present and keystore-absent Linux halves are the same image
+	// run with and without it.
+	envSessionBus = "DBUS_SESSION_BUS_ADDRESS"
 )
 
 // requireKeystoreTier answers to both gates. Below them the tier is not
@@ -30,32 +32,12 @@ func requireKeystoreTier(t *testing.T) {
 	}
 }
 
-// keystoreServiceState reports which of the three configurations this process
-// is running as. Linux takes the state its driver declares, because the
-// keystore-present and keystore-absent halves are the same image run with and
-// without a session bus, and a Linux process with no declaration is the host
-// rather than either half — both of its configurations are running inside the
-// container fixture the driver started. macOS has no absent half: the Keychain
-// is always there, and this is the third of the matrix no container can carry.
-func keystoreServiceState(t *testing.T) string {
-	t.Helper()
-
-	if runtime.GOOS == "darwin" {
-		return keystoreServicePresent
-	}
-
-	switch state := os.Getenv(envKeystoreService); state {
-	case keystoreServicePresent, keystoreServiceAbsent:
-		return state
-	case "":
-		t.Skip("both Linux configurations run inside the container fixture; see TestKeystoreProviderAuthResidence")
-
-		return ""
-	default:
-		t.Fatalf("%s must be %q or %q, got %q", envKeystoreService, keystoreServicePresent, keystoreServiceAbsent, state)
-
-		return ""
-	}
+// keystoreServicePresent reports whether a keystore answers here at all. macOS
+// has no absent half — the Keychain is always there, and that is the third of
+// the matrix no container can carry — while on Linux the reachable session bus
+// is what makes a Secret Service present or absent.
+func keystoreServicePresent() bool {
+	return runtime.GOOS == "darwin" || os.Getenv(envSessionBus) != ""
 }
 
 // TestKeystoreResidenceMatrix proves which credential store the read path wins
@@ -67,7 +49,7 @@ func keystoreServiceState(t *testing.T) string {
 func TestKeystoreResidenceMatrix(t *testing.T) {
 	requireKeystoreTier(t)
 
-	keystorePresent := keystoreServiceState(t) == keystoreServicePresent
+	keystorePresent := keystoreServicePresent()
 
 	cases := map[string]struct {
 		mode string

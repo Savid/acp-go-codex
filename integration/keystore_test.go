@@ -22,12 +22,10 @@ const (
 	keystoreRoundTrip = "/usr/local/bin/roundtrip.sh"
 	keystoreProbePath = "/usr/local/bin/residence.test"
 
-	// The probe reads its configuration from the environment the driver
-	// exports. The names are spelled here as well as beside the read path
-	// because the two live in different packages and neither exports them.
-	envKeystoreService     = "ACP_GO_CODEX_KEYSTORE_SERVICE"
-	keystoreServicePresent = "present"
-	keystoreServiceAbsent  = "absent"
+	// The session-bus address is what reaches the Secret Service, so it is the
+	// configuration itself rather than a label for one. The probe reads it
+	// directly; nothing else selects which half runs.
+	envSessionBus = "DBUS_SESSION_BUS_ADDRESS"
 )
 
 func requireKeystoreTier(t *testing.T) {
@@ -88,20 +86,19 @@ func TestKeystoreProviderAuthResidence(t *testing.T) {
 		t.Fatalf("copy residence probe: %v", err)
 	}
 
-	// The bus address is what reaches the Secret Service, so withholding it is
-	// the whole difference between the two configurations: the daemon is still
-	// running, and the read path simply has no service to ask.
+	// Withholding the bus address is the whole difference between the two
+	// configurations: the daemon is still running, and the read path simply has
+	// no service to ask.
 	configurations := map[string]string{
-		keystoreServicePresent: ". " + keystoreEnvFile + "; export DBUS_SESSION_BUS_ADDRESS; ",
-		keystoreServiceAbsent:  "unset DBUS_SESSION_BUS_ADDRESS; ",
+		"keystore present": ". " + keystoreEnvFile + "; export " + envSessionBus + "; ",
+		"keystore absent":  "unset " + envSessionBus + "; ",
 	}
 
 	for state, prelude := range configurations {
 		t.Run(state, func(t *testing.T) {
 			code, output, err := container.Exec(ctx, []string{
 				"/bin/sh", "-c",
-				prelude + "export " + envKeystoreService + "=" + state + " " +
-					envRunIntegration + "=1 " + envRunKeystore + "=1; exec " +
+				prelude + "export " + envRunIntegration + "=1 " + envRunKeystore + "=1; exec " +
 					keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'",
 			})
 			if err != nil {
