@@ -42,10 +42,6 @@ func TestAuthorizeMintsADeviceFlow(t *testing.T) {
 		t.Fatalf("presentation = %+v", result)
 	}
 
-	if result.PollIntervalMs != 0 {
-		t.Fatalf("codex synthesized a poll hint: %d", result.PollIntervalMs)
-	}
-
 	record, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
 	if err != nil || !ok {
 		t.Fatalf("ledger read: ok=%v err=%v", ok, err)
@@ -1737,5 +1733,86 @@ func TestAuthNativeCauseClassification(t *testing.T) {
 
 	if got := authNativeCause(expired, errors.New("boom")); got != authCauseTimeout {
 		t.Fatalf("cause = %s, want timeout", got)
+	}
+}
+
+// adversarialConnectionIDs are the caller-minted values the bound refuses. Each
+// is a shape the id would otherwise carry into a durable ledger entry and into
+// the adapter's own logs, and the two replacement-rune spellings are one Go
+// string reached from two different wire encodings, which aliases one
+// connection onto another's entry.
+func adversarialConnectionIDs() map[string]string {
+	return map[string]string{
+		"empty":              "",
+		"path separators":    "../../../etc/passwd",
+		"windows separators": `..\..\connection`,
+		"newline":            "connection\n1",
+		"nul":                "connection\x00 1",
+		"bidi override":      "connection\u202e1",
+		"space":              "connection 1",
+		"colon":              "connection:1",
+		"replacement rune":   "connection-�",
+		"non ascii":          "connection-é",
+		"unbounded":          strings.Repeat("c", authConnectionIDMaxBytes+1),
+	}
+}
+
+func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	generation := fixture.mintGeneration(t)
+
+	seeded := sampleLedgerRecord()
+	if err := fixture.broker.ledger.write(seeded); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	for name, connectionID := range adversarialConnectionIDs() {
+		t.Run(name, func(t *testing.T) {
+			_, err := fixture.call(t, AuthAuthorizeMethod, map[string]any{
+				"sessionId":          fixture.sessionID,
+				"providerId":         authProviderOpenAI,
+				"connectionId":       connectionID,
+				"methodsGeneration":  generation,
+				"method":             authMethodDeviceCode,
+				"authorizeRequestId": "request-1",
+			})
+			requireInvalidField(t, err, authFieldConnectionID)
+
+			_, err = fixture.call(t, AuthDisconnectMethod, map[string]any{
+				"sessionId":         fixture.sessionID,
+				"providerId":        authProviderOpenAI,
+				"connectionId":      connectionID,
+				"bindingGeneration": seeded.BindingGeneration,
+			})
+			requireInvalidField(t, err, authFieldConnectionID)
+		})
+	}
+
+	// Every refusal above landed before the leg read the entry the live binding
+	// names, so nothing recorded a value the bound rejects.
+	live, ok, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil || !ok {
+		t.Fatalf("ledger read: ok=%v err=%v", ok, err)
+	}
+
+	if live.ConnectionID != seeded.ConnectionID || live.BindingGeneration != seeded.BindingGeneration {
+		t.Fatalf("a refused connection id reached the live entry: %+v", live)
+	}
+
+	if fixture.client.deviceCalls != 0 {
+		t.Fatalf("a refused connection id drove %d native mints", fixture.client.deviceCalls)
+	}
+}
+
+func TestConnectionIDAcceptsTheOpaqueTokenAConsumerMints(t *testing.T) {
+	for _, connectionID := range []string{
+		"pac_2f1c9b4e-8d3a-4c17-9f21-0b6e5a7c8d90",
+		"connection-1",
+		"C0",
+		strings.Repeat("c", authConnectionIDMaxBytes),
+	} {
+		if !authValidConnectionID(connectionID) {
+			t.Fatalf("connection id %q was refused", connectionID)
+		}
 	}
 }

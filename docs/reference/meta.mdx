@@ -160,7 +160,10 @@ A failed `_codex/auth/*` leg returns JSON-RPC `-32000` whose `data` carries:
 There is no free-form field and no native message text. A caller-owned
 addressing failure — an unknown, superseded, or cross-session `flowId`, a stale
 `methodsGeneration`, or a `method` that does not match the flow — is invalid
-params (`-32602`) carrying the offending field path instead.
+params (`-32602`) carrying the offending field path instead. `connectionId` is
+caller-minted and bounded to at most 128 bytes of `A-Z`, `a-z`, `0-9`, `-`, and
+`_`; every leg that carries one checks it before the value is compared or
+recorded, and anything outside that shape is `-32602` naming `connectionId`.
 
 `binding_conflict` comes only from `_codex/auth/disconnect`, and it means the
 `connectionId` and `bindingGeneration` you sent do not match the binding the
