@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -114,12 +113,6 @@ func TestAttendedProviderAuthDeviceLoginCompletes(t *testing.T) {
 		codexacp.WithHome(home),
 		codexacp.WithProviderAuthRoot(authRoot),
 		codexacp.WithProviderAuthDirectHome(home),
-	}
-
-	// The attended tier runs under an operator's hands, and Darwin fails every
-	// native launch closed without this explicit opt-in.
-	if runtime.GOOS == "darwin" {
-		options = append(options, codexacp.WithDarwinBestEffortContainment())
 	}
 
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, options...)
