@@ -103,6 +103,116 @@ func TestAuthorizeReplaysTheSameRequestIDVerbatim(t *testing.T) {
 	}
 }
 
+// TestAuthorizeReplaysTheSameRequestIDAfterTheFlowTerminalized pins the whole
+// point of the idempotency key: the repeat that matters is the one a caller
+// sends after the first answer was lost, which is exactly when the flow it
+// names has already completed.
+func TestAuthorizeReplaysTheSameRequestIDAfterTheFlowTerminalized(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	first := fixture.authorize(t, authMethodDeviceCode, "request-1")
+	fixture.client.account = codex.Account{AuthMode: codex.AuthModeChatGPT}
+
+	fixture.broker.loginCompleted(t.Context(), codex.LoginCompletion{LoginID: "login-1", Success: true})
+
+	if state := fixture.status(t, first.FlowID).State; state != authStateAuthenticated {
+		t.Fatalf("state = %q, want authenticated", state)
+	}
+
+	before, _, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+
+	generation := fixture.mintGeneration(t)
+
+	result, err := fixture.call(t, AuthAuthorizeMethod, map[string]any{
+		"sessionId":          fixture.sessionID,
+		"providerId":         authProviderOpenAI,
+		"connectionId":       "connection-1",
+		"methodsGeneration":  generation,
+		"method":             authMethodDeviceCode,
+		"authorizeRequestId": "request-1",
+	})
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	if replayed, _ := result.(authAuthorizeResult); replayed != first {
+		t.Fatal("a replayed request id did not answer verbatim after the flow terminalized")
+	}
+
+	// No second native login, and no ledger revision: the repeat consumed
+	// nothing the first call had earned.
+	if fixture.client.deviceCalls != 1 {
+		t.Fatalf("a replay drove %d native mints", fixture.client.deviceCalls)
+	}
+
+	after, _, err := fixture.broker.ledger.read(authProviderOpenAI)
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+
+	if after != before {
+		t.Fatal("a replay rewrote the ledger entry")
+	}
+
+	if state := fixture.status(t, first.FlowID).State; state != authStateAuthenticated {
+		t.Fatalf("state after replay = %q, want authenticated", state)
+	}
+}
+
+// TestAuthorizeStopsReplayingOnceTheSessionCloses pins the other half: the
+// record lives exactly as long as the session that owns it.
+func TestAuthorizeStopsReplayingOnceTheSessionCloses(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+
+	first := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	fixture.broker.closeSession(acp.SessionId(fixture.sessionID))
+
+	if second := fixture.authorize(t, authMethodDeviceCode, "request-1"); second.FlowID == first.FlowID {
+		t.Fatal("a closed session still replayed its idempotency key")
+	}
+}
+
+// TestAuthorizeMintFailureAddressesTheFlowItNames pins the flowId a failed mint
+// returns against a record a caller can actually address, and pins that the
+// same key retries rather than replaying a presentation that was never
+// published.
+func TestAuthorizeMintFailureAddressesTheFlowItNames(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	fixture.client.deviceErr = errors.New("device mint refused")
+
+	generation := fixture.mintGeneration(t)
+
+	_, err := fixture.call(t, AuthAuthorizeMethod, map[string]any{
+		"sessionId":          fixture.sessionID,
+		"providerId":         authProviderOpenAI,
+		"connectionId":       "connection-1",
+		"methodsGeneration":  generation,
+		"method":             authMethodDeviceCode,
+		"authorizeRequestId": "request-1",
+	})
+	requireAuthCause(t, err, authCauseTransport)
+
+	flowID, _ := authErrorData(t, err)[authFieldFlowID].(string)
+	if flowID == "" {
+		t.Fatal("a mint failure carried no flow id")
+	}
+
+	if status := fixture.status(t, flowID); status.State != authStateFailed || status.Reason != authReasonTransport {
+		t.Fatalf("state/reason = %q/%q, want failed/transport", status.State, status.Reason)
+	}
+
+	fixture.client.deviceErr = nil
+
+	retried := fixture.authorize(t, authMethodDeviceCode, "request-1")
+	if retried.FlowID == flowID || retried.URL == "" {
+		t.Fatal("the same key after a failed mint replayed an unpublished presentation")
+	}
+}
+
 func TestAuthorizeSupersedesTheEarlierFlow(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -468,40 +467,56 @@ func TestAuthKeystoreAccountPartitionsByHome(t *testing.T) {
 func TestResolveAuthStoreMode(t *testing.T) {
 	home := t.TempDir()
 
-	if mode := resolveAuthStoreMode(Options{}, home); mode != authStoreModeFile {
-		t.Fatalf("mode with no config = %q", mode)
+	requireMode := func(t *testing.T, options Options, want string, label string) {
+		t.Helper()
+
+		mode, err := resolveAuthStoreMode(options, home)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+
+		if mode != want {
+			t.Fatalf("%s = %q, want %q", label, mode, want)
+		}
 	}
 
-	override := Options{Config: map[string]any{authStoreConfigKey: authStoreModeKeyring}}
-	if mode := resolveAuthStoreMode(override, home); mode != authStoreModeKeyring {
-		t.Fatalf("mode with an override = %q", mode)
-	}
-
-	empty := Options{Config: map[string]any{authStoreConfigKey: ""}}
-	if mode := resolveAuthStoreMode(empty, home); mode != authStoreModeFile {
-		t.Fatalf("mode with an empty override = %q", mode)
-	}
-
-	nonString := Options{Config: map[string]any{authStoreConfigKey: 7}}
-	if mode := resolveAuthStoreMode(nonString, home); mode != authStoreModeFile {
-		t.Fatalf("mode with a non-string override = %q", mode)
-	}
+	requireMode(t, Options{}, authStoreModeFile, "mode with no config")
+	requireMode(t, Options{Config: map[string]any{authStoreConfigKey: authStoreModeKeyring}}, authStoreModeKeyring, "mode with an override")
+	requireMode(t, Options{Config: map[string]any{authStoreConfigKey: ""}}, authStoreModeFile, "mode with an empty override")
+	requireMode(t, Options{Config: map[string]any{authStoreConfigKey: 7}}, authStoreModeFile, "mode with a non-string override")
 
 	config := filepath.Join(home, authConfigFileName)
 	if err := os.WriteFile(config, []byte("model = \"gpt\"\ncli_auth_credentials_store = \"keyring\"\n"), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
-	if mode := resolveAuthStoreMode(Options{}, home); mode != authStoreModeKeyring {
-		t.Fatalf("mode from config = %q", mode)
-	}
+	requireMode(t, Options{}, authStoreModeKeyring, "mode from config")
 
 	if err := os.WriteFile(config, []byte("model = \"gpt\"\n"), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
-	if mode := resolveAuthStoreMode(Options{}, home); mode != authStoreModeFile {
-		t.Fatalf("mode from a config without the key = %q", mode)
+	requireMode(t, Options{}, authStoreModeFile, "mode from a config without the key")
+}
+
+// TestResolveAuthStoreModeFailsClosedOnAnUnreadableConfig pins the difference
+// between a home that never configured a selector and one whose selector could
+// not be read: only the first is the documented default, and reading the second
+// as the default hands a keyring or ephemeral home a file-shaped harvest.
+func TestResolveAuthStoreModeFailsClosedOnAnUnreadableConfig(t *testing.T) {
+	restoreCredentialHooks(t)
+
+	home := t.TempDir()
+
+	authReadFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+
+	if _, err := resolveAuthStoreMode(Options{}, home); err == nil {
+		t.Fatal("an unreadable config resolved to a store mode")
+	}
+
+	broker := newProviderAuthFixture(t).broker
+	if _, err := broker.readStoredCredential(); err == nil {
+		t.Fatal("an unreadable config harvested a store")
 	}
 }
 
@@ -532,79 +547,5 @@ func TestProviderCredentialRejectsAnUnacceptedVariantWithNoExtraFields(t *testin
 	var credential ProviderCredential
 	if err := json.Unmarshal([]byte(`{"type":"api"}`), &credential); err == nil {
 		t.Fatal("an unaccepted variant decoded")
-	}
-}
-
-// keystoreFixtureMarker is written by the credential-residence fixture's
-// entrypoint. The matrix below needs a live Secret Service, so it runs inside
-// that container and nowhere else.
-const keystoreFixtureMarker = "/run/acp-go-codex-keystore/marker"
-
-// TestKeystoreResidenceMatrix proves which credential store the read path wins
-// from under each configured mode. Both stores hold a distinguishable canary, so
-// a mode that read the wrong one is visible rather than merely unproven.
-func TestKeystoreResidenceMatrix(t *testing.T) {
-	if _, err := os.Stat(keystoreFixtureMarker); err != nil {
-		t.Skip("the credential-residence matrix runs inside the keystore fixture container")
-	}
-
-	cases := map[string]struct {
-		mode    string
-		wins    string
-		harvest bool
-	}{
-		"file":      {mode: authStoreModeFile, wins: "file-canary-access", harvest: true},
-		"keyring":   {mode: authStoreModeKeyring, wins: "keystore-canary-access", harvest: true},
-		"auto":      {mode: authStoreModeAuto},
-		"ephemeral": {mode: authStoreModeEphemeral},
-	}
-
-	for name, testCase := range cases {
-		t.Run(name, func(t *testing.T) {
-			fixture := newProviderAuthFixture(t, WithCodexConfigOverrides(map[string]any{
-				authStoreConfigKey: testCase.mode,
-			}))
-
-			seedStoredLogin(t, fixture.home, storedLoginWithAccess("file-canary-access"))
-			seedKeystoreCanary(t, fixture.home, storedLoginWithAccess("keystore-canary-access"))
-
-			stored, err := fixture.broker.readStoredCredential()
-			if !testCase.harvest {
-				if err == nil {
-					t.Fatalf("%s harvested a store with no determinate authority", testCase.mode)
-				}
-
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("%s read: %v", testCase.mode, err)
-			}
-
-			if stored.AccessToken != testCase.wins {
-				t.Fatalf("%s read %q, want %q", testCase.mode, stored.AccessToken, testCase.wins)
-			}
-		})
-	}
-}
-
-func storedLoginWithAccess(access string) string {
-	return `{"auth_mode":"chatgpt","tokens":{"access_token":"` + access +
-		`","refresh_token":"canary-refresh","account_id":"canary-account"}}`
-}
-
-// seedKeystoreCanary plants canary material through the platform tool rather
-// than through the read path, so the assertion is not a round trip of one
-// library against itself.
-func seedKeystoreCanary(t *testing.T, home string, contents string) {
-	t.Helper()
-
-	command := exec.Command("secret-tool", "store", "--label=codex-canary",
-		"service", authKeystoreService,
-		"username", authKeystoreAccount(home))
-	command.Stdin = strings.NewReader(contents)
-
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("seed keystore canary: %v: %s", err, output)
 	}
 }

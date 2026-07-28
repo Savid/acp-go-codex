@@ -311,12 +311,12 @@ func (p *providerAuth) claimHarvest(flow *authFlow) error {
 // store that may not be authoritative: auto resolves to whichever store answers
 // first, and ephemeral leaves nothing anywhere.
 func (p *providerAuth) readStoredCredential() (codexStoredLogin, error) {
-	mode := resolveAuthStoreMode(p.agent.options, p.directHome)
+	mode, err := resolveAuthStoreMode(p.agent.options, p.directHome)
+	if err != nil {
+		return codexStoredLogin{}, err
+	}
 
-	var (
-		raw []byte
-		err error
-	)
+	var raw []byte
 
 	switch mode {
 	case authStoreModeFile:
@@ -364,21 +364,29 @@ func authKeystoreAccount(home string) string {
 // resolveAuthStoreMode reads the configured store rather than assuming the
 // default. An adapter-supplied override wins because it is what the app-server
 // itself runs under; otherwise the value comes from the home's own config file.
-func resolveAuthStoreMode(options Options, home string) string {
+// A home with no config file is the documented default; a config file that
+// cannot be read establishes nothing, and a home configured keyring or
+// ephemeral whose selector went unread would take a file-shaped harvest of a
+// store that is not authoritative.
+func resolveAuthStoreMode(options Options, home string) (string, error) {
 	if value, ok := options.Config[authStoreConfigKey].(string); ok && value != "" {
-		return value
+		return value, nil
 	}
 
 	contents, err := authReadFile(filepath.Join(home, authConfigFileName))
 	if err != nil {
-		return authStoreModeFile
+		if errors.Is(err, os.ErrNotExist) {
+			return authStoreModeFile, nil
+		}
+
+		return "", fmt.Errorf("read codex credential store mode: %w", err)
 	}
 
 	if value, ok := topLevelTOMLScalar(string(contents), authStoreConfigKey); ok {
-		return value
+		return value, nil
 	}
 
-	return authStoreModeFile
+	return authStoreModeFile, nil
 }
 
 // topLevelTOMLScalar reads one top-level scalar out of a config file. The

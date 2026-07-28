@@ -86,6 +86,30 @@ func TestNewAuthLedgerRejectsARelativeRoot(t *testing.T) {
 	}
 }
 
+// TestNewAuthLedgerRestrictsTheConfiguredRoot pins the mode of the directory
+// the operator named, not only of the leaf under it: a pre-existing root keeps
+// whatever mode it was created with, and the ledger is only as private as the
+// directory holding it.
+func TestNewAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, Home: "/home"}); err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat root: %v", err)
+	}
+
+	if info.Mode().Perm() != authLedgerDirMode {
+		t.Fatalf("root mode = %v, want %v", info.Mode().Perm(), os.FileMode(authLedgerDirMode))
+	}
+}
+
 func TestNewAuthLedgerPreparationFailures(t *testing.T) {
 	options := Options{ProviderAuthRoot: t.TempDir(), Home: "/home"}
 
@@ -95,6 +119,28 @@ func TestNewAuthLedgerPreparationFailures(t *testing.T) {
 		},
 		"chmod": func() {
 			ledgerChmod = func(string, os.FileMode) error { return errors.New("chmod") }
+		},
+		// The configured root and the leaf under it are prepared separately, so
+		// a failure that only the leaf reaches is its own case.
+		"leafmkdir": func() {
+			mkdirAll := ledgerMkdirAll
+			ledgerMkdirAll = func(path string, mode os.FileMode) error {
+				if path == options.ProviderAuthRoot {
+					return mkdirAll(path, mode)
+				}
+
+				return errors.New("mkdir")
+			}
+		},
+		"leafchmod": func() {
+			chmod := ledgerChmod
+			ledgerChmod = func(path string, mode os.FileMode) error {
+				if path == options.ProviderAuthRoot {
+					return chmod(path, mode)
+				}
+
+				return errors.New("chmod")
+			}
 		},
 		"stat": func() {
 			ledgerStat = func(string) (os.FileInfo, error) { return nil, errors.New("stat") }

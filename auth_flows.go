@@ -85,6 +85,9 @@ type authFlow struct {
 	expiresAt           time.Time
 	credentialExpiresAt int64
 	harvested           bool
+	// presented reports whether the mint published this record's presentation.
+	// A record that never reached one has no verbatim answer to replay.
+	presented bool
 
 	nextProbeAt   time.Time
 	probeInterval time.Duration
@@ -207,16 +210,22 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		disarm:             make(chan struct{}),
 	}
 
-	presentation, err := p.mintPresentation(ctx, session, flow)
-	if err != nil {
-		return nil, err
-	}
-
-	flow.presentation = presentation
-
+	// The flow is registered against the ledger entry that already names it, so
+	// the flowId every later answer carries — a mint failure's included —
+	// addresses a real record.
 	p.mu.Lock()
 	p.flows[key] = flow
 	p.byID[flowID] = flow
+	p.mu.Unlock()
+
+	presentation, cause := p.mintPresentation(ctx, session, flow)
+	if cause != "" {
+		return nil, p.fail(flow, cause, false)
+	}
+
+	p.mu.Lock()
+	flow.presentation = presentation
+	flow.presented = true
 	p.mu.Unlock()
 
 	p.armCompleter(flow)
@@ -277,13 +286,16 @@ func decodeAuthorizeRequest(fields map[string]json.RawMessage) (authorizeRequest
 
 // replayAuthorize answers a repeated idempotency key verbatim from memory: no
 // supersede, no completer disarm, no destruction of flow state, and no native
-// call.
+// call. The record it answers from survives every terminal transition and is
+// dropped only when the session closes, so a repeat after completion returns
+// what the first call returned instead of driving a second login. A record
+// whose mint never published a presentation has nothing to replay.
 func (p *providerAuth) replayAuthorize(key authFlowKey, requestID string) (authAuthorizeResult, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	flow, ok := p.flows[key]
-	if !ok || flow.authorizeRequestID != requestID {
+	if !ok || !flow.presented || flow.authorizeRequestID != requestID {
 		return authAuthorizeResult{}, false
 	}
 
@@ -310,8 +322,9 @@ func (p *providerAuth) resolveMethod(request authorizeRequest) (authCatalogMetho
 
 // mintPresentation performs the native mint for the device method and builds
 // the wire presentation. The API-key method has nothing to mint: its value is
-// submitted through callback and applied natively there.
-func (p *providerAuth) mintPresentation(ctx context.Context, session *session, flow *authFlow) (authAuthorizeResult, error) {
+// submitted through callback and applied natively there. A non-empty cause is
+// the leg's failure, and the flow it names owns the transition.
+func (p *providerAuth) mintPresentation(ctx context.Context, session *session, flow *authFlow) (authAuthorizeResult, string) {
 	result := authAuthorizeResult{
 		FlowID:        flow.id,
 		FlowExpiresAt: flow.expiresAt.UnixMilli(),
@@ -321,12 +334,12 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *session, f
 	if flow.method.Type == authMethodTypeAPI {
 		result.Interaction = authInteractionSecret
 
-		return result, nil
+		return result, ""
 	}
 
 	client := session.nativeAuthClient()
 	if client == nil {
-		return authAuthorizeResult{}, authFailed(authCauseTransport, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseTransport
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
@@ -334,29 +347,32 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *session, f
 
 	login, err := client.StartDeviceCodeLogin(callCtx)
 	if err != nil {
-		return authAuthorizeResult{}, authFailed(authNativeCause(callCtx, err), flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authNativeCause(callCtx, err)
 	}
 
 	if authLoopbackHost(login.VerificationURL) {
-		return authAuthorizeResult{}, authFailed(authCauseUnsupportedVariant, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseUnsupportedVariant
 	}
 
 	verificationURL, ok := authDisplayURL(login.VerificationURL)
 	if !ok {
-		return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseNativeVeto
 	}
 
 	userCode, ok := authDisplayUserCode(login.UserCode)
 	if !ok {
-		return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseNativeVeto
 	}
 
+	p.mu.Lock()
 	flow.loginID = login.LoginID
+	p.mu.Unlock()
+
 	result.Interaction = authInteractionWait
 	result.URL = verificationURL
 	result.UserCode = userCode
 
-	return result, nil
+	return result, ""
 }
 
 // armCompleter bounds the flow by its effective deadline. It is armed exactly
@@ -379,14 +395,14 @@ func (p *providerAuth) armCompleter(flow *authFlow) {
 }
 
 // supersede terminalizes the flow a new authorize replaces. The superseded
-// flowId then addresses nothing. Only a pending flow is ever reachable here:
-// terminalizing a flow already frees its pending slot.
+// flowId then addresses nothing. A flow that already terminalized was not
+// superseded by anything and keeps both its record and its id.
 func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	flow, ok := p.flows[key]
-	if !ok {
+	if !ok || authTerminal(flow.state) {
 		return
 	}
 
@@ -539,7 +555,6 @@ func (p *providerAuth) terminalize(flow *authFlow, state string, reason string, 
 	flow.credentialExpiresAt = credentialExpiresAt
 
 	flow.stopCompleter()
-	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
 }
 
 func (p *providerAuth) flowState(flow *authFlow) string {
@@ -801,8 +816,9 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 }
 
 // closeSession cancels every pending flow the session owns, terminalizing each
-// as cancelled/session_closed. It runs before the native interrupt, so a flow is
-// never abandoned to a process already being torn down.
+// as cancelled/session_closed, and drops every record the session could still
+// replay an idempotency key from. It runs before the native interrupt, so a flow
+// is never abandoned to a process already being torn down.
 func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 	p.cancelFlows(func(key authFlowKey) bool { return key.sessionID == sessionID })
 }
@@ -824,6 +840,10 @@ func (p *providerAuth) cancelFlows(match func(authFlowKey) bool) {
 
 		delete(p.flows, key)
 		delete(p.byID, flow.id)
+
+		if authTerminal(flow.state) {
+			continue
+		}
 
 		flow.state = authStateCancelled
 		flow.reason = authReasonSessionClosed

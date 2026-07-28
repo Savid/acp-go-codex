@@ -118,6 +118,18 @@ func newAuthLedger(options Options) (*authLedger, error) {
 		return nil, errors.New("provider auth root must be an absolute path")
 	}
 
+	// The configured root is restricted in its own right, not merely the leaf
+	// under it: an operator-supplied directory that already exists keeps
+	// whatever mode it was created with, and the ledger under it is only as
+	// private as the directory holding it.
+	if err := ledgerMkdirAll(root, authLedgerDirMode); err != nil {
+		return nil, fmt.Errorf("create provider auth root: %w", err)
+	}
+
+	if err := ledgerChmod(root, authLedgerDirMode); err != nil {
+		return nil, fmt.Errorf("restrict provider auth root: %w", err)
+	}
+
 	dir := filepath.Join(root, authLedgerVendorDir, authLedgerHomeKey(options.Home), authLedgerLeafDir)
 	if err := ledgerMkdirAll(dir, authLedgerDirMode); err != nil {
 		return nil, fmt.Errorf("create provider auth ledger root: %w", err)

@@ -34,7 +34,7 @@ test-integration-live:
 test-integration-attended:
 	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/...
 
-## test-integration-keystore: run credential-residence tests against the container fixture
+## test-integration-keystore: run the three-configuration credential-residence matrix
 test-integration-keystore:
 	ACP_GO_CODEX_RUN_INTEGRATION=1 ACP_GO_CODEX_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -v -run TestKeystore ./...
 

@@ -21,6 +21,13 @@ const (
 	keystoreEnvFile   = "/run/acp-go-codex-keystore/env"
 	keystoreRoundTrip = "/usr/local/bin/roundtrip.sh"
 	keystoreProbePath = "/usr/local/bin/residence.test"
+
+	// The probe reads its configuration from the environment the driver
+	// exports. The names are spelled here as well as beside the read path
+	// because the two live in different packages and neither exports them.
+	envKeystoreService     = "ACP_GO_CODEX_KEYSTORE_SERVICE"
+	keystoreServicePresent = "present"
+	keystoreServiceAbsent  = "absent"
 )
 
 func requireKeystoreTier(t *testing.T) {
@@ -37,10 +44,14 @@ func requireKeystoreTier(t *testing.T) {
 	}
 }
 
-// TestKeystoreProviderAuthResidence runs the credential-residence matrix against
-// a live Secret Service. The matrix itself lives beside the read path it
+// TestKeystoreProviderAuthResidence runs the credential-residence matrix in
+// both Linux configurations. The matrix itself lives beside the read path it
 // exercises; this test builds the fixture, proves the service answers a real
-// store/lookup round trip, and runs the matrix inside it.
+// store/lookup round trip, and runs the matrix inside it twice — once with the
+// session bus that reaches the Secret Service, and once without one, which is
+// the keystore-absent configuration an ungated run would never pick. The macOS
+// third of the matrix needs no container and runs from the same gate on a macOS
+// runner.
 func TestKeystoreProviderAuthResidence(t *testing.T) {
 	requireKeystoreTier(t)
 
@@ -77,36 +88,50 @@ func TestKeystoreProviderAuthResidence(t *testing.T) {
 		t.Fatalf("copy residence probe: %v", err)
 	}
 
-	code, output, err := container.Exec(ctx, []string{
-		"/bin/sh", "-c",
-		". " + keystoreEnvFile + "; export DBUS_SESSION_BUS_ADDRESS; exec " +
-			keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'",
-	})
-	if err != nil {
-		t.Fatalf("run residence matrix: %v", err)
+	// The bus address is what reaches the Secret Service, so withholding it is
+	// the whole difference between the two configurations: the daemon is still
+	// running, and the read path simply has no service to ask.
+	configurations := map[string]string{
+		keystoreServicePresent: ". " + keystoreEnvFile + "; export DBUS_SESSION_BUS_ADDRESS; ",
+		keystoreServiceAbsent:  "unset DBUS_SESSION_BUS_ADDRESS; ",
 	}
 
-	logs, readErr := io.ReadAll(output)
-	if readErr != nil {
-		t.Fatalf("read residence output: %v", readErr)
-	}
+	for state, prelude := range configurations {
+		t.Run(state, func(t *testing.T) {
+			code, output, err := container.Exec(ctx, []string{
+				"/bin/sh", "-c",
+				prelude + "export " + envKeystoreService + "=" + state + " " +
+					envRunIntegration + "=1 " + envRunKeystore + "=1; exec " +
+					keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'",
+			})
+			if err != nil {
+				t.Fatalf("run residence matrix: %v", err)
+			}
 
-	t.Log(string(logs))
+			logs, readErr := io.ReadAll(output)
+			if readErr != nil {
+				t.Fatalf("read residence output: %v", readErr)
+			}
 
-	if code != 0 {
-		t.Fatalf("residence matrix exited %d", code)
+			t.Log(string(logs))
+
+			if code != 0 {
+				t.Fatalf("residence matrix exited %d", code)
+			}
+		})
 	}
 }
 
 // buildResidenceProbe compiles the package that owns the read path for the
-// fixture's platform. The matrix cannot run on the host: only the container has
-// a Secret Service to answer it.
+// fixture's platform. Both halves of this tier build only under the integration
+// tag: a residence test compiled into an ungated `go test ./...` is the defect
+// the split exists to prevent.
 func buildResidenceProbe(t *testing.T) string {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "residence.test")
 
-	command := exec.Command("go", "test", "-c", "-o", out, ".")
+	command := exec.Command("go", "test", "-c", "-tags=integration", "-o", out, ".")
 	command.Dir = ".."
 	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
 

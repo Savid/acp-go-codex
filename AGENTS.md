@@ -37,9 +37,11 @@ tests always launch Codex with an isolated temp `CODEX_HOME`.
 `make test-integration-attended` sets `ACP_GO_CODEX_RUN_ATTENDED=1` and runs the
 provider-auth flows a human must approve at the provider; it fails rather than
 skips when nobody answers. `make test-integration-keystore` sets
-`ACP_GO_CODEX_RUN_KEYSTORE=1` and runs the credential-residence matrix against
-the container fixture in `integration/keystore`; it fails rather than skips when
-no container runtime is available. Neither joins `make audit`. When `OPENAI_API_KEY`
+`ACP_GO_CODEX_RUN_KEYSTORE=1` and runs the credential-residence matrix in all
+three configurations: the keystore-present and keystore-absent Linux halves
+inside the container fixture in `integration/keystore`, and the macOS third on a
+macOS host. It fails rather than skips when no container runtime is available.
+Neither joins `make audit`. When `OPENAI_API_KEY`
 is set and `ACP_GO_CODEX_HOME` is unset, tests use a fresh temp home. Otherwise
 they copy the source home into the temp home and clear copied auth refresh
 tokens. If neither env auth nor copied `auth.json` is available, tests fail
