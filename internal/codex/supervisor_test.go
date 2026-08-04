@@ -135,6 +135,7 @@ func TestSupervisorCommandAndProof(t *testing.T) {
 	proof := &supervisorProof{started: started, completion: complete}
 	require.NoError(t, writeSupervisorMarker(complete))
 	require.NoError(t, proof.awaitCompletion())
+	require.NoFileExists(t, complete)
 	require.NoError(t, (*supervisorProof)(nil).awaitCompletion())
 
 	badProof := &supervisorProof{started: filepath.Join(root, "directory"), completion: filepath.Join(root, "completion-directory")}
@@ -155,6 +156,29 @@ func TestSupervisorCommandAndProof(t *testing.T) {
 	}).awaitCompletion()
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	<-lateDone
+}
+
+func TestGuardianCleansQuarantineMarkersWithoutCaller(t *testing.T) {
+	root := t.TempDir()
+	config := supervisorConfig{
+		Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"),
+		Quarantine: filepath.Join(root, "quarantine"), NativePIDFile: filepath.Join(root, "pid"),
+		ProviderSnapshot: filepath.Join(root, "snapshot"),
+	}
+	for _, path := range []string{config.Started, config.Quarantine, config.NativePIDFile, config.ProviderSnapshot} {
+		require.NoError(t, writeSupervisorMarker(path))
+	}
+
+	livenessDone := make(chan error)
+	cleanupDone := make(chan error, 1)
+	go func() { cleanupDone <- finishQuarantinedLiveness(livenessDone, config) }()
+	require.FileExists(t, config.Quarantine)
+	livenessDone <- nil
+	require.ErrorIs(t, <-cleanupDone, ErrProcessContainmentIncomplete)
+
+	for _, path := range []string{config.Started, config.Completion, config.Quarantine, config.NativePIDFile, config.ProviderSnapshot} {
+		require.NoFileExists(t, path)
+	}
 }
 
 func TestSupervisorStreamAndQuiescenceHelpers(t *testing.T) {
@@ -211,5 +235,6 @@ func TestSupervisorConfigRootPermissions(t *testing.T) {
 	defer cancel()
 	cmd, _, err := supervisorCommand(ctx, supervisorConfig{Scratch: filepath.Join(root, "other"), Home: config.Home, NativePath: config.NativePath, NativeEnv: os.Environ(), Isolation: testProcessIsolation()})
 	require.NoError(t, err)
-	require.Equal(t, supervisorQuiesceWindow+time.Second, cmd.WaitDelay)
+	require.Zero(t, cmd.WaitDelay)
+	require.Nil(t, cmd.Cancel)
 }

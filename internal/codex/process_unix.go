@@ -14,12 +14,6 @@ var (
 	killProcessID     = syscall.Kill
 )
 
-func startProcess(cmd *exec.Cmd) error {
-	configureProcess(cmd)
-
-	return cmd.Start()
-}
-
 func terminateProcess(cmd *exec.Cmd) error {
 	return signalProcess(cmd, syscall.SIGTERM)
 }

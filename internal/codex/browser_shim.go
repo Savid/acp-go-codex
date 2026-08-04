@@ -38,6 +38,14 @@ type browserShim struct {
 	dir string
 }
 
+func (s *browserShim) handoff(isolation *ProcessIsolation) error {
+	if s == nil {
+		return nil
+	}
+
+	return handoffGeneratedNativeTree(s.dir, isolation)
+}
+
 // environ returns env with the shim ahead of PATH and BROWSER pointed at one of
 // its no-ops. A nil shim leaves env untouched: a leg that opens no browser runs
 // with the environment it would have had.

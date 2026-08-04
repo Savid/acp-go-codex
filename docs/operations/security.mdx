@@ -8,6 +8,24 @@ The controls below decide how much of the operator's Codex install a client can
 reach. For how common failures surface, see
 [Troubleshooting](/docs/operations/troubleshooting).
 
+## Standalone command boundary
+
+The standalone command launches native work only on Linux and requires the
+root-owned mode-`0600` `-process-isolation-config` policy. Resolution walks
+from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
+must be root-owned and not writable by group or other, and the final single-link
+policy inode is read through the descriptor that was validated. The configured
+account home is resolved the same way, must be a target-owned mode-`0700`
+directory beneath protected root-owned ancestry, and cannot be `/root` or
+`/nonexistent`.
+
+The adapter remains root, but its ambient environment is never copied wholesale
+to the child. Only the complete literal `baseEnvironment` plus names in
+`inheritEnvironment` reach native work. The CLI refuses Darwin, Windows, and
+other platforms; Darwin best-effort containment remains an explicit
+embedded-Go option only. `-version` and Darwin containment diagnostics launch
+no native worker and are exempt.
+
 ## Home and account boundary
 
 `-home` and `WithHome` choose the `CODEX_HOME` used by launched Codex processes.
@@ -18,25 +36,38 @@ Only one cooperating app-server or terminal login/logout command may mutate a
 writable Codex home.
 The adapter takes two mode-0600, never-unlinked files in that home —
 `acp-go-codex-runtime.claim.lock` and
-`acp-go-codex-runtime.liveness.lock` — with build-tagged Unix `flock` or Windows
-`LockFileEx` backends. A guardian process owns only the claim lock; its separate
-liveness supervisor owns only the liveness lock and directly parents the native
-root. The native process never inherits either descriptor. Linux initially
-places the root and descendants in a process group; Windows starts the root
-suspended, assigns it to a named Job Object with `KILL_ON_JOB_CLOSE`, and only
-then resumes it. On Linux, each dedicated supervisor is also a child subreaper.
+`acp-go-codex-runtime.liveness.lock` — with build-tagged Unix `flock` and a
+Windows `LockFileEx` compile backend. The latter does not make native launch
+supported. A guardian process owns only the claim lock; its separate liveness
+supervisor owns only the liveness lock and directly parents the native root.
+The native process never inherits either descriptor. On Linux, each dedicated
+supervisor initially places the root and descendants in a process group and is
+also a child subreaper.
 It kills and reaps adopted descendants even when they escape the original
 process group with `setsid`, then requires a non-reaping
 `waitid(..., WNOWAIT)` `ECHILD` result as
-the kernel proof that no child remains. Windows requires the Job Object's active
-process count to reach zero. If either supervisor dies, the survivor performs
-the same containment; adapter/control EOF does too. Only after that proof does
-shutdown release liveness and then claim, so a second claimant fails closed
-while any old tree can still write the home.
+the kernel proof that no child remains. If either supervisor dies, the survivor
+performs the same containment; adapter/control EOF does too. Only after that
+proof does shutdown release liveness and then claim, so a second claimant fails
+closed while any old tree can still write the home.
 
-Linux and Windows provide authoritative runtime containment. Darwin defaults to
-the same fail-closed behavior, but `-darwin-best-effort-containment` or
-`WithDarwinBestEffortContainment()` explicitly accepts a weaker boundary. Each
+On Linux both supervisors stay root and run from `/` with a closed private
+environment. Private launch configuration carries the target identity and
+native environment; only the Codex app-server receives the configured UID/GID
+with no supplementary groups. The guardian acquires the root-owned
+`/run/acp-go/agent-identities/<uid>.lock`, and the liveness supervisor shares
+that same locked open-file description until the descendant wait queue is
+empty. The native tree inherits no launch, control, proof, guardian, or lock
+descriptor, so it cannot forge completion or overlap another provider tree
+using the same host identity.
+
+Linux provides authoritative runtime containment. Windows rejects native launch
+before spawning Codex because its process API cannot apply the mandatory Unix
+UID/GID identity boundary with empty supplementary groups. Windows
+cross-compilation proves only that this refusal path builds; it does not
+establish runtime support. Embedded Darwin hosts default to the same
+fail-closed behavior, but `WithDarwinBestEffortContainment()` explicitly
+accepts a weaker boundary. Each
 native launch receives a fresh process group; the liveness supervisor captures
 that original PGID while the sole direct-child waiter is paused, records the
 child identity, begins that waiter before readiness, then uses one memoized
@@ -45,8 +76,8 @@ until the original group is absent and the direct child is reaped.
 
 This is deliberately not authoritative. A descendant can call `setsid` and
 escape. Darwin exposes only a numeric PGID, so reuse can cause collateral
-signalling. The standalone command therefore prints an unconditional warning,
-and provider-descendant inventory is unavailable rather than reported as zero.
+signalling. Embedded hosts receive an unconditional warning, and
+provider-descendant inventory is unavailable rather than reported as zero.
 FreeBSD, OpenBSD, NetBSD, and other unsupported platforms remain fail closed.
 
 Before a Darwin best-effort launch, Codex writes a mode-0600 schema-1 record in
@@ -64,6 +95,8 @@ Linux accepts ext2, ext3, ext4, XFS, Btrfs, F2FS, and tmpfs; Windows accepts
 fixed or RAM drives formatted as NTFS or ReFS. Network mounts, overlay
 filesystems, unknown filesystem types, and platforms without a proved backend
 fail closed before either native runtime or terminal account mutation starts.
+The Windows filesystem check is only part of the compiled refusal path and
+does not override the mandatory identity-boundary rejection.
 
 ACP logout is disabled by default and is refused unless the adapter is started
 with `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. See

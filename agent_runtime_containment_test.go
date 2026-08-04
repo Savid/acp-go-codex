@@ -31,7 +31,7 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 		},
 	}))
 	want := RuntimeContainmentUnavailable
-	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+	if runtime.GOOS == "linux" {
 		want = RuntimeContainmentAuthoritative
 	}
 	if got := defaultAgent.ContainmentMode(); got != want {
@@ -88,11 +88,13 @@ func TestContainmentModeSelections(t *testing.T) {
 	original := containmentGOOS
 	t.Cleanup(func() { containmentGOOS = original })
 
-	for _, platform := range []string{"linux", "windows"} {
-		containmentGOOS = platform
-		if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
-			t.Fatalf("%s mode = %q", platform, got)
-		}
+	containmentGOOS = "linux"
+	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("Linux mode = %q", got)
+	}
+	containmentGOOS = "windows"
+	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("Windows mode = %q", got)
 	}
 
 	containmentGOOS = "darwin"

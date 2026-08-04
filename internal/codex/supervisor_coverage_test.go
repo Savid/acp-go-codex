@@ -72,6 +72,9 @@ func preserveSupervisorGlobals(t *testing.T) {
 	oldGuardianContainment := supervisorNewGuardianContainment
 	oldLivenessContainment := supervisorOpenLivenessContainment
 	oldGuardianQuiesce := supervisorGuardianQuiesce
+	oldLivenessQuiesce := supervisorLivenessQuiesce
+	oldQuarantineRetry := supervisorQuarantineRetry
+	oldGuardianQuarantineRetry := supervisorGuardianQuarantineRetry
 	oldInput := supervisorInput
 	oldOutput := supervisorOutput
 	oldError := supervisorError
@@ -86,6 +89,9 @@ func preserveSupervisorGlobals(t *testing.T) {
 		supervisorNewGuardianContainment = oldGuardianContainment
 		supervisorOpenLivenessContainment = oldLivenessContainment
 		supervisorGuardianQuiesce = oldGuardianQuiesce
+		supervisorLivenessQuiesce = oldLivenessQuiesce
+		supervisorQuarantineRetry = oldQuarantineRetry
+		supervisorGuardianQuarantineRetry = oldGuardianQuarantineRetry
 		supervisorInput = oldInput
 		supervisorOutput = oldOutput
 		supervisorError = oldError

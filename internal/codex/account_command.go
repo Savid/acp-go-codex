@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 const (
@@ -58,6 +59,9 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	if options.CodexHome == "" {
 		return errors.New("codex writable home is required for account mutation")
 	}
+	if err := validateNativeOwnedDirectory(options.CodexHome, options.ProcessIsolation); err != nil {
+		return fmt.Errorf("validate codex writable home: %w", err)
+	}
 
 	nativeEnv, err := buildProcessEnvironment(options.ProcessIsolation, options.Env, map[string]string{envCodexHome: options.CodexHome})
 	if err != nil {
@@ -88,6 +92,9 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		if err != nil {
 			return err
 		}
+		if err := shim.handoff(options.ProcessIsolation); err != nil {
+			return errors.Join(err, shim.remove())
+		}
 	}
 
 	defer func() {
@@ -109,13 +116,17 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 			returnErr = errors.Join(returnErr, accountRemoveAll(scratch))
 		}
 	}()
+	lockRoot, err := HomeLockRoot(scratchParent, options.CodexHome)
+	if err != nil {
+		return err
+	}
 
 	cmd, proof, err := accountSupervisorCommand(ctx, supervisorConfig{
 		NativePath:       path,
 		NativeArgs:       args,
 		NativeEnv:        shim.environ(nativeEnv),
 		Isolation:        options.ProcessIsolation,
-		Home:             options.CodexHome,
+		Home:             lockRoot,
 		Scratch:          scratch,
 		ScratchParent:    scratchParent,
 		LifecycleKind:    lifecycleDiscovery,
@@ -130,7 +141,8 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	cmd.Stdout = options.Stdout
 	cmd.Stderr = options.Stderr
 
-	if err := accountStartProcess(cmd); err != nil {
+	waiter, err := accountStartProcess(cmd)
+	if err != nil {
 		_ = proof.closeInherited()
 
 		return err
@@ -138,13 +150,18 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 
 	if closeErr := proof.closeInherited(); closeErr != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+
+		waiter.start()
+		<-waiter.result()
 
 		return fmt.Errorf("close inherited supervisor config: %w", closeErr)
 	}
 
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
+	waiter.start()
+	waitDone := waiter.result()
+
+	quarantinePoll := time.NewTicker(10 * time.Millisecond)
+	defer quarantinePoll.Stop()
 
 	signals := options.Signals
 
@@ -152,6 +169,15 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		select {
 		case waitErr := <-waitDone:
 			return errors.Join(waitErr, proof.awaitCompletion())
+		case <-quarantinePoll.C:
+			quarantined, quarantineErr := proof.quarantineDetected()
+			if quarantineErr != nil {
+				return errors.Join(ErrProcessContainmentIncomplete, quarantineErr)
+			}
+
+			if quarantined {
+				return proof.awaitCompletion()
+			}
 		case signalValue, ok := <-signals:
 			if !ok {
 				signals = nil

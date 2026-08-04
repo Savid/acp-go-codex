@@ -279,13 +279,14 @@ func TestCommandWaitJoinsSupervisorCompletion(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start failing command: %v", err)
 	}
+	waiter := newSupervisorWaiter(cmd, false)
 
 	completion := filepath.Join(t.TempDir(), "complete")
 	if err := writeSupervisorMarker(completion); err != nil {
 		t.Fatalf("write supervisor completion: %v", err)
 	}
 
-	proc := &process{cmd: cmd, supervisor: &supervisorProof{completion: completion}}
+	proc := &process{cmd: cmd, supervisor: &supervisorProof{completion: completion}, processWaiter: waiter}
 	proc.beginWait()
 	<-proc.waitDone
 	if proc.waitErr == nil {
@@ -298,6 +299,7 @@ func TestCommandWaitRequiresCompletionAfterSuccessfulGuardianExit(t *testing.T) 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start successful command: %v", err)
 	}
+	waiter := newSupervisorWaiter(cmd, false)
 
 	root := t.TempDir()
 	started := filepath.Join(root, "started")
@@ -309,7 +311,7 @@ func TestCommandWaitRequiresCompletionAfterSuccessfulGuardianExit(t *testing.T) 
 		started:        started,
 		completion:     filepath.Join(root, "missing-completion"),
 		completionWait: 20 * time.Millisecond,
-	}}
+	}, processWaiter: waiter}
 	proc.beginWait()
 	<-proc.waitDone
 	if !errors.Is(proc.waitErr, ErrProcessContainmentIncomplete) {
@@ -326,13 +328,15 @@ func TestCommandProcessKillBranches(t *testing.T) {
 		t.Fatalf("kill exited process: %v", err)
 	}
 	running := exec.Command("/bin/sh", "-c", "sleep 10")
-	if err := startProcess(running); err != nil {
-		t.Fatalf("start running process: %v", err)
+	runningWaiter, runningStartErr := startProcess(running)
+	if runningStartErr != nil {
+		t.Fatalf("start running process: %v", runningStartErr)
 	}
 	if err := killProcess(running); err != nil {
 		t.Fatalf("kill running process: %v", err)
 	}
-	_ = running.Wait()
+	runningWaiter.start()
+	<-runningWaiter.result()
 	origGetPGID := getProcessGroupID
 	origKillPID := killProcessID
 	t.Cleanup(func() {
@@ -341,19 +345,22 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	})
 	getProcessGroupID = func(int) (int, error) { return 0, errors.New("pgid failed") }
 	fallback := exec.Command("/bin/sh", "-c", "sleep 10")
-	if err := startProcess(fallback); err != nil {
-		t.Fatalf("start fallback process: %v", err)
+	fallbackWaiter, fallbackStartErr := startProcess(fallback)
+	if fallbackStartErr != nil {
+		t.Fatalf("start fallback process: %v", fallbackStartErr)
 	}
 	if err := killProcess(fallback); err != nil {
 		t.Fatalf("fallback process kill: %v", err)
 	}
-	_ = fallback.Wait()
+	fallbackWaiter.start()
+	<-fallbackWaiter.result()
 	getProcessGroupID = origGetPGID
 	signaled := exec.Command("/bin/sh", "-c", "kill -KILL $$")
-	if err := startProcess(signaled); err != nil {
-		t.Fatalf("start signaled process: %v", err)
+	signaledWaiter, signaledStartErr := startProcess(signaled)
+	if signaledStartErr != nil {
+		t.Fatalf("start signaled process: %v", signaledStartErr)
 	}
-	if err := (&process{cmd: signaled}).Close(); err != nil {
+	if err := (&process{cmd: signaled, processWaiter: signaledWaiter}).Close(); err != nil {
 		t.Fatalf("signaled process close returned error: %v", err)
 	}
 	getProcessGroupID = func(int) (int, error) { return 123, nil }
@@ -364,14 +371,15 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	getProcessGroupID = origGetPGID
 	killProcessID = origKillPID
 	killFail := sleepCommand(t, "10")
-	if err := startProcess(killFail); err != nil {
-		t.Fatalf("start kill-fail process: %v", err)
+	killFailWaiter, killFailStartErr := startProcess(killFail)
+	if killFailStartErr != nil {
+		t.Fatalf("start kill-fail process: %v", killFailStartErr)
 	}
 	getProcessGroupID = func(int) (int, error) { return 123, nil }
 	killProcessID = func(int, syscall.Signal) error { return errors.New("kill failed") }
 	origGrace := processCloseGrace
 	processCloseGrace = 0
-	if err := (&process{cmd: killFail}).Close(); err == nil {
+	if err := (&process{cmd: killFail, processWaiter: killFailWaiter}).Close(); err == nil {
 		t.Fatal("processCloser ignored kill error")
 	}
 	getProcessGroupID = origGetPGID
@@ -380,8 +388,9 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	processCloseGrace = origGrace
 
 	finalKillFail := sleepCommand(t, "10")
-	if err := startProcess(finalKillFail); err != nil {
-		t.Fatalf("start final-kill-fail process: %v", err)
+	finalKillFailWaiter, finalKillFailStartErr := startProcess(finalKillFail)
+	if finalKillFailStartErr != nil {
+		t.Fatalf("start final-kill-fail process: %v", finalKillFailStartErr)
 	}
 	signalCount := 0
 	getProcessGroupID = func(int) (int, error) { return 123, nil }
@@ -394,7 +403,7 @@ func TestCommandProcessKillBranches(t *testing.T) {
 		return errors.New("final kill failed")
 	}
 	processCloseGrace = 0
-	if err := (&process{cmd: finalKillFail}).Close(); err == nil {
+	if err := (&process{cmd: finalKillFail, processWaiter: finalKillFailWaiter}).Close(); err == nil {
 		t.Fatal("processCloser ignored final kill error")
 	}
 	getProcessGroupID = origGetPGID
@@ -405,8 +414,9 @@ func TestCommandProcessKillBranches(t *testing.T) {
 	ready := filepath.Join(t.TempDir(), "stubborn-ready")
 	stubborn := exec.Command("/bin/sh", "-c", `trap '' TERM; : > "$STUBBORN_READY"; exec /bin/sleep 10`)
 	stubborn.Env = append(os.Environ(), "STUBBORN_READY="+ready)
-	if err := startProcess(stubborn); err != nil {
-		t.Fatalf("start stubborn process: %v", err)
+	stubbornWaiter, stubbornStartErr := startProcess(stubborn)
+	if stubbornStartErr != nil {
+		t.Fatalf("start stubborn process: %v", stubbornStartErr)
 	}
 	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
 		if _, err := os.Stat(ready); err == nil {
@@ -414,13 +424,14 @@ func TestCommandProcessKillBranches(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			_ = killProcess(stubborn)
-			_ = stubborn.Wait()
+			stubbornWaiter.start()
+			<-stubbornWaiter.result()
 			t.Fatal("stubborn process did not become ready")
 		}
 	}
 	processCloseGrace = 0
 	t.Cleanup(func() { processCloseGrace = origGrace })
-	if err := (&process{cmd: stubborn}).Close(); err != nil {
+	if err := (&process{cmd: stubborn, processWaiter: stubbornWaiter}).Close(); err != nil {
 		t.Fatalf("processCloser timeout kill returned error: %v", err)
 	}
 	processCloseGrace = origGrace
@@ -453,8 +464,9 @@ read release
 	cmd := exec.Command(script)
 	cmd.Env = append(os.Environ(), "TERM_MARK="+marker, "READY_MARK="+ready)
 	cmd.Stdin = holdRead
-	if err := startProcess(cmd); err != nil {
-		t.Fatalf("start trap process: %v", err)
+	waiter, startErr := startProcess(cmd)
+	if startErr != nil {
+		t.Fatalf("start trap process: %v", startErr)
 	}
 	t.Cleanup(func() {
 		_ = holdWrite.Close()
@@ -476,7 +488,7 @@ read release
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	if err := (&process{cmd: cmd}).Close(); err != nil {
+	if err := (&process{cmd: cmd, processWaiter: waiter}).Close(); err != nil {
 		t.Fatalf("close trap process: %v", err)
 	}
 

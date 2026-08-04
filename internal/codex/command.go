@@ -56,12 +56,16 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 			return nil, nil, "", credentialErr
 		}
 	} else {
+		lockRoot, lockErr := HomeLockRoot(options.SupervisorParent, firstNonEmpty(options.WritableHome, options.CodexHome))
+		if lockErr != nil {
+			return nil, nil, "", lockErr
+		}
 		cmd, supervisor, err = supervisorCommand(procCtx, supervisorConfig{
 			NativePath:       path,
 			NativeArgs:       appServerArgs(options),
 			NativeEnv:        nativeEnv,
 			Isolation:        options.ProcessIsolation,
-			Home:             firstNonEmpty(options.WritableHome, options.CodexHome),
+			Home:             lockRoot,
 			Scratch:          options.SupervisorRoot,
 			ScratchParent:    options.SupervisorParent,
 			LifecycleKind:    lifecycleRuntime,
@@ -89,7 +93,8 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 
 	spawnStarted := time.Now()
 
-	if err := startProcess(cmd); err != nil {
+	waiter, err := startProcess(cmd)
+	if err != nil {
 		_ = supervisor.closeInherited()
 
 		observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, err)
@@ -102,14 +107,24 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 
 	if closeErr := supervisor.closeInherited(); closeErr != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+
+		waiter.start()
+		<-waiter.result()
 
 		return nil, nil, "", fmt.Errorf("close inherited supervisor config: %w", closeErr)
 	}
 
 	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, nil)
 
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, supervisor: supervisor, observeProcess: options.ObserveProcess}
+	proc := &process{
+		cmd:            cmd,
+		stdin:          stdin,
+		stdout:         stdout,
+		stderr:         stderr,
+		supervisor:     supervisor,
+		processWaiter:  waiter,
+		observeProcess: options.ObserveProcess,
+	}
 	if options.NewProcessSnapshotObserver != nil {
 		proc.processSnapshot = options.NewProcessSnapshotObserver(ctx)
 	}
@@ -313,11 +328,12 @@ const processExitGrace = 2 * time.Second
 // stderr tail, and the single cmd.Wait reaper shared by the transport
 // process-death detection and the deliberate Close escalation.
 type process struct {
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	stderr     *stderrTail
-	supervisor *supervisorProof
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	stdout        io.ReadCloser
+	stderr        *stderrTail
+	supervisor    *supervisorProof
+	processWaiter *supervisorWaiter
 
 	waitOnce sync.Once
 	waitErr  error
@@ -409,13 +425,24 @@ func (p *process) beginWait() {
 			return
 		}
 
+		if p.processWaiter == nil {
+			p.waitErr = errors.New("codex process waiter is unavailable")
+			close(p.waitDone)
+
+			return
+		}
+
+		p.processWaiter.start()
+
 		go func() {
 			defer recoverCodexGoroutine(context.Background(), "Codex process waiter")
 			defer p.markExited()
 
-			p.waitErr = p.cmd.Wait()
 			if p.supervisor != nil {
-				p.waitErr = errors.Join(p.waitErr, p.supervisor.awaitCompletion())
+				waitErr, proofErr := p.supervisor.awaitCommand(p.processWaiter.result())
+				p.waitErr = errors.Join(waitErr, proofErr)
+			} else {
+				p.waitErr = <-p.processWaiter.result()
 			}
 
 			close(p.waitDone)

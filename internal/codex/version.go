@@ -36,13 +36,17 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	if err != nil {
 		return "", err
 	}
+	lockRoot, err := HomeLockRoot(options.ScratchParent, options.WritableHome)
+	if err != nil {
+		return "", err
+	}
 
 	cmd, proof, err := versionSupervisorCommand(ctx, supervisorConfig{
 		NativePath:       path,
 		NativeArgs:       []string{codexVersionArgument},
 		NativeEnv:        nativeEnv,
 		Isolation:        options.ProcessIsolation,
-		Home:             options.WritableHome,
+		Home:             lockRoot,
 		Scratch:          options.Scratch,
 		ScratchParent:    options.ScratchParent,
 		LifecycleKind:    lifecycleDiscovery,
@@ -62,7 +66,8 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := versionStartProcess(cmd); err != nil {
+	waiter, err := versionStartProcess(cmd)
+	if err != nil {
 		_ = proof.closeInherited()
 
 		return "", fmt.Errorf("start codex CLI version probe: %w", err)
@@ -70,12 +75,15 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 
 	if err := proof.closeInherited(); err != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+
+		waiter.start()
+		<-waiter.result()
 
 		return "", fmt.Errorf("close inherited supervisor config: %w", err)
 	}
 
-	waitErr, containmentErr := cmd.Wait(), proof.awaitCompletion()
+	waiter.start()
+	waitErr, containmentErr := proof.awaitCommand(waiter.result())
 
 	if waitErr != nil || containmentErr != nil {
 		probeErr := waitErr

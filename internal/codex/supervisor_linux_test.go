@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 
 type supervisedNative struct {
 	cmd         *exec.Cmd
+	waiter      *supervisorWaiter
 	stdin       io.WriteCloser
 	home        string
 	rootPID     int
@@ -107,6 +109,16 @@ func TestLinuxSupervisorLaunchesFailClosedWhenSecurityLimitsCannotBeSet(t *testi
 	require.ErrorContains(t, (&livenessContainment{}).Start(exec.Command("/bin/true")), "disable privilege elevation")
 }
 
+func TestLinuxLivenessContainmentUsesCreatorThreadWait(t *testing.T) {
+	preserveLinuxSupervisorGlobals(t)
+
+	command := exec.Command("/bin/sh", "-c", "exit 0")
+	containment := &livenessContainment{}
+	require.NoError(t, containment.Start(command))
+	require.NoError(t, <-containment.Wait())
+	require.NotNil(t, command.ProcessState)
+}
+
 func TestSupervisorControlEOFKillsTreeBeforeUnlock(t *testing.T) {
 	runtime := startSupervisedNative(t)
 	_, err := homelock.Acquire(runtime.home)
@@ -178,6 +190,146 @@ func TestLinuxAgentIdentityLockSerializesAndCancels(t *testing.T) {
 	}
 }
 
+func TestLinuxSupervisorConfigIsSealed(t *testing.T) {
+	file, err := writeLinuxSupervisorConfig("", supervisorConfig{NativePath: "/bin/true"})
+	require.NoError(t, err)
+	defer file.Close()
+
+	seals, err := unix.FcntlInt(file.Fd(), unix.F_GET_SEALS, 0)
+	require.NoError(t, err)
+	require.Equal(t, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL, seals)
+	_, err = file.WriteAt([]byte("x"), 0)
+	require.Error(t, err)
+}
+
+func TestLinuxAgentIdentityLockRejectsWrongModeWithoutRepair(t *testing.T) {
+	trusted := unix.Stat_t{Uid: 0, Gid: 0, Mode: unix.S_IFREG | 0o600, Nlink: 1}
+	require.NoError(t, validateLinuxAgentIdentityLock(trusted))
+
+	wrongMode := trusted
+	wrongMode.Mode = unix.S_IFREG | 0o640
+	require.ErrorContains(t, validateLinuxAgentIdentityLock(wrongMode), "mode-0600")
+	require.Equal(t, uint32(unix.S_IFREG|0o640), wrongMode.Mode)
+}
+
+func TestPersistentProofFailureRetainsIdentityLockUntilRecovery(t *testing.T) {
+	preserveSupervisorGlobals(t)
+	supervisorInput = strings.NewReader("")
+	supervisorOutput = io.Discard
+	supervisorError = io.Discard
+
+	lockPath := filepath.Join(t.TempDir(), "identity.lock")
+	guardianFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	require.NoError(t, err)
+	require.NoError(t, unix.Flock(int(guardianFile.Fd()), unix.LOCK_EX|unix.LOCK_NB))
+
+	survivorFD, err := unix.Dup(int(guardianFile.Fd()))
+	require.NoError(t, err)
+	survivorFile := os.NewFile(uintptr(survivorFD), "surviving-identity-lock")
+	require.NotNil(t, survivorFile)
+	require.NoError(t, (&linuxAgentIdentityLock{file: guardianFile}).Close())
+
+	contender, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+	require.NoError(t, err)
+	defer contender.Close()
+	require.ErrorIs(t, unix.Flock(int(contender.Fd()), unix.LOCK_EX|unix.LOCK_NB), unix.EWOULDBLOCK)
+
+	recoverProof := make(chan struct{})
+	var attempts atomic.Int32
+	supervisorLivenessQuiesce = func(*livenessContainment, int, time.Duration) error {
+		attempts.Add(1)
+		select {
+		case <-recoverProof:
+			return nil
+		default:
+			return ErrProcessContainmentIncomplete
+		}
+	}
+	supervisorQuarantineRetry = retryLinuxLivenessContainment
+
+	root := t.TempDir()
+	config := supervisorConfig{
+		Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"),
+		Quarantine: filepath.Join(root, "quarantine"), NativePIDFile: filepath.Join(root, "pid"),
+		ProviderSnapshot: filepath.Join(root, "snapshot"),
+	}
+	require.NoError(t, writeSupervisorMarker(config.Started))
+
+	livenessDone := make(chan error)
+	go func() {
+		livenessDone <- completeOrQuarantineLiveness(config, &livenessContainment{}, ErrProcessContainmentIncomplete)
+		_ = survivorFile.Close()
+	}()
+	guardianDone := make(chan error, 1)
+	go func() { guardianDone <- finishQuarantinedLiveness(livenessDone, config) }()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(config.Quarantine)
+
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	startedAt := time.Now()
+	proofErr := (&supervisorProof{
+		started: config.Started, completion: config.Completion, quarantine: config.Quarantine,
+		nativePIDFile: config.NativePIDFile, providerSnapshot: config.ProviderSnapshot,
+	}).awaitCompletion()
+	require.ErrorIs(t, proofErr, ErrProcessContainmentIncomplete)
+	require.Less(t, time.Since(startedAt), time.Second)
+	require.FileExists(t, config.Quarantine)
+	require.FileExists(t, config.Started)
+	require.ErrorIs(t, unix.Flock(int(contender.Fd()), unix.LOCK_EX|unix.LOCK_NB), unix.EWOULDBLOCK)
+	require.GreaterOrEqual(t, attempts.Load(), int32(1))
+
+	close(recoverProof)
+	require.ErrorIs(t, <-guardianDone, ErrProcessContainmentIncomplete)
+	require.NoFileExists(t, config.Quarantine)
+	require.NoFileExists(t, config.Started)
+	require.Eventually(t, func() bool {
+		return unix.Flock(int(contender.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestGuardianPersistentProofFailureQuarantinesUntilRecovery(t *testing.T) {
+	preserveSupervisorGlobals(t)
+	supervisorInput = strings.NewReader("")
+	supervisorOutput = io.Discard
+	supervisorError = io.Discard
+
+	recoverProof := make(chan struct{})
+	supervisorGuardianQuiesce = func(*guardianContainment, int, time.Duration) error {
+		select {
+		case <-recoverProof:
+			return nil
+		default:
+			return ErrProcessContainmentIncomplete
+		}
+	}
+	supervisorGuardianQuarantineRetry = retryLinuxGuardianContainment
+
+	root := t.TempDir()
+	config := supervisorConfig{
+		Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"),
+		Quarantine: filepath.Join(root, "quarantine"), NativePIDFile: filepath.Join(root, "pid"),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- completeOrQuarantineGuardian(config, &guardianContainment{}, ErrProcessContainmentIncomplete)
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(config.Quarantine)
+
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("guardian quarantine returned before kernel recovery: %v", err)
+	default:
+	}
+
+	close(recoverProof)
+	require.ErrorIs(t, <-done, ErrProcessContainmentIncomplete)
+}
+
 func TestSupervisorGuardianSIGKILLLeavesLivenessLockedUntilTreeExit(t *testing.T) {
 	runtime := startSupervisedNative(t)
 	require.NoError(t, syscall.Kill(-runtime.rootPID, syscall.SIGSTOP))
@@ -196,7 +348,8 @@ func TestSupervisorGuardianSIGKILLLeavesLivenessLockedUntilTreeExit(t *testing.T
 	defer func() { require.NoError(t, claim.Release()) }()
 	_, err := homelock.AcquireLiveness(runtime.home)
 	require.Error(t, err, "surviving liveness supervisor must retain its lock")
-	_ = runtime.cmd.Wait()
+	runtime.waiter.start()
+	<-runtime.waiter.result()
 
 	liveness := acquireLivenessEventually(t, runtime.home)
 	require.NoError(t, liveness.Release())
@@ -460,16 +613,19 @@ done
 		Isolation:  &ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: environmentMap(nativeEnv)},
 	})
 	require.NoError(t, err)
+	require.Nil(t, cmd.Cancel, "trusted supervisor must outlive caller-context cancellation")
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
 	stderr := new(bytes.Buffer)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = stderr
-	require.NoError(t, startProcess(cmd))
+	waiter, err := startProcess(cmd)
+	require.NoError(t, err)
 	require.NoError(t, proof.closeInherited())
 
 	runtime := &supervisedNative{
 		cmd:        cmd,
+		waiter:     waiter,
 		stdin:      stdin,
 		home:       home,
 		stderr:     stderr,
@@ -535,10 +691,10 @@ func parentPID(t *testing.T, pid int) int {
 }
 
 func waitSupervisor(runtime *supervisedNative, timeout time.Duration) error {
-	done := make(chan error, 1)
-	go func() { done <- runtime.cmd.Wait() }()
+	runtime.waiter.start()
+
 	select {
-	case err := <-done:
+	case err := <-runtime.waiter.result():
 		runtime.cancel()
 
 		return errors.Join(err, runtime.proof.awaitCompletion())

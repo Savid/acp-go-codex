@@ -33,6 +33,12 @@ func withTestVersionIsolation(options VersionProbeOptions) VersionProbeOptions {
 	if options.ProcessIsolation == nil {
 		options.ProcessIsolation = testProcessIsolation()
 	}
+	if options.ScratchParent == "" {
+		options.ScratchParent = os.TempDir()
+	}
+	if options.WritableHome == "" {
+		options.WritableHome = os.TempDir()
+	}
 
 	return options
 }

@@ -470,6 +470,13 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string, nativeVersion string) (codex.Client, error) {
 	env, _ := a.pinRuntimeEnvironment(nil)
+	home := a.resolvedCodexHomeForEnv(env)
+	if err := validateNativeOwnedDirectory(home, a.options.ProcessIsolation); err != nil {
+		return nil, err
+	}
+	if a.options.ProcessIsolation != nil && len(a.options.SeedFiles) > 0 {
+		return nil, errors.New("Codex seed files are unsupported with process isolation")
+	}
 
 	factory := a.options.clientFactory
 	if factory == nil {
@@ -502,7 +509,7 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 	client, err := factory(ctx, codex.Options{
 		CLIPath:          a.options.ExecutablePath,
 		CodexHome:        a.options.Home,
-		WritableHome:     a.resolvedCodexHomeForEnv(env),
+		WritableHome:     home,
 		SupervisorRoot:   supervisorRoot,
 		SupervisorParent: filepath.Dir(supervisorRoot),
 		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,

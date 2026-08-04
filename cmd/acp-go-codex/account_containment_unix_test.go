@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	internalcodex "github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-codex/internal/homelock"
 )
 
@@ -22,12 +23,18 @@ func TestTerminalAuthContainsDescendantsAndHoldsHomeUntilQuiescence(t *testing.T
 	if runtime.GOOS == "darwin" {
 		t.Skip("requires a privileged two-principal fixture to clear supplementary groups")
 	}
-	root := t.TempDir()
+	root := cliTempDir(t)
+	if err := os.Chmod(root, 0o711); err != nil {
+		t.Fatal(err)
+	}
 	home := filepath.Join(root, "home")
-	ready := filepath.Join(root, "ready")
-	pidPath := filepath.Join(root, "child.pid")
-	rootPIDPath := filepath.Join(root, "root.pid")
-	writes := filepath.Join(root, "writes")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(home, "ready")
+	pidPath := filepath.Join(home, "child.pid")
+	rootPIDPath := filepath.Join(home, "root.pid")
+	writes := filepath.Join(home, "writes")
 	script := filepath.Join(root, "codex")
 	requireWriteFile(t, script, `#!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -45,29 +52,50 @@ echo $$ > "$AUTH_ROOT_PID"
 echo ready > "$AUTH_READY"
 wait
 `)
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("AUTH_READY", ready)
 	t.Setenv("AUTH_CHILD_PID", pidPath)
 	t.Setenv("AUTH_ROOT_PID", rootPIDPath)
 	t.Setenv("AUTH_WRITES", writes)
+	isolation := testCLIProcessIsolation()
+	if err := os.Chown(home, int(isolation.UID), int(isolation.GID)); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	runDone := make(chan struct{})
+	signals := make(chan os.Signal, 1)
 	var commandStderr bytes.Buffer
-	scratch := t.TempDir()
+	scratch := cliTempDir(t)
+	if err := os.Chmod(scratch, 0o711); err != nil {
+		t.Fatal(err)
+	}
 	go func() {
 		defer close(runDone)
 
-		errCh <- runCodexCLI(ctx, script, home, scratch, loginCommand, false, true, bytes.NewReader(nil), bytes.NewBuffer(nil), &commandStderr)
+		errCh <- runCodexCLIWithSignals(ctx, script, home, scratch, loginCommand, false, isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), &commandStderr, signals)
 	}()
-	t.Cleanup(func() { reapAuthFixture(t, cancel, runDone, rootPIDPath, pidPath) })
+	t.Cleanup(func() {
+		select {
+		case signals <- syscall.SIGTERM:
+		default:
+		}
+		reapAuthFixture(t, cancel, runDone, rootPIDPath, pidPath)
+	})
 
 	waitUntilWithFailure(t, func() bool {
 		_, err := os.Stat(ready)
 
 		return err == nil
 	}, func() string { return commandStderr.String() })
-	if _, err := homelock.Acquire(home); err == nil {
+	lockRoot, err := internalcodex.HomeLockRoot(scratch, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := homelock.Acquire(lockRoot); err == nil {
 		t.Fatal("second claimant acquired home while terminal auth tree was live")
 	}
 
@@ -83,7 +111,7 @@ wait
 		t.Fatalf("auth descendant was not live before cancellation: %v", probeErr)
 	}
 
-	cancel()
+	signals <- syscall.SIGTERM
 	if runErr := <-errCh; runErr == nil {
 		t.Fatal("cancelled terminal auth command returned nil")
 	}
@@ -110,7 +138,7 @@ wait
 		t.Fatalf("write-capable auth descendant remained active: size %d -> %d", before.Size(), after.Size())
 	}
 
-	lock, err := homelock.Acquire(home)
+	lock, err := homelock.Acquire(lockRoot)
 	if err != nil {
 		t.Fatalf("home did not reacquire after auth tree quiescence: %v", err)
 	}

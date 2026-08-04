@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	codexacp "github.com/savid/acp-go-codex"
 	nativecodex "github.com/savid/acp-go-codex/internal/codex"
 )
 
@@ -60,66 +58,22 @@ func TestRunContainmentSuccessfulOperations(t *testing.T) {
 	}
 }
 
-func TestRunContainmentDispatchAndOffDarwinFlag(t *testing.T) {
+func TestRunContainmentDispatchAndRemovedDarwinFlag(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(t.Context(), []string{"containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 {
 		t.Fatalf("containment dispatch = %d, stderr=%q", code, stderr.String())
 	}
 
-	originalGOOS := runtimeGOOS
-	t.Cleanup(func() { runtimeGOOS = originalGOOS })
-	runtimeGOOS = "linux"
 	stderr.Reset()
-	if code := run(t.Context(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "only on darwin") {
-		t.Fatalf("off-Darwin flag = %d, stderr=%q", code, stderr.String())
+	if code := run(t.Context(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("removed Darwin flag = %d, stderr=%q", code, stderr.String())
 	}
 }
 
-func TestRunDarwinBestEffortServeAndAccountFlags(t *testing.T) {
-	originalGOOS := runtimeGOOS
-	originalServe := serve
-	originalCLI := runCodexCLICommand
-	originalShutdown := shutdownOpenTelemetry
-	t.Cleanup(func() {
-		runtimeGOOS = originalGOOS
-		serve = originalServe
-		runCodexCLICommand = originalCLI
-		shutdownOpenTelemetry = originalShutdown
-	})
-	runtimeGOOS = platformDarwin
-	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
-
-	selected := false
-	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...codexacp.Option) error {
-		var configured codexacp.Options
-		for _, option := range options {
-			option(&configured)
-		}
-		selected = configured.DarwinBestEffortContainment
-
-		return nil
-	}
+func TestRunRemovedDarwinAccountFlag(t *testing.T) {
 	var stderr bytes.Buffer
-	if code := run(t.Context(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 0 || !selected || !strings.Contains(stderr.String(), "WARNING containment=best_effort") {
-		t.Fatalf("Darwin serve flag = %d, selected=%v stderr=%q", code, selected, stderr.String())
-	}
-
-	runtimeGOOS = "linux"
-	stderr.Reset()
-	if code := run(t.Context(), []string{"login", "-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "only on darwin") {
-		t.Fatalf("off-Darwin account flag = %d, stderr=%q", code, stderr.String())
-	}
-
-	runtimeGOOS = platformDarwin
-	accountSelected := false
-	runCodexCLICommand = func(_ context.Context, _ string, _ string, _ string, _ string, _ bool, boolValue bool, _ io.Reader, _ io.Writer, _ io.Writer) error {
-		accountSelected = boolValue
-
-		return nil
-	}
-	stderr.Reset()
-	if code := run(t.Context(), []string{"logout", "-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 0 || !accountSelected || !strings.Contains(stderr.String(), "WARNING containment=best_effort") {
-		t.Fatalf("Darwin account flag = %d, selected=%v stderr=%q", code, accountSelected, stderr.String())
+	if code := run(t.Context(), []string{"login", "-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("removed Darwin account flag = %d, stderr=%q", code, stderr.String())
 	}
 }
 

@@ -35,7 +35,7 @@ escaped descendants are absent on Darwin.
 | Option | Purpose |
 | --- | --- |
 | `WithExecutablePath(path)` | Codex CLI executable path (defaults to `codex` on `PATH`). |
-| `WithProcessIsolation(policy)` | Mandatory nonzero target UID/GID and complete replacement base environment for every native/helper process; supplementary groups are cleared. |
+| `WithProcessIsolation(policy)` | Mandatory nonzero target UID/GID and complete replacement environment for native Codex processes. On Linux the guardian/liveness supervisors stay trusted root; only the native app-server receives the configured identity, with supplementary groups cleared. |
 | `WithHome(path)` | `CODEX_HOME` for launched Codex processes. |
 | `WithScratchDir(dir)` | Parent directory for all ephemeral on-disk materialization; empty means the system temp directory. Created `0700` when missing. |
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
@@ -114,7 +114,10 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `CancelRequest` | Build an active-turn cancellation with the same bounded route; invalid input likewise fails closed. |
 
 `Agent.ContainmentMode()` returns `authoritative`, `best_effort`, or
-`unavailable`. Linux and Windows are authoritative. Opted-in Darwin is
+`unavailable`. Linux is authoritative. Windows is unavailable for native
+launch because the mandatory Unix UID/GID identity boundary with empty
+supplementary groups cannot be applied. A Windows cross-compile proves only
+that this refusal path builds; it is not runtime support. Opted-in Darwin is
 best-effort; it reaps the direct child and drains the captured original process
 group, but cannot contain `setsid` escapees or eliminate numeric-PGID-reuse
 collateral-signalling risk. FreeBSD, OpenBSD, NetBSD, and other unsupported

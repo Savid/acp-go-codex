@@ -18,10 +18,12 @@ import (
 	"go.uber.org/goleak"
 
 	codexacp "github.com/savid/acp-go-codex"
+	internalcodex "github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-codex/internal/homelock"
 )
 
 func TestRunPassesOptions(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	originalShutdown := shutdownOpenTelemetry
@@ -45,6 +47,7 @@ func TestRunPassesOptions(t *testing.T) {
 	code := run(
 		context.Background(),
 		[]string{
+			"-process-isolation-config", testProcessIsolationConfigPath,
 			"-path", "/bin/codex",
 			"-home", "/tmp/codex",
 			"-scratch-dir", "/tmp/codex-scratch",
@@ -81,9 +84,13 @@ func TestRunPassesOptions(t *testing.T) {
 	if _, ok := any(got.Logger).(*slog.Logger); !ok {
 		t.Fatalf("logger type = %T", got.Logger)
 	}
+	if got.ProcessIsolation == nil || got.ProcessIsolation.UID != 20001 {
+		t.Fatalf("process isolation = %#v", got.ProcessIsolation)
+	}
 }
 
 func TestRunErrorPathsAndVersion(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	originalShutdown := shutdownOpenTelemetry
@@ -112,12 +119,13 @@ func TestRunErrorPathsAndVersion(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	if code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr); code != 1 || !strings.Contains(stderr.String(), "serve failed") {
+	if code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr); code != 1 || !strings.Contains(stderr.String(), "serve failed") {
 		t.Fatalf("serve error code/stderr = %d %q", code, stderr.String())
 	}
 }
 
 func TestRunPassesSeedFiles(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	originalShutdown := shutdownOpenTelemetry
@@ -146,7 +154,7 @@ func TestRunPassesSeedFiles(t *testing.T) {
 
 	code := run(
 		context.Background(),
-		[]string{"-home", "/tmp/codex", "-seed-file", "config.toml=" + hostConfig},
+		isolatedArgs("-home", "/tmp/codex", "-seed-file", "config.toml="+hostConfig),
 		bytes.NewBuffer(nil),
 		bytes.NewBuffer(nil),
 		bytes.NewBuffer(nil),
@@ -161,6 +169,7 @@ func TestRunPassesSeedFiles(t *testing.T) {
 }
 
 func TestRunPassesConfigOverrides(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
 	originalShutdown := shutdownOpenTelemetry
@@ -183,7 +192,7 @@ func TestRunPassesConfigOverrides(t *testing.T) {
 
 	code := run(
 		context.Background(),
-		[]string{"-codex-config", "model_provider=litellm", "-codex-config", "model_providers.litellm.base_url=https://litellm.example/v1"},
+		isolatedArgs("-codex-config", "model_provider=litellm", "-codex-config", "model_providers.litellm.base_url=https://litellm.example/v1"),
 		bytes.NewBuffer(nil),
 		bytes.NewBuffer(nil),
 		bytes.NewBuffer(nil),
@@ -301,6 +310,7 @@ func TestRunRejectsBadSeedFileFlag(t *testing.T) {
 }
 
 func TestRunReturnsPendingSignalCode(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	t.Cleanup(func() {
@@ -322,34 +332,38 @@ func TestRunReturnsPendingSignalCode(t *testing.T) {
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 
-	if code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != signalCode(syscall.SIGHUP) {
+	if code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != signalCode(syscall.SIGHUP) {
 		t.Fatalf("run signal code = %d, want %d", code, signalCode(syscall.SIGHUP))
 	}
 }
 
 func TestRunCodexCLISubcommand(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalCLI := runCodexCLICommand
 	t.Cleanup(func() { runCodexCLICommand = originalCLI })
 
 	var gotPath, gotHome, gotScratch, gotMode string
 	var gotDeviceAuth bool
-	runCodexCLICommand = func(_ context.Context, path string, home string, scratch string, mode string, deviceAuth bool, _ bool, _ io.Reader, _ io.Writer, _ io.Writer) error {
+	runCodexCLICommand = func(_ context.Context, path string, home string, scratch string, mode string, deviceAuth bool, isolation processIsolationConfig, _ io.Reader, _ io.Writer, _ io.Writer) error {
 		gotPath, gotHome, gotScratch, gotMode, gotDeviceAuth = path, home, scratch, mode, deviceAuth
+		if isolation.UID != 20001 {
+			t.Fatalf("isolation = %#v", isolation)
+		}
 
 		return nil
 	}
-	if code := run(context.Background(), []string{"login", "-path", "/bin/codex", "-home", "/tmp/codex", "-scratch-dir", "/tmp/codex-scratch", "-codex-device-auth"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
+	if code := run(context.Background(), append([]string{"login"}, isolatedArgs("-path", "/bin/codex", "-home", "/tmp/codex", "-scratch-dir", "/tmp/codex-scratch", "-codex-device-auth")...), bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
 		t.Fatalf("successful login code = %d", code)
 	}
 	if gotPath != "/bin/codex" || gotHome != "/tmp/codex" || gotScratch != "/tmp/codex-scratch" || gotMode != "login" || !gotDeviceAuth {
 		t.Fatalf("cli args path=%q home=%q scratch=%q mode=%q deviceAuth=%v", gotPath, gotHome, gotScratch, gotMode, gotDeviceAuth)
 	}
 
-	runCodexCLICommand = func(context.Context, string, string, string, string, bool, bool, io.Reader, io.Writer, io.Writer) error {
+	runCodexCLICommand = func(context.Context, string, string, string, string, bool, processIsolationConfig, io.Reader, io.Writer, io.Writer) error {
 		return assertError("cli failed")
 	}
 	var stderr bytes.Buffer
-	if code := run(context.Background(), []string{"logout"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr); code != 1 || !strings.Contains(stderr.String(), "cli failed") {
+	if code := run(context.Background(), append([]string{"logout"}, isolatedArgs("-home", "/tmp/codex")...), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr); code != 1 || !strings.Contains(stderr.String(), "cli failed") {
 		t.Fatalf("cli error code/stderr = %d %q", code, stderr.String())
 	}
 	if code := run(context.Background(), []string{"login", "-bad"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 2 {
@@ -358,6 +372,7 @@ func TestRunCodexCLISubcommand(t *testing.T) {
 }
 
 func TestMainUsesRunAndExitOnlyOnFailure(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalExit := exit
 	originalArgs := os.Args
@@ -376,7 +391,7 @@ func TestMainUsesRunAndExitOnlyOnFailure(t *testing.T) {
 	exit = func(code int) {
 		t.Fatalf("exit called with code %d", code)
 	}
-	os.Args = []string{"acp-go-codex"}
+	os.Args = []string{"acp-go-codex", "-process-isolation-config", testProcessIsolationConfigPath}
 	main()
 
 	serve = func(context.Context, io.Reader, io.Writer, ...codexacp.Option) error {
@@ -392,18 +407,35 @@ func TestMainUsesRunAndExitOnlyOnFailure(t *testing.T) {
 
 func TestRunCodexCLI(t *testing.T) {
 	skipUnprivilegedDarwinCLIIsolation(t)
-	dir := t.TempDir()
+	if os.Geteuid() == 0 {
+		t.Skip("root distinct-identity coverage is owned by the terminal containment test")
+	}
+	dir := cliTempDir(t)
+	if err := os.Chmod(dir, 0o711); err != nil {
+		t.Fatal(err)
+	}
 	home := filepath.Join(dir, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CODEX_HOME", home)
 	script := filepath.Join(dir, "codex")
-	logPath := filepath.Join(dir, "log")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; exit 0; fi\necho \"$@:$CODEX_HOME\" > \"$TEST_LOG\"\n"), 0o700); err != nil {
+	logPath := filepath.Join(home, "log")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; exit 0; fi\necho \"$@:$CODEX_HOME\" > \"$TEST_LOG\"\n"), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
 	t.Setenv("TEST_LOG", logPath)
+	isolation := testCLIProcessIsolation()
+	if err := os.Chown(home, int(isolation.UID), int(isolation.GID)); err != nil {
+		t.Fatal(err)
+	}
 	var commandStderr bytes.Buffer
 
-	if err := runCodexCLI(context.Background(), script, home, t.TempDir(), "login", true, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &commandStderr); err != nil {
+	scratch := cliTempDir(t)
+	if err := os.Chmod(scratch, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCodexCLI(context.Background(), script, home, scratch, "login", true, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &commandStderr); err != nil {
 		t.Fatalf("runCodexCLI login returned error: %v", err)
 	}
 	raw, err := os.ReadFile(logPath)
@@ -413,37 +445,41 @@ func TestRunCodexCLI(t *testing.T) {
 	if !strings.Contains(string(raw), "login --device-auth:"+home) {
 		t.Fatalf("log = %q", string(raw))
 	}
-	if logoutErr := runCodexCLI(context.Background(), script, "", "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); logoutErr != nil {
-		t.Fatalf("runCodexCLI logout returned error: %v", logoutErr)
+	if logoutErr := runCodexCLI(context.Background(), script, "", "", "logout", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); logoutErr == nil {
+		t.Fatal("runCodexCLI accepted an implicit root home")
 	}
-	if badErr := runCodexCLI(context.Background(), script, "", "", "bad", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); badErr == nil {
+	if badErr := runCodexCLI(context.Background(), script, home, scratch, "bad", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); badErr == nil {
 		t.Fatal("unsupported CLI command succeeded")
 	}
 
 	fail := filepath.Join(dir, "codex-fail")
-	if writeErr := os.WriteFile(fail, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; exit 0; fi\nexit 7\n"), 0o700); writeErr != nil {
+	if writeErr := os.WriteFile(fail, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; exit 0; fi\nexit 7\n"), 0o755); writeErr != nil {
 		t.Fatalf("write failing script: %v", writeErr)
 	}
-	if failErr := runCodexCLI(context.Background(), fail, "", "", "login", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); failErr == nil || commandExitCode(failErr) == 0 {
+	if failErr := runCodexCLI(context.Background(), fail, home, scratch, "login", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); failErr == nil || commandExitCode(failErr) == 0 {
 		t.Fatalf("failing cli err=%v code=%d", failErr, commandExitCode(failErr))
 	}
-
-	pathDir := t.TempDir()
+	pathDir := cliTempDir(t)
+	if err := os.Chmod(pathDir, 0o711); err != nil {
+		t.Fatal(err)
+	}
 	pathScript := filepath.Join(pathDir, "codex")
-	if writePathErr := os.WriteFile(pathScript, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; fi\nexit 0\n"), 0o700); writePathErr != nil {
+	if writePathErr := os.WriteFile(pathScript, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; fi\nexit 0\n"), 0o755); writePathErr != nil {
 		t.Fatalf("write PATH codex: %v", writePathErr)
 	}
 	t.Setenv("PATH", pathDir)
-	if defaultPathErr := runCodexCLI(context.Background(), "", "", "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); defaultPathErr != nil {
-		t.Fatalf("runCodexCLI default path returned error: %v", defaultPathErr)
+	isolation = testCLIProcessIsolation()
+	var defaultStderr bytes.Buffer
+	if defaultPathErr := runCodexCLI(context.Background(), "", home, scratch, "logout", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &defaultStderr); defaultPathErr != nil {
+		t.Fatalf("runCodexCLI default path returned error: %v: %s", defaultPathErr, defaultStderr.String())
 	}
-	if missingErr := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), "", "", "logout", false, true, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); missingErr == nil {
+	if missingErr := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), home, scratch, "logout", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); missingErr == nil {
 		t.Fatal("runCodexCLI accepted missing executable")
 	}
 
 	signalScript := filepath.Join(dir, "codex-signal")
-	readyPath := filepath.Join(dir, "ready")
-	harnessPIDPath := filepath.Join(dir, "signal-pid")
+	readyPath := filepath.Join(home, "ready")
+	harnessPIDPath := filepath.Join(home, "signal-pid")
 	if writeSignalErr := os.WriteFile(signalScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo codex-cli 0.144.1
@@ -456,11 +492,12 @@ if [ "$1" = "logout" ]; then
   exit 0
 fi
 exit 2
-`), 0o700); writeSignalErr != nil {
+`), 0o755); writeSignalErr != nil {
 		t.Fatalf("write signal script: %v", writeSignalErr)
 	}
 	t.Setenv("TEST_READY_LOG", readyPath)
 	t.Setenv("TEST_PID_LOG", harnessPIDPath)
+	isolation = testCLIProcessIsolation()
 
 	// The fake harness stays terminal-logout-live by blocking on its own stdin,
 	// so it burns no CPU and cannot outlive the pipe this process holds.
@@ -476,7 +513,7 @@ exit 2
 	go func() {
 		defer close(runDone)
 
-		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, "", "logout", false, true, holdRead, bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
+		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, scratch, "logout", false, isolation, holdRead, bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
 	}()
 	t.Cleanup(func() { reapSignalHarness(t, holdWrite, harnessPIDPath, runDone) })
 	waitUntilFor(t, 7*time.Second, func() bool {
@@ -484,7 +521,11 @@ exit 2
 
 		return statErr == nil
 	})
-	_, lockErr := homelock.Acquire(home)
+	lockRoot, rootErr := internalcodex.HomeLockRoot(scratch, home)
+	if rootErr != nil {
+		t.Fatal(rootErr)
+	}
+	_, lockErr := homelock.Acquire(lockRoot)
 	if lockErr == nil {
 		t.Fatal("terminal logout did not hold both writable-home locks")
 	}
@@ -534,42 +575,61 @@ func skipUnprivilegedDarwinCLIIsolation(t *testing.T) {
 }
 
 func TestResolvedCodexCLIHome(t *testing.T) {
-	restore := codexCLIUserHomeDir
-	t.Cleanup(func() { codexCLIUserHomeDir = restore })
-
-	t.Setenv("CODEX_HOME", "")
-	configured := filepath.Join(t.TempDir(), "configured", "..", "home")
+	configured := filepath.Join(t.TempDir(), "home")
 	got, err := resolvedCodexCLIHome(configured)
-	if err != nil || got != filepath.Clean(configured) {
+	if err != nil || got != configured {
 		t.Fatalf("configured home = %q, %v", got, err)
 	}
 
-	envHome := filepath.Join(t.TempDir(), "env-home")
-	t.Setenv("CODEX_HOME", envHome)
-	got, err = resolvedCodexCLIHome("")
-	if err != nil || got != envHome {
-		t.Fatalf("environment home = %q, %v", got, err)
+	for _, invalid := range []string{"", "relative", configured + string(filepath.Separator) + ".." + string(filepath.Separator) + "other"} {
+		if _, err := resolvedCodexCLIHome(invalid); err == nil {
+			t.Fatalf("invalid home %q was accepted", invalid)
+		}
 	}
 
-	t.Setenv("CODEX_HOME", "")
-	userHome := t.TempDir()
-	codexCLIUserHomeDir = func() (string, error) { return userHome, nil }
-	got, err = resolvedCodexCLIHome("")
-	if err != nil || got != filepath.Join(userHome, ".codex") {
-		t.Fatalf("default home = %q, %v", got, err)
+	isolation := processIsolationConfig{BaseEnvironment: map[string]string{"HOME": configured}}
+	if got, err = resolvedCodexIsolationHome("", isolation, false); err != nil || got != configured {
+		t.Fatalf("default isolated home = %q, %v", got, err)
+	}
+	if _, err = resolvedCodexIsolationHome("", isolation, true); err == nil {
+		t.Fatal("native account mode accepted an implicit home")
+	}
+	if _, err = resolvedCodexIsolationHome(filepath.Join(filepath.Dir(configured), "other"), isolation, true); err == nil {
+		t.Fatal("alternate native account home was accepted")
+	}
+}
+
+func testCLIProcessIsolation() processIsolationConfig {
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid == 0 {
+		uid = 65534
+	}
+	if gid == 0 {
+		gid = 65534
+	}
+	environment := make(map[string]string)
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			environment[name] = value
+		}
 	}
 
-	codexCLIUserHomeDir = func() (string, error) { return "", assertError("home") }
-	if _, err := resolvedCodexCLIHome(""); err == nil {
-		t.Fatal("home lookup failure was accepted")
+	return processIsolationConfig{UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment}
+}
+
+func cliTempDir(t *testing.T) string {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		return t.TempDir()
 	}
-	if err := runCodexCLI(context.Background(), "codex", "", "", logoutCommand, false, true, nil, nil, nil); err == nil {
-		t.Fatal("terminal command accepted failed home lookup")
+	dir, err := os.MkdirTemp("/tmp", "acp-go-codex-cli-test-")
+	if err != nil {
+		t.Fatal(err)
 	}
-	codexCLIUserHomeDir = func() (string, error) { return "", nil }
-	if _, err := resolvedCodexCLIHome(""); err == nil {
-		t.Fatal("empty user home was accepted")
-	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	return dir
 }
 
 func TestVersionDefaultBranch(t *testing.T) {

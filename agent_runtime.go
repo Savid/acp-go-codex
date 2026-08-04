@@ -525,6 +525,12 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 }
 
 func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
+	env, _ := a.pinRuntimeEnvironment(nil)
+	home := a.resolvedCodexHomeForEnv(env)
+	if err := validateNativeOwnedDirectory(home, a.options.ProcessIsolation); err != nil {
+		return "", err
+	}
+
 	scratchRelease, err := a.reserveScratchRoot(ctx, RuntimeResourceDiscovery)
 	if err != nil {
 		return "", err
@@ -542,11 +548,10 @@ func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
 		return "", finalizeRuntimeResources(err, nil, scratchRoot, scratchRelease)
 	}
 
-	env, _ := a.pinRuntimeEnvironment(nil)
 	version, probeErr := runtimeProbeCodexVersion(ctx, codex.VersionProbeOptions{
 		CLIPath:          a.options.ExecutablePath,
 		CodexHome:        a.options.Home,
-		WritableHome:     a.resolvedCodexHomeForEnv(env),
+		WritableHome:     home,
 		Scratch:          scratchRoot,
 		ScratchParent:    filepath.Dir(scratchRoot),
 		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,

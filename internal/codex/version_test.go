@@ -38,7 +38,9 @@ func TestProbeVersionFailureBranches(t *testing.T) {
 
 		return exec.Command("/usr/bin/true"), &supervisorProof{}, nil
 	}
-	versionStartProcess = func(*exec.Cmd) error { return errors.New("start failed") }
+	versionStartProcess = func(*exec.Cmd) (*supervisorWaiter, error) {
+		return nil, errors.New("start failed")
+	}
 	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); err == nil || !strings.Contains(err.Error(), "start") {
 		t.Fatalf("start error = %v", err)
 	}

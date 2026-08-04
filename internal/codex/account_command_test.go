@@ -87,7 +87,9 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 	accountSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
 		return exec.Command(valid, "logout"), &supervisorProof{}, nil
 	}
-	accountStartProcess = func(*exec.Cmd) error { return errors.New("start") }
+	accountStartProcess = func(*exec.Cmd) (*supervisorWaiter, error) {
+		return nil, errors.New("start")
+	}
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
 		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "start")

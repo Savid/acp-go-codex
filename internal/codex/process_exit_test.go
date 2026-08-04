@@ -29,11 +29,12 @@ func TestLineTransportCapturesProcessExit(t *testing.T) {
 		t.Fatalf("stdin pipe: %v", err)
 	}
 
-	if err := startProcess(cmd); err != nil {
+	waiter, err := startProcess(cmd)
+	if err != nil {
 		t.Fatalf("start process: %v", err)
 	}
 
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}
+	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, processWaiter: waiter}
 	transport := newLineTransport(stdout, stdin, proc)
 	t.Cleanup(func() { _ = transport.Close() })
 
@@ -81,11 +82,12 @@ func TestLineTransportReadErrorProcessAlive(t *testing.T) {
 		t.Fatalf("stdin pipe: %v", err)
 	}
 
-	if err := startProcess(cmd); err != nil {
+	waiter, err := startProcess(cmd)
+	if err != nil {
 		t.Fatalf("start process: %v", err)
 	}
 
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}
+	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, processWaiter: waiter}
 	transport := newLineTransport(stdout, stdin, proc)
 	// Shrink this transport instance's exit grace so the alive-process
 	// classification path does not stall the test. The field is written before

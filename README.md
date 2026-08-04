@@ -88,19 +88,16 @@ OpenTelemetry providers.
 
 ## Platform containment
 
-Linux child-subreapers and Windows Job Objects provide authoritative native
-tree containment. Darwin remains fail closed unless the operator explicitly
-accepts its weaker process-group boundary:
-
-```sh
-acp-go-codex -darwin-best-effort-containment
-```
-
-Embedded callers use `codexacp.WithDarwinBestEffortContainment()`. This mode
+Linux child-subreapers provide authoritative native-tree containment. Windows
+native launch fails closed because its process API cannot apply the mandatory
+Unix UID/GID identity boundary with empty supplementary groups;
+cross-compilation proves only that the refusal path builds, not runtime support.
+The standalone command is Linux-only. Embedded Darwin callers may explicitly
+accept the weaker process-group boundary with
+`codexacp.WithDarwinBestEffortContainment()`. This mode
 reaps the direct native child and performs a bounded `SIGTERM` then `SIGKILL`
 against the captured original process group. Descendants that call `setsid`
-can survive, and numeric PGID reuse can cause collateral signalling. The
-standalone command prints an unconditional warning before serving. FreeBSD,
+can survive, and numeric PGID reuse can cause collateral signalling. FreeBSD,
 OpenBSD, NetBSD, and other unsupported platforms remain fail closed.
 
 Darwin operators can inspect or explicitly clean one marker-correlated runtime

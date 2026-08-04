@@ -9,16 +9,59 @@ acp-go-codex [flags]
 
 Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
 
+## Required standalone isolation policy
+
+Normal serve mode is Linux-only and requires
+`-process-isolation-config=/absolute/path/process-isolation.json`. The native `login` and `logout` subcommands require the same flag and also require explicit `-home` equal to the policy `HOME`. Serve mode defaults `-home` to that directory and rejects any different value.
+`-version` and the Darwin containment diagnostic subcommands are exempt.
+The policy must be a root-owned, single-link regular file with mode `0600`.
+Every component is opened from `/` without following symlinks, and every
+ancestor must be root-owned and not writable by group or other. Unknown JSON
+fields and trailing JSON values are rejected.
+
+```json
+{
+  "uid": 20001,
+  "gid": 20001,
+  "baseEnvironment": {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/var/lib/acp-go-codex",
+    "USER": "acp-go-codex",
+    "LOGNAME": "acp-go-codex",
+    "LANG": "C.UTF-8"
+  },
+  "inheritEnvironment": []
+}
+```
+
+The supervisor must run as root. The UID/GID must name a nonroot account with
+that same-name private primary group, no supplementary groups, and a target-owned mode
+`0700` home matching `HOME`, reached without symlinks beneath protected
+root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
+`LOGNAME` must match the account.
+`PATH` must contain existing canonical absolute directories. The child gets
+only `baseEnvironment` plus variables explicitly named in
+`inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
+home, and adapter-private variables cannot be inherited. Unset or duplicate
+inheritance entries fail startup. Darwin, Windows, and other platforms refuse
+standalone native mode rather than weakening this contract.
+
+Provision the target as a locked system account with a non-login shell, its
+same-name private group, and no sudo policy. Its UID and primary GID cannot be
+shared by another account. Password locking is not a substitute for disabling
+login paths, and a locked account still needs the validated private writable
+home for native tools.
+
 ## Serve flags
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-path` | `codex` on `PATH` | Codex CLI executable path. |
-| `-home` | unset | Codex home directory passed as `CODEX_HOME`. |
+| `-process-isolation-config` | unset | Required absolute path to the standalone Linux isolation policy described above. |
+| `-home` | policy `HOME` | Codex home directory passed as `CODEX_HOME`; an explicit value must equal policy `HOME`, and root ambient state is never consulted. |
 | `-scratch-dir` | system temp | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-provider-auth-root` | unset | Durable host-owned root holding the values-free provider-auth ledger. Empty leaves the whole provider-auth surface unadvertised. |
 | `-provider-auth-direct-home` | unset | Exact `CODEX_HOME` the operator consents to the `credential` and `disconnect` legs touching. It must equal `-home`; empty leaves those two legs unadvertised. |
-| `-darwin-best-effort-containment` | `false` | On Darwin only, explicitly accept captured process-group containment and its escaped-descendant and numeric-PGID-reuse risks. Rejected on every other platform. |
 | `-model` | unset | Default model preference. |
 | `-debug` | `false` | Write adapter debug logs to stderr. |
 | `-version` | `false` | Print adapter version and exit. |
@@ -52,8 +95,8 @@ an explicit `-home`.
 Login helpers delegate to the Codex CLI:
 
 ```sh
-acp-go-codex login [-path PATH] [-home DIR] [-scratch-dir DIR] [-darwin-best-effort-containment] [-codex-device-auth]
-acp-go-codex logout [-path PATH] [-home DIR] [-scratch-dir DIR] [-darwin-best-effort-containment]
+acp-go-codex login -process-isolation-config POLICY -home DIR [-path PATH] [-scratch-dir DIR] [-codex-device-auth]
+acp-go-codex logout -process-isolation-config POLICY -home DIR [-path PATH] [-scratch-dir DIR]
 ```
 
 Both subcommands require Codex CLI 0.144.1 or newer and run under the same
@@ -61,17 +104,16 @@ writable-home lock and selected containment backend as app-server mode.
 `-scratch-dir` selects the parent for their private supervisor scratch and
 defaults to system temp. A command fails closed when the home is already
 claimed or is not on an approved local filesystem. `login` also neutralises
-browser launches from the same scratch parent, and fails closed on Windows,
-where that is not possible; `logout` is unaffected on every platform. See
-[Authentication](/docs/features/authentication).
-
-On Darwin, serve, login, and logout all remain fail closed unless
-`-darwin-best-effort-containment` is present. The binary writes an unconditional
-`containment=best_effort` warning to stderr before starting work. Descendants
-that escape the original process group with `setsid` may survive, and signalling
-a reused numeric PGID may affect an unrelated process group.
+browser launches from the same scratch parent. Windows rejects every native
+Codex launch, including `login` and `logout`, because the mandatory Unix UID/GID
+identity boundary is unavailable; the browser launch also cannot be neutralised
+there. See [Authentication](/docs/features/authentication).
 
 ## Darwin containment operations
+
+These operational commands remain available to inspect generations left by an
+embedded Darwin host; the standalone command does not launch native work on
+Darwin.
 
 ```sh
 acp-go-codex containment diagnose -scratch-dir <parent>

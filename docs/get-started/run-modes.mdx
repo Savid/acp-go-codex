@@ -5,8 +5,16 @@ description: "Run acp-go-codex as a stdio ACP agent or embedded Go adapter."
 
 ## Standalone
 
+Standalone native mode is Linux-only. The root supervisor must receive
+`-process-isolation-config=/absolute/path/process-isolation.json`; the strict
+file schema, account/home checks, closed environment, and explicit
+`inheritEnvironment` behavior are documented in the
+[CLI reference](/docs/reference/cli). `-version` and Darwin containment
+diagnostics do not require the policy. There is no Darwin or Windows
+standalone-launch fallback.
+
 ```sh
-acp-go-codex -path /usr/local/bin/codex -home /tmp/codex-home -model gpt-5.5
+acp-go-codex -process-isolation-config /etc/acp-go/codex-isolation.json -path /usr/local/bin/codex -home /var/lib/acp-go-codex -model gpt-5.5
 ```
 
 The command speaks ACP JSON-RPC over stdin/stdout: stdout carries ACP JSON-RPC
@@ -15,9 +23,9 @@ only; diagnostics go to stderr (and `-debug` when present).
 | Flag | Purpose |
 | --- | --- |
 | `-path` | Codex CLI executable path. |
-| `-home` | `CODEX_HOME` for launched Codex processes. |
+| `-home` | `CODEX_HOME` for launched Codex processes; an explicit value must equal policy `HOME`. |
 | `-scratch-dir` | Parent directory for ephemeral runtime generations. |
-| `-darwin-best-effort-containment` | Darwin-only explicit acceptance of direct-child and captured-process-group cleanup; rejected off Darwin. |
+| `-process-isolation-config` | Required standalone Linux child identity and closed environment policy. |
 | `-model` | Default model preference for new sessions. |
 | `-debug` | Write adapter diagnostics to stderr. |
 | `-version` | Print adapter version and exit. |
@@ -26,8 +34,8 @@ only; diagnostics go to stderr (and `-debug` when present).
 ## Login helpers
 
 ```sh
-acp-go-codex login -path /usr/local/bin/codex -home /tmp/codex-home -codex-device-auth
-acp-go-codex logout -path /usr/local/bin/codex -home /tmp/codex-home
+acp-go-codex login -process-isolation-config /etc/acp-go/codex-isolation.json -path /usr/local/bin/codex -home /var/lib/acp-go-codex -codex-device-auth
+acp-go-codex logout -process-isolation-config /etc/acp-go/codex-isolation.json -path /usr/local/bin/codex -home /var/lib/acp-go-codex
 ```
 
 ## Embedded Go
@@ -35,6 +43,7 @@ acp-go-codex logout -path /usr/local/bin/codex -home /tmp/codex-home
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
 	codexacp.WithExecutablePath("/usr/local/bin/codex"),
+	codexacp.WithProcessIsolation(codexacp.ProcessIsolation{UID: 20001, GID: 20001, BaseEnvironment: isolationEnvironment}),
 	codexacp.WithHome("/tmp/codex-home"),
 	codexacp.WithDefaultModel("gpt-5.5"),
 )

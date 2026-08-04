@@ -42,6 +42,7 @@ type supervisorConfig struct {
 	JobName          string            `json:"jobName,omitempty"`
 	Started          string            `json:"started"`
 	Completion       string            `json:"completion"`
+	Quarantine       string            `json:"quarantine"`
 	NativePIDFile    string            `json:"nativePidFile"`
 	ProviderSnapshot string            `json:"providerSnapshot"`
 	FramedInput      bool              `json:"framedInput"`
@@ -70,6 +71,11 @@ var supervisorOpenLivenessContainment = openLivenessContainment
 var supervisorGuardianQuiesce = func(containment *guardianContainment, nativePID int, timeout time.Duration) error {
 	return containment.Quiesce(nativePID, timeout)
 }
+var supervisorLivenessQuiesce = func(containment *livenessContainment, nativePID int, timeout time.Duration) error {
+	return containment.Quiesce(nativePID, timeout)
+}
+var supervisorQuarantineRetry func(*livenessContainment) error
+var supervisorGuardianQuarantineRetry func(*guardianContainment) error
 var supervisorDescendantCount = func(containment *livenessContainment) (int, bool) {
 	return containment.DescendantCount()
 }
@@ -98,6 +104,8 @@ func (noopSupervisorIdentityLock) InheritedFile() *os.File { return nil }
 type supervisorProof struct {
 	started          string
 	completion       string
+	quarantine       string
+	nativePIDFile    string
 	providerSnapshot string
 	startupWait      time.Duration
 	completionWait   time.Duration
@@ -254,6 +262,10 @@ func writeSupervisorConfig(root string, config supervisorConfig) (*os.File, erro
 }
 
 func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
 	if err := validateProcessIsolation(config.Isolation); err != nil {
 		return nil, nil, err
 	}
@@ -285,6 +297,7 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 
 	config.Started = filepath.Join(markerRoot, "supervisor-started-"+markerNonce)
 	config.Completion = filepath.Join(markerRoot, "supervisor-complete-"+markerNonce)
+	config.Quarantine = filepath.Join(markerRoot, "supervisor-quarantine-"+markerNonce)
 	config.NativePIDFile = filepath.Join(markerRoot, "supervisor-native-pid-"+markerNonce)
 	config.ProviderSnapshot = filepath.Join(markerRoot, "supervisor-provider-snapshot-"+markerNonce)
 
@@ -310,15 +323,17 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 	}
 
 	cmd := execCommandContext(ctx, executable)
+	cmd.Cancel = nil
+	cmd.WaitDelay = 0
 	cmd.Env = helperEnv
 	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{configFile}
 
-	cmd.WaitDelay = supervisorQuiesceWindow + time.Second
-
 	return cmd, &supervisorProof{
 		started:          config.Started,
 		completion:       config.Completion,
+		quarantine:       config.Quarantine,
+		nativePIDFile:    config.NativePIDFile,
 		providerSnapshot: config.ProviderSnapshot,
 		inherited:        []*os.File{configFile},
 	}, nil
@@ -369,9 +384,17 @@ func (p *supervisorProof) awaitCompletion() error {
 
 	for {
 		if _, err := os.Stat(p.completion); err == nil {
+			p.removeTerminalMarkers()
+
 			return nil
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w: stat liveness completion proof: %v", ErrProcessContainmentIncomplete, err)
+		}
+
+		if quarantined, err := supervisorMarkerExists(p.quarantine); err != nil {
+			return fmt.Errorf("%w: stat liveness quarantine proof: %v", ErrProcessContainmentIncomplete, err)
+		} else if quarantined {
+			return fmt.Errorf("%w: liveness supervisor retained the identity lock while quarantining descendants", ErrProcessContainmentIncomplete)
 		}
 
 		if _, err := os.Stat(p.started); err == nil {
@@ -400,9 +423,17 @@ func (p *supervisorProof) awaitCompletion() error {
 
 	for {
 		if _, err := os.Stat(p.completion); err == nil {
+			p.removeTerminalMarkers()
+
 			return nil
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w: stat liveness completion proof: %v", ErrProcessContainmentIncomplete, err)
+		}
+
+		if quarantined, err := supervisorMarkerExists(p.quarantine); err != nil {
+			return fmt.Errorf("%w: stat liveness quarantine proof: %v", ErrProcessContainmentIncomplete, err)
+		} else if quarantined {
+			return fmt.Errorf("%w: liveness supervisor retained the identity lock while quarantining descendants", ErrProcessContainmentIncomplete)
 		}
 
 		if time.Now().After(completionDeadline) {
@@ -410,6 +441,43 @@ func (p *supervisorProof) awaitCompletion() error {
 		}
 
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (p *supervisorProof) removeTerminalMarkers() {
+	if p == nil {
+		return
+	}
+
+	removeSupervisorMarkers(p.started, p.completion, p.quarantine, p.nativePIDFile, p.providerSnapshot)
+}
+
+func (p *supervisorProof) quarantineDetected() (bool, error) {
+	if p == nil {
+		return false, nil
+	}
+
+	return supervisorMarkerExists(p.quarantine)
+}
+
+func (p *supervisorProof) awaitCommand(waitDone <-chan error) (error, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case waitErr := <-waitDone:
+			return waitErr, p.awaitCompletion()
+		case <-ticker.C:
+			quarantined, err := p.quarantineDetected()
+			if err != nil {
+				return nil, fmt.Errorf("%w: stat liveness quarantine proof: %v", ErrProcessContainmentIncomplete, err)
+			}
+
+			if quarantined {
+				return nil, p.awaitCompletion()
+			}
+		}
 	}
 }
 
@@ -508,6 +576,9 @@ func runGuardian(config supervisorConfig) error {
 
 	_ = livenessConfig.Close()
 
+	livenessDone := make(chan error, 1)
+	go func() { livenessDone <- cmd.Wait() }()
+
 	control := bufio.NewReader(stderr)
 	readyLine, readyErr := control.ReadString('\n')
 
@@ -515,7 +586,15 @@ func runGuardian(config supervisorConfig) error {
 	if readyErr != nil || parseErr != nil {
 		_ = stdin.Close()
 		_ = terminateIndependentSupervisor(cmd)
-		waitErr := cmd.Wait()
+
+		waitErr, quarantined, terminalErr := awaitLivenessTerminal(livenessDone, config.Quarantine)
+		if quarantined || terminalErr != nil {
+			_ = stderr.Close()
+			_, _ = io.Copy(errorOutput, control)
+
+			return errors.Join(terminalErr, finishQuarantinedLiveness(livenessDone, config))
+		}
+
 		_, _ = io.Copy(errorOutput, control)
 
 		var proofErr error
@@ -527,13 +606,14 @@ func runGuardian(config supervisorConfig) error {
 
 			if _, startedErr := os.Stat(config.Started); startedErr == nil {
 				nativePID, _ := readNativePID(config.NativePIDFile)
+				if markerErr := writeGuardianQuarantineMarker(config); markerErr != nil {
+					return errors.Join(waitErr, markerErr)
+				}
 
 				proofErr = awaitQuiescence(func() error {
 					return supervisorGuardianQuiesce(containment, nativePID, supervisorQuiesceWindow)
 				})
-				if proofErr == nil {
-					proofErr = writeSupervisorMarker(config.Completion)
-				}
+				proofErr = completeOrQuarantineGuardian(config, containment, proofErr)
 			} else if !errors.Is(startedErr, os.ErrNotExist) {
 				return errors.Join(waitErr, startedErr)
 			}
@@ -552,19 +632,30 @@ func runGuardian(config supervisorConfig) error {
 	streamDone := make(chan struct{}, 1)
 	go copySupervisorStream(errorOutput, control, streamDone)
 
-	waitErr := cmd.Wait()
+	waitErr, quarantined, terminalErr := awaitLivenessTerminal(livenessDone, config.Quarantine)
+
 	_ = stdin.Close()
+	if quarantined || terminalErr != nil {
+		_ = stderr.Close()
+
+		<-streamDone
+
+		return errors.Join(terminalErr, finishQuarantinedLiveness(livenessDone, config))
+	}
 
 	<-streamDone
 
 	var proofErr error
+
 	if _, completionErr := os.Stat(config.Completion); errors.Is(completionErr, os.ErrNotExist) {
+		if markerErr := writeGuardianQuarantineMarker(config); markerErr != nil {
+			return errors.Join(waitErr, markerErr)
+		}
+
 		proofErr = awaitQuiescence(func() error {
 			return supervisorGuardianQuiesce(containment, ready.NativePID, supervisorQuiesceWindow)
 		})
-		if proofErr == nil {
-			proofErr = writeSupervisorMarker(config.Completion)
-		}
+		proofErr = completeOrQuarantineGuardian(config, containment, proofErr)
 	} else if completionErr != nil {
 		proofErr = fmt.Errorf("stat liveness completion: %w", completionErr)
 	}
@@ -648,14 +739,12 @@ func runLiveness(config supervisorConfig) error {
 
 	if pidErr := writeNativePID(config.NativePIDFile, cmd.Process.Pid); pidErr != nil {
 		proofErr := awaitQuiescence(func() error {
-			return containment.Quiesce(cmd.Process.Pid, supervisorQuiesceWindow)
+			return supervisorLivenessQuiesce(containment, cmd.Process.Pid, supervisorQuiesceWindow)
 		})
 
 		<-waitDone
 
-		if proofErr == nil {
-			proofErr = writeSupervisorMarker(config.Completion)
-		}
+		proofErr = completeOrQuarantineLiveness(config, containment, proofErr)
 
 		return errors.Join(pidErr, proofErr)
 	}
@@ -665,14 +754,12 @@ func runLiveness(config supervisorConfig) error {
 
 	if _, err := fmt.Fprintln(errorOutput, supervisorReadyPrefix+string(ready)); err != nil {
 		proofErr := awaitQuiescence(func() error {
-			return containment.Quiesce(cmd.Process.Pid, supervisorQuiesceWindow)
+			return supervisorLivenessQuiesce(containment, cmd.Process.Pid, supervisorQuiesceWindow)
 		})
 
 		<-waitDone
 
-		if proofErr == nil {
-			proofErr = writeSupervisorMarker(config.Completion)
-		}
+		proofErr = completeOrQuarantineLiveness(config, containment, proofErr)
 
 		return errors.Join(fmt.Errorf("publish supervisor readiness: %w", err), proofErr)
 	}
@@ -706,12 +793,10 @@ func runLiveness(config supervisorConfig) error {
 			// Each backend uses the containment boundary captured at launch.
 			// Darwin's boundary is the original process group and therefore keeps
 			// the documented best-effort numeric-PGID reuse risk after this wait.
-			return containment.Quiesce(0, supervisorQuiesceWindow)
+			return supervisorLivenessQuiesce(containment, 0, supervisorQuiesceWindow)
 		})
-		if proofErr == nil {
-			proofErr = writeSupervisorMarker(config.Completion)
-		}
 
+		proofErr = completeOrQuarantineLiveness(config, containment, proofErr)
 		if proofErr != nil {
 			return errors.Join(waitErr, proofErr)
 		}
@@ -723,17 +808,125 @@ func runLiveness(config supervisorConfig) error {
 		return nil
 	case <-controlDone:
 		proofErr := awaitQuiescence(func() error {
-			return containment.Quiesce(cmd.Process.Pid, supervisorQuiesceWindow)
+			return supervisorLivenessQuiesce(containment, cmd.Process.Pid, supervisorQuiesceWindow)
 		})
 
 		<-waitDone
 		<-streamDone
 
-		if proofErr == nil {
-			proofErr = writeSupervisorMarker(config.Completion)
-		}
+		proofErr = completeOrQuarantineLiveness(config, containment, proofErr)
 
 		return proofErr
+	}
+}
+
+func completeOrQuarantineLiveness(config supervisorConfig, containment *livenessContainment, proofErr error) error {
+	if proofErr == nil {
+		return writeSupervisorMarker(config.Completion)
+	}
+
+	if supervisorQuarantineRetry == nil || config.Quarantine == "" {
+		return proofErr
+	}
+
+	if err := writeSupervisorMarker(config.Quarantine); err != nil {
+		return errors.Join(proofErr, err)
+	}
+
+	closeSupervisorQuarantineStreams()
+
+	retryErr := supervisorQuarantineRetry(containment)
+
+	removeSupervisorMarkers(config.Started, config.Completion, config.NativePIDFile, config.ProviderSnapshot)
+
+	return errors.Join(proofErr, retryErr)
+}
+
+func writeGuardianQuarantineMarker(config supervisorConfig) error {
+	if config.Quarantine == "" {
+		return nil
+	}
+
+	return writeSupervisorMarker(config.Quarantine)
+}
+
+func completeOrQuarantineGuardian(config supervisorConfig, containment *guardianContainment, proofErr error) error {
+	if proofErr == nil {
+		return writeSupervisorMarker(config.Completion)
+	}
+
+	if supervisorGuardianQuarantineRetry == nil || config.Quarantine == "" {
+		return proofErr
+	}
+
+	if err := writeSupervisorMarker(config.Quarantine); err != nil {
+		return errors.Join(proofErr, err)
+	}
+
+	closeSupervisorQuarantineStreams()
+
+	retryErr := supervisorGuardianQuarantineRetry(containment)
+
+	removeSupervisorMarkers(config.Started, config.Completion, config.Quarantine, config.NativePIDFile, config.ProviderSnapshot)
+
+	return errors.Join(proofErr, retryErr)
+}
+
+func finishQuarantinedLiveness(done <-chan error, config supervisorConfig) error {
+	waitErr := <-done
+
+	removeSupervisorMarkers(config.Started, config.Completion, config.Quarantine, config.NativePIDFile, config.ProviderSnapshot)
+
+	return errors.Join(waitErr, fmt.Errorf("%w: liveness supervisor completed containment quarantine", ErrProcessContainmentIncomplete))
+}
+
+func awaitLivenessTerminal(done <-chan error, quarantine string) (error, bool, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			return err, false, nil
+		case <-ticker.C:
+			present, err := supervisorMarkerExists(quarantine)
+			if err != nil {
+				return nil, false, fmt.Errorf("stat liveness quarantine proof: %w", err)
+			}
+
+			if present {
+				return nil, true, nil
+			}
+		}
+	}
+}
+
+func supervisorMarkerExists(path string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+
+	_, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+
+	return err == nil, err
+}
+
+func removeSupervisorMarkers(paths ...string) {
+	for _, path := range paths {
+		if path != "" {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+func closeSupervisorQuarantineStreams() {
+	for _, stream := range []any{supervisorInput, supervisorOutput, supervisorError} {
+		if file, ok := stream.(*os.File); ok {
+			_ = file.Close()
+		}
 	}
 }
 

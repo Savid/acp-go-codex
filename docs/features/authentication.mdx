@@ -13,6 +13,18 @@ session is loaded, and logout first releases every loaded thread before
 mutating the account and closing the runtime. No thread can switch accounts
 independently.
 
+## Standalone credential input
+
+The standalone root supervisor never forwards its ambient environment.
+To pass `OPENAI_API_KEY`, name each variable explicitly in the
+`inheritEnvironment` array of the root-owned
+`-process-isolation-config` policy. The value must be set in the supervisor
+environment or startup fails; identity, path, loader, XDG/native-home, and
+adapter-private variables cannot be inherited. File-backed or provider-broker
+credentials must live only in the explicit target-owned native home described
+by the adapter. No standalone path reads root `HOME`, root native config, or
+an unlisted root credential.
+
 ## Terminal login
 
 The `login` and `logout` subcommands delegate to `codex`:
@@ -42,9 +54,11 @@ that execs `open` directly never reads `BROWSER`. Without both, `codex login`
 opens a tab on the operator's desktop that reaches its loopback listener and
 completes a grant with no further action. The directory is removed with the
 command's scratch. On Windows the launch cannot be shadowed this way, so
-`login` refuses to run rather than open a browser. `logout` opens nothing: it
-keeps the environment it would otherwise have had, on every platform, so a
-resident credential can always be removed.
+`login` would refuse rather than open a browser. More fundamentally, Windows
+rejects every native Codex command before spawning because the mandatory Unix
+UID/GID identity boundary is unavailable, so both `login` and `logout` are
+unavailable there. On platforms where native launch is available, `logout`
+opens nothing and keeps the environment it would otherwise have had.
 
 During ACP initialize, the terminal auth method is advertised only when the
 client declares terminal auth support. The agent auth method

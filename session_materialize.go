@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -29,6 +30,12 @@ func (a *Agent) materializeStoredRollout(
 
 	path, err := materializeRollout(a.options.ScratchDir, hydrated)
 	if err != nil {
+		release()
+
+		return "", nil, err
+	}
+	if err := handoffGeneratedNativeTree(filepath.Dir(path), a.options.ProcessIsolation); err != nil {
+		_ = removeMaterializedRollout(path)
 		release()
 
 		return "", nil, err

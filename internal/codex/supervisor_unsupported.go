@@ -1,4 +1,4 @@
-//go:build !linux && !darwin && !freebsd && !openbsd && !netbsd && !windows
+//go:build !linux && !darwin && !freebsd && !openbsd && !netbsd
 
 package codex
 
@@ -42,9 +42,7 @@ func (*livenessContainment) Quiesce(int, time.Duration) error {
 }
 func configureIndependentSupervisor(*exec.Cmd) {}
 
-func startIndependentSupervisor(cmd *exec.Cmd) error {
-	return cmd.Start()
-}
+func startIndependentSupervisor(*exec.Cmd) error { return unsupportedContainment() }
 func terminateIndependentSupervisor(*exec.Cmd) error {
 	return unsupportedContainment()
 }
