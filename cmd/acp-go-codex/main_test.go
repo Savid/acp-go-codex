@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -390,6 +391,7 @@ func TestMainUsesRunAndExitOnlyOnFailure(t *testing.T) {
 }
 
 func TestRunCodexCLI(t *testing.T) {
+	skipUnprivilegedDarwinCLIIsolation(t)
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("CODEX_HOME", home)
@@ -521,6 +523,13 @@ exit 2
 		if exitErr, ok := err.(*exec.ExitError); ok && signalExitCode(exitErr) != 0 {
 			t.Fatalf("non-signal exit mapped to signal code")
 		}
+	}
+}
+
+func skipUnprivilegedDarwinCLIIsolation(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		t.Skip("requires a privileged two-principal fixture to clear supplementary groups")
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 )
 
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	restoreAccountCommandHooks(t)
 
 	marker := filepath.Join(t.TempDir(), "launched")
@@ -61,6 +62,7 @@ exit 0
 }
 
 func TestLogoutRunsWithoutABrowserShim(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	restoreAccountCommandHooks(t)
 	restoreBrowserShimHooks(t)
 
@@ -105,10 +107,11 @@ func TestRunAccountCommandRefusesWithoutABrowserShim(t *testing.T) {
 
 	browserShimMkdirTemp = func(string, string) (string, error) { return "", errors.New("shim parent") }
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath:    writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.1\n"),
-		CodexHome:  t.TempDir(),
-		ScratchDir: t.TempDir(),
-		Mode:       accountCommandLogin,
+		CLIPath:          writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.1\n"),
+		CodexHome:        t.TempDir(),
+		ScratchDir:       t.TempDir(),
+		Mode:             accountCommandLogin,
+		ProcessIsolation: testProcessIsolation(),
 	}), "create browser shim directory")
 }
 

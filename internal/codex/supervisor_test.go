@@ -81,6 +81,7 @@ func TestSupervisorHelpersAndBootstrap(t *testing.T) {
 }
 
 func TestRunGuardianAndLivenessBranches(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	oldInput, oldOutput, oldError, oldExecutable := supervisorInput, supervisorOutput, supervisorError, supervisorExecutable
 	t.Cleanup(func() {
 		supervisorInput, supervisorOutput, supervisorError, supervisorExecutable = oldInput, oldOutput, oldError, oldExecutable
@@ -190,6 +191,9 @@ func testSupervisorConfig(t *testing.T, root string, nativePath string, args []s
 		Started:          filepath.Join(scratch, "started"),
 		Completion:       filepath.Join(scratch, "complete"),
 		NativePIDFile:    filepath.Join(scratch, "native.pid"),
+		IsolationUID:     testProcessIsolation().UID,
+		IsolationGID:     testProcessIsolation().GID,
+		Isolation:        testProcessIsolation(),
 	}
 }
 
@@ -205,7 +209,7 @@ func TestSupervisorConfigRootPermissions(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	cmd, _, err := supervisorCommand(ctx, supervisorConfig{Scratch: filepath.Join(root, "other"), Home: config.Home, NativePath: config.NativePath})
+	cmd, _, err := supervisorCommand(ctx, supervisorConfig{Scratch: filepath.Join(root, "other"), Home: config.Home, NativePath: config.NativePath, NativeEnv: os.Environ(), Isolation: testProcessIsolation()})
 	require.NoError(t, err)
 	require.Equal(t, supervisorQuiesceWindow+time.Second, cmd.WaitDelay)
 }

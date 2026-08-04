@@ -150,6 +150,7 @@ func envContains(env []string, want string) bool {
 }
 
 func TestCommandLaunchAndProcessErrors(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	dir := t.TempDir()
 	codexPath := filepath.Join(dir, "codex")
 	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), 0o700); err != nil {

@@ -453,6 +453,7 @@ func TestDarwinCleanupDoesNotSignalDirectPIDAfterSoleWaiterCompletes(t *testing.
 }
 
 func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if role := os.Getenv("ACP_GO_CODEX_DARWIN_CONTAINMENT_HELPER"); role != "" {
 		runCodexDarwinSetsidHelper(role)
 

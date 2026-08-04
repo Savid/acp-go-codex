@@ -35,26 +35,26 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 	require.Error(t, RunAccountCommand(context.Background(), AccountCommandOptions{Mode: "logout"}))
 	t.Setenv("PATH", "")
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CodexHome: t.TempDir(), Mode: "logout",
+		CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "find codex CLI")
 	require.Error(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: filepath.Join(t.TempDir(), "missing"), CodexHome: t.TempDir(), Mode: "logout",
+		CLIPath: filepath.Join(t.TempDir(), "missing"), CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}))
 
 	old := writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.0\n")
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: old, CodexHome: t.TempDir(), Mode: "logout",
+		CLIPath: old, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "too old")
 
 	valid := writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.1\n")
 	SetScratchParentResolver(nil)
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout",
+		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "scratch parent resolver")
 
 	SetScratchParentResolver(func(string) (string, error) { return "", errors.New("scratch parent") })
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout",
+		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "scratch parent")
 
 	configuredScratch := t.TempDir()
@@ -65,7 +65,7 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 		return "", errors.New("mkdir")
 	}
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), ScratchDir: configuredScratch, Mode: "logout",
+		CLIPath: valid, CodexHome: t.TempDir(), ScratchDir: configuredScratch, Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "mkdir")
 
 	defaultScratch := t.TempDir()
@@ -81,7 +81,7 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 		return nil, nil, errors.New("supervisor")
 	}
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout",
+		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "supervisor")
 
 	accountSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
@@ -89,7 +89,7 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 	}
 	accountStartProcess = func(*exec.Cmd) error { return errors.New("start") }
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout",
+		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "start")
 }
 
@@ -102,7 +102,7 @@ func TestRunAccountCommandForwardsSignalToGuardian(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	signals <- os.Kill
 	err := RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", Signals: signals,
+		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", Signals: signals, ProcessIsolation: testProcessIsolation(),
 	})
 	require.Error(t, err)
 }
@@ -127,7 +127,7 @@ sleep 0.05
 	}
 	var output bytes.Buffer
 	err := RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: script, CodexHome: t.TempDir(), Mode: "logout",
+		CLIPath: script, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 		Stdout: &output, Stderr: &output, Signals: closedSignals,
 	})
 	require.ErrorContains(t, err, "cleanup")
@@ -156,7 +156,7 @@ func TestRunAccountCommandUsesSeparateVersionGeneration(t *testing.T) {
 	}
 
 	err := RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: home, ScratchDir: parent, Mode: accountCommandLogout,
+		CLIPath: "/usr/bin/true", CodexHome: home, ScratchDir: parent, Mode: accountCommandLogout, ProcessIsolation: testProcessIsolation(),
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, versionScratch)
@@ -186,7 +186,7 @@ func TestRunAccountCommandAccountGenerationAndClosedSignalBranches(t *testing.T)
 			return os.MkdirTemp(parent, pattern)
 		}
 		err := RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
+			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout, ProcessIsolation: testProcessIsolation(),
 		})
 		require.ErrorContains(t, err, "account generation")
 		require.Equal(t, 2, calls)
@@ -203,7 +203,7 @@ func TestRunAccountCommandAccountGenerationAndClosedSignalBranches(t *testing.T)
 		signals := make(chan os.Signal)
 		close(signals)
 		require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout, Signals: signals,
+			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout, Signals: signals, ProcessIsolation: testProcessIsolation(),
 		}))
 	})
 }

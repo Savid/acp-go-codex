@@ -11,6 +11,7 @@ import (
 )
 
 func TestProbeVersionUsesIndependentDarwinDiscoveryGeneration(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	parent := t.TempDir()
 	home := filepath.Join(parent, "home")
 	if err := os.Mkdir(home, 0o700); err != nil {

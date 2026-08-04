@@ -1,6 +1,16 @@
 package codexacp
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
+
+func skipUnprivilegedDarwinIsolation(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		t.Skip("requires a privileged two-principal fixture to clear supplementary groups")
+	}
+}
 
 func TestWithProcessIsolationClonesBaseEnvironment(t *testing.T) {
 	base := map[string]string{"PATH": "/policy/bin", "ONLY_POLICY": "present"}

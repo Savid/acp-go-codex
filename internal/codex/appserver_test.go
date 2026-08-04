@@ -176,6 +176,7 @@ func TestAppServerClientModelAndAccountMethods(t *testing.T) {
 }
 
 func TestNewAppServerClientLaunchesCLI(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	script := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then

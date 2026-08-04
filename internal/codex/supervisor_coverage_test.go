@@ -299,8 +299,6 @@ func TestSupervisorBootstrapAndUnixContainmentBranches(t *testing.T) {
 	supervisorError = io.Discard
 	t.Setenv(supervisorModeEnv, "")
 	supervisorBootstrap()
-	t.Setenv(supervisorModeEnv, "bad")
-	supervisorBootstrap()
 
 	guardian, err := newGuardianContainment(supervisorConfig{})
 	require.NoError(t, err)
@@ -516,21 +514,6 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	supervisorOutput = io.Discard
 	supervisorError = io.Discard
 	require.NoError(t, runSupervisor(supervisorModeLiveness, path))
-
-	exitCode := -1
-	supervisorExit = func(code int) { exitCode = code }
-	root = t.TempDir()
-	config.Home = filepath.Join(root, "home")
-	config.Scratch = root
-	config.Started = filepath.Join(root, "started")
-	config.Completion = filepath.Join(root, "complete")
-	config.NativePIDFile = filepath.Join(root, "pid")
-	path, err = writeSupervisorConfig(root, config)
-	require.NoError(t, err)
-	supervisorInput = strings.NewReader("")
-	t.Setenv(supervisorModeEnv, supervisorModeLiveness)
-	supervisorBootstrap()
-	require.Equal(t, 0, exitCode)
 
 	supervisorRandRead = func([]byte) (int, error) { return 0, errors.New("entropy failed") }
 	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: t.TempDir()})

@@ -199,6 +199,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 // session for lazy relaunch. The fake app-server is this test binary re-execed
 // via TestMain; it dies on turn/start.
 func TestTurnFailureProcessDeath(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	ctx := context.Background()
 
 	client, err := codex.NewAppServerClient(ctx, codex.Options{

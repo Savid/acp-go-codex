@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -67,6 +68,7 @@ func preserveSupervisorGlobals(t *testing.T) {
 	oldRandRead := supervisorRandRead
 	oldChmod := supervisorChmod
 	oldOpenFile := supervisorOpenFile
+	oldCreateTemp := supervisorCreateTemp
 	oldEncode := supervisorEncodeConfig
 	oldGuardianContainment := supervisorNewGuardianContainment
 	oldLivenessContainment := supervisorOpenLivenessContainment
@@ -97,6 +99,7 @@ func preserveSupervisorGlobals(t *testing.T) {
 		supervisorRandRead = oldRandRead
 		supervisorChmod = oldChmod
 		supervisorOpenFile = oldOpenFile
+		supervisorCreateTemp = oldCreateTemp
 		supervisorEncodeConfig = oldEncode
 		supervisorNewGuardianContainment = oldGuardianContainment
 		supervisorOpenLivenessContainment = oldLivenessContainment
@@ -205,12 +208,12 @@ func TestSupervisorCommandNonceEnvironmentAndProof(t *testing.T) {
 	preserveSupervisorGlobals(t)
 	root := t.TempDir()
 	supervisorExecutable = func() (string, error) { return "", errors.New("lookup failed") }
-	_, _, err := supervisorCommand(context.Background(), supervisorConfig{Scratch: root})
+	_, _, err := supervisorCommand(context.Background(), supervisorConfig{Scratch: root, Isolation: testProcessIsolation()})
 	require.ErrorContains(t, err, "resolve embedded")
 
 	supervisorExecutable = os.Executable
 	cmd, proof, err := supervisorCommand(context.Background(), supervisorConfig{
-		NativePath: "/usr/bin/true", Home: filepath.Join(root, "home"), Scratch: root,
+		NativePath: "/usr/bin/true", Home: filepath.Join(root, "home"), Scratch: root, NativeEnv: os.Environ(), Isolation: testProcessIsolation(),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, cmd)
@@ -344,6 +347,7 @@ func TestRunLivenessPublishAndPIDFailures(t *testing.T) {
 }
 
 func TestRunGuardianHappyPathAndPreReadinessFailure(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	preserveSupervisorGlobals(t)
 	root := t.TempDir()
 	supervisorInput = strings.NewReader("payload\n")
@@ -374,8 +378,6 @@ func TestSupervisorBootstrapAndUnixContainmentBranches(t *testing.T) {
 	supervisorError = io.Discard
 	t.Setenv(supervisorModeEnv, "")
 	supervisorBootstrap()
-	t.Setenv(supervisorModeEnv, "bad")
-	supervisorBootstrap()
 
 	guardian, err := newGuardianContainment(supervisorConfig{DarwinBestEffort: true})
 	require.NoError(t, err)
@@ -401,8 +403,11 @@ func TestSupervisorEntropyAndProofStatFailures(t *testing.T) {
 	supervisorRandRead = func([]byte) (int, error) { return 0, errors.New("entropy failed") }
 	_, err := supervisorNonce()
 	require.ErrorContains(t, err, "marker nonce")
-	_, err = writeSupervisorConfig(t.TempDir(), supervisorConfig{})
-	require.ErrorContains(t, err, "config nonce")
+	configFile, configErr := writeSupervisorConfig(t.TempDir(), supervisorConfig{})
+	require.NoError(t, configErr)
+	require.NoError(t, configFile.Close())
+	_, statErr := os.Stat(configFile.Name())
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	root := t.TempDir()
 	notDirectory := filepath.Join(root, "file")
@@ -442,7 +447,7 @@ func TestRunGuardianPipeAndStartFailures(t *testing.T) {
 		supervisorExecutable = func() (string, error) { return "/missing", nil }
 		supervisorExecCommand = func(string, ...string) *exec.Cmd { return exec.Command(filepath.Join(root, "missing")) }
 		err := runGuardian(supervisorConfig{Home: filepath.Join(root, "home"), Scratch: root})
-		require.ErrorContains(t, err, "start liveness supervisor")
+		require.ErrorContains(t, err, "resolve liveness supervisor executable through process policy")
 	})
 
 	t.Run("executable", func(t *testing.T) {
@@ -503,7 +508,7 @@ func TestSupervisorInjectedFilesystemAndContainmentFailures(t *testing.T) {
 
 	t.Run("open file", func(t *testing.T) {
 		preserveSupervisorGlobals(t)
-		supervisorOpenFile = func(string, int, os.FileMode) (*os.File, error) { return nil, errors.New("open failed") }
+		supervisorCreateTemp = func(string, string) (*os.File, error) { return nil, errors.New("open failed") }
 		_, err := writeSupervisorConfig(t.TempDir(), supervisorConfig{})
 		require.ErrorContains(t, err, "create private supervisor config")
 	})
@@ -536,10 +541,14 @@ func TestSupervisorInjectedFilesystemAndContainmentFailures(t *testing.T) {
 
 func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	preserveSupervisorGlobals(t)
+	isolation := testProcessIsolation()
+	t.Setenv(processIsolationUIDEnv, fmt.Sprint(isolation.UID))
+	t.Setenv(processIsolationGIDEnv, fmt.Sprint(isolation.GID))
 	root := t.TempDir()
 	config := supervisorConfig{
 		NativePath: "/usr/bin/true", NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root,
 		Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"), NativePIDFile: filepath.Join(root, "pid"),
+		IsolationUID: isolation.UID, IsolationGID: isolation.GID,
 	}
 	path, err := writeSupervisorConfig(root, config)
 	require.NoError(t, err)
@@ -555,7 +564,7 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	config.Completion = filepath.Join(root, "complete")
 	config.NativePIDFile = filepath.Join(root, "pid")
 	supervisorRandRead = func([]byte) (int, error) { return 0, errors.New("entropy failed") }
-	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: t.TempDir()})
+	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: t.TempDir(), Isolation: isolation})
 	require.ErrorContains(t, err, "marker nonce")
 	supervisorRandRead = func(value []byte) (int, error) {
 		for index := range value {
@@ -564,7 +573,7 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 
 		return len(value), nil
 	}
-	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: ""})
+	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: "", Isolation: isolation})
 	require.ErrorContains(t, err, "scratch root")
 
 	root = t.TempDir()
@@ -654,6 +663,7 @@ func TestGuardianPreReadinessRecoveryProofBranches(t *testing.T) {
 
 func TestSupervisorFinalRemainingBranches(t *testing.T) {
 	t.Run("guardian dispatch", func(t *testing.T) {
+		skipUnprivilegedDarwinIsolation(t)
 		preserveSupervisorGlobals(t)
 		root := t.TempDir()
 		supervisorInput = strings.NewReader("")

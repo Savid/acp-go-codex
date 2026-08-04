@@ -22,6 +22,7 @@ type promptResult struct {
 // Cancellation must synchronously terminate the target thread's descendants,
 // preserve the shared app-server, and keep the logical session usable.
 func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	scratch := filepath.Join(root, "scratch")
@@ -117,6 +118,7 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 // real delayed child, so Prompt must not return its timeout failure until that
 // child can no longer publish a side effect.
 func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	scratch := filepath.Join(root, "scratch")
@@ -198,6 +200,7 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 }
 
 func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	scratch := filepath.Join(root, "scratch")

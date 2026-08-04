@@ -19,6 +19,9 @@ import (
 )
 
 func TestTerminalAuthContainsDescendantsAndHoldsHomeUntilQuiescence(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("requires a privileged two-principal fixture to clear supplementary groups")
+	}
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	ready := filepath.Join(root, "ready")
