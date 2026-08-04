@@ -348,6 +348,10 @@ func configureIndependentSupervisor(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+func startIndependentSupervisor(cmd *exec.Cmd) error {
+	return cmd.Start()
+}
+
 func terminateIndependentSupervisor(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil

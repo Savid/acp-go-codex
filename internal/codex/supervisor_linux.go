@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,6 +28,9 @@ const linuxTaskRoot = "/proc/self/task"
 var (
 	linuxSetSubreaper = func() error {
 		return unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+	}
+	linuxSetNoNewPrivileges = func() error {
+		return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 	}
 	linuxTaskEntries = func() ([]os.DirEntry, error) {
 		return os.ReadDir(linuxTaskRoot)
@@ -70,7 +74,7 @@ func openLivenessContainment(supervisorConfig) (*livenessContainment, error) {
 }
 
 func (c *livenessContainment) Start(cmd *exec.Cmd) error {
-	if err := startProcess(cmd); err != nil {
+	if err := startLinuxNoNewPrivileges(func() error { return startProcess(cmd) }); err != nil {
 		return err
 	}
 
@@ -91,6 +95,21 @@ func (*livenessContainment) Quiesce(nativePID int, timeout time.Duration) error 
 
 func configureIndependentSupervisor(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+func startIndependentSupervisor(cmd *exec.Cmd) error {
+	return startLinuxNoNewPrivileges(cmd.Start)
+}
+
+func startLinuxNoNewPrivileges(start func() error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	if err := linuxSetNoNewPrivileges(); err != nil {
+		return fmt.Errorf("disable privilege elevation for Linux supervisor child: %w", err)
+	}
+
+	return start()
 }
 
 func terminateIndependentSupervisor(cmd *exec.Cmd) error {

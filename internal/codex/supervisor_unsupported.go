@@ -41,6 +41,10 @@ func (*livenessContainment) Quiesce(int, time.Duration) error {
 	return unsupportedContainment()
 }
 func configureIndependentSupervisor(*exec.Cmd) {}
+
+func startIndependentSupervisor(cmd *exec.Cmd) error {
+	return cmd.Start()
+}
 func terminateIndependentSupervisor(*exec.Cmd) error {
 	return unsupportedContainment()
 }

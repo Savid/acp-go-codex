@@ -445,7 +445,7 @@ func runGuardian(config supervisorConfig) error {
 
 	cmd.Stdout = output
 
-	if err := cmd.Start(); err != nil {
+	if err := startIndependentSupervisor(cmd); err != nil {
 		_ = stdin.Close()
 		_ = stderr.Close()
 		_ = livenessConfig.Close()
