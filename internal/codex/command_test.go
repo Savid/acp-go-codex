@@ -68,12 +68,21 @@ func TestAppServerArgs(t *testing.T) {
 }
 
 func TestCommandHelpers(t *testing.T) {
-	path, err := resolveCodexPath("/custom/codex")
-	if err != nil || path != "/custom/codex" {
+	path, err := resolveCodexPath("/bin/sh", []string{"PATH=/usr/bin:/bin"})
+	if err != nil || path != "/bin/sh" {
 		t.Fatalf("explicit path=%q err=%v", path, err)
 	}
 
-	env := mergedEnv(Options{CodexHome: "/home/codex", Env: map[string]string{"A": "B"}})
+	env, err := buildMergedEnv(Options{
+		CodexHome: "/home/codex",
+		Env:       map[string]string{"A": "B"},
+		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{
+			"PATH": "/usr/bin:/bin",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !envContains(env, envCodexHome+"=/home/codex") || !envContains(env, "A=B") {
 		t.Fatalf("merged env missing values: %v", env)
 	}
@@ -98,8 +107,7 @@ func TestCommandHelpers(t *testing.T) {
 	if compareSemver("0.144.2", minCodexVersion) <= 0 || compareSemver("0.144.0", minCodexVersion) >= 0 || compareSemver(minCodexVersion, minCodexVersion) != 0 {
 		t.Fatal("compareSemver failed")
 	}
-	t.Setenv("PATH", "")
-	if _, err := resolveCodexPath(""); err == nil {
+	if _, err := resolveCodexPath("", []string{"PATH=/missing"}); err == nil {
 		t.Fatal("resolveCodexPath without codex succeeded")
 	}
 }
@@ -147,8 +155,7 @@ func TestCommandLaunchAndProcessErrors(t *testing.T) {
 	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), 0o700); err != nil {
 		t.Fatalf("write codex: %v", err)
 	}
-	t.Setenv("PATH", dir)
-	if resolved, err := resolveCodexPath(""); err != nil || resolved != codexPath {
+	if resolved, err := resolveCodexPath("", []string{"PATH=" + dir}); err != nil || resolved != codexPath {
 		t.Fatalf("resolve PATH = %q err=%v", resolved, err)
 	}
 

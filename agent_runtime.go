@@ -551,6 +551,7 @@ func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
 		ScratchParent:    filepath.Dir(scratchRoot),
 		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
 		Env:              env,
+		ProcessIsolation: codexProcessIsolation(a.options.ProcessIsolation),
 	})
 	probeErr = finalizeRuntimeResources(probeErr, nativeRelease, scratchRoot, scratchRelease)
 

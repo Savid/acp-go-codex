@@ -169,22 +169,14 @@ func TestRunGuardianRecoveryMarkerAndExitBranches(t *testing.T) {
 }
 
 func TestSupervisorConfigAndDispatchFailures(t *testing.T) {
-	_, err := readSupervisorConfig("")
+	_, err := readSupervisorConfig(nil)
 	require.ErrorContains(t, err, "missing private")
-	_, err = readSupervisorConfig(filepath.Join(t.TempDir(), "missing"))
-	require.ErrorContains(t, err, "open private")
 
 	root := t.TempDir()
-	badJSON := filepath.Join(root, "bad.json")
-	require.NoError(t, os.WriteFile(badJSON, []byte("{"), 0o600))
-	_, err = readSupervisorConfig(badJSON)
+	_, err = readSupervisorConfig(strings.NewReader("{"))
 	require.ErrorContains(t, err, "decode private")
-	_, statErr := os.Stat(badJSON)
-	require.ErrorIs(t, statErr, os.ErrNotExist)
 
-	incomplete := filepath.Join(root, "incomplete.json")
-	require.NoError(t, os.WriteFile(incomplete, []byte(`{"nativePath":"x"}`), 0o600))
-	_, err = readSupervisorConfig(incomplete)
+	_, err = readSupervisorConfig(strings.NewReader(`{"nativePath":"x"}`))
 	require.ErrorContains(t, err, "incomplete")
 
 	_, err = writeSupervisorConfig("", supervisorConfig{})
@@ -194,7 +186,7 @@ func TestSupervisorConfigAndDispatchFailures(t *testing.T) {
 	_, err = writeSupervisorConfig(filepath.Join(notDir, "child"), supervisorConfig{})
 	require.ErrorContains(t, err, "create private")
 
-	config := supervisorConfig{NativePath: "x", Home: "h", Scratch: "s"}
+	config := supervisorConfig{NativePath: "x", Home: "h", Scratch: "s", IsolationUID: 1, IsolationGID: 2}
 	path, err := writeSupervisorConfig(root, config)
 	require.NoError(t, err)
 	loaded, err := readSupervisorConfig(path)
@@ -203,6 +195,8 @@ func TestSupervisorConfigAndDispatchFailures(t *testing.T) {
 
 	path, err = writeSupervisorConfig(root, config)
 	require.NoError(t, err)
+	t.Setenv(processIsolationUIDEnv, "1")
+	t.Setenv(processIsolationGIDEnv, "2")
 	err = runSupervisor("unknown", path)
 	require.ErrorContains(t, err, "unknown internal mode")
 }
@@ -227,12 +221,11 @@ func TestSupervisorCommandNonceEnvironmentAndProof(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, nonce, 32)
 
-	t.Setenv(supervisorModeEnv, "old")
-	t.Setenv(supervisorConfigEnv, "old")
-	env := supervisorEnv("new", "config")
+	env := supervisorIdentityEnvironment([]string{"BASE=yes"}, "new", ProcessIsolation{UID: 1, GID: 2})
 	require.Contains(t, env, supervisorModeEnv+"=new")
-	require.Contains(t, env, supervisorConfigEnv+"=config")
-	require.NotContains(t, env, supervisorModeEnv+"=old")
+	require.Contains(t, env, processIsolationUIDEnv+"=1")
+	require.Contains(t, env, processIsolationGIDEnv+"=2")
+	require.Contains(t, env, "BASE=yes")
 
 	require.NoError(t, (*supervisorProof)(nil).awaitCompletion())
 	require.ErrorIs(t, (&supervisorProof{
@@ -382,7 +375,6 @@ func TestSupervisorBootstrapAndUnixContainmentBranches(t *testing.T) {
 	t.Setenv(supervisorModeEnv, "")
 	supervisorBootstrap()
 	t.Setenv(supervisorModeEnv, "bad")
-	t.Setenv(supervisorConfigEnv, "")
 	supervisorBootstrap()
 
 	guardian, err := newGuardianContainment(supervisorConfig{DarwinBestEffort: true})
@@ -556,22 +548,12 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	supervisorError = io.Discard
 	require.NoError(t, runSupervisor(supervisorModeLiveness, path))
 
-	exitCode := -1
-	supervisorExit = func(code int) { exitCode = code }
 	root = t.TempDir()
 	config.Home = filepath.Join(root, "home")
 	config.Scratch = root
 	config.Started = filepath.Join(root, "started")
 	config.Completion = filepath.Join(root, "complete")
 	config.NativePIDFile = filepath.Join(root, "pid")
-	path, err = writeSupervisorConfig(root, config)
-	require.NoError(t, err)
-	supervisorInput = strings.NewReader("")
-	t.Setenv(supervisorModeEnv, supervisorModeLiveness)
-	t.Setenv(supervisorConfigEnv, path)
-	supervisorBootstrap()
-	require.Equal(t, 0, exitCode)
-
 	supervisorRandRead = func([]byte) (int, error) { return 0, errors.New("entropy failed") }
 	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: t.TempDir()})
 	require.ErrorContains(t, err, "marker nonce")

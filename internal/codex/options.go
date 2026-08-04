@@ -17,6 +17,7 @@ type Options struct {
 	NativeVersion              string
 	DefaultModel               string
 	Env                        map[string]string
+	ProcessIsolation           *ProcessIsolation
 	Config                     map[string]any
 	ExtraArgs                  []string
 	Logger                     *slog.Logger
@@ -31,6 +32,14 @@ type Options struct {
 	// command error branches. Production launches always use the supervisor
 	// pair and fail closed without its private scratch root.
 	skipSupervisor bool
+}
+
+// ProcessIsolation is the mandatory credential and complete environment base
+// applied to every provider process and self-exec supervisor.
+type ProcessIsolation struct {
+	UID             uint32
+	GID             uint32
+	BaseEnvironment map[string]string
 }
 
 // ProcessSnapshotObserver reports containment-proven absolute inventory for

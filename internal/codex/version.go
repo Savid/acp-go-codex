@@ -19,6 +19,7 @@ type VersionProbeOptions struct {
 	ScratchParent    string
 	DarwinBestEffort bool
 	Env              map[string]string
+	ProcessIsolation *ProcessIsolation
 }
 
 var versionSupervisorCommand = supervisorCommand
@@ -26,7 +27,12 @@ var versionStartProcess = startProcess
 
 // ProbeVersion runs codex --version through its own guardian/liveness pair.
 func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, error) {
-	path, err := resolveCodexPath(options.CLIPath)
+	nativeEnv, err := buildMergedEnv(Options{CodexHome: options.CodexHome, Env: options.Env, ProcessIsolation: options.ProcessIsolation})
+	if err != nil {
+		return "", err
+	}
+
+	path, err := resolveCodexPath(options.CLIPath, nativeEnv)
 	if err != nil {
 		return "", err
 	}
@@ -34,7 +40,8 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	cmd, proof, err := versionSupervisorCommand(ctx, supervisorConfig{
 		NativePath:       path,
 		NativeArgs:       []string{codexVersionArgument},
-		NativeEnv:        mergedEnv(Options{CodexHome: options.CodexHome, Env: options.Env}),
+		NativeEnv:        nativeEnv,
+		Isolation:        options.ProcessIsolation,
 		Home:             options.WritableHome,
 		Scratch:          options.Scratch,
 		ScratchParent:    options.ScratchParent,
@@ -56,7 +63,16 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	cmd.Stderr = &stderr
 
 	if err := versionStartProcess(cmd); err != nil {
+		_ = proof.closeInherited()
+
 		return "", fmt.Errorf("start codex CLI version probe: %w", err)
+	}
+
+	if err := proof.closeInherited(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+
+		return "", fmt.Errorf("close inherited supervisor config: %w", err)
 	}
 
 	waitErr, containmentErr := cmd.Wait(), proof.awaitCompletion()

@@ -28,6 +28,8 @@ type AccountCommandOptions struct {
 	Stdout           io.Writer
 	Stderr           io.Writer
 	Signals          <-chan os.Signal
+	Env              map[string]string
+	ProcessIsolation *ProcessIsolation
 }
 
 var accountScratchParent func(string) (string, error)
@@ -57,7 +59,12 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return errors.New("codex writable home is required for account mutation")
 	}
 
-	path, err := resolveCodexPath(options.CLIPath)
+	nativeEnv, err := buildProcessEnvironment(options.ProcessIsolation, options.Env, map[string]string{envCodexHome: options.CodexHome})
+	if err != nil {
+		return err
+	}
+
+	path, err := resolveCodexPath(options.CLIPath, nativeEnv)
 	if err != nil {
 		return err
 	}
@@ -106,7 +113,8 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	cmd, proof, err := accountSupervisorCommand(ctx, supervisorConfig{
 		NativePath:       path,
 		NativeArgs:       args,
-		NativeEnv:        shim.environ(upsertEnv(os.Environ(), envCodexHome, options.CodexHome)),
+		NativeEnv:        shim.environ(nativeEnv),
+		Isolation:        options.ProcessIsolation,
 		Home:             options.CodexHome,
 		Scratch:          scratch,
 		ScratchParent:    scratchParent,
@@ -123,7 +131,16 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	cmd.Stderr = options.Stderr
 
 	if err := accountStartProcess(cmd); err != nil {
+		_ = proof.closeInherited()
+
 		return err
+	}
+
+	if closeErr := proof.closeInherited(); closeErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+
+		return fmt.Errorf("close inherited supervisor config: %w", closeErr)
 	}
 
 	waitDone := make(chan error, 1)
@@ -170,6 +187,8 @@ func runAccountVersionProbe(
 		Scratch:          scratch,
 		ScratchParent:    scratchParent,
 		DarwinBestEffort: options.DarwinBestEffort,
+		Env:              options.Env,
+		ProcessIsolation: options.ProcessIsolation,
 	})
 
 	return version, returnErr

@@ -35,10 +35,11 @@ escaped descendants are absent on Darwin.
 | Option | Purpose |
 | --- | --- |
 | `WithExecutablePath(path)` | Codex CLI executable path (defaults to `codex` on `PATH`). |
+| `WithProcessIsolation(policy)` | Mandatory nonzero target UID/GID and complete replacement base environment for every native/helper process; supplementary groups are cleared. |
 | `WithHome(path)` | `CODEX_HOME` for launched Codex processes. |
 | `WithScratchDir(dir)` | Parent directory for all ephemeral on-disk materialization; empty means the system temp directory. Created `0700` when missing. |
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
-| `WithEnv(env)` | Environment variables merged into launched Codex processes; `ACP_GO_CODEX_INTERNAL_*`, `ACP_GO_CODEX_RUNTIME_ID`, and `ACP_GO_CODEX_SCRATCH_ROOT` names are reserved and rejected case-insensitively. |
+| `WithEnv(env)` | Environment variables overlaid on `ProcessIsolation.BaseEnvironment`; the adapter never inherits its own environment. Reserved internal names are rejected. |
 | `WithLogger(logger)` | `*slog.Logger` for structured adapter diagnostics. |
 | `WithSessionStore(store)` | Replace the default in-memory lifecycle authority with a durable Codex rollout JSONL store. |
 | `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |

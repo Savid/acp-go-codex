@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -30,7 +29,12 @@ var processSupervisorCloseWait = supervisorQuiesceWindow + time.Second
 // (see NewAppServerClient): binding the process to procCtx prevents
 // exec.CommandContext from SIGKILLing codex when the launching request returns.
 func launchAppServer(ctx context.Context, procCtx context.Context, options Options) (*lineTransport, *exec.Cmd, string, error) {
-	path, err := resolveCodexPath(options.CLIPath)
+	nativeEnv, err := buildMergedEnv(options)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	path, err := resolveCodexPath(options.CLIPath, nativeEnv)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -46,12 +50,17 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 
 	if options.skipSupervisor {
 		cmd = execCommandContext(procCtx, path, appServerArgs(options)...)
-		cmd.Env = mergedEnv(options)
+
+		cmd.Env = nativeEnv
+		if credentialErr := applyProcessCredential(cmd, options.ProcessIsolation); credentialErr != nil {
+			return nil, nil, "", credentialErr
+		}
 	} else {
 		cmd, supervisor, err = supervisorCommand(procCtx, supervisorConfig{
 			NativePath:       path,
 			NativeArgs:       appServerArgs(options),
-			NativeEnv:        mergedEnv(options),
+			NativeEnv:        nativeEnv,
+			Isolation:        options.ProcessIsolation,
 			Home:             firstNonEmpty(options.WritableHome, options.CodexHome),
 			Scratch:          options.SupervisorRoot,
 			ScratchParent:    options.SupervisorParent,
@@ -79,13 +88,23 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	cmd.Stderr = stderr
 
 	spawnStarted := time.Now()
+
 	if err := startProcess(cmd); err != nil {
+		_ = supervisor.closeInherited()
+
 		observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, err)
 
 		_ = stdin.Close()
 		_ = stdout.Close()
 
 		return nil, nil, "", err
+	}
+
+	if closeErr := supervisor.closeInherited(); closeErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+
+		return nil, nil, "", fmt.Errorf("close inherited supervisor config: %w", closeErr)
 	}
 
 	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, nil)
@@ -172,12 +191,12 @@ func (w *stderrTail) tail() string {
 	return strings.TrimSpace(string(w.buf))
 }
 
-func resolveCodexPath(path string) (string, error) {
-	if strings.TrimSpace(path) != "" {
-		return path, nil
+func resolveCodexPath(path string, env []string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		path = "codex" //nolint:goconst // Executable identity is distinct from Darwin registry metadata.
 	}
 
-	resolved, err := exec.LookPath("codex")
+	resolved, err := resolveProcessExecutable(path, env)
 	if err != nil {
 		return "", fmt.Errorf("find codex CLI: %w", err)
 	}
@@ -245,17 +264,13 @@ func semverParts(value string) [3]int {
 	return out
 }
 
-func mergedEnv(options Options) []string {
-	env := os.Environ()
+func buildMergedEnv(options Options) ([]string, error) {
+	managed := map[string]string{}
 	if options.CodexHome != "" {
-		env = upsertEnv(env, envCodexHome, options.CodexHome)
+		managed[envCodexHome] = options.CodexHome
 	}
 
-	for key, value := range options.Env {
-		env = upsertEnv(env, key, value)
-	}
-
-	return env
+	return buildProcessEnvironment(options.ProcessIsolation, options.Env, managed)
 }
 
 func upsertEnv(env []string, key string, value string) []string {

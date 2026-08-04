@@ -66,7 +66,7 @@ the write fails closed and touches nothing — an operator-authored `config.toml
 is never clobbered.
 
 Keep secrets out of the seeded file: set the API key with `WithEnv` (or the
-process environment) and reference it from the config with `env_key`.
+`ProcessIsolation.BaseEnvironment`) and reference it from the config with `env_key`.
 
 Session builders also expose `WithCodexEnv`. The first runtime construction
 pins the effective process `WithEnv` plus session overlay for that Agent-owned

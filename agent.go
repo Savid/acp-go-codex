@@ -509,6 +509,7 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 		NativeVersion:    nativeVersion,
 		DefaultModel:     a.options.DefaultModel,
 		Env:              a.observe.InjectTraceEnv(ctx, env),
+		ProcessIsolation: codexProcessIsolation(a.options.ProcessIsolation),
 		Config:           a.codexConfig(),
 		ExtraArgs:        extraArgs,
 		Logger:           a.log,
@@ -542,6 +543,16 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 	}
 
 	return client, nil
+}
+
+func codexProcessIsolation(value *ProcessIsolation) *codex.ProcessIsolation {
+	if value == nil {
+		return nil
+	}
+
+	return &codex.ProcessIsolation{
+		UID: value.UID, GID: value.GID, BaseEnvironment: cloneStringMap(value.BaseEnvironment),
+	}
 }
 
 func (a *Agent) codexConfig() map[string]any {
