@@ -120,8 +120,6 @@ func TestSupervisorConfigAndDispatchFailures(t *testing.T) {
 
 	path, err = writeSupervisorConfig(root, config)
 	require.NoError(t, err)
-	t.Setenv(processIsolationUIDEnv, "1")
-	t.Setenv(processIsolationGIDEnv, "2")
 	err = runSupervisor("unknown", path)
 	require.ErrorContains(t, err, "unknown internal mode")
 }
@@ -140,17 +138,15 @@ func TestSupervisorCommandNonceEnvironmentAndProof(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cmd)
 	require.NotNil(t, proof)
-	require.Contains(t, strings.Join(cmd.Env, "\n"), supervisorModeEnv+"="+supervisorModeGuardian)
+	require.Equal(t, []string{supervisorModeEnv + "=" + supervisorModeGuardian}, cmd.Env)
+	require.Equal(t, "/", cmd.Dir)
+	if cmd.SysProcAttr != nil {
+		require.Nil(t, cmd.SysProcAttr.Credential)
+	}
 
 	nonce, err := supervisorNonce()
 	require.NoError(t, err)
 	require.Len(t, nonce, 32)
-
-	env := supervisorIdentityEnvironment([]string{"BASE=yes"}, "new", ProcessIsolation{UID: 1, GID: 2})
-	require.Contains(t, env, supervisorModeEnv+"=new")
-	require.Contains(t, env, processIsolationUIDEnv+"=1")
-	require.Contains(t, env, processIsolationGIDEnv+"=2")
-	require.Contains(t, env, "BASE=yes")
 
 	require.NoError(t, (*supervisorProof)(nil).awaitCompletion())
 	require.ErrorIs(t, (&supervisorProof{

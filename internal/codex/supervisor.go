@@ -47,6 +47,7 @@ type supervisorConfig struct {
 	FramedInput      bool              `json:"framedInput"`
 	IsolationUID     uint32            `json:"isolationUid"`
 	IsolationGID     uint32            `json:"isolationGid"`
+	IdentityLock     bool              `json:"identityLock"`
 	Isolation        *ProcessIsolation `json:"-"`
 }
 
@@ -76,6 +77,23 @@ var supervisorInput io.Reader = os.Stdin
 var supervisorOutput io.Writer = os.Stdout
 var supervisorError io.Writer = os.Stderr
 var supervisorExit = os.Exit
+var supervisorWriteConfig = writeSupervisorConfig
+var supervisorMarkerRoot = func(config supervisorConfig) (string, error) { return config.Scratch, nil }
+var supervisorAcquireIdentityLock = func(uint32, io.Reader) (supervisorIdentityLock, error) {
+	return noopSupervisorIdentityLock{}, nil
+}
+var supervisorVerifyTrustedIdentity = func(uint32) error { return nil }
+var supervisorAdoptIdentityLock = func() (io.Closer, error) { return noopSupervisorIdentityLock{}, nil }
+
+type supervisorIdentityLock interface {
+	io.Closer
+	InheritedFile() *os.File
+}
+
+type noopSupervisorIdentityLock struct{}
+
+func (noopSupervisorIdentityLock) Close() error            { return nil }
+func (noopSupervisorIdentityLock) InheritedFile() *os.File { return nil }
 
 type supervisorProof struct {
 	started          string
@@ -114,7 +132,7 @@ func supervisorBootstrap() {
 		return
 	}
 
-	err := verifySupervisorIdentity()
+	var err error
 
 	configFile := supervisorInheritedFile(3, "acp-go-codex-supervisor-config")
 	if err == nil && configFile == nil {
@@ -150,9 +168,12 @@ func runSupervisor(mode string, configInput io.Reader) error {
 		return err
 	}
 
-	uid, gid, err := expectedSupervisorIdentity()
-	if err != nil || config.IsolationUID != uid || config.IsolationGID != gid {
-		return errors.Join(errors.New("private supervisor config identity does not match the verified process identity"), err)
+	if mode == supervisorModeLiveness && config.IdentityLock {
+		lock, lockErr := supervisorAdoptIdentityLock()
+		if lockErr != nil {
+			return lockErr
+		}
+		defer func() { _ = lock.Close() }()
 	}
 
 	switch mode {
@@ -237,6 +258,10 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 		return nil, nil, err
 	}
 
+	if err := supervisorVerifyTrustedIdentity(config.Isolation.UID); err != nil {
+		return nil, nil, err
+	}
+
 	config.IsolationUID = config.Isolation.UID
 
 	config.IsolationGID = config.Isolation.GID
@@ -253,12 +278,17 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 		return nil, nil, err
 	}
 
-	config.Started = filepath.Join(config.Scratch, "supervisor-started-"+markerNonce)
-	config.Completion = filepath.Join(config.Scratch, "supervisor-complete-"+markerNonce)
-	config.NativePIDFile = filepath.Join(config.Scratch, "supervisor-native-pid-"+markerNonce)
-	config.ProviderSnapshot = filepath.Join(config.Scratch, "supervisor-provider-snapshot-"+markerNonce)
+	markerRoot, err := supervisorMarkerRoot(config)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	configFile, err := writeSupervisorConfig(config.Scratch, config)
+	config.Started = filepath.Join(markerRoot, "supervisor-started-"+markerNonce)
+	config.Completion = filepath.Join(markerRoot, "supervisor-complete-"+markerNonce)
+	config.NativePIDFile = filepath.Join(markerRoot, "supervisor-native-pid-"+markerNonce)
+	config.ProviderSnapshot = filepath.Join(markerRoot, "supervisor-provider-snapshot-"+markerNonce)
+
+	configFile, err := supervisorWriteConfig(config.Scratch, config)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -270,7 +300,7 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 		return nil, nil, fmt.Errorf("resolve embedded runtime supervisor: %w", err)
 	}
 
-	helperEnv := supervisorIdentityEnvironment(config.NativeEnv, supervisorModeGuardian, *config.Isolation)
+	helperEnv := []string{supervisorModeEnv + "=" + supervisorModeGuardian}
 
 	executable, err = resolveProcessExecutable(executable, helperEnv)
 	if err != nil {
@@ -281,14 +311,10 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 
 	cmd := execCommandContext(ctx, executable)
 	cmd.Env = helperEnv
+	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{configFile}
 
 	cmd.WaitDelay = supervisorQuiesceWindow + time.Second
-	if err := applyProcessCredential(cmd, config.Isolation); err != nil {
-		_ = configFile.Close()
-
-		return nil, nil, err
-	}
 
 	return cmd, &supervisorProof{
 		started:          config.Started,
@@ -390,6 +416,24 @@ func (p *supervisorProof) awaitCompletion() error {
 func runGuardian(config supervisorConfig) error {
 	input, output, errorOutput := supervisorInput, supervisorOutput, supervisorError
 
+	var (
+		err          error
+		identityLock supervisorIdentityLock = noopSupervisorIdentityLock{}
+	)
+
+	if config.IsolationUID != 0 {
+		if verifyErr := supervisorVerifyTrustedIdentity(config.IsolationUID); verifyErr != nil {
+			return verifyErr
+		}
+
+		identityLock, err = supervisorAcquireIdentityLock(config.IsolationUID, input)
+		if err != nil {
+			return err
+		}
+	}
+
+	defer func() { _ = identityLock.Close() }()
+
 	claim, err := homelock.AcquireClaim(config.Home)
 	if err != nil {
 		return err
@@ -404,7 +448,10 @@ func runGuardian(config supervisorConfig) error {
 
 	config.JobName = containment.Name()
 
-	livenessConfig, err := writeSupervisorConfig(config.Scratch, config)
+	lockFile := identityLock.InheritedFile()
+	config.IdentityLock = lockFile != nil
+
+	livenessConfig, err := supervisorWriteConfig(config.Scratch, config)
 	if err != nil {
 		return err
 	}
@@ -424,8 +471,14 @@ func runGuardian(config supervisorConfig) error {
 	}
 
 	cmd := supervisorExecCommand(executable)
-	cmd.Env = supervisorIdentityEnvironment(config.NativeEnv, supervisorModeLiveness, ProcessIsolation{UID: config.IsolationUID, GID: config.IsolationGID})
+	cmd.Env = []string{supervisorModeEnv + "=" + supervisorModeLiveness}
+	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{livenessConfig}
+
+	if lockFile != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, lockFile)
+	}
+
 	configureIndependentSupervisor(cmd)
 
 	stdin, err := cmd.StdinPipe()
@@ -530,6 +583,12 @@ func runGuardian(config supervisorConfig) error {
 func runLiveness(config supervisorConfig) error {
 	input, output, errorOutput := supervisorInput, supervisorOutput, supervisorError
 
+	if config.IsolationUID != 0 {
+		if verifyErr := supervisorVerifyTrustedIdentity(config.IsolationUID); verifyErr != nil {
+			return verifyErr
+		}
+	}
+
 	if err := writeSupervisorMarker(config.Started); err != nil {
 		return err
 	}
@@ -551,6 +610,16 @@ func runLiveness(config supervisorConfig) error {
 	// accepted from ACP requests.
 	cmd := supervisorExecCommand(config.NativePath, config.NativeArgs...)
 	cmd.Env = config.NativeEnv
+
+	if config.IsolationUID != 0 || config.IsolationGID != 0 {
+		if credentialErr := applyProcessCredential(cmd, &ProcessIsolation{
+			UID:             config.IsolationUID,
+			GID:             config.IsolationGID,
+			BaseEnvironment: environmentMap(config.NativeEnv),
+		}); credentialErr != nil {
+			return fmt.Errorf("apply supervised Codex native identity: %w", credentialErr)
+		}
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
