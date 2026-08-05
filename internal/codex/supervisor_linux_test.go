@@ -96,6 +96,23 @@ func TestLinuxSupervisorChildInheritsSecurityLimits(t *testing.T) {
 	require.Equal(t, "1 0", strings.TrimSpace(string(proof)))
 }
 
+func TestSupervisedNativeIsolationDropsStandaloneFieldsAfterAuthorityAdoption(t *testing.T) {
+	config := supervisorConfig{
+		IsolationUID: 123, IsolationGID: 456,
+		NativeEnv:           []string{"PATH=/usr/bin:/bin"},
+		IdentityLock:        true,
+		AuthorityDomain:     true,
+		StandaloneOwnerID:   "standalone-owner",
+		StandaloneStateRoot: "/var/lib/standalone-owner",
+	}
+
+	isolation := supervisedNativeIsolation(config)
+	require.True(t, isolation.identityAuthorityAdopted)
+	require.Empty(t, isolation.StandaloneOwnerID)
+	require.Empty(t, isolation.StandaloneStateRoot)
+	require.NoError(t, validateProcessIsolation(isolation))
+}
+
 func TestLinuxSupervisorLaunchesFailClosedWhenSecurityLimitsCannotBeSet(t *testing.T) {
 	preserveLinuxSupervisorGlobals(t)
 	linuxSetCoreLimit = func() error { return errors.New("setrlimit failed") }

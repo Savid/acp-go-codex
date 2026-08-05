@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -110,13 +109,20 @@ func TestRealNativeBrowserContainment(t *testing.T) {
 		readDone <- scanner.Err()
 	}()
 
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdinRead.Close()
+	defer stdinWrite.Close()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	signals := make(chan os.Signal, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runCodexCLIWithSignals(ctx, browserCanaryNative, browserCanaryHome, browserCanaryScratch,
-			loginCommand, false, isolation, bytes.NewReader(nil), stdoutWrite, stdoutWrite, signals)
+			loginCommand, false, isolation, stdinRead, stdoutWrite, stdoutWrite, signals)
 	}()
 
 	seenURL := false

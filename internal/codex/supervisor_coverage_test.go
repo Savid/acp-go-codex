@@ -588,14 +588,16 @@ func TestGuardianPreReadinessRecoveryProofBranches(t *testing.T) {
 		completion := filepath.Join(root, "complete")
 		require.NoError(t, writeSupervisorMarker(started))
 		supervisorExecutable = func() (string, error) { return "/bin/false", nil }
+		wroteCompletion := make(chan error, 1)
 		go func() {
 			time.Sleep(20 * time.Millisecond)
-			_ = writeSupervisorMarker(completion)
+			wroteCompletion <- writeSupervisorMarker(completion)
 		}()
 		err := runGuardian(supervisorConfig{
 			Home: filepath.Join(root, "home"), Scratch: root, Started: started,
 			Completion: completion, NativePIDFile: filepath.Join(root, "missing-pid"),
 		})
+		require.NoError(t, <-wroteCompletion)
 		require.Error(t, err)
 	})
 }
