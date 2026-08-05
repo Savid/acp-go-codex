@@ -91,6 +91,10 @@ type authLedger struct {
 // InputHandoffRoot and a negative ImageLimits field produce.
 func validateProviderAuthOptions(options Options) error {
 	var err error
+	if options.AllowAccountLogout && options.Home == "" {
+		err = errors.Join(err, errors.New("WithCodexAllowAccountLogout requires an explicit WithHome"))
+	}
+
 	if options.ProviderAuthRoot != "" && !filepath.IsAbs(options.ProviderAuthRoot) {
 		err = errors.Join(err, fmt.Errorf("ProviderAuthRoot must be an absolute path, got %q", options.ProviderAuthRoot))
 	}

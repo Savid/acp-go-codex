@@ -548,9 +548,11 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	supervisorInput = strings.NewReader("")
 	supervisorOutput = io.Discard
 	supervisorError = io.Discard
-	require.NoError(t, runSupervisor(supervisorModeLiveness, path))
+	require.ErrorContains(t, runSupervisor(supervisorModeLiveness, path), "operation not permitted")
 
 	root = t.TempDir()
+	config.IsolationUID = 0
+	config.IsolationGID = 0
 	config.Home = filepath.Join(root, "home")
 	config.Scratch = root
 	config.Started = filepath.Join(root, "started")
@@ -663,7 +665,7 @@ func TestSupervisorFinalRemainingBranches(t *testing.T) {
 		supervisorOutput = io.Discard
 		supervisorError = io.Discard
 		config := supervisorConfig{
-			NativePath: "/usr/bin/true", NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root, ScratchParent: filepath.Dir(root), LifecycleKind: "runtime",
+			NativePath: "/bin/sleep", NativeArgs: []string{"0.1"}, NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root, ScratchParent: filepath.Dir(root), LifecycleKind: "runtime",
 			Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"), NativePIDFile: filepath.Join(root, "pid"),
 			FramedInput: true, DarwinBestEffort: true,
 		}
@@ -718,7 +720,7 @@ func TestSupervisorFinalRemainingBranches(t *testing.T) {
 		supervisorOutput = io.Discard
 		supervisorError = io.Discard
 		err := runLiveness(supervisorConfig{
-			NativePath: "/usr/bin/true", NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root,
+			NativePath: "/bin/sleep", NativeArgs: []string{"0.1"}, NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root,
 			Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"), NativePIDFile: filepath.Join(root, "pid"),
 			FramedInput: true,
 		})

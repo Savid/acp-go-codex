@@ -10,7 +10,9 @@ import (
 )
 
 type guardianContainment struct{}
-type livenessContainment struct{}
+type livenessContainment struct {
+	beforeStart func() error
+}
 
 func (*livenessContainment) DescendantCount() (int, bool) { return 0, false }
 

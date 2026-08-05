@@ -38,6 +38,7 @@ const (
 	methodAccountLoginStart           = "account/login/start"
 	methodAccountLogout               = "account/logout"
 	methodAccountRateLimitsRead       = "account/rateLimits/read"
+	appServerClientName               = "acp-go-codex"
 )
 
 const (
@@ -160,8 +161,8 @@ func (c *AppServerClient) initialize(ctx context.Context) error {
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodInitialize, map[string]any{
 		"clientInfo": map[string]any{
-			fieldName:  "acp-go-codex",
-			fieldTitle: "acp-go-codex",
+			fieldName:  appServerClientName,
+			fieldTitle: appServerClientName,
 			"version":  "0.1.0",
 		},
 		"capabilities": map[string]any{

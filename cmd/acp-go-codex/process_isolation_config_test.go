@@ -17,9 +17,11 @@ func stubProcessIsolationConfig(t *testing.T) {
 		}
 
 		return processIsolationConfig{
-			UID:             20001,
-			GID:             20001,
-			BaseEnvironment: map[string]string{"PATH": "/usr/bin", "HOME": "/tmp/codex", "USER": "acp", "LOGNAME": "acp"},
+			UID:                 20001,
+			GID:                 20001,
+			BaseEnvironment:     map[string]string{"PATH": "/usr/bin", "HOME": "/tmp/codex", "USER": "acp", "LOGNAME": "acp"},
+			StandaloneOwnerID:   "test-owner",
+			StandaloneStateRoot: "/tmp/codex",
 		}, nil
 	}
 	t.Cleanup(func() { processIsolationConfigLoader = original })
@@ -30,11 +32,12 @@ func isolatedArgs(args ...string) []string {
 }
 
 func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
-	config, err := decodeProcessIsolationConfig([]byte(`{"uid":20001,"gid":20002,"baseEnvironment":{"PATH":"/usr/bin"},"inheritEnvironment":["AMP_API_KEY"]}`))
+	config, err := decodeProcessIsolationConfig([]byte(`{"uid":20001,"gid":20002,"baseEnvironment":{"PATH":"/usr/bin"},"inheritEnvironment":["AMP_API_KEY"],"standaloneOwnerId":"deployment-1","standaloneStateRoot":"/var/lib/provider"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.UID != 20001 || config.GID != 20002 || config.BaseEnvironment["PATH"] != "/usr/bin" || len(config.InheritEnvironment) != 1 {
+	if config.UID != 20001 || config.GID != 20002 || config.BaseEnvironment["PATH"] != "/usr/bin" || len(config.InheritEnvironment) != 1 ||
+		config.StandaloneOwnerID != "deployment-1" || config.StandaloneStateRoot != "/var/lib/provider" {
 		t.Fatalf("decoded config = %#v", config)
 	}
 
@@ -42,12 +45,22 @@ func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
 		`{"uid":1,"gid":2,"baseEnvironment":{},"unknown":true}`,
 		`{"uid":1,"gid":2,"baseEnvironment":{}} {}`,
 		`{"uid":1,"uid":2,"gid":2,"baseEnvironment":{}}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{},"standaloneOwnerId":"a","standaloneOwnerId":"b"}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{},"standaloneStateRoot":"/a","standaloneStateRoot":"/b"}`,
 		`{"uid":1,"gid":2,"baseEnvironment":{"PATH":"/bin","PATH":"/usr/bin"}}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{}} @`,
+		`{"uid":1,"gid":2,"baseEnvironment":{},@:1}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{},"inheritEnvironment":[@]}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{"PATH":"/bin"`,
+		`[{"uid":1}]`,
 		``,
 	} {
 		if _, err := decodeProcessIsolationConfig([]byte(document)); err == nil {
 			t.Fatalf("decode unexpectedly accepted %q", document)
 		}
+	}
+	if _, err := decodeProcessIsolationConfig([]byte{0xff}); err == nil {
+		t.Fatal("invalid UTF-8 was accepted")
 	}
 }
 

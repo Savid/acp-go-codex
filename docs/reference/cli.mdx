@@ -12,7 +12,7 @@ Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
 ## Required standalone isolation policy
 
 Normal serve mode is Linux-only and requires
-`-process-isolation-config=/absolute/path/process-isolation.json`. The native `login` and `logout` subcommands require the same flag and also require explicit `-home` equal to the policy `HOME`. Serve mode defaults `-home` to that directory and rejects any different value.
+`-process-isolation-config=/absolute/path/process-isolation.json`. The native `login` and `logout` subcommands require the same flag and also require explicit `-home` equal to `standaloneStateRoot`. Serve mode defaults `-home` to that directory and rejects any different value.
 `-version` and the Darwin containment diagnostic subcommands are exempt.
 The policy must be a root-owned, single-link regular file with mode `0600`.
 Every component is opened from `/` without following symlinks, and every
@@ -23,6 +23,8 @@ fields and trailing JSON values are rejected.
 {
   "uid": 20001,
   "gid": 20001,
+  "standaloneOwnerId": "codex-deployment-1",
+  "standaloneStateRoot": "/var/lib/acp-go-codex",
   "baseEnvironment": {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
     "HOME": "/var/lib/acp-go-codex",
@@ -33,6 +35,17 @@ fields and trailing JSON values are rejected.
   "inheritEnvironment": []
 }
 ```
+
+`standaloneOwnerId` is the nonsecret, case-sensitive deployment identity:
+1--256 ASCII bytes, beginning alphanumeric, with remaining bytes limited to
+alphanumerics and `._:@/-`. `standaloneStateRoot` is the existing dedicated
+durable provider state root, is neither `/` nor equal to or beneath
+`/var/lib/acp-go/agent-identities`, and must equal the configured native home. Its clean
+absolute UTF-8 path is limited to 4096 bytes with no control character, and
+Linux resolves the complete path componentwise from `/` without following
+symlinks or magic links. Every ancestor is root-owned and not group/world
+writable; the final directory is owned by the configured UID:GID with mode
+`0700`. It binds the exact path, device, and inode.
 
 The supervisor must run as root. The UID/GID must name a nonroot account with
 that same-name private primary group, no supplementary groups, and a target-owned mode
@@ -58,7 +71,7 @@ home for native tools.
 | --- | --- | --- |
 | `-path` | `codex` on `PATH` | Codex CLI executable path. |
 | `-process-isolation-config` | unset | Required absolute path to the standalone Linux isolation policy described above. |
-| `-home` | policy `HOME` | Codex home directory passed as `CODEX_HOME`; an explicit value must equal policy `HOME`, and root ambient state is never consulted. |
+| `-home` | policy `standaloneStateRoot` | Codex home directory passed as `CODEX_HOME`; an explicit value must equal `standaloneStateRoot`, and root ambient state is never consulted. |
 | `-scratch-dir` | system temp | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-provider-auth-root` | unset | Durable host-owned root holding the values-free provider-auth ledger. Empty leaves the whole provider-auth surface unadvertised. |
 | `-provider-auth-direct-home` | unset | Exact `CODEX_HOME` the operator consents to the `credential` and `disconnect` legs touching. It must equal `-home`; empty leaves those two legs unadvertised. |

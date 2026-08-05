@@ -95,7 +95,7 @@ wait
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := homelock.Acquire(lockRoot); err == nil {
+	if _, liveErr := homelock.Acquire(lockRoot); liveErr == nil {
 		t.Fatal("second claimant acquired home while terminal auth tree was live")
 	}
 

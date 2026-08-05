@@ -64,6 +64,7 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 	}
 
 	logoutAgent := NewAgent(
+		WithHome(t.TempDir()),
 		WithCodexAllowAccountLogout(true),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
@@ -72,6 +73,25 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 	}
 	if !client.loggedOut {
 		t.Fatal("client Logout was not called")
+	}
+}
+
+func TestLogoutRejectsAnEnvironmentSelectedCodexHomeBeforeNativeCreation(t *testing.T) {
+	client := newSpyCodexClient()
+	agent := NewAgent(
+		WithCodexAllowAccountLogout(true),
+		WithEnv(map[string]string{"CODEX_HOME": t.TempDir()}),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+			return client, nil
+		}),
+	)
+
+	_, err := agent.Logout(t.Context(), acp.LogoutRequest{})
+	if err == nil || !containsAll(err.Error(), "explicit WithHome", "reserved") {
+		t.Fatalf("logout error = %v", err)
+	}
+	if client.loggedOut {
+		t.Fatal("logout reached the native client")
 	}
 }
 
@@ -203,6 +223,7 @@ func TestAuthErrorBranches(t *testing.T) {
 
 	logoutClientErr := errors.New("logout client failed")
 	logoutNewClient := NewAgent(
+		WithHome(t.TempDir()),
 		WithCodexAllowAccountLogout(true),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return nil, logoutClientErr }),
 	)
@@ -213,6 +234,7 @@ func TestAuthErrorBranches(t *testing.T) {
 	logoutErr := errors.New("logout failed")
 	logoutClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), logoutErr: logoutErr}
 	logoutAgent := NewAgent(
+		WithHome(t.TempDir()),
 		WithCodexAllowAccountLogout(true),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return logoutClient, nil }),
 	)

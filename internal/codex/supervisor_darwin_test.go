@@ -88,8 +88,28 @@ func TestDarwinContainmentSelectionAndStartFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := liveness.Start(exec.Command(filepath.Join(t.TempDir(), "missing"))); err == nil {
+	if startErr := liveness.Start(exec.Command(filepath.Join(t.TempDir(), "missing"))); startErr == nil {
 		t.Fatal("missing command started")
+	}
+
+	config = darwinSupervisorTestConfig(t)
+	liveness, err = openLivenessContainment(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("/usr/bin/true")
+	credential := &syscall.Credential{Uid: 501, Gid: 502, Groups: []uint32{}}
+	command.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
+	want := errors.New("stop before launch")
+	liveness.beforeStart = func() error {
+		if command.SysProcAttr == nil || command.SysProcAttr.Credential != credential || !command.SysProcAttr.Setpgid {
+			t.Fatalf("Darwin liveness start discarded native credentials: %#v", command.SysProcAttr)
+		}
+
+		return want
+	}
+	if err = liveness.Start(command); !errors.Is(err, want) {
+		t.Fatalf("credential-preserving start = %v", err)
 	}
 	if err := (&livenessContainment{generation: &DarwinGeneration{}}).Start(exec.Command("/usr/bin/true")); err == nil {
 		t.Fatal("invalid generation prepared a command")

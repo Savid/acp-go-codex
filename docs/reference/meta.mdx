@@ -33,6 +33,11 @@ Accepted session lifecycle metadata:
 }
 ```
 
+Session `env` may add ordinary variables to the runtime's immutable environment.
+`CODEX_HOME`, `HOME`, and the XDG cache, config, data, runtime, and state roots
+are reserved and rejected before native creation; `WithHome` and the trusted
+process-isolation base environment remain authoritative.
+
 ## Initialize capabilities
 
 Accepted initialize capability metadata under `_meta.codex`:

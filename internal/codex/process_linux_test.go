@@ -17,7 +17,7 @@ func TestConfigureProcessLinux(t *testing.T) {
 	}
 }
 
-func TestLinuxProcessStartRetainsCreatorThreadThroughWait(t *testing.T) {
+func TestProviderCreatorLinuxProcessStartRetainsCreatorThreadThroughWait(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", "while :; do sleep 1; done")
 	waiter, err := startProcess(cmd)
 	if err != nil {

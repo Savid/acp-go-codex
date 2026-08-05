@@ -177,7 +177,7 @@ func TestAppServerClientModelAndAccountMethods(t *testing.T) {
 
 func TestNewAppServerClientLaunchesCLI(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
-	script := filepath.Join(t.TempDir(), "codex")
+	script := filepath.Join(testTraversableTempDir(t), "codex")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo codex-cli 0.144.1
@@ -190,7 +190,12 @@ while read line; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write codex script: %v", err)
 	}
-	client, err := NewAppServerClient(context.Background(), Options{CLIPath: script, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second})
+	client, err := NewAppServerClient(context.Background(), Options{
+		CLIPath: script, CodexHome: testNativeOwnedTempDir(t), SupervisorRoot: testTraversableTempDir(t),
+		SupervisorParent: os.TempDir(),
+		DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second,
+		ProcessIsolation: testProcessIsolation(),
+	})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
 	}
@@ -735,6 +740,10 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 		close(sent)
 	}()
 	<-sent
+	// Draining immediately would race the non-blocking send forward attempts
+	// first; the terminal event must be delivered through the blocking send so
+	// the buffered consumer path is the one under test.
+	time.Sleep(50 * time.Millisecond)
 	if event := <-blockingCompleted.out; event.Kind != EventRaw {
 		t.Fatalf("blocking completed filler event = %#v", event)
 	}
@@ -1038,7 +1047,7 @@ func TestAppServerLifecycleMappingEdges(t *testing.T) {
 		t.Fatal("NewAppServerClient accepted missing CLI")
 	}
 
-	initErrorScript := filepath.Join(t.TempDir(), "codex-init-error")
+	initErrorScript := filepath.Join(testTraversableTempDir(t), "codex-init-error")
 	if err := os.WriteFile(initErrorScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo codex-cli 0.144.1
@@ -1050,7 +1059,12 @@ while read line; do :; done
 `), 0o700); err != nil {
 		t.Fatalf("write init error script: %v", err)
 	}
-	if _, err := NewAppServerClient(context.Background(), Options{CLIPath: initErrorScript, CodexHome: t.TempDir(), SupervisorRoot: t.TempDir(), DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: time.Second}); err == nil {
+	if _, err := NewAppServerClient(context.Background(), Options{
+		CLIPath: initErrorScript, CodexHome: testNativeOwnedTempDir(t), SupervisorRoot: testTraversableTempDir(t),
+		SupervisorParent: os.TempDir(),
+		DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: time.Second,
+		ProcessIsolation: testProcessIsolation(),
+	}); err == nil {
 		t.Fatal("NewAppServerClient accepted initialize failure")
 	}
 

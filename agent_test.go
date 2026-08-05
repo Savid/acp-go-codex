@@ -1588,3 +1588,22 @@ func TestServeReturnsImmediatelyOnCanceledContext(t *testing.T) {
 		t.Fatalf("Serve with canceled context = %v, want context.Canceled", err)
 	}
 }
+
+func TestCodexProcessIsolationClonesStandaloneBinding(t *testing.T) {
+	base := map[string]string{"CANARY": "base"}
+	policy := &ProcessIsolation{
+		UID: 12, GID: 34, BaseEnvironment: base,
+		StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "/var/lib/codex",
+	}
+
+	converted := codexProcessIsolation(policy)
+	base["CANARY"] = "mutated"
+
+	if converted.UID != 12 || converted.GID != 34 || converted.BaseEnvironment["CANARY"] != "base" ||
+		converted.StandaloneOwnerID != "deployment-1" || converted.StandaloneStateRoot != "/var/lib/codex" {
+		t.Fatalf("converted isolation = %#v", converted)
+	}
+	if codexProcessIsolation(nil) != nil {
+		t.Fatal("nil isolation did not remain nil")
+	}
+}

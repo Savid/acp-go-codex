@@ -11,6 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// The native turn id is what thread-scoped containment targets, so it must be
+// readable while a turn runs and must never be cleared by an id-less event.
+func TestSessionActiveTurnIDTracksNativeTurn(t *testing.T) {
+	session := &session{}
+	require.Empty(t, session.activeTurnID())
+
+	session.setTurnID("native-turn-1")
+	require.Equal(t, "native-turn-1", session.activeTurnID())
+
+	session.setTurnID("")
+	require.Equal(t, "native-turn-1", session.activeTurnID())
+
+	session.setTurnID("native-turn-2")
+	require.Equal(t, "native-turn-2", session.activeTurnID())
+}
+
 func TestSessionInteractionCancellationBranches(t *testing.T) {
 	session := &session{}
 	release, err := session.acquireTurn(context.Background())

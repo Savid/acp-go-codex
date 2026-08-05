@@ -133,13 +133,14 @@ func TestSupervisorConfigAndDispatchFailures(t *testing.T) {
 func TestSupervisorCommandNonceEnvironmentAndProof(t *testing.T) {
 	preserveSupervisorGlobals(t)
 	root := t.TempDir()
+	isolation := testProcessIsolation()
 	supervisorExecutable = func() (string, error) { return "", errors.New("lookup failed") }
-	_, _, err := supervisorCommand(context.Background(), supervisorConfig{Scratch: root})
+	_, _, err := supervisorCommand(context.Background(), supervisorConfig{Scratch: root, Isolation: isolation})
 	require.ErrorContains(t, err, "resolve embedded")
 
 	supervisorExecutable = os.Executable
 	cmd, proof, err := supervisorCommand(context.Background(), supervisorConfig{
-		NativePath: "/bin/true", Home: filepath.Join(root, "home"), Scratch: root,
+		NativePath: "/bin/true", Home: filepath.Join(root, "home"), Scratch: root, Isolation: isolation,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, cmd)
@@ -328,8 +329,6 @@ func TestSupervisorEntropyAndProofStatFailures(t *testing.T) {
 	supervisorRandRead = func([]byte) (int, error) { return 0, errors.New("entropy failed") }
 	_, err := supervisorNonce()
 	require.ErrorContains(t, err, "marker nonce")
-	_, err = writeSupervisorConfig(t.TempDir(), supervisorConfig{})
-	require.ErrorContains(t, err, "config nonce")
 
 	root := t.TempDir()
 	notDirectory := filepath.Join(root, "file")
@@ -366,7 +365,7 @@ func TestRunGuardianPipeAndStartFailures(t *testing.T) {
 	t.Run("start", func(t *testing.T) {
 		preserveSupervisorGlobals(t)
 		root := t.TempDir()
-		supervisorExecutable = func() (string, error) { return "/missing", nil }
+		supervisorExecutable = func() (string, error) { return "/bin/true", nil }
 		supervisorExecCommand = func(string, ...string) *exec.Cmd { return exec.Command(filepath.Join(root, "missing")) }
 		err := runGuardian(supervisorConfig{Home: filepath.Join(root, "home"), Scratch: root})
 		require.ErrorContains(t, err, "start liveness supervisor")
@@ -463,20 +462,6 @@ func TestUnixQuiescenceSignalEscalationAndTimeout(t *testing.T) {
 }
 
 func TestSupervisorInjectedFilesystemAndContainmentFailures(t *testing.T) {
-	t.Run("chmod", func(t *testing.T) {
-		preserveSupervisorGlobals(t)
-		supervisorChmod = func(string, os.FileMode) error { return errors.New("chmod failed") }
-		_, err := writeSupervisorConfig(t.TempDir(), supervisorConfig{})
-		require.ErrorContains(t, err, "chmod private")
-	})
-
-	t.Run("open file", func(t *testing.T) {
-		preserveSupervisorGlobals(t)
-		supervisorOpenFile = func(string, int, os.FileMode) (*os.File, error) { return nil, errors.New("open failed") }
-		_, err := writeSupervisorConfig(t.TempDir(), supervisorConfig{})
-		require.ErrorContains(t, err, "create private supervisor config")
-	})
-
 	t.Run("encode", func(t *testing.T) {
 		preserveSupervisorGlobals(t)
 		supervisorEncodeConfig = func(io.Writer, supervisorConfig) error { return errors.New("encode failed") }

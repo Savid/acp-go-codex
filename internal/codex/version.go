@@ -36,6 +36,7 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	if err != nil {
 		return "", err
 	}
+
 	lockRoot, err := HomeLockRoot(options.ScratchParent, options.WritableHome)
 	if err != nil {
 		return "", err

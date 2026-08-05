@@ -17,7 +17,8 @@ options below.
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
 	codexacp.WithExecutablePath("/usr/local/bin/codex"),
-	codexacp.WithHome("/tmp/codex-home"),
+	codexacp.WithProcessIsolation(codexacp.ProcessIsolation{UID: agentUID, GID: agentGID, BaseEnvironment: agentEnv, StandaloneOwnerID: ownerID, StandaloneStateRoot: "/var/lib/acp-go-codex"}),
+	codexacp.WithHome("/var/lib/acp-go-codex"),
 	codexacp.WithDefaultModel("gpt-5.5"),
 	codexacp.WithLogger(logger),
 )
@@ -36,10 +37,10 @@ escaped descendants are absent on Darwin.
 | --- | --- |
 | `WithExecutablePath(path)` | Codex CLI executable path (defaults to `codex` on `PATH`). |
 | `WithProcessIsolation(policy)` | Mandatory nonzero target UID/GID and complete replacement environment for native Codex processes. On Linux the guardian/liveness supervisors stay trusted root; only the native app-server receives the configured identity, with supplementary groups cleared. |
-| `WithHome(path)` | `CODEX_HOME` for launched Codex processes. |
+| `WithHome(path)` | `CODEX_HOME` for launched Codex processes. Standalone isolation defaults it to `StandaloneStateRoot` and rejects any different explicit path. |
 | `WithScratchDir(dir)` | Parent directory for all ephemeral on-disk materialization; empty means the system temp directory. Created `0700` when missing. |
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
-| `WithEnv(env)` | Environment variables overlaid on `ProcessIsolation.BaseEnvironment`; the adapter never inherits its own environment. Reserved internal names are rejected. |
+| `WithEnv(env)` | Ordinary environment variables overlaid on `ProcessIsolation.BaseEnvironment`; the adapter never inherits its own environment. `CODEX_HOME`, `HOME`, XDG roots, and adapter-internal names are reserved and rejected. |
 | `WithLogger(logger)` | `*slog.Logger` for structured adapter diagnostics. |
 | `WithSessionStore(store)` | Replace the default in-memory lifecycle authority with a durable Codex rollout JSONL store. |
 | `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |
@@ -54,11 +55,39 @@ escaped descendants are absent on Darwin.
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
 | `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk, and the session-scoped `mcp_servers` keyspace is rejected. |
 | `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh callback. |
-| `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout to mutate adapter-owned Codex auth. |
+| `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout to mutate adapter-owned Codex auth. Enabling it requires an explicit `WithHome` consent boundary. |
 | `WithAgentName(name)` | Protocol identifier advertised at initialize. |
 | `WithAgentTitle(title)` | Human-readable agent name advertised at initialize. |
 | `WithAgentVersion(version)` | Agent version advertised at initialize. |
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | Caller-owned OpenTelemetry providers (see [Observability](/docs/operations/observability)). |
+
+`ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`
+optionally accept opaque host capabilities with `Duplicate() (*os.File, error)`
+for the already-held canonical UID lock and shared `domain.lock` lease. Each
+capability keeps ownership of its original descriptor; caller-owned duplicates
+reach only the trusted supervisor, which validates the named inodes, held locks,
+and strict matching domain record and protects them with checked `FD_CLOEXEC`.
+Set both fields together for
+host-borrowed authority or leave both nil for standalone domain, permanent
+provider-owner binding, retained `ACTIVE`, and UID-lock acquisition. A
+mixed nil/non-nil pair fails closed. Borrowed authority rejects owned UIDs. Native
+processes receive neither capability nor descriptor.
+
+`ProcessIsolation.StandaloneOwnerID` and
+`ProcessIsolation.StandaloneStateRoot` are required when both capabilities
+are nil and forbidden when both are set. The owner ID is the nonsecret
+case-sensitive deployment identity: 1--256 canonical ASCII bytes beginning
+alphanumeric, followed only by alphanumerics or `._:@/-`. The state root is
+the existing dedicated durable provider home, neither `/` nor equal to or
+beneath `/var/lib/acp-go/agent-identities`, expressed as a clean absolute UTF-8 path of
+at most 4096 bytes with no control character. Linux resolves it from `/`
+without symlinks or magic links, requires protected root-owned ancestry and an
+exact configured UID:GID mode-`0700` final directory, and binds the exact
+path, device, and inode. The protected path and metadata are revalidated
+immediately before `ACTIVE` publication and native launch. Standalone claims
+are permanent; changing either value does not migrate authority and fails
+closed. Standalone `WithHome` defaults to this exact state root and any
+different explicit home fails construction validation.
 
 `WithSeedFiles` writes config files into the resolved `CODEX_HOME` before each
 Codex process launches, so Codex reads them as its own config. Paths are

@@ -39,7 +39,7 @@ func TestCodexAccountNativePathsExcludeSupervisorScratch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	isolation := &ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}}
+	isolation := &ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}, StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test"}
 	if err := handoffGeneratedNativeTree(home, isolation); err != nil {
 		t.Fatal(err)
 	}

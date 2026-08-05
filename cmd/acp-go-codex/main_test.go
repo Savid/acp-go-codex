@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -121,6 +122,72 @@ func TestRunErrorPathsAndVersion(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr); code != 1 || !strings.Contains(stderr.String(), "serve failed") {
 		t.Fatalf("serve error code/stderr = %d %q", code, stderr.String())
+	}
+}
+
+func TestRunRefusesUnusableProcessIsolation(t *testing.T) {
+	original := processIsolationConfigLoader
+	t.Cleanup(func() { processIsolationConfigLoader = original })
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		return processIsolationConfig{}, assertError("policy is not root-owned")
+	}
+
+	var stderr bytes.Buffer
+	code := run(context.Background(), isolatedArgs(), bytes.NewReader(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "process isolation: policy is not root-owned") {
+		t.Fatalf("policy load failure code/stderr = %d %q", code, stderr.String())
+	}
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		return processIsolationConfig{StandaloneStateRoot: "/tmp/approved"}, nil
+	}
+
+	stderr.Reset()
+	code = run(context.Background(), isolatedArgs("-home", "/tmp/elsewhere"), bytes.NewReader(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), `native home: -home must equal standaloneStateRoot "/tmp/approved"`) {
+		t.Fatalf("unapproved home code/stderr = %d %q", code, stderr.String())
+	}
+}
+
+func TestRunCodexCLISubcommandRefusesUnusableProcessIsolation(t *testing.T) {
+	originalCLI := runCodexCLICommand
+	originalLoader := processIsolationConfigLoader
+	t.Cleanup(func() {
+		runCodexCLICommand = originalCLI
+		processIsolationConfigLoader = originalLoader
+	})
+
+	runCodexCLICommand = func(context.Context, string, string, string, string, bool, processIsolationConfig, io.Reader, io.Writer, io.Writer) error {
+		t.Fatal("account command ran without a usable isolation policy")
+
+		return nil
+	}
+
+	var stderr bytes.Buffer
+	code := run(context.Background(), []string{loginCommand}, bytes.NewReader(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "acp-go-codex login: -"+processIsolationConfigFlag+" is required") {
+		t.Fatalf("missing policy code/stderr = %d %q", code, stderr.String())
+	}
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		return processIsolationConfig{}, assertError("policy is world-readable")
+	}
+
+	stderr.Reset()
+	code = run(context.Background(), append([]string{logoutCommand}, isolatedArgs()...), bytes.NewReader(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "acp-go-codex logout: process isolation: policy is world-readable") {
+		t.Fatalf("policy load failure code/stderr = %d %q", code, stderr.String())
+	}
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		return processIsolationConfig{StandaloneStateRoot: "/tmp/approved"}, nil
+	}
+
+	stderr.Reset()
+	code = run(context.Background(), append([]string{loginCommand}, isolatedArgs("-home", "/tmp/elsewhere")...), bytes.NewReader(nil), bytes.NewBuffer(nil), &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), `acp-go-codex login: native home: -home must equal standaloneStateRoot "/tmp/approved"`) {
+		t.Fatalf("unapproved home code/stderr = %d %q", code, stderr.String())
 	}
 }
 
@@ -540,9 +607,33 @@ exit 2
 	if releaseErr := lock.Release(); releaseErr != nil {
 		t.Fatalf("release writable-home lock: %v", releaseErr)
 	}
-	if commandExitCode(assertError("plain")) != 1 {
-		t.Fatal("plain command error did not map to exit code 1")
+}
+
+// TestRunCodexCLIRefusesUnownedHome exercises the account-command entrypoint on
+// every unix host, including the unprivileged ones where the full two-principal
+// harness fixture cannot run. The command is refused before it resolves a CLI
+// or spawns anything, so only the entrypoint's own wiring is under test.
+func TestRunCodexCLIRefusesUnownedHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "unowned-home")
+	isolation := processIsolationConfig{
+		UID:                 uint32(os.Getuid()) + 1,
+		GID:                 uint32(os.Getgid()) + 1,
+		BaseEnvironment:     map[string]string{"PATH": "/usr/bin", "HOME": home},
+		StandaloneOwnerID:   "test-owner",
+		StandaloneStateRoot: home,
 	}
+
+	if err := runCodexCLI(context.Background(), "", "", "", logoutCommand, false, isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err == nil {
+		t.Fatal("runCodexCLI accepted an implicit root home")
+	}
+
+	err := runCodexCLI(context.Background(), "", home, "", logoutCommand, false, isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+	if err == nil || !strings.Contains(err.Error(), "validate codex writable home") {
+		t.Fatalf("runCodexCLI unowned-home error = %v", err)
+	}
+}
+
+func TestPendingSignalAndSignalCode(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	if pendingSignal(signals) != nil {
 		t.Fatal("empty signal channel returned a signal")
@@ -551,20 +642,42 @@ exit 2
 	if pendingSignal(signals) != os.Interrupt {
 		t.Fatal("pendingSignal missed interrupt")
 	}
-	if signalCode(os.Interrupt) <= 0 || signalCode(testSignal("custom")) != 1 {
-		t.Fatal("signalCode returned unexpected value")
+	if got := signalCode(syscall.SIGHUP); got != 128+int(syscall.SIGHUP) {
+		t.Fatalf("signalCode(SIGHUP) = %d", got)
 	}
-	cmd := exec.Command("/bin/sh", "-c", "kill -TERM $$")
-	err = cmd.Run()
-	if err != nil && commandExitCode(err) <= 0 {
-		t.Fatalf("signal exit did not map to exit code: %v", err)
+	if got := signalCode(testSignal("custom")); got != 1 {
+		t.Fatalf("signalCode(custom) = %d", got)
 	}
-	exitCmd := exec.Command("/bin/sh", "-c", "exit 3")
-	if err := exitCmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && signalExitCode(exitErr) != 0 {
-			t.Fatalf("non-signal exit mapped to signal code")
-		}
+}
+
+func TestCommandExitCode(t *testing.T) {
+	if got := commandExitCode(assertError("plain")); got != 1 {
+		t.Fatalf("plain command error code = %d", got)
 	}
+
+	statusErr := shellExitError(t, "exit 3")
+	if got := commandExitCode(statusErr); got != 3 {
+		t.Fatalf("exit-status code = %d", got)
+	}
+	if got := signalExitCode(statusErr); got != 0 {
+		t.Fatalf("non-signal exit mapped to signal code %d", got)
+	}
+
+	signalErr := shellExitError(t, "kill -TERM $$")
+	if got := commandExitCode(signalErr); got != 128+int(syscall.SIGTERM) {
+		t.Fatalf("signalled exit code = %d", got)
+	}
+}
+
+func shellExitError(t *testing.T, script string) *exec.ExitError {
+	t.Helper()
+
+	var exitErr *exec.ExitError
+	if err := exec.Command("/bin/sh", "-c", script).Run(); !errors.As(err, &exitErr) {
+		t.Fatalf("%q returned %v, want an exec.ExitError", script, err)
+	}
+
+	return exitErr
 }
 
 func skipUnprivilegedDarwinCLIIsolation(t *testing.T) {
@@ -582,12 +695,12 @@ func TestResolvedCodexCLIHome(t *testing.T) {
 	}
 
 	for _, invalid := range []string{"", "relative", configured + string(filepath.Separator) + ".." + string(filepath.Separator) + "other"} {
-		if _, err := resolvedCodexCLIHome(invalid); err == nil {
+		if _, invalidErr := resolvedCodexCLIHome(invalid); invalidErr == nil {
 			t.Fatalf("invalid home %q was accepted", invalid)
 		}
 	}
 
-	isolation := processIsolationConfig{BaseEnvironment: map[string]string{"HOME": configured}}
+	isolation := processIsolationConfig{StandaloneStateRoot: configured, BaseEnvironment: map[string]string{"HOME": configured}}
 	if got, err = resolvedCodexIsolationHome("", isolation, false); err != nil || got != configured {
 		t.Fatalf("default isolated home = %q, %v", got, err)
 	}
@@ -615,7 +728,10 @@ func testCLIProcessIsolation() processIsolationConfig {
 		}
 	}
 
-	return processIsolationConfig{UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment}
+	return processIsolationConfig{
+		UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment,
+		StandaloneOwnerID: "test-owner", StandaloneStateRoot: environment["HOME"],
+	}
 }
 
 func cliTempDir(t *testing.T) string {

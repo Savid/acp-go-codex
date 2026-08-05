@@ -35,29 +35,29 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 	require.Error(t, RunAccountCommand(context.Background(), AccountCommandOptions{Mode: "logout"}))
 	t.Setenv("PATH", "")
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "find codex CLI")
 	require.Error(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: filepath.Join(t.TempDir(), "missing"), CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: filepath.Join(testTraversableTempDir(t), "missing"), CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}))
 
 	old := writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.0\n")
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: old, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: old, CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "too old")
 
 	valid := writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.1\n")
 	SetScratchParentResolver(nil)
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: valid, CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "scratch parent resolver")
 
 	SetScratchParentResolver(func(string) (string, error) { return "", errors.New("scratch parent") })
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: valid, CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "scratch parent")
 
-	configuredScratch := t.TempDir()
+	configuredScratch := testTraversableTempDir(t)
 	SetScratchParentResolver(func(dir string) (string, error) { return dir, nil })
 	accountMkdirTemp = func(parent string, _ string) (string, error) {
 		require.Equal(t, configuredScratch, parent)
@@ -65,10 +65,10 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 		return "", errors.New("mkdir")
 	}
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), ScratchDir: configuredScratch, Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: valid, CodexHome: testNativeOwnedTempDir(t), ScratchDir: configuredScratch, Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "mkdir")
 
-	defaultScratch := t.TempDir()
+	defaultScratch := testTraversableTempDir(t)
 	SetScratchParentResolver(func(dir string) (string, error) {
 		if dir != "" {
 			return dir, nil
@@ -81,7 +81,7 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 		return nil, nil, errors.New("supervisor")
 	}
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: valid, CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "supervisor")
 
 	accountSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
@@ -91,7 +91,7 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 		return nil, errors.New("start")
 	}
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: valid, CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 	}), "start")
 }
 
@@ -104,7 +104,7 @@ func TestRunAccountCommandForwardsSignalToGuardian(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	signals <- os.Kill
 	err := RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: valid, CodexHome: t.TempDir(), Mode: "logout", Signals: signals, ProcessIsolation: testProcessIsolation(),
+		CLIPath: valid, CodexHome: testNativeOwnedTempDir(t), Mode: "logout", Signals: signals, ProcessIsolation: testProcessIsolation(),
 	})
 	require.Error(t, err)
 }
@@ -129,7 +129,7 @@ sleep 0.05
 	}
 	var output bytes.Buffer
 	err := RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: script, CodexHome: t.TempDir(), Mode: "logout", ProcessIsolation: testProcessIsolation(),
+		CLIPath: script, CodexHome: testNativeOwnedTempDir(t), Mode: "logout", ProcessIsolation: testProcessIsolation(),
 		Stdout: &output, Stderr: &output, Signals: closedSignals,
 	})
 	require.ErrorContains(t, err, "cleanup")
@@ -139,8 +139,8 @@ sleep 0.05
 
 func TestRunAccountCommandUsesSeparateVersionGeneration(t *testing.T) {
 	restoreAccountCommandHooks(t)
-	parent := t.TempDir()
-	home := t.TempDir()
+	parent := testTraversableTempDir(t)
+	home := testNativeOwnedTempDir(t)
 	SetScratchParentResolver(func(string) (string, error) { return parent, nil })
 
 	var versionScratch string
@@ -173,7 +173,7 @@ func TestRunAccountCommandUsesSeparateVersionGeneration(t *testing.T) {
 func TestRunAccountCommandAccountGenerationAndClosedSignalBranches(t *testing.T) {
 	t.Run("account generation", func(t *testing.T) {
 		restoreAccountCommandHooks(t)
-		parent := t.TempDir()
+		parent := testTraversableTempDir(t)
 		SetScratchParentResolver(func(string) (string, error) { return parent, nil })
 		accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) {
 			return minCodexVersion, nil
@@ -188,7 +188,7 @@ func TestRunAccountCommandAccountGenerationAndClosedSignalBranches(t *testing.T)
 			return os.MkdirTemp(parent, pattern)
 		}
 		err := RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout, ProcessIsolation: testProcessIsolation(),
+			CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout, ProcessIsolation: testProcessIsolation(),
 		})
 		require.ErrorContains(t, err, "account generation")
 		require.Equal(t, 2, calls)
@@ -205,14 +205,14 @@ func TestRunAccountCommandAccountGenerationAndClosedSignalBranches(t *testing.T)
 		signals := make(chan os.Signal)
 		close(signals)
 		require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout, Signals: signals, ProcessIsolation: testProcessIsolation(),
+			CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout, Signals: signals, ProcessIsolation: testProcessIsolation(),
 		}))
 	})
 }
 
 func writeAccountCommandScript(t *testing.T, contents string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "codex")
+	path := filepath.Join(testTraversableTempDir(t), "codex")
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o700))
 
 	return path

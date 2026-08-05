@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"log/slog"
+	"os"
 	"time"
 )
 
@@ -36,10 +37,19 @@ type Options struct {
 
 // ProcessIsolation is the mandatory credential and complete environment base
 // applied to every provider process.
+type ProcessIdentityLockCapability interface {
+	Duplicate() (*os.File, error)
+}
+
 type ProcessIsolation struct {
-	UID             uint32
-	GID             uint32
-	BaseEnvironment map[string]string
+	UID                      uint32
+	GID                      uint32
+	BaseEnvironment          map[string]string
+	StandaloneOwnerID        string
+	StandaloneStateRoot      string
+	IdentityLock             ProcessIdentityLockCapability
+	AuthorityDomain          ProcessIdentityLockCapability
+	identityAuthorityAdopted bool
 }
 
 // ProcessSnapshotObserver reports containment-proven absolute inventory for

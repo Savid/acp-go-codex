@@ -75,15 +75,23 @@ func TestCommandHelpers(t *testing.T) {
 
 	env, err := buildMergedEnv(Options{
 		CodexHome: "/home/codex",
-		Env:       map[string]string{"A": "B"},
+		Env: map[string]string{
+			"A":               "B",
+			"CODEX_HOME":      "/hostile/codex",
+			"HOME":            "/hostile/home",
+			"XDG_CONFIG_HOME": "/hostile/xdg-config",
+		},
 		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{
-			"PATH": "/usr/bin:/bin",
-		}},
+			"HOME": "/managed/home", "PATH": "/usr/bin:/bin", "XDG_CONFIG_HOME": "/managed/xdg-config",
+		}, StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !envContains(env, envCodexHome+"=/home/codex") || !envContains(env, "A=B") {
+	if !envContains(env, envCodexHome+"=/home/codex") || !envContains(env, "A=B") ||
+		!envContains(env, "HOME=/managed/home") || !envContains(env, "XDG_CONFIG_HOME=/managed/xdg-config") ||
+		envContains(env, envCodexHome+"=/hostile/codex") || envContains(env, "HOME=/hostile/home") ||
+		envContains(env, "XDG_CONFIG_HOME=/hostile/xdg-config") {
 		t.Fatalf("merged env missing values: %v", env)
 	}
 	updated := upsertEnv([]string{"A=1"}, "A", "2")
@@ -151,7 +159,7 @@ func envContains(env []string, want string) bool {
 
 func TestCommandLaunchAndProcessErrors(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
-	dir := t.TempDir()
+	dir := testTraversableTempDir(t)
 	codexPath := filepath.Join(dir, "codex")
 	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), 0o700); err != nil {
 		t.Fatalf("write codex: %v", err)
@@ -182,14 +190,16 @@ while read line; do :; done
 	var processSnapshotsQuiescent int
 	client, err := NewAppServerClient(context.Background(), Options{
 		CLIPath:          script,
-		CodexHome:        t.TempDir(),
-		SupervisorRoot:   t.TempDir(),
+		CodexHome:        testNativeOwnedTempDir(t),
+		SupervisorRoot:   testTraversableTempDir(t),
+		SupervisorParent: os.TempDir(),
 		DarwinBestEffort: true,
 		NativeVersion:    minCodexVersion,
 		Config:           map[string]any{"feature.enabled": true, "name": "x y"},
 		ExtraArgs:        []string{"--extra"},
 		Logger:           logger,
 		LaunchTimeout:    5 * time.Second,
+		ProcessIsolation: testProcessIsolation(),
 		NewProcessSnapshotObserver: func(context.Context) ProcessSnapshotObserver {
 			return ProcessSnapshotObserver{Quiescent: func(context.Context) { processSnapshotsQuiescent++ }}
 		},
@@ -232,7 +242,10 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return cmd
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion, skipSupervisor: true}); err == nil {
+	shell := sleepCommandPath(t)
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+		CLIPath: shell, NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
+	}); err == nil {
 		t.Fatal("launchAppServer ignored StdinPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
@@ -244,7 +257,9 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return cmd
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion, skipSupervisor: true}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+		CLIPath: shell, NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
+	}); err == nil {
 		t.Fatal("launchAppServer ignored StdoutPipe error")
 	}
 	execCommandContext = func(ctx context.Context, path string, args ...string) *exec.Cmd {
@@ -254,24 +269,44 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return exec.Command(filepath.Join(t.TempDir(), "missing"))
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion, skipSupervisor: true}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+		CLIPath: shell, NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
+	}); err == nil {
 		t.Fatal("launchAppServer ignored start error")
 	}
-	execCommandContext = func(context.Context, string, ...string) *exec.Cmd {
-		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.1.0")
-	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: "0.1.0", skipSupervisor: true}); err == nil {
+	execCommandContext = origExec
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+		CLIPath: shell, NativeVersion: "0.1.0", skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
+	}); err == nil {
 		t.Fatal("launchAppServer ignored version error")
 	}
-	execCommandContext = versionCmd
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{CLIPath: "codex", NativeVersion: minCodexVersion}); err == nil {
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+		CLIPath: shell, NativeVersion: minCodexVersion, ProcessIsolation: testProcessIsolation(),
+	}); err == nil {
+		t.Fatal("launchAppServer ignored home-lock configuration error")
+	}
+	originalExecutable := supervisorExecutable
+	supervisorExecutable = func() (string, error) { return "", errors.New("no embedded supervisor") }
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+		CLIPath: shell, NativeVersion: minCodexVersion, SupervisorParent: os.TempDir(),
+		WritableHome: t.TempDir(), SupervisorRoot: t.TempDir(), ProcessIsolation: testProcessIsolation(),
+	}); err == nil {
 		t.Fatal("launchAppServer ignored supervisor configuration error")
 	}
-	execCommandContext = origExec
-	t.Setenv("PATH", t.TempDir())
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{}); err == nil {
+	supervisorExecutable = originalExecutable
+	pathless := testProcessIsolation()
+	delete(pathless.BaseEnvironment, "PATH")
+	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+		NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: pathless,
+	}); err == nil {
 		t.Fatal("launchAppServer ignored missing codex path")
 	}
+}
+
+func sleepCommandPath(t *testing.T) string {
+	t.Helper()
+
+	return sleepCommand(t, "10").Path
 }
 
 func TestCommandWaitJoinsSupervisorCompletion(t *testing.T) {

@@ -3,12 +3,15 @@ package codexacp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func nativeContainmentTestOptions(options ...Option) []Option {
@@ -17,6 +20,56 @@ func nativeContainmentTestOptions(options ...Option) []Option {
 	}
 
 	return options
+}
+
+func TestStandaloneIsolationDefaultsAndFencesDurableHome(t *testing.T) {
+	const stateRoot = "/var/lib/acp-go-codex"
+	isolation := ProcessIsolation{StandaloneOwnerID: "deployment-1", StandaloneStateRoot: stateRoot}
+
+	defaulted := NewAgent(WithProcessIsolation(isolation))
+	if defaulted.options.Home != stateRoot {
+		t.Fatalf("default home = %q, want %q", defaulted.options.Home, stateRoot)
+	}
+
+	mismatched := NewAgent(WithHome("/var/lib/other"), WithProcessIsolation(isolation))
+	if _, err := mismatched.Initialize(t.Context(), acp.InitializeRequest{}); err == nil ||
+		!strings.Contains(err.Error(), "WithHome must equal ProcessIsolation.StandaloneStateRoot") {
+		t.Fatalf("mismatched standalone home error = %v", err)
+	}
+}
+
+// A supervised embedding owns its state root through the trusted descriptors,
+// so only the standalone shape defaults or fences the durable home.
+func TestStandaloneHomeNormalizationLeavesSupervisedEmbeddingsAlone(t *testing.T) {
+	const stateRoot = "/var/lib/acp-go-codex"
+
+	require.NoError(t, normalizeStandaloneHome(nil))
+
+	noIsolation := Options{Home: "/var/lib/other"}
+	require.NoError(t, normalizeStandaloneHome(&noIsolation))
+	require.Equal(t, "/var/lib/other", noIsolation.Home)
+
+	for name, isolation := range map[string]ProcessIsolation{
+		"identity lock":    {StandaloneStateRoot: stateRoot, IdentityLock: unavailableIdentityLock{}},
+		"authority domain": {StandaloneStateRoot: stateRoot, AuthorityDomain: unavailableIdentityLock{}},
+		"no state root":    {StandaloneOwnerID: "deployment-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			options := Options{ProcessIsolation: &isolation}
+			require.NoError(t, normalizeStandaloneHome(&options))
+			require.Empty(t, options.Home)
+		})
+	}
+
+	matching := Options{Home: stateRoot, ProcessIsolation: &ProcessIsolation{StandaloneStateRoot: stateRoot}}
+	require.NoError(t, normalizeStandaloneHome(&matching))
+	require.Equal(t, stateRoot, matching.Home)
+}
+
+type unavailableIdentityLock struct{}
+
+func (unavailableIdentityLock) Duplicate() (*os.File, error) {
+	return nil, errors.New("identity lock is unavailable")
 }
 
 func TestAgentContainmentModeAndObservation(t *testing.T) {
@@ -126,6 +179,13 @@ func TestContainmentModeSelections(t *testing.T) {
 		"acp_go_codex_internal_spoof",
 		"acp_go_codex_runtime_id",
 		"ACP_GO_CODEX_SCRATCH_ROOT",
+		"CODEX_HOME",
+		"HOME",
+		"XDG_CACHE_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
+		"XDG_RUNTIME_DIR",
+		"XDG_STATE_HOME",
 	} {
 		if err := validateContainmentOptions(Options{Env: map[string]string{key: "1"}}); err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Fatalf("reserved environment validation error for %q = %v", key, err)

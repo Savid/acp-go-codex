@@ -8,7 +8,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
+
+const standaloneAuthorityRoot = "/var/lib/acp-go/agent-identities"
 
 func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation == nil {
@@ -27,7 +31,81 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return fmt.Errorf("validate process isolation base environment: %w", err)
 	}
 
-	return validateProcessIsolationPlatform()
+	return errors.Join(validateProcessIsolationIdentity(isolation), validateProcessIsolationPlatform())
+}
+
+func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
+	identityLock := isolation.IdentityLock != nil
+
+	authorityDomain := isolation.AuthorityDomain != nil
+
+	if isolation.identityAuthorityAdopted {
+		if identityLock || authorityDomain {
+			return errors.New("adopted process identity authority cannot carry duplicable capabilities")
+		}
+
+		identityLock = true
+		authorityDomain = true
+	}
+
+	if identityLock != authorityDomain {
+		return errors.New("process identity lock and authority domain must be provided together")
+	}
+
+	if identityLock {
+		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
+			return errors.New("borrowed process identity forbids standalone owner fields")
+		}
+
+		return nil
+	}
+
+	if !validStandaloneOwnerID(isolation.StandaloneOwnerID) {
+		return errors.New("standalone owner id must be 1..256 canonical ASCII bytes")
+	}
+
+	if !validStandaloneStateRootPath(isolation.StandaloneStateRoot) {
+		return errors.New("standalone state root must be a clean absolute path outside the authority root")
+	}
+
+	return nil
+}
+
+func validStandaloneOwnerID(value string) bool {
+	if value == "" || len(value) > 256 || !standaloneOwnerIDAlphanumeric(value[0]) {
+		return false
+	}
+
+	for index := 1; index < len(value); index++ {
+		if !standaloneOwnerIDAlphanumeric(value[index]) && !strings.ContainsRune("._:@/-", rune(value[index])) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func standaloneOwnerIDAlphanumeric(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
+}
+
+func validStandaloneStateRootPath(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
+		filepath.Clean(value) != value || value == "/" || strings.IndexByte(value, 0) >= 0 {
+		return false
+	}
+
+	if value == standaloneAuthorityRoot || strings.HasPrefix(value, standaloneAuthorityRoot+string(filepath.Separator)) {
+		return false
+	}
+
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func validateEnvironmentMap(environment map[string]string) error {
@@ -95,6 +173,21 @@ func buildProcessEnvironment(isolation *ProcessIsolation, overlays ...map[string
 	}
 
 	return environmentList(values), nil
+}
+
+func withoutManagedRootOverrides(env map[string]string) map[string]string {
+	filtered := make(map[string]string, len(env))
+	for key, value := range env {
+		switch strings.ToUpper(key) {
+		case envCodexHome, envHome,
+			"XDG_CACHE_HOME", envXDGConfigHome, "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+			continue
+		default:
+			filtered[key] = value
+		}
+	}
+
+	return filtered
 }
 
 func validateProcessSearchPath(search string) error {

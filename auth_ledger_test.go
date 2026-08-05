@@ -63,6 +63,12 @@ func TestValidateProviderAuthOptions(t *testing.T) {
 	if err := validateProviderAuthOptions(Options{}); err != nil {
 		t.Fatalf("unset paths were rejected: %v", err)
 	}
+	if err := validateProviderAuthOptions(Options{AllowAccountLogout: true}); err == nil {
+		t.Fatal("account logout without an explicit home was accepted")
+	}
+	if err := validateProviderAuthOptions(Options{AllowAccountLogout: true, Home: "/abs"}); err != nil {
+		t.Fatalf("account logout with an explicit home was rejected: %v", err)
+	}
 
 	err := validateProviderAuthOptions(Options{ProviderAuthRoot: "rel", ProviderAuthDirectHome: "rel"})
 	if err == nil {

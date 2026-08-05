@@ -200,9 +200,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		codexacp.WithCodexAllowAccountLogout(*allowAccountLogout),
 		codexacp.WithLogger(logger),
 		codexacp.WithProcessIsolation(codexacp.ProcessIsolation{
-			UID:             isolation.UID,
-			GID:             isolation.GID,
-			BaseEnvironment: isolation.BaseEnvironment,
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
 		}),
 	)
 
@@ -264,6 +266,7 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 
 		return 1
 	}
+
 	*codexHome, err = resolvedCodexIsolationHome(*codexHome, isolation, true)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: native home: %v\n", mode, err)
@@ -314,9 +317,11 @@ func runCodexCLIWithSignals(
 		Mode:       mode,
 		DeviceAuth: deviceAuth,
 		ProcessIsolation: &codex.ProcessIsolation{
-			UID:             isolation.UID,
-			GID:             isolation.GID,
-			BaseEnvironment: isolation.BaseEnvironment,
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
 		},
 		Stdin:   stdin,
 		Stdout:  stdout,
@@ -329,6 +334,7 @@ func resolvedCodexCLIHome(configured string) (string, error) {
 	if configured == "" {
 		return "", errors.New("-home is required for native account mode; root CODEX_HOME and root home are never consulted")
 	}
+
 	cleaned := filepath.Clean(configured)
 	if !filepath.IsAbs(configured) || cleaned != configured {
 		return "", errors.New("-home must be a canonical absolute path")
@@ -338,16 +344,18 @@ func resolvedCodexCLIHome(configured string) (string, error) {
 }
 
 func resolvedCodexIsolationHome(configured string, isolation processIsolationConfig, required bool) (string, error) {
-	approved := isolation.BaseEnvironment["HOME"]
+	approved := isolation.StandaloneStateRoot
 	if configured == "" && !required {
 		return approved, nil
 	}
+
 	home, err := resolvedCodexCLIHome(configured)
 	if err != nil {
 		return "", err
 	}
+
 	if home != approved {
-		return "", fmt.Errorf("-home must equal process isolation HOME %q", approved)
+		return "", fmt.Errorf("-home must equal standaloneStateRoot %q", approved)
 	}
 
 	return home, nil

@@ -194,6 +194,45 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	}
 }
 
+// The process-exit mapping itself is platform-independent: a ProcessExitError
+// reported mid-turn must surface cause:"process_exit" with the real exit status
+// and stderr tail, and must mark the session for lazy relaunch. T3 proves the
+// same contract against a real dying app-server where that fixture can run.
+func TestTurnFailureProcessExitMapping(t *testing.T) {
+	ctx := context.Background()
+
+	client := &runEventsClient{spyCodexClient: newSpyCodexClient(), events: []codex.Event{{
+		Kind:     codex.EventError,
+		ThreadID: "thread-1",
+		TurnID:   "turn-1",
+		Err: &codex.ProcessExitError{
+			Status:     "exit status 1",
+			StderrTail: "out of memory",
+			Err:        errors.New("EOF"),
+		},
+	}}}
+	agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
+	agent.setAgentClient(newRecordingAgentClient())
+
+	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+
+	promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "hi"))
+	require.NotEqual(t, acp.StopReasonEndTurn, promptResp.StopReason)
+	require.True(t, isTurnFailure(promptErr, codex.CauseProcessExit), "prompt error = %v", promptErr)
+
+	data := turnFailureData(t, promptErr)
+	message, _ := data[jsonFieldMessage].(string)
+	require.Contains(t, message, "exit status 1")
+	require.Contains(t, message, "out of memory")
+	require.NotEqual(t, "EOF", message)
+
+	session := agent.activeSession(resp.SessionId)
+	require.NotNil(t, session)
+	_, _, clientDead := session.closeState()
+	require.True(t, clientDead, "process death did not mark the session for lazy relaunch")
+}
+
 // T3 — a real app-server process death mid-turn surfaces cause:"process_exit"
 // with the true exit status and stderr tail (never a bare EOF) and marks the
 // session for lazy relaunch. The fake app-server is this test binary re-execed

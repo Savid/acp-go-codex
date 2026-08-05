@@ -26,7 +26,10 @@ func testProcessIsolation() *ProcessIsolation {
 		environment["PATH"] = "/usr/bin:/bin"
 	}
 
-	return &ProcessIsolation{UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment}
+	return &ProcessIsolation{
+		UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment,
+		StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test",
+	}
 }
 
 func withTestVersionIsolation(options VersionProbeOptions) VersionProbeOptions {
@@ -41,6 +44,35 @@ func withTestVersionIsolation(options VersionProbeOptions) VersionProbeOptions {
 	}
 
 	return options
+}
+
+func testTraversableTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("", "acp-go-codex-test-")
+	if err != nil {
+		t.Fatalf("create traversable test directory: %v", err)
+	}
+	if err = os.Chmod(directory, 0o711); err != nil {
+		_ = os.RemoveAll(directory)
+		t.Fatalf("make test directory traversable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+
+	return directory
+}
+
+func testNativeOwnedTempDir(t *testing.T) string {
+	t.Helper()
+	directory := testTraversableTempDir(t)
+	isolation := testProcessIsolation()
+	if err := os.Chown(directory, int(isolation.UID), int(isolation.GID)); err != nil {
+		t.Fatalf("assign native-owned test directory: %v", err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatalf("protect native-owned test directory: %v", err)
+	}
+
+	return directory
 }
 
 func skipUnprivilegedDarwinIsolation(t *testing.T) {

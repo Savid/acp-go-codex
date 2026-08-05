@@ -696,10 +696,6 @@ func connectLiveAgentBinary(
 		args = append(args, "-model", model)
 	}
 
-	if runtime.GOOS == "darwin" {
-		args = append(args, "-darwin-best-effort-containment")
-	}
-
 	cmd := exec.Command(agentPath, args...) // #nosec G204,G702 -- path is the test-built agent binary.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

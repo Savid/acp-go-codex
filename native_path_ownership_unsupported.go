@@ -9,7 +9,7 @@ import (
 )
 
 func handoffGeneratedNativeTreePlatform(_ string, uid uint32, gid uint32) error {
-	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
+	if matchesEffectiveIdentity(uid, gid) {
 		return nil
 	}
 
@@ -17,9 +17,13 @@ func handoffGeneratedNativeTreePlatform(_ string, uid uint32, gid uint32) error 
 }
 
 func validateNativeOwnedDirectoryPlatform(_ string, uid uint32, gid uint32) error {
-	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
+	if matchesEffectiveIdentity(uid, gid) {
 		return nil
 	}
 
 	return fmt.Errorf("native path ownership validation is unsupported on %s", runtime.GOOS)
+}
+
+func matchesEffectiveIdentity(uid uint32, gid uint32) bool {
+	return uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) //nolint:gosec // Kernel IDs fit the public uint32 identity contract.
 }

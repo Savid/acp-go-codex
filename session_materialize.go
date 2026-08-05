@@ -34,8 +34,10 @@ func (a *Agent) materializeStoredRollout(
 
 		return "", nil, err
 	}
+
 	if err := handoffGeneratedNativeTree(filepath.Dir(path), a.options.ProcessIsolation); err != nil {
 		_ = removeMaterializedRollout(path)
+
 		release()
 
 		return "", nil, err

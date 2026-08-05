@@ -82,7 +82,7 @@ agent := codexacp.NewAgent(
 <Warning>
   ACP logout is refused unless the adapter is started with
   `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. Enable it
-  only for an adapter-owned `CODEX_HOME`; otherwise a client could clear the
+  only with an explicit adapter-owned `-home` or `WithHome`; otherwise a client could clear the
   credentials of the operator's normal Codex install. When enabled, ACP logout
   clears only adapter-owned session state and the Codex account.
 </Warning>

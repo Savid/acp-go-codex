@@ -56,7 +56,8 @@ exit 0
 	}
 
 	require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: cli, CodexHome: t.TempDir(), ScratchDir: t.TempDir(), Mode: accountCommandLogin,
+		CLIPath: cli, CodexHome: testNativeOwnedTempDir(t), ScratchDir: testTraversableTempDir(t),
+		Mode: accountCommandLogin, ProcessIsolation: testProcessIsolation(),
 	}))
 	require.NoFileExists(t, marker)
 }
@@ -66,8 +67,8 @@ func TestLogoutRunsWithoutABrowserShim(t *testing.T) {
 	restoreAccountCommandHooks(t)
 	restoreBrowserShimHooks(t)
 
-	parent := t.TempDir()
-	home := t.TempDir()
+	parent := testTraversableTempDir(t)
+	home := testNativeOwnedTempDir(t)
 
 	browserShimMkdirTemp = func(string, string) (string, error) {
 		t.Error("logout built a browser shim")
@@ -97,8 +98,9 @@ func TestLogoutRunsWithoutABrowserShim(t *testing.T) {
 
 	require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
 		CLIPath: "/usr/bin/true", CodexHome: home, ScratchDir: parent, Mode: accountCommandLogout,
+		ProcessIsolation: testProcessIsolation(),
 	}))
-	require.Equal(t, upsertEnv(os.Environ(), envCodexHome, home), childEnv)
+	require.ElementsMatch(t, upsertEnv(os.Environ(), envCodexHome, home), childEnv)
 }
 
 func TestRunAccountCommandRefusesWithoutABrowserShim(t *testing.T) {
@@ -108,8 +110,8 @@ func TestRunAccountCommandRefusesWithoutABrowserShim(t *testing.T) {
 	browserShimMkdirTemp = func(string, string) (string, error) { return "", errors.New("shim parent") }
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
 		CLIPath:          writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.1\n"),
-		CodexHome:        t.TempDir(),
-		ScratchDir:       t.TempDir(),
+		CodexHome:        testNativeOwnedTempDir(t),
+		ScratchDir:       testTraversableTempDir(t),
 		Mode:             accountCommandLogin,
 		ProcessIsolation: testProcessIsolation(),
 	}), "create browser shim directory")

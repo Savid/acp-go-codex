@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -16,10 +17,21 @@ type Option func(*Options)
 
 // ProcessIsolation defines the complete operating-system identity and base
 // environment inherited by every native Codex process.
+type ProcessIdentityLockCapability interface {
+	Duplicate() (*os.File, error)
+}
+
 type ProcessIsolation struct {
-	UID             uint32
-	GID             uint32
-	BaseEnvironment map[string]string
+	UID                 uint32
+	GID                 uint32
+	BaseEnvironment     map[string]string
+	StandaloneOwnerID   string
+	StandaloneStateRoot string
+	// IdentityLock is an optional trusted-supervisor descriptor for the
+	// host-global UID lock. Linux supervisors validate it and never expose it to
+	// the native Codex process. Standalone embeddings should leave it nil.
+	IdentityLock    ProcessIdentityLockCapability
+	AuthorityDomain ProcessIdentityLockCapability
 }
 
 // ChatGPTAuthTokens are externally supplied ChatGPT auth credentials for Codex.
@@ -107,7 +119,8 @@ type Options struct {
 	ScratchDir string
 	// DefaultModel is the model preference for newly created Codex threads.
 	DefaultModel string
-	// Env is merged into launched Codex process environments.
+	// Env is merged into launched Codex process environments. Managed config
+	// and identity root variables are rejected.
 	Env map[string]string
 	// ProcessIsolation is the mandatory process boundary for every native
 	// launch. Configure it with WithProcessIsolation.
@@ -330,9 +343,10 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// WithEnv merges environment variables into launched Codex sessions. Adapter
-// process-management and Darwin correlation keys are reserved and rejected
-// case-insensitively before a native lifecycle starts.
+// WithEnv merges environment variables into launched Codex sessions. Managed
+// config and identity roots, adapter process-management keys, and Darwin
+// correlation keys are reserved and rejected case-insensitively before a
+// native lifecycle starts.
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = make(map[string]string, len(env))
@@ -422,6 +436,7 @@ func WithCodexChatGPTAuthTokenRefresher(refresher func(context.Context) (ChatGPT
 }
 
 // WithCodexAllowAccountLogout permits ACP logout to call Codex account/logout.
+// Enabling it requires an explicit WithHome consent boundary.
 func WithCodexAllowAccountLogout(enabled bool) Option {
 	return func(options *Options) {
 		options.AllowAccountLogout = enabled

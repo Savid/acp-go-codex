@@ -491,6 +491,82 @@ func TestRuntimeVersionProbeOwnsDiscoveryAdmissionsAndGeneration(t *testing.T) {
 	require.NoDirExists(t, probeOptions.Scratch)
 }
 
+// The version probe launches a native process under the configured identity, so
+// it must refuse an unproven writable home before it takes any admission slot.
+func TestRuntimeVersionProbeRefusesUnprovenNativeHome(t *testing.T) {
+	var reserved atomic.Int64
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		WithProcessIsolation(foreignNativeIdentity()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				reserved.Add(1)
+
+				return func() {}, nil
+			},
+		}),
+	)
+
+	_, err := agent.probeRuntimeVersion(t.Context())
+	require.Error(t, err)
+	require.EqualValues(t, 0, reserved.Load())
+}
+
+// Both native-launch refusals must fire before the app-server is spawned.
+func TestRuntimeLaunchRefusesSeedFilesAndUnprovenNativeHome(t *testing.T) {
+	var launches atomic.Int64
+	factory := withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		launches.Add(1)
+
+		return newSpyCodexClient(), nil
+	})
+
+	seeded := NewAgent(
+		WithHome(t.TempDir()),
+		WithProcessIsolation(ProcessIsolation{UID: uint32(os.Geteuid()), GID: uint32(os.Getegid())}),
+		WithSeedFiles(map[string]string{"config.toml": "model = \"gpt-5\""}),
+		factory,
+	)
+	_, err := seeded.launchRuntimeClient(t.Context(), 1, t.TempDir(), minSupportedCodexVersion)
+	require.ErrorContains(t, err, "seed files are unsupported with process isolation")
+
+	unproven := NewAgent(WithHome(t.TempDir()), WithProcessIsolation(foreignNativeIdentity()), factory)
+	_, err = unproven.launchRuntimeClient(t.Context(), 1, t.TempDir(), minSupportedCodexVersion)
+	require.Error(t, err)
+
+	require.EqualValues(t, 0, launches.Load())
+}
+
+// foreignNativeIdentity is a native identity the calling process cannot prove
+// ownership for on any platform.
+func foreignNativeIdentity() ProcessIsolation {
+	return ProcessIsolation{UID: uint32(os.Geteuid()) + 1, GID: uint32(os.Getegid()) + 1}
+}
+
+// Without a caller-supplied client factory the adapter owns the native launch,
+// so it probes the CLI version and hands it to the app-server options.
+func TestSharedRuntimeProbesNativeVersionForAdapterOwnedLaunch(t *testing.T) {
+	originalProbe := runtimeProbeCodexVersion
+	t.Cleanup(func() { runtimeProbeCodexVersion = originalProbe })
+	runtimeProbeCodexVersion = func(context.Context, codex.VersionProbeOptions) (string, error) {
+		return "0.199.0", nil
+	}
+
+	agent := NewAgent(WithScratchDir(t.TempDir()))
+	var launched codex.Options
+	agent.options.clientFactory = func(_ context.Context, options codex.Options) (codex.Client, error) {
+		launched = options
+
+		return newSpyCodexClient(), nil
+	}
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	client, err := agent.sharedRuntime(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	require.Equal(t, "0.199.0", launched.NativeVersion)
+}
+
 func TestRuntimeVersionProbeAdmissionFailureBranches(t *testing.T) {
 	t.Run("scratch admission", func(t *testing.T) {
 		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
@@ -932,9 +1008,30 @@ func TestRuntimeFailureAndHelperBranches(t *testing.T) {
 	_, err = lost.sharedRuntime(ctx)
 	require.Error(t, err)
 
-	require.Equal(t, filepath.Clean("/env-home"), NewAgent(WithEnv(map[string]string{"CODEX_HOME": "/env-home"})).resolvedCodexHome())
+	invalidHome := NewAgent(WithEnv(map[string]string{"CODEX_HOME": "/env-home"}))
+	_, err = invalidHome.Initialize(t.Context(), acp.InitializeRequest{})
+	require.ErrorContains(t, err, "reserved")
 	t.Setenv("CODEX_HOME", "/process-home")
 	require.Equal(t, filepath.Clean("/process-home"), NewAgent().resolvedCodexHome())
+}
+
+// The writable home a native launch is proven against resolves from the
+// explicit option first, then the pinned runtime environment, then the process
+// environment, and finally the caller's home directory.
+func TestResolvedCodexHomePrecedence(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/process-home")
+
+	configured := NewAgent(WithHome("/opt/codex-home/"))
+	require.Equal(t, filepath.Clean("/opt/codex-home"), configured.resolvedCodexHomeForEnv(map[string]string{"CODEX_HOME": "/env-home"}))
+
+	agent := NewAgent()
+	require.Equal(t, filepath.Clean("/env-home"), agent.resolvedCodexHomeForEnv(map[string]string{"CODEX_HOME": "/env-home/"}))
+	require.Equal(t, filepath.Clean("/process-home"), agent.resolvedCodexHomeForEnv(map[string]string{"CODEX_HOME": ""}))
+
+	home, err := runtimeUserHomeDir()
+	require.NoError(t, err)
+	t.Setenv("CODEX_HOME", "")
+	require.Equal(t, filepath.Join(home, ".codex"), agent.resolvedCodexHomeForEnv(nil))
 }
 
 func TestRuntimeEnvironmentPinIsAtomicAndImmutable(t *testing.T) {
@@ -985,11 +1082,32 @@ func TestRuntimeEnvironmentRejectsReservedSessionKeys(t *testing.T) {
 		"acp_go_codex_internal_spoof",
 		"acp_go_codex_runtime_id",
 		"ACP_GO_CODEX_SCRATCH_ROOT",
+		"CODEX_HOME",
+		"HOME",
+		"XDG_CONFIG_HOME",
 	} {
 		_, err := agent.pinRuntimeEnvironment(map[string]string{key: "1"})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "_meta.codex.options.env")
 	}
+}
+
+func TestManagedHomeSessionEnvironmentFailsBeforeNativeCreation(t *testing.T) {
+	var launches atomic.Int64
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+			launches.Add(1)
+
+			return newSpyCodexClient(), nil
+		}),
+	)
+
+	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir(), WithSessionCodexOptions(
+		NewCodexOptions(WithCodexEnv(map[string]string{"CODEX_HOME": t.TempDir()})),
+	)))
+	require.ErrorContains(t, err, "_meta.codex.options.env")
+	require.Zero(t, launches.Load())
 }
 
 func TestConflictingSessionEnvironmentFailsBeforeNativeCreation(t *testing.T) {
@@ -1272,6 +1390,37 @@ func (c deadlineEventClient) RunTurn(ctx context.Context, _ codex.TurnStartReque
 	close(events)
 
 	return events, nil
+}
+
+// A stored rollout is generated by the trusted process and then handed to the
+// native identity. An unprovable handoff must leave no rollout behind and must
+// return the scratch admission it took.
+func TestMaterializeStoredRolloutDiscardsRolloutOnFailedOwnershipHandoff(t *testing.T) {
+	scratch := t.TempDir()
+	var released atomic.Int64
+	agent := NewAgent(
+		WithScratchDir(scratch),
+		WithProcessIsolation(foreignNativeIdentity()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { released.Add(1) }, nil
+			},
+		}),
+	)
+
+	path, release, err := agent.materializeStoredRollout(
+		t.Context(),
+		"session",
+		[]SessionStoreEntry{json.RawMessage(`{"type":"session_meta"}`)},
+	)
+	require.Error(t, err)
+	require.Empty(t, path)
+	require.Nil(t, release)
+	require.EqualValues(t, 1, released.Load())
+
+	remaining, err := os.ReadDir(scratch)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
 }
 
 func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {

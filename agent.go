@@ -162,11 +162,14 @@ var (
 // NewAgent creates an ACP agent for Codex.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
+
+	homeErr := normalizeStandaloneHome(&options)
 	if options.SessionStore == nil {
 		options.SessionStore = NewInMemorySessionStore()
 	}
 
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
+	optionsErr = errors.Join(optionsErr, homeErr)
 	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
 	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
 	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
@@ -471,11 +474,13 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string, nativeVersion string) (codex.Client, error) {
 	env, _ := a.pinRuntimeEnvironment(nil)
 	home := a.resolvedCodexHomeForEnv(env)
+
+	if a.options.ProcessIsolation != nil && len(a.options.SeedFiles) > 0 {
+		return nil, errors.New("codex seed files are unsupported with process isolation")
+	}
+
 	if err := validateNativeOwnedDirectory(home, a.options.ProcessIsolation); err != nil {
 		return nil, err
-	}
-	if a.options.ProcessIsolation != nil && len(a.options.SeedFiles) > 0 {
-		return nil, errors.New("Codex seed files are unsupported with process isolation")
 	}
 
 	factory := a.options.clientFactory
@@ -559,6 +564,8 @@ func codexProcessIsolation(value *ProcessIsolation) *codex.ProcessIsolation {
 
 	return &codex.ProcessIsolation{
 		UID: value.UID, GID: value.GID, BaseEnvironment: cloneStringMap(value.BaseEnvironment),
+		StandaloneOwnerID: value.StandaloneOwnerID, StandaloneStateRoot: value.StandaloneStateRoot,
+		IdentityLock: value.IdentityLock, AuthorityDomain: value.AuthorityDomain,
 	}
 }
 

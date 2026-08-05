@@ -16,8 +16,10 @@ import (
 )
 
 const (
-	envCodexHome    = "CODEX_HOME"
-	minCodexVersion = "0.144.1"
+	envCodexHome     = "CODEX_HOME"
+	envHome          = "HOME"
+	envXDGConfigHome = "XDG_CONFIG_HOME"
+	minCodexVersion  = "0.144.1"
 )
 
 var execCommandContext = exec.CommandContext
@@ -60,6 +62,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		if lockErr != nil {
 			return nil, nil, "", lockErr
 		}
+
 		cmd, supervisor, err = supervisorCommand(procCtx, supervisorConfig{
 			NativePath:       path,
 			NativeArgs:       appServerArgs(options),
@@ -285,7 +288,7 @@ func buildMergedEnv(options Options) ([]string, error) {
 		managed[envCodexHome] = options.CodexHome
 	}
 
-	return buildProcessEnvironment(options.ProcessIsolation, options.Env, managed)
+	return buildProcessEnvironment(options.ProcessIsolation, withoutManagedRootOverrides(options.Env), managed)
 }
 
 func upsertEnv(env []string, key string, value string) []string {

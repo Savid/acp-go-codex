@@ -527,6 +527,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
 	env, _ := a.pinRuntimeEnvironment(nil)
 	home := a.resolvedCodexHomeForEnv(env)
+
 	if err := validateNativeOwnedDirectory(home, a.options.ProcessIsolation); err != nil {
 		return "", err
 	}

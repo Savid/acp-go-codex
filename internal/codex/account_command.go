@@ -59,11 +59,16 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	if options.CodexHome == "" {
 		return errors.New("codex writable home is required for account mutation")
 	}
-	if err := validateNativeOwnedDirectory(options.CodexHome, options.ProcessIsolation); err != nil {
-		return fmt.Errorf("validate codex writable home: %w", err)
+
+	if validationErr := validateNativeOwnedDirectory(options.CodexHome, options.ProcessIsolation); validationErr != nil {
+		return fmt.Errorf("validate codex writable home: %w", validationErr)
 	}
 
-	nativeEnv, err := buildProcessEnvironment(options.ProcessIsolation, options.Env, map[string]string{envCodexHome: options.CodexHome})
+	nativeEnv, err := buildProcessEnvironment(
+		options.ProcessIsolation,
+		withoutManagedRootOverrides(options.Env),
+		map[string]string{envCodexHome: options.CodexHome},
+	)
 	if err != nil {
 		return err
 	}
@@ -92,8 +97,9 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		if err != nil {
 			return err
 		}
-		if err := shim.handoff(options.ProcessIsolation); err != nil {
-			return errors.Join(err, shim.remove())
+
+		if handoffErr := shim.handoff(options.ProcessIsolation); handoffErr != nil {
+			return errors.Join(handoffErr, shim.remove())
 		}
 	}
 
@@ -116,6 +122,7 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 			returnErr = errors.Join(returnErr, accountRemoveAll(scratch))
 		}
 	}()
+
 	lockRoot, err := HomeLockRoot(scratchParent, options.CodexHome)
 	if err != nil {
 		return err
