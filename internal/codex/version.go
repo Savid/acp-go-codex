@@ -63,7 +63,19 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 		stderr bytes.Buffer
 	)
 
-	cmd.Stdin = bytes.NewReader(nil)
+	// The supervisor reads a hangup on its control input as caller death and
+	// abandons agent identity acquisition. This probe sends no control data, so
+	// it owns the write end for the probe's lifetime rather than handing the
+	// guardian a channel that is already closed before it starts.
+	controlRead, controlWrite, err := supervisorPipe()
+	if err != nil {
+		return "", fmt.Errorf("open codex CLI version probe control input: %w", err)
+	}
+
+	defer controlRead.Close()
+	defer controlWrite.Close()
+
+	cmd.Stdin = controlRead
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

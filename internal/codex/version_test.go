@@ -14,9 +14,11 @@ import (
 func TestProbeVersionFailureBranches(t *testing.T) {
 	originalSupervisor := versionSupervisorCommand
 	originalStart := versionStartProcess
+	originalPipe := supervisorPipe
 	t.Cleanup(func() {
 		versionSupervisorCommand = originalSupervisor
 		versionStartProcess = originalStart
+		supervisorPipe = originalPipe
 	})
 
 	t.Setenv("PATH", "")
@@ -38,6 +40,12 @@ func TestProbeVersionFailureBranches(t *testing.T) {
 
 		return exec.Command("/usr/bin/true"), &supervisorProof{}, nil
 	}
+	supervisorPipe = func() (*os.File, *os.File, error) { return nil, nil, errors.New("pipe exhausted") }
+	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); err == nil || !strings.Contains(err.Error(), "control input") {
+		t.Fatalf("control input error = %v", err)
+	}
+
+	supervisorPipe = originalPipe
 	versionStartProcess = func(*exec.Cmd) (*supervisorWaiter, error) {
 		return nil, errors.New("start failed")
 	}
@@ -72,6 +80,46 @@ func TestProbeVersionFailureBranches(t *testing.T) {
 	}
 	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("containment error = %v", err)
+	}
+}
+
+// TestProbeVersionHoldsSupervisorControlInputOpen pins the caller-liveness
+// contract the guardian relies on: a hangup on its control input means the
+// caller is gone, and the guardian then abandons agent identity acquisition.
+func TestProbeVersionHoldsSupervisorControlInputOpen(t *testing.T) {
+	originalSupervisor := versionSupervisorCommand
+	originalStart := versionStartProcess
+	t.Cleanup(func() {
+		versionSupervisorCommand = originalSupervisor
+		versionStartProcess = originalStart
+	})
+
+	versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
+		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.144.1"), &supervisorProof{}, nil
+	}
+	versionStartProcess = func(cmd *exec.Cmd) (*supervisorWaiter, error) {
+		control, ok := cmd.Stdin.(*os.File)
+		if !ok {
+			t.Fatalf("version probe control input = %T, want a file the supervisor can poll", cmd.Stdin)
+		}
+		if err := control.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+
+		var probe [1]byte
+		if _, err := control.Read(probe[:]); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("version probe control input was not held open: %v", err)
+		}
+		if err := control.SetReadDeadline(time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+
+		return startProcess(cmd)
+	}
+
+	version, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"}))
+	if err != nil || version != minCodexVersion {
+		t.Fatalf("version = %q, err = %v", version, err)
 	}
 }
 

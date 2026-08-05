@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -31,12 +32,34 @@ type supervisedNative struct {
 	rootPID      int
 	descPID      int
 	livenessPID  int
-	stderr       *bytes.Buffer
+	stderr       *supervisorStderr
 	cancel       context.CancelFunc
 	proof        *supervisorProof
 	attackPath   string
 	forgePath    string
 	isolationUID uint32
+}
+
+// supervisorStderr collects the guardian's error stream while the test reads it
+// for diagnostics. os/exec copies into cmd.Stderr from its own goroutine until
+// Wait returns, so every read has to share the writer's lock.
+type supervisorStderr struct {
+	mutex   sync.Mutex
+	content bytes.Buffer
+}
+
+func (s *supervisorStderr) Write(payload []byte) (int, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	return s.content.Write(payload)
+}
+
+func (s *supervisorStderr) String() string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	return s.content.String()
 }
 
 type linuxSupervisorDirEntry struct {
@@ -304,8 +327,8 @@ func TestGuardianPersistentProofFailureQuarantinesUntilRecovery(t *testing.T) {
 
 func TestSupervisorGuardianSIGKILLLeavesLivenessLockedUntilTreeExit(t *testing.T) {
 	runtime := startSupervisedNative(t)
-	require.NoError(t, syscall.Kill(-runtime.rootPID, syscall.SIGSTOP))
-	require.NoError(t, syscall.Kill(runtime.livenessPID, syscall.SIGSTOP))
+	stopProcessGroup(t, runtime.rootPID)
+	stopProcess(t, runtime.livenessPID)
 	t.Cleanup(func() { _ = syscall.Kill(runtime.livenessPID, syscall.SIGCONT) })
 	require.NoError(t, runtime.cmd.Process.Kill())
 
@@ -400,8 +423,8 @@ func TestSupervisorGuardianSIGKILLBeforeNativeLaunchRefusesStartAndCompletesAfte
 
 func TestSupervisorLivenessSIGKILLLeavesClaimLockedUntilTreeExit(t *testing.T) {
 	runtime := startSupervisedNative(t)
-	require.NoError(t, syscall.Kill(-runtime.rootPID, syscall.SIGSTOP))
-	require.NoError(t, syscall.Kill(runtime.cmd.Process.Pid, syscall.SIGSTOP))
+	stopProcessGroup(t, runtime.rootPID)
+	stopProcess(t, runtime.cmd.Process.Pid)
 	t.Cleanup(func() { _ = syscall.Kill(runtime.cmd.Process.Pid, syscall.SIGCONT) })
 	require.NoError(t, syscall.Kill(runtime.livenessPID, syscall.SIGKILL))
 
@@ -610,6 +633,12 @@ func TestSupervisorPropagatesKernelProofFailure(t *testing.T) {
 
 func startSupervisedNative(t *testing.T) *supervisedNative {
 	t.Helper()
+	// Adopt the supervisor pair's orphans. Without this the kernel reparents a
+	// killed guardian's liveness supervisor to init, which orphans its process
+	// group; POSIX then resumes a group that holds stopped jobs with SIGHUP and
+	// SIGCONT, so a frozen survivor would thaw before it could be observed.
+	require.NoError(t, unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0))
+
 	const standaloneStateRoot = "/var/lib/acp-go-codex-test"
 	require.NoError(t, os.MkdirAll(standaloneStateRoot, 0o700))
 	require.NoError(t, os.Chown(standaloneStateRoot, 65534, 65534))
@@ -675,7 +704,7 @@ done
 	require.Nil(t, cmd.Cancel, "trusted supervisor must outlive caller-context cancellation")
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
-	stderr := new(bytes.Buffer)
+	stderr := new(supervisorStderr)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = stderr
 	waiter, err := startProcess(cmd)
@@ -758,7 +787,7 @@ func waitFile(t *testing.T, path string) {
 	}, 5*time.Second, 10*time.Millisecond, "file %s was not published", path)
 }
 
-func waitPIDFile(t *testing.T, path string, stderr *bytes.Buffer) int {
+func waitPIDFile(t *testing.T, path string, stderr *supervisorStderr) int {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -778,16 +807,63 @@ func waitPIDFile(t *testing.T, path string, stderr *bytes.Buffer) int {
 
 func parentPID(t *testing.T, pid int) int {
 	t.Helper()
-	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	fields, err := procStatFields(fmt.Sprintf("/proc/%d/stat", pid))
 	require.NoError(t, err)
-	closeParen := strings.LastIndexByte(string(raw), ')')
-	require.Greater(t, closeParen, 0)
-	fields := strings.Fields(string(raw[closeParen+1:]))
 	require.GreaterOrEqual(t, len(fields), 2)
 	parent, err := strconv.Atoi(fields[1])
 	require.NoError(t, err)
 
 	return parent
+}
+
+// procStatFields returns the stat fields that follow the comm field, so a
+// process name containing spaces or parentheses cannot shift the offsets.
+func procStatFields(path string) ([]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	closeParen := strings.LastIndexByte(string(raw), ')')
+	if closeParen <= 0 {
+		return nil, fmt.Errorf("%s has no comm field", path)
+	}
+
+	return strings.Fields(string(raw[closeParen+1:])), nil
+}
+
+func stopProcessGroup(t *testing.T, pid int) {
+	t.Helper()
+	require.NoError(t, syscall.Kill(-pid, syscall.SIGSTOP))
+	awaitProcessStopped(t, pid)
+}
+
+func stopProcess(t *testing.T, pid int) {
+	t.Helper()
+	require.NoError(t, syscall.Kill(pid, syscall.SIGSTOP))
+	awaitProcessStopped(t, pid)
+}
+
+// awaitProcessStopped blocks until every task of the process has entered the
+// group stop. kill returns as soon as the signal is queued, so a supervisor
+// that is only nominally frozen can still observe its peer's death, release its
+// runtime lock, and quiesce the tree before the stop latches.
+func awaitProcessStopped(t *testing.T, pid int) {
+	t.Helper()
+	taskRoot := fmt.Sprintf("/proc/%d/task", pid)
+	require.Eventually(t, func() bool {
+		tasks, err := os.ReadDir(taskRoot)
+		if err != nil || len(tasks) == 0 {
+			return false
+		}
+		for _, task := range tasks {
+			fields, statErr := procStatFields(filepath.Join(taskRoot, task.Name(), "stat"))
+			if statErr != nil || len(fields) == 0 || fields[0] != "T" {
+				return false
+			}
+		}
+
+		return true
+	}, 5*time.Second, 5*time.Millisecond, "process %d did not enter the stopped state", pid)
 }
 
 func waitSupervisor(runtime *supervisedNative, timeout time.Duration) error {
