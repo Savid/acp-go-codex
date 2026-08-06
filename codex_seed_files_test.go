@@ -236,14 +236,19 @@ func TestWriteSeedFilesReadManagedError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// The three cases below each deny one write. None of them denies it with
+// directory permissions: a privileged identity carries CAP_DAC_OVERRIDE and
+// walks through a 0500 home, which left every one of them proving nothing when
+// the suite ran as root. Each obstruction is structural instead, so the write
+// fails for every identity.
+
 func TestWriteSeedFilesBackupWriteError(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, writeSeedFiles(home, map[string]string{"config.toml": "old\n"}))
 
-	// A read-only home lets the managed compare read succeed but fails the
-	// .seed.bak sidecar write.
-	require.NoError(t, os.Chmod(home, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+	// A directory where the .seed.bak sidecar belongs lets the managed compare
+	// read succeed and fails the sidecar write.
+	require.NoError(t, os.Mkdir(filepath.Join(home, "config.toml"+seedBackupSuffix), 0o700))
 
 	err := writeSeedFiles(home, map[string]string{"config.toml": "new\n"})
 	require.Error(t, err)
@@ -251,8 +256,9 @@ func TestWriteSeedFilesBackupWriteError(t *testing.T) {
 
 func TestWriteSeedFilesMkdirError(t *testing.T) {
 	home := t.TempDir()
-	require.NoError(t, os.Chmod(home, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+
+	// A file where the seed subdirectory belongs fails the parent creation.
+	require.NoError(t, os.WriteFile(filepath.Join(home, "sub"), []byte("x"), 0o600))
 
 	err := writeSeedFiles(home, map[string]string{"sub/config.toml": "x\n"})
 	require.Error(t, err)
@@ -260,8 +266,10 @@ func TestWriteSeedFilesMkdirError(t *testing.T) {
 
 func TestWriteSeedFilesWriteError(t *testing.T) {
 	home := t.TempDir()
-	require.NoError(t, os.Chmod(home, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+
+	// A dangling symlink still reads as absent, so the target is written
+	// directly — into a directory that does not exist.
+	require.NoError(t, os.Symlink(filepath.Join(home, "missing", "config.toml"), filepath.Join(home, "config.toml")))
 
 	err := writeSeedFiles(home, map[string]string{"config.toml": "x\n"})
 	require.Error(t, err)
