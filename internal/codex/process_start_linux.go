@@ -8,6 +8,7 @@ func startProcess(cmd *exec.Cmd) (*supervisorWaiter, error) {
 	configureProcess(cmd)
 
 	beginWait := make(chan struct{})
+
 	waitDone, err := startCommandOnCreatorThread(cmd.Start, func() error {
 		<-beginWait
 

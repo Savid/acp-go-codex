@@ -79,13 +79,16 @@ func openLivenessContainment(supervisorConfig) (*livenessContainment, error) {
 
 func (c *livenessContainment) Start(cmd *exec.Cmd) error {
 	configureProcess(cmd)
+
 	waitDone, err := startCommandOnCreatorThread(func() error {
 		if err := linuxSetCoreLimit(); err != nil {
 			return fmt.Errorf("disable core dumps for Linux supervisor child: %w", err)
 		}
+
 		if err := linuxSetNoNewPrivileges(); err != nil {
 			return fmt.Errorf("disable privilege elevation for Linux supervisor child: %w", err)
 		}
+
 		if c.beforeStart != nil {
 			if err := c.beforeStart(); err != nil {
 				return err
@@ -129,6 +132,7 @@ func startLinuxSecurityLimited(start func() error) error {
 	if err := linuxSetCoreLimit(); err != nil {
 		return fmt.Errorf("disable core dumps for Linux supervisor child: %w", err)
 	}
+
 	if err := linuxSetNoNewPrivileges(); err != nil {
 		return fmt.Errorf("disable privilege elevation for Linux supervisor child: %w", err)
 	}
