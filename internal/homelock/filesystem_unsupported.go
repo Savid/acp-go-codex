@@ -9,5 +9,5 @@ import (
 )
 
 func validateLockFilesystem(*os.File) error {
-	return fmt.Errorf("Codex writable-home filesystem validation is unsupported on %s", runtime.GOOS)
+	return fmt.Errorf("codex writable-home filesystem validation is unsupported on %s", runtime.GOOS)
 }

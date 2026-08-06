@@ -13,6 +13,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// The /proc/locks range column reads EOF for a whole-file lock.
+const agentIdentityLockRangeEOF = "EOF"
+
 var (
 	agentIdentityLockRunRoot    = "/var/lib"
 	agentIdentityLockTrustedUID = uint32(0)
@@ -259,8 +262,8 @@ func adoptAgentIdentityLock(file *os.File, uid uint32, testOnly bool, testRoot s
 		}
 
 		runRoot = testRoot
-		trustedUID = uint32(os.Geteuid())
-		trustedGID = uint32(os.Getegid())
+		trustedUID = effectiveUID()
+		trustedGID = effectiveGID()
 	} else if testRoot != "" {
 		return fail(errors.New("test agent identity lock root is forbidden"))
 	}
@@ -322,8 +325,8 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 		}
 
 		runRoot = testRoot
-		trustedUID = uint32(os.Geteuid())
-		trustedGID = uint32(os.Getegid())
+		trustedUID = effectiveUID()
+		trustedGID = effectiveGID()
 	} else if testRoot != "" {
 		return fail(errors.New("test agent identity lock root is forbidden"))
 	}
@@ -343,7 +346,7 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 		return fail(err)
 	}
 
-	const name = "domain.lock"
+	name := agentAuthorityDomainLockName
 	if err = unix.Fstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fail(fmt.Errorf("inspect named agent authority domain %s: %w", name, err))
 	}
@@ -503,7 +506,7 @@ func validateAdoptedStandaloneAgentIdentityDisposition(
 	}
 
 	if owner != want {
-		return errors.New("Codex adopted standalone authority does not match its immutable owner binding")
+		return errors.New("codex adopted standalone authority does not match its immutable owner binding")
 	}
 
 	return validateAgentStandalonePriorDisposition(directory, owner, trustedUID, trustedGID)
@@ -520,8 +523,8 @@ func openAgentIdentityDispositionRoot(testOnly bool, testRoot string) (*os.File,
 		}
 
 		runRoot = testRoot
-		trustedUID = uint32(os.Geteuid())
-		trustedGID = uint32(os.Getegid())
+		trustedUID = effectiveUID()
+		trustedGID = effectiveGID()
 	} else if testRoot != "" {
 		return nil, 0, 0, errors.New("test agent identity lock root is forbidden")
 	}
@@ -640,7 +643,7 @@ func validateInheritedAgentIdentityFlock(file *os.File, descriptor unix.Stat_t, 
 
 func validateInheritedAgentIdentityFlockLine(fields []string, descriptor unix.Stat_t, wantMode string) error {
 	if len(fields) != 9 || !strings.HasSuffix(fields[1], ":") || fields[2] != "FLOCK" ||
-		fields[3] != "ADVISORY" || fields[4] != wantMode || fields[7] != "0" || fields[8] != "EOF" {
+		fields[3] != "ADVISORY" || fields[4] != wantMode || fields[7] != "0" || fields[8] != agentIdentityLockRangeEOF {
 		return errors.New("inherited agent identity descriptor has malformed or wrong-mode flock state")
 	}
 

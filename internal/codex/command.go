@@ -310,7 +310,7 @@ func shellValue(value any) string {
 		return fmt.Sprintf("%q", typed)
 	case bool:
 		if typed {
-			return "true"
+			return otelValueTrue
 		}
 
 		return "false"

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"time"
 
@@ -50,8 +51,8 @@ func writeLinuxSupervisorConfig(_ string, config supervisorConfig) (*os.File, er
 }
 
 func verifyLinuxTrustedSupervisorIdentity(uid uint32) error {
-	if os.Geteuid() != 0 || uid == 0 || uint32(os.Geteuid()) == uid {
-		return errors.New("Codex liveness supervisor requires a distinct trusted root identity")
+	if os.Geteuid() != 0 || uid == 0 || effectiveUID() == uid {
+		return errors.New("codex liveness supervisor requires a distinct trusted root identity")
 	}
 
 	return nil
@@ -105,7 +106,7 @@ func linuxSupervisorControlCancellation(control io.Reader) (<-chan struct{}, fun
 			case <-stop:
 				return
 			case <-ticker.C:
-				poll := []unix.PollFd{{Fd: int32(file.Fd()), Events: unix.POLLHUP | unix.POLLERR}}
+				poll := []unix.PollFd{{Fd: pollFD(file), Events: unix.POLLHUP | unix.POLLERR}}
 
 				count, pollErr := unix.Poll(poll, 0)
 				if pollErr == nil && count > 0 && poll[0].Revents&(unix.POLLHUP|unix.POLLERR) != 0 {
@@ -127,12 +128,12 @@ func validateLinuxSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) er
 
 	select {
 	case <-done:
-		return errors.New("Codex guardian exited before native launch")
+		return errors.New("codex guardian exited before native launch")
 	default:
 	}
 
 	poll := []unix.PollFd{{
-		Fd:     int32(peer.Fd()),
+		Fd:     pollFD(peer),
 		Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR,
 	}}
 
@@ -142,7 +143,7 @@ func validateLinuxSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) er
 	}
 
 	if ready != 0 || poll[0].Revents != 0 {
-		return errors.New("Codex guardian exited before native launch")
+		return errors.New("codex guardian exited before native launch")
 	}
 
 	return nil
@@ -228,4 +229,21 @@ func retryLinuxGuardianContainment(containment *guardianContainment) error {
 
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// Seam for the fail-closed guard in pollFD. Linux hands out small descriptors,
+// so the guard is unreachable through a real *os.File; tests swap this to reach it.
+var pollFDSource = (*os.File).Fd
+
+// pollFD narrows a descriptor to the int32 unix.PollFd carries. Linux hands out
+// small non-negative descriptors, so the guard never fires; when the value
+// cannot be represented it yields -1, which poll reports as EBADF rather than
+// aliasing onto a live descriptor.
+func pollFD(file *os.File) int32 {
+	fd := pollFDSource(file)
+	if fd > math.MaxInt32 {
+		return -1
+	}
+
+	return int32(fd)
 }

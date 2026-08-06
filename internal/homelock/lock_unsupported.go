@@ -9,7 +9,7 @@ import (
 )
 
 func lockFile(*os.File) error {
-	return fmt.Errorf("Codex writable-home locking is unsupported on %s", runtime.GOOS)
+	return fmt.Errorf("codex writable-home locking is unsupported on %s", runtime.GOOS)
 }
 
 func unlockFile(*os.File) error { return nil }
