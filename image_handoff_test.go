@@ -540,7 +540,7 @@ func TestHandoffURIDefects(t *testing.T) {
 		message string
 	}{
 		{uri: "", message: handoffCauseURIMissing},
-		{uri: "::not a uri::", message: handoffCauseURIUnparseable},
+		{uri: "::not a uri::", message: handoffCauseURIUnparsable},
 		{uri: "https://example.com/a.png", message: handoffCauseURIScheme},
 		{uri: "file://elsewhere/a.png", message: handoffCauseURIHost},
 		{uri: "file:relative.png", message: handoffCauseURIRelative},
@@ -1043,7 +1043,7 @@ func TestHandoffMessagesAreConstants(t *testing.T) {
 		handoffCauseEnvelopeDigest:    {},
 		handoffCauseEnvelopeSizeBytes: {},
 		handoffCauseURIMissing:        {},
-		handoffCauseURIUnparseable:    {},
+		handoffCauseURIUnparsable:     {},
 		handoffCauseURIScheme:         {},
 		handoffCauseURIHost:           {},
 		handoffCauseURIRelative:       {},

@@ -99,7 +99,7 @@ refused declaration cannot be used to learn whether the path it named exists:
 
 | `error` | Cause |
 | --- | --- |
-| `invalid_handoff` | The block is malformed as a block: no handoff root is configured, the envelope is absent, not an object, carries a field other than `version`, `digest`, and `sizeBytes`, declares a version other than `1`, a digest that is not 64 lowercase hex characters, or a negative or non-integer `sizeBytes` — or the `uri` is absent, unparseable, not `file`, names another host, or is not an absolute path. |
+| `invalid_handoff` | The block is malformed as a block: no handoff root is configured, the envelope is absent, not an object, carries a field other than `version`, `digest`, and `sizeBytes`, declares a version other than `1`, a digest that is not 64 lowercase hex characters, or a negative or non-integer `sizeBytes` — or the `uri` is absent, unparsable, not `file`, names another host, or is not an absolute path. |
 | `invalid_media_type` | The declared media type is outside the four-format allowlist. |
 | `too_large` | The declared `sizeBytes` is past the effective per-image limit. |
 | `path_not_allowed` | The confined root refused the open — a name that climbs out of the root, an absolute symlink, or a link whose target is outside it — or the opened file is not a regular file. |

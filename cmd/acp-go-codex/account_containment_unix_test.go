@@ -138,7 +138,7 @@ wait
 	time.Sleep(50 * time.Millisecond)
 	after, err := os.Stat(writes)
 	if err != nil {
-		t.Fatalf("restat descendant writes: %v", err)
+		t.Fatalf("re-stat descendant writes: %v", err)
 	}
 	if before.Size() != after.Size() {
 		t.Fatalf("write-capable auth descendant remained active: size %d -> %d", before.Size(), after.Size())

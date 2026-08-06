@@ -62,7 +62,7 @@ const (
 	handoffCauseEnvelopeDigest    = "_meta." + handoffMetaKey + ".digest must be a lowercase hex sha256"
 	handoffCauseEnvelopeSizeBytes = "_meta." + handoffMetaKey + ".sizeBytes must be a non-negative integer"
 	handoffCauseURIMissing        = "uri is required"
-	handoffCauseURIUnparseable    = "uri is not parseable"
+	handoffCauseURIUnparsable     = "uri is not parseable"
 	handoffCauseURIScheme         = "uri scheme is not " + handoffURIScheme
 	handoffCauseURIHost           = "uri host is not this host"
 	handoffCauseURIRelative       = "uri path is not absolute"
@@ -362,7 +362,7 @@ func handoffURIPath(uri string) (string, string) {
 
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return "", handoffCauseURIUnparseable
+		return "", handoffCauseURIUnparsable
 	}
 
 	if parsed.Scheme != handoffURIScheme {
