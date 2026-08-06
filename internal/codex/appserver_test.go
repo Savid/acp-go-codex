@@ -187,7 +187,7 @@ read line || exit 0
 echo '{"jsonrpc":"2.0","id":1,"result":{}}'
 read line || true
 while read line; do :; done
-`), 0o700); err != nil {
+`), nativeScriptMode); err != nil {
 		t.Fatalf("write codex script: %v", err)
 	}
 	client, err := NewAppServerClient(context.Background(), Options{
@@ -1056,7 +1056,7 @@ fi
 read line || exit 0
 echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"init failed"}}'
 while read line; do :; done
-`), 0o700); err != nil {
+`), nativeScriptMode); err != nil {
 		t.Fatalf("write init error script: %v", err)
 	}
 	if _, err := NewAppServerClient(context.Background(), Options{

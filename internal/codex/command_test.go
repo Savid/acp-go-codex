@@ -161,14 +161,17 @@ func TestCommandLaunchAndProcessErrors(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
 	dir := testTraversableTempDir(t)
 	codexPath := filepath.Join(dir, "codex")
-	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), 0o700); err != nil {
+	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), nativeScriptMode); err != nil {
 		t.Fatalf("write codex: %v", err)
 	}
 	if resolved, err := resolveCodexPath("", []string{"PATH=" + dir}); err != nil || resolved != codexPath {
 		t.Fatalf("resolve PATH = %q err=%v", resolved, err)
 	}
 
-	logPath := filepath.Join(dir, "args")
+	// The app-server writes its args as the isolated identity, so the file has to
+	// live somewhere that identity owns rather than in the traversable parent.
+	shared := testNativeOwnedTempDir(t)
+	logPath := filepath.Join(shared, "args")
 	script := filepath.Join(dir, "codex-app")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -181,7 +184,7 @@ read line || exit 0
 echo '{"jsonrpc":"2.0","id":1,"result":{}}'
 read line || true
 while read line; do :; done
-`), 0o700); err != nil {
+`), nativeScriptMode); err != nil {
 		t.Fatalf("write app script: %v", err)
 	}
 	t.Setenv("TEST_ARGS", logPath)
@@ -485,7 +488,7 @@ func TestProcessCloserSendsTermBeforeKill(t *testing.T) {
 trap 'printf term > "$TERM_MARK"; exit 0' TERM
 printf ready > "$READY_MARK"
 read release
-`), 0o700); err != nil {
+`), nativeScriptMode); err != nil {
 		t.Fatalf("write trap script: %v", err)
 	}
 

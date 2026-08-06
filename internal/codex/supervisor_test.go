@@ -90,6 +90,12 @@ func TestRunGuardianAndLivenessBranches(t *testing.T) {
 	supervisorOutput = io.Discard
 	supervisorError = io.Discard
 
+	// The guardian runs in this process, so it uses the platform-neutral
+	// identity hooks: the real authority claims one identity exclusively down an
+	// inherited descriptor, which a single test process cannot establish and
+	// release repeatedly. supervisor_linux_test.go proves the real authority.
+	withNeutralSupervisorIdentityHooks(t)
+
 	root := t.TempDir()
 	config := testSupervisorConfig(t, filepath.Join(root, "guardian"), "/bin/sh", []string{"-c", "cat"})
 	require.NoError(t, runGuardian(config))
@@ -204,20 +210,22 @@ func testSupervisorConfig(t *testing.T, root string, nativePath string, args []s
 	require.NoError(t, os.MkdirAll(scratch, 0o700))
 
 	return supervisorConfig{
-		NativePath:       nativePath,
-		NativeArgs:       args,
-		NativeEnv:        os.Environ(),
-		Home:             filepath.Join(root, "home"),
-		Scratch:          scratch,
-		ScratchParent:    root,
-		LifecycleKind:    "runtime",
-		DarwinBestEffort: true,
-		Started:          filepath.Join(scratch, "started"),
-		Completion:       filepath.Join(scratch, "complete"),
-		NativePIDFile:    filepath.Join(scratch, "native.pid"),
-		IsolationUID:     testProcessIsolation().UID,
-		IsolationGID:     testProcessIsolation().GID,
-		Isolation:        testProcessIsolation(),
+		NativePath:          nativePath,
+		NativeArgs:          args,
+		NativeEnv:           os.Environ(),
+		Home:                filepath.Join(root, "home"),
+		Scratch:             scratch,
+		ScratchParent:       root,
+		LifecycleKind:       "runtime",
+		DarwinBestEffort:    true,
+		Started:             filepath.Join(scratch, "started"),
+		Completion:          filepath.Join(scratch, "complete"),
+		NativePIDFile:       filepath.Join(scratch, "native.pid"),
+		IsolationUID:        testProcessIsolation().UID,
+		IsolationGID:        testProcessIsolation().GID,
+		StandaloneOwnerID:   testProcessIsolation().StandaloneOwnerID,
+		StandaloneStateRoot: testProcessIsolation().StandaloneStateRoot,
+		Isolation:           testProcessIsolation(),
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -712,14 +713,42 @@ func TestResolvedCodexCLIHome(t *testing.T) {
 	}
 }
 
-func testCLIProcessIsolation() processIsolationConfig {
+// testCLIStandaloneStateRootPath is the one state root every fixture in this
+// module claims. It has to be exactly one path: the authority permanently binds
+// a UID to a single owner and state root, and `go test ./...` runs every
+// package against one authority tree. $HOME cannot serve — it belongs to the
+// runner, not to the identity the claim is for.
+const testCLIStandaloneStateRootPath = "/var/lib/acp-go-codex-cli-test"
+
+// testCLIStandaloneStateRoot materializes the directory a standalone identity
+// claim binds: mode 0700, owned by the claimed identity, beneath root-owned
+// ancestry that is neither group- nor other-writable.
+var testCLIStandaloneStateRoot = sync.OnceValue(func() string {
+	uid, gid := testCLIIsolationIdentity()
+	if err := os.MkdirAll(testCLIStandaloneStateRootPath, 0o700); err != nil {
+		return testCLIStandaloneStateRootPath
+	}
+	if err := os.Chown(testCLIStandaloneStateRootPath, int(uid), int(gid)); err != nil {
+		return testCLIStandaloneStateRootPath
+	}
+	_ = os.Chmod(testCLIStandaloneStateRootPath, 0o700)
+
+	return testCLIStandaloneStateRootPath
+})
+
+// The CLI package claims a different UID from the other packages: go test runs
+// them concurrently, and the authority admits one live claimant per UID.
+func testCLIIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
-	if uid == 0 {
-		uid = 65534
+	if uid == 0 || gid == 0 {
+		uid, gid = 65532, 65532
 	}
-	if gid == 0 {
-		gid = 65534
-	}
+
+	return uint32(uid), uint32(gid)
+}
+
+func testCLIProcessIsolation() processIsolationConfig {
+	uid, gid := testCLIIsolationIdentity()
 	environment := make(map[string]string)
 	for _, entry := range os.Environ() {
 		name, value, ok := strings.Cut(entry, "=")
@@ -729,8 +758,8 @@ func testCLIProcessIsolation() processIsolationConfig {
 	}
 
 	return processIsolationConfig{
-		UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment,
-		StandaloneOwnerID: "test-owner", StandaloneStateRoot: environment["HOME"],
+		UID: uid, GID: gid, BaseEnvironment: environment,
+		StandaloneOwnerID: "test-owner", StandaloneStateRoot: testCLIStandaloneStateRoot(),
 	}
 }
 

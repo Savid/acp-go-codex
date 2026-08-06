@@ -213,7 +213,7 @@ func TestRunAccountCommandAccountGenerationAndClosedSignalBranches(t *testing.T)
 func writeAccountCommandScript(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(testTraversableTempDir(t), "codex")
-	require.NoError(t, os.WriteFile(path, []byte(contents), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte(contents), nativeScriptMode))
 
 	return path
 }

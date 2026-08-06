@@ -4,17 +4,53 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
-func testProcessIsolation() *ProcessIsolation {
+// testIsolationIdentity is the identity every fixture isolates to. Root cannot
+// isolate to itself — the policy forbids UID or GID zero — and uid 1 is the
+// system daemon account, which the standalone claim finds live on any host the
+// suite can see through the initial PID namespace and rightly refuses as
+// occupied. 65534 is the fleet-wide unprivileged stand-in, and the privileged
+// lock serializes it across repos.
+func testIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
-	if uid == 0 {
-		uid = 1
+	if uid == 0 || gid == 0 {
+		uid, gid = 65534, 65534
 	}
-	if gid == 0 {
-		gid = 1
+
+	return uint32(uid), uint32(gid)
+}
+
+// testStandaloneStateRootPath is the one state root every fixture in this
+// package claims. It has to be exactly one path: the authority permanently
+// binds a UID to a single owner and state root, so a second root for the same
+// identity is refused for the lifetime of the authority tree.
+const testStandaloneStateRootPath = "/var/lib/acp-go-codex-test"
+
+// testStandaloneStateRoot materializes the directory a standalone identity
+// claim binds: mode 0700, owned by the claimed identity, beneath root-owned
+// ancestry that is neither group- nor other-writable. The fixture used to name
+// /var/lib/acp-go-test, a path nothing ever created, so every supervised launch
+// died at the bind with ENOENT before the case under test began. Materializing
+// it needs the privileges the claim needs anyway; an identity the caller cannot
+// hand it to fails at the bind, which is the honest report.
+var testStandaloneStateRoot = sync.OnceValue(func() string {
+	uid, gid := testIsolationIdentity()
+	if err := os.MkdirAll(testStandaloneStateRootPath, 0o700); err != nil {
+		return testStandaloneStateRootPath
 	}
+	if err := os.Chown(testStandaloneStateRootPath, int(uid), int(gid)); err != nil {
+		return testStandaloneStateRootPath
+	}
+	_ = os.Chmod(testStandaloneStateRootPath, 0o700)
+
+	return testStandaloneStateRootPath
+})
+
+func testProcessIsolation() *ProcessIsolation {
+	uid, gid := testIsolationIdentity()
 	environment := make(map[string]string)
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
@@ -27,8 +63,8 @@ func testProcessIsolation() *ProcessIsolation {
 	}
 
 	return &ProcessIsolation{
-		UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment,
-		StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test",
+		UID: uid, GID: gid, BaseEnvironment: environment,
+		StandaloneOwnerID: "test-owner", StandaloneStateRoot: testStandaloneStateRoot(),
 	}
 }
 
@@ -81,3 +117,8 @@ func skipUnprivilegedDarwinIsolation(t *testing.T) {
 		t.Skip("requires a privileged two-principal fixture to clear supplementary groups")
 	}
 }
+
+// nativeScriptMode is the mode a fake native executable needs. The product
+// launches it as the isolated identity, so a 0700 file owned by the test runner
+// is unreachable and the launch dies with EACCES before the case begins.
+const nativeScriptMode = 0o755

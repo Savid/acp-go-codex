@@ -79,6 +79,12 @@ func preserveSupervisorGlobals(t *testing.T) {
 	oldOutput := supervisorOutput
 	oldError := supervisorError
 	oldExit := supervisorExit
+	oldAcquireIdentityAuthority := supervisorAcquireIdentityAuthority
+	oldVerifyTrustedIdentity := supervisorVerifyTrustedIdentity
+	oldAdoptIdentityLock := supervisorAdoptIdentityLock
+	oldAdoptAuthorityDomain := supervisorAdoptAuthorityDomain
+	oldValidateAdoptedAuthority := supervisorValidateAdoptedAuthority
+	oldValidateGuardianPeer := supervisorValidateGuardianPeer
 	t.Cleanup(func() {
 		supervisorExecutable = oldExecutable
 		supervisorExecCommand = oldCommand
@@ -96,7 +102,30 @@ func preserveSupervisorGlobals(t *testing.T) {
 		supervisorOutput = oldOutput
 		supervisorError = oldError
 		supervisorExit = oldExit
+		supervisorAcquireIdentityAuthority = oldAcquireIdentityAuthority
+		supervisorVerifyTrustedIdentity = oldVerifyTrustedIdentity
+		supervisorAdoptIdentityLock = oldAdoptIdentityLock
+		supervisorAdoptAuthorityDomain = oldAdoptAuthorityDomain
+		supervisorValidateAdoptedAuthority = oldValidateAdoptedAuthority
+		supervisorValidateGuardianPeer = oldValidateGuardianPeer
 	})
+}
+
+// withTestSupervisorIdentity fills the identity a private supervisor config
+// must carry. readSupervisorConfig rejects a config whose isolation IDs are
+// zero, and on Linux the guardian binds the standalone owner and state root
+// before it dispatches, so a config naming neither never reaches the branch the
+// case is about. Every fixture claims the one package identity: the authority
+// binds a UID to a single owner and state root permanently.
+func withTestSupervisorIdentity(config supervisorConfig) supervisorConfig {
+	isolation := testProcessIsolation()
+	config.IsolationUID = isolation.UID
+	config.IsolationGID = isolation.GID
+	config.StandaloneOwnerID = isolation.StandaloneOwnerID
+	config.StandaloneStateRoot = isolation.StandaloneStateRoot
+	config.Isolation = isolation
+
+	return config
 }
 
 func TestSupervisorConfigAndDispatchFailures(t *testing.T) {
@@ -273,16 +302,17 @@ func TestRunLivenessPublishAndPIDFailures(t *testing.T) {
 
 func TestRunGuardianHappyPathAndPreReadinessFailure(t *testing.T) {
 	preserveSupervisorGlobals(t)
+	withNeutralSupervisorIdentityHooks(t)
 	root := t.TempDir()
 	supervisorInput = strings.NewReader("payload\n")
 	supervisorOutput = io.Discard
 	supervisorError = io.Discard
-	config := supervisorConfig{
+	config := withTestSupervisorIdentity(supervisorConfig{
 		NativePath: "/bin/sh", NativeArgs: []string{"-c", "cat"}, NativeEnv: os.Environ(),
 		Home: filepath.Join(root, "home"), Scratch: root,
 		Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"),
 		NativePIDFile: filepath.Join(root, "native.pid"),
-	}
+	})
 	require.NoError(t, runGuardian(config))
 
 	root = t.TempDir()
@@ -490,11 +520,12 @@ func TestSupervisorInjectedFilesystemAndContainmentFailures(t *testing.T) {
 
 func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	preserveSupervisorGlobals(t)
+	withNeutralSupervisorIdentityHooks(t)
 	root := t.TempDir()
-	config := supervisorConfig{
+	config := withTestSupervisorIdentity(supervisorConfig{
 		NativePath: "/bin/true", NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root,
 		Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"), NativePIDFile: filepath.Join(root, "pid"),
-	}
+	})
 	path, err := writeSupervisorConfig(root, config)
 	require.NoError(t, err)
 	supervisorInput = strings.NewReader("")
@@ -503,7 +534,7 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 	require.NoError(t, runSupervisor(supervisorModeLiveness, path))
 
 	supervisorRandRead = func([]byte) (int, error) { return 0, errors.New("entropy failed") }
-	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: t.TempDir()})
+	_, _, err = supervisorCommand(context.Background(), withTestSupervisorIdentity(supervisorConfig{Scratch: t.TempDir()}))
 	require.ErrorContains(t, err, "marker nonce")
 	supervisorRandRead = func(value []byte) (int, error) {
 		for index := range value {
@@ -605,15 +636,16 @@ func TestGuardianPreReadinessRecoveryProofBranches(t *testing.T) {
 func TestSupervisorFinalRemainingBranches(t *testing.T) {
 	t.Run("guardian dispatch", func(t *testing.T) {
 		preserveSupervisorGlobals(t)
+		withNeutralSupervisorIdentityHooks(t)
 		root := t.TempDir()
 		supervisorInput = strings.NewReader("")
 		supervisorOutput = io.Discard
 		supervisorError = io.Discard
-		config := supervisorConfig{
+		config := withTestSupervisorIdentity(supervisorConfig{
 			NativePath: "/bin/true", NativeEnv: os.Environ(), Home: filepath.Join(root, "home"), Scratch: root,
 			Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"), NativePIDFile: filepath.Join(root, "pid"),
 			FramedInput: true,
-		}
+		})
 		path, err := writeSupervisorConfig(root, config)
 		require.NoError(t, err)
 		require.NoError(t, runSupervisor(supervisorModeGuardian, path))
@@ -621,8 +653,9 @@ func TestSupervisorFinalRemainingBranches(t *testing.T) {
 
 	t.Run("guardian config", func(t *testing.T) {
 		preserveSupervisorGlobals(t)
-		err := runGuardian(supervisorConfig{Home: t.TempDir(), Scratch: ""})
-		require.ErrorContains(t, err, "scratch root")
+		withNeutralSupervisorIdentityHooks(t)
+		err := runGuardian(withTestSupervisorIdentity(supervisorConfig{Home: t.TempDir(), Scratch: ""}))
+		require.ErrorContains(t, err, guardianWithoutScratchRootRefusal)
 	})
 
 	t.Run("guardian completion publish", func(t *testing.T) {

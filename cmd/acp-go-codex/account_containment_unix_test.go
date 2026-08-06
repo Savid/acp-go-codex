@@ -27,10 +27,10 @@ func TestTerminalAuthContainsDescendantsAndHoldsHomeUntilQuiescence(t *testing.T
 	if err := os.Chmod(root, 0o711); err != nil {
 		t.Fatal(err)
 	}
-	home := filepath.Join(root, "home")
-	if err := os.Mkdir(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// A standalone isolation fences the durable home to its state root, and the
+	// isolated identity owns that root outright, which is also what lets the
+	// contained tree publish its sentinels inside it.
+	home := testCLIStandaloneStateRoot()
 	ready := filepath.Join(home, "ready")
 	pidPath := filepath.Join(home, "child.pid")
 	rootPIDPath := filepath.Join(home, "root.pid")
@@ -60,9 +60,6 @@ wait
 	t.Setenv("AUTH_ROOT_PID", rootPIDPath)
 	t.Setenv("AUTH_WRITES", writes)
 	isolation := testCLIProcessIsolation()
-	if err := os.Chown(home, int(isolation.UID), int(isolation.GID)); err != nil {
-		t.Fatal(err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
