@@ -31,8 +31,17 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return fmt.Errorf("validate process isolation base environment: %w", err)
 	}
 
-	return errors.Join(validateProcessIsolationIdentity(isolation), validateProcessIsolationPlatform())
+	return errors.Join(processIsolationValidateIdentity(isolation), validateProcessIsolationPlatform())
 }
+
+// Seam for the platform's identity disposition validator. Only Linux owns an
+// agent identity lock and an authority domain, so only the Linux build has a
+// disposition to enforce; every other platform accepts whatever it is handed.
+// supervisorCommand makes its own check that the pair arrives together, and on
+// Linux this validator has always refused first, so the supervisor's own check
+// is the only one there is off Linux and cannot be reached here. Tests swap
+// this for the answer every other platform gives so that check can be proved.
+var processIsolationValidateIdentity = validateProcessIsolationIdentity
 
 func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	identityLock := isolation.IdentityLock != nil
