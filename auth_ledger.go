@@ -163,8 +163,8 @@ func newAuthLedger(options Options) (*authLedger, error) {
 }
 
 // authLedgerHomeKey scopes the ledger to the credential root it describes. Two
-// agents pointed at different CODEX_HOMEs describe different slots, so their
-// records must not alias.
+// agents pointed at different CODEX_HOME roots describe different slots, so
+// their records must not alias.
 func authLedgerHomeKey(home string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(home)))
 
