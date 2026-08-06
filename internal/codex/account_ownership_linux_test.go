@@ -20,20 +20,20 @@ func TestCodexAccountNativePathsExcludeSupervisorScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(parent) })
-	if err := os.Chmod(parent, 0o711); err != nil {
-		t.Fatal(err)
+	if chmodErr := os.Chmod(parent, 0o711); chmodErr != nil {
+		t.Fatal(chmodErr)
 	}
 	home := filepath.Join(parent, "home")
-	if err := os.Mkdir(home, 0o700); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.Mkdir(home, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
 	control, err := HomeLockRoot(parent, home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	proof := filepath.Join(control, "proof")
-	if err := os.WriteFile(proof, []byte("trusted"), 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(proof, []byte("trusted"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	shim, err := newBrowserShim(parent)
 	if err != nil {
