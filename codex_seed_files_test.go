@@ -173,6 +173,24 @@ func TestWriteSeedFilesFailsClosedOnUnmanagedFile(t *testing.T) {
 	require.True(t, errors.Is(statErr, os.ErrNotExist), "fail-closed seed must not write a manifest")
 }
 
+// TestWriteSeedBytesRefusesAnUncreatableParent proves the seed writer reports
+// a parent directory it cannot create instead of writing anywhere else. The
+// entry point cannot reach this guard: writeSeedFiles stats every target
+// first, and a parent that is secretly a file already fails that stat, so the
+// guard is driven directly with the same shape of path.
+func TestWriteSeedBytesRefusesAnUncreatableParent(t *testing.T) {
+	home := t.TempDir()
+	occupied := filepath.Join(home, "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))
+
+	err := writeSeedBytes(filepath.Join(occupied, "nested", "seed.toml"), []byte("seeded\n"))
+	require.ErrorContains(t, err, "create seed file directory")
+
+	current, readErr := os.ReadFile(occupied)
+	require.NoError(t, readErr)
+	require.Equal(t, "x", string(current), "the occupying file must be left untouched")
+}
+
 func TestWriteSeedFilesManifestSurvivesPasses(t *testing.T) {
 	home := t.TempDir()
 

@@ -182,8 +182,14 @@ func TestBrowserShimEnviron(t *testing.T) {
 	}, shim.environ([]string{"PATH=/usr/bin"}))
 }
 
-func TestBrowserShimRemoveNilReceiver(t *testing.T) {
+// TestBrowserShimNilReceiverIsANoOp proves an absent shim answers both of the
+// methods the account command's shared cleanup and handoff paths call, so the
+// logout leg, which builds no shim, needs no nil checks of its own.
+func TestBrowserShimNilReceiverIsANoOp(t *testing.T) {
 	require.NoError(t, (*browserShim)(nil).remove())
+	require.NoError(t, (*browserShim)(nil).handoff(testProcessIsolation()),
+		"a nil shim must hand nothing off rather than walk a tree it does not have",
+	)
 }
 
 func restoreBrowserShimHooks(t *testing.T) {

@@ -44,4 +44,16 @@ func TestHomeLockRootFailureBranches(t *testing.T) {
 	require.NoError(t, os.WriteFile(blocked, []byte("x"), 0o600))
 	_, err = HomeLockRoot(parent, t.TempDir())
 	require.ErrorContains(t, err, "create codex trusted home-lock root")
+
+	// The protection step must fail closed: a root whose mode cannot be
+	// asserted is not handed out as trusted. The kernel never refuses a chmod
+	// from the owner of a directory it just created, so the fault arrives
+	// through the seam.
+	previousChmod := homeLockChmod
+	t.Cleanup(func() { homeLockChmod = previousChmod })
+
+	homeLockChmod = func(string, os.FileMode) error { return errors.New("mode lost") }
+	root, err := HomeLockRoot(t.TempDir(), t.TempDir())
+	require.ErrorContains(t, err, "protect codex trusted home-lock root")
+	require.Empty(t, root, "an unprotected root must not be handed out")
 }

@@ -10,6 +10,11 @@ import (
 
 var homeLockAbsolutePath = filepath.Abs
 
+// homeLockChmod carries os.Chmod so a test can fault the protection step. A
+// directory MkdirAll just created or accepted always takes a mode change from
+// its owner, so the guard below is unreachable through the real call.
+var homeLockChmod = os.Chmod
+
 func HomeLockRoot(scratchParent string, writableHome string) (string, error) {
 	if scratchParent == "" {
 		return "", fmt.Errorf("codex home-lock scratch parent is required")
@@ -31,7 +36,7 @@ func HomeLockRoot(scratchParent string, writableHome string) (string, error) {
 		return "", fmt.Errorf("create codex trusted home-lock root: %w", err)
 	}
 
-	if err := os.Chmod(root, 0o700); err != nil {
+	if err := homeLockChmod(root, 0o700); err != nil {
 		return "", fmt.Errorf("protect codex trusted home-lock root: %w", err)
 	}
 
