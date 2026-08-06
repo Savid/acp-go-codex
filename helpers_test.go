@@ -28,6 +28,11 @@ func testIsolationIdentity() (uint32, uint32) {
 	return uint32(uid), uint32(gid)
 }
 
+// testStandaloneOwnerID is the claim owner this package uses. The authority
+// binds an owner to a UID as tightly as it binds a UID to an owner, so a package
+// that reuses another package's owner is refused even with its own UID.
+const testStandaloneOwnerID = "test-owner-adapter"
+
 // testStandaloneStateRootPath is the one state root this package claims. It has
 // to be exactly one path: the authority permanently binds a UID to a single
 // owner and state root for the lifetime of the authority tree.
@@ -70,7 +75,7 @@ func testProcessIsolation() ProcessIsolation {
 
 	return ProcessIsolation{
 		UID: uid, GID: gid, BaseEnvironment: environment,
-		StandaloneOwnerID: "test-owner", StandaloneStateRoot: testStandaloneStateRoot(),
+		StandaloneOwnerID: testStandaloneOwnerID, StandaloneStateRoot: testStandaloneStateRoot(),
 	}
 }
 

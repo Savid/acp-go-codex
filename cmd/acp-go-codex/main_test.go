@@ -737,11 +737,14 @@ var testCLIStandaloneStateRoot = sync.OnceValue(func() string {
 })
 
 // The CLI package claims a different UID from the other packages: go test runs
-// them concurrently, and the authority admits one live claimant per UID.
+// them concurrently, and the authority admits one live claimant per UID. It
+// also has to be a UID nothing on the host is already running as — the initial
+// PID namespace shows the suite every process on the box, and 65532 belongs to
+// the host cloudflared service.
 func testCLIIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 || gid == 0 {
-		uid, gid = 65532, 65532
+		uid, gid = 65531, 65531
 	}
 
 	return uint32(uid), uint32(gid)
@@ -759,7 +762,7 @@ func testCLIProcessIsolation() processIsolationConfig {
 
 	return processIsolationConfig{
 		UID: uid, GID: gid, BaseEnvironment: environment,
-		StandaloneOwnerID: "test-owner", StandaloneStateRoot: testCLIStandaloneStateRoot(),
+		StandaloneOwnerID: "test-owner-cli", StandaloneStateRoot: testCLIStandaloneStateRoot(),
 	}
 }
 
