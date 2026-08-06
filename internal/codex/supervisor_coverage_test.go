@@ -543,8 +543,7 @@ func TestSupervisorDispatchBootstrapAndEarlyFailures(t *testing.T) {
 
 		return len(value), nil
 	}
-	_, _, err = supervisorCommand(context.Background(), supervisorConfig{Scratch: ""})
-	require.ErrorContains(t, err, "scratch root")
+	requireSupervisorCommandWithoutScratchRoot(t)
 
 	root = t.TempDir()
 	claim, err := homelock.AcquireClaim(filepath.Join(root, "home"))
