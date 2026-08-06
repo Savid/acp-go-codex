@@ -96,21 +96,22 @@ var supervisorOutput io.Writer = os.Stdout
 var supervisorError io.Writer = os.Stderr
 var supervisorExit = os.Exit
 var supervisorWriteConfig = writeSupervisorConfig
-var supervisorMarkerRoot = func(config supervisorConfig) (string, error) { return config.Scratch, nil }
-var supervisorAcquireIdentityAuthority = func(
+
+// The identity seams below carry no initializer: every platform installs its
+// own through configureSupervisorPlatform, because the answers they stand for
+// are what differs between platforms. Linux binds the real agent identity
+// registry; everywhere else the supervisor holds no identity to bind.
+var supervisorMarkerRoot func(config supervisorConfig) (string, error)
+var supervisorAcquireIdentityAuthority func(
 	uint32, uint32, string, string, io.Reader,
-) (supervisorIdentityLock, supervisorIdentityLock, error) {
-	return noopSupervisorIdentityLock{}, noopSupervisorIdentityLock{}, nil
-}
-var supervisorVerifyTrustedIdentity = func(uint32) error { return nil }
-var supervisorAdoptIdentityLock = func(uint32) (supervisorIdentityLock, error) { return noopSupervisorIdentityLock{}, nil }
-var supervisorAdoptAuthorityDomain = func(uint32) (supervisorIdentityLock, error) {
-	return noopSupervisorIdentityLock{}, nil
-}
-var supervisorValidateAdoptedAuthority = func(supervisorConfig) error { return nil }
+) (supervisorIdentityLock, supervisorIdentityLock, error)
+var supervisorVerifyTrustedIdentity func(uint32) error
+var supervisorAdoptIdentityLock func(uint32) (supervisorIdentityLock, error)
+var supervisorAdoptAuthorityDomain func(uint32) (supervisorIdentityLock, error)
+var supervisorValidateAdoptedAuthority func(supervisorConfig) error
 var supervisorOpenIdentityPlaceholder = func() (*os.File, error) { return os.Open(os.DevNull) }
 var supervisorGuardianPeer *os.File
-var supervisorValidateGuardianPeer = func(*os.File, <-chan struct{}) error { return nil }
+var supervisorValidateGuardianPeer func(*os.File, <-chan struct{}) error
 
 type supervisorIdentityLock interface {
 	io.Closer
