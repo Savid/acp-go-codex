@@ -557,6 +557,140 @@ func TestAgentStandalonePeerWonMissingDomainRaceReturnsSharedLease(t *testing.T)
 	require.NoError(t, unix.Flock(int(third.Fd()), unix.LOCK_SH|unix.LOCK_NB))
 }
 
+// TestAgentStandaloneDomainClaimRereadsUnderTheExclusiveLease proves the claim
+// re-reads the authority record once it holds the exclusive lease and acts on
+// what it finds there, not on the absence it saw before it queued. A peer that
+// published the record while we waited must decide the outcome.
+func TestAgentStandaloneDomainClaimRereadsUnderTheExclusiveLease(t *testing.T) {
+	// A peer that publishes an authority record for this very domain while we
+	// queue for the exclusive lease has minted the authority we were about to
+	// mint ourselves, so the claim adopts that record rather than replacing it,
+	// leaves it byte for byte on its own inode, and hands back the lease
+	// downgraded to shared the way every adopting branch does.
+	t.Run("peer publishes a matching record while we queue", func(t *testing.T) {
+		directory, ownerUID, ownerGID := createAgentStandalonePristineDomainFixture(t)
+		want := agentStandaloneOwner{
+			Version: 1, UID: 62903, GID: 62904, Kind: agentStandaloneOwnerKind,
+			Provider: agentStandaloneOwnerID, OwnerID: "queued",
+			StateRoot: agentStandaloneStateRoot{Path: "/srv/codex/queued", Dev: 101, Ino: 102},
+		}
+		record, err := currentAgentAuthorityDomain(directory)
+		require.NoError(t, err)
+		record.AuthorityID = "0123456789abcdef0123456789abcdef"
+		recordPath := filepath.Join(directory.Name(), "domain.json")
+		held := holdAgentStandaloneTestDomainShared(t, directory, ownerUID, ownerGID)
+		published := make(chan struct{})
+		var publishedBytes []byte
+		var publishedStat unix.Stat_t
+		go func() {
+			time.Sleep(60 * time.Millisecond)
+			publishErr := replaceAgentStandaloneDomainRecord(directory, ownerUID, ownerGID, record)
+			var readErr, statErr error
+			if publishErr == nil {
+				publishedBytes, readErr = os.ReadFile(recordPath)
+				statErr = unix.Stat(recordPath, &publishedStat)
+			}
+			closeErr := held.Close()
+			if joined := errors.Join(publishErr, readErr, statErr, closeErr); joined != nil {
+				panic(joined)
+			}
+			close(published)
+		}()
+
+		lease, err := acquireAgentStandaloneDomain(
+			directory, want, ownerUID, ownerGID, true, time.Now().Add(5*time.Second), nil, nil,
+		)
+		<-published
+		require.NoError(t, err)
+		require.NotNil(t, lease)
+		defer lease.Close()
+		reread, err := loadAgentAuthorityDomainRecord(directory, ownerUID, ownerGID)
+		require.NoError(t, err)
+		require.Equal(t, record.AuthorityID, reread.AuthorityID,
+			"the adopting claim must take on the peer's authority id rather than mint its own",
+		)
+		adopted, err := os.ReadFile(recordPath)
+		require.NoError(t, err)
+		var adoptedStat unix.Stat_t
+		require.NoError(t, unix.Stat(recordPath, &adoptedStat))
+		require.Equal(t, publishedStat.Dev, adoptedStat.Dev,
+			"the adopting claim must leave the peer's record where the peer put it",
+		)
+		require.Equal(t, publishedStat.Ino, adoptedStat.Ino,
+			"the adopting claim must not rename a record of its own over the peer's",
+		)
+		require.Equal(t, publishedBytes, adopted, "the adopted record must be the peer's, byte for byte")
+		contender, err := openAgentStandaloneNamedLock(directory, "domain.lock", false, ownerUID, ownerGID)
+		require.NoError(t, err)
+		require.NoError(t, unix.Flock(int(contender.Fd()), unix.LOCK_SH|unix.LOCK_NB),
+			"the adopted lease must be shared, so peers on the same authority may hold it too",
+		)
+		require.ErrorIs(t, unix.Flock(int(contender.Fd()), unix.LOCK_EX|unix.LOCK_NB), unix.EWOULDBLOCK,
+			"the adopted lease must still exclude a contender that wants the domain to itself",
+		)
+		require.NoError(t, contender.Close())
+	})
+
+	// Adoption downgrades the exclusive lease to shared and only then reads the
+	// record back, so a peer holding the same shared lease can still replace it
+	// inside that window. The read-back is the only thing standing between that
+	// peer and a lease handed out for an authority this claim never saw.
+	t.Run("peer replaces the adopted record in the shared-lease window", func(t *testing.T) {
+		directory, ownerUID, ownerGID := createAgentStandalonePristineDomainFixture(t)
+		want := agentStandaloneOwner{
+			Version: 1, UID: 62913, GID: 62914, Kind: agentStandaloneOwnerKind,
+			Provider: agentStandaloneOwnerID, OwnerID: "adopted",
+			StateRoot: agentStandaloneStateRoot{Path: "/srv/codex/adopted", Dev: 101, Ino: 102},
+		}
+		record, err := currentAgentAuthorityDomain(directory)
+		require.NoError(t, err)
+		record.AuthorityID = "0123456789abcdef0123456789abcdef"
+		successor := record
+		successor.AuthorityID = "fedcba9876543210fedcba9876543210"
+		held := holdAgentStandaloneTestDomainShared(t, directory, ownerUID, ownerGID)
+		published := make(chan struct{})
+		go func() {
+			time.Sleep(60 * time.Millisecond)
+			publishErr := replaceAgentStandaloneDomainRecord(directory, ownerUID, ownerGID, record)
+			closeErr := held.Close()
+			if joined := errors.Join(publishErr, closeErr); joined != nil {
+				panic(joined)
+			}
+			close(published)
+		}()
+		// Only the lease downgrade flocks bare LOCK_SH; every acquisition adds
+		// LOCK_NB, so this lands the peer in the downgrade window and nowhere else.
+		previous := agentStandaloneFlock
+		t.Cleanup(func() { agentStandaloneFlock = previous })
+		replaced := false
+		agentStandaloneFlock = func(fd, how int) error {
+			if how == unix.LOCK_SH && !replaced {
+				replaced = true
+				require.NoError(t, replaceAgentStandaloneDomainRecord(directory, ownerUID, ownerGID, successor))
+			}
+
+			return previous(fd, how)
+		}
+
+		lease, err := acquireAgentStandaloneDomain(
+			directory, want, ownerUID, ownerGID, true, time.Now().Add(5*time.Second), nil, nil,
+		)
+		<-published
+		require.Nil(t, lease)
+		require.ErrorContains(t, err, "changed during shared-lease transition")
+		require.True(t, replaced, "the peer never reached the shared-lease window")
+		reread, err := loadAgentAuthorityDomainRecord(directory, ownerUID, ownerGID)
+		require.NoError(t, err)
+		require.Equal(t, successor.AuthorityID, reread.AuthorityID,
+			"the refusal must leave the peer's replacement in place",
+		)
+		contender, acquired, err := tryAgentStandaloneNamedLock(directory, "domain.lock", false, ownerUID, ownerGID)
+		require.NoError(t, err)
+		require.True(t, acquired, "the refused claim must release the domain lock")
+		require.NoError(t, contender.Close())
+	})
+}
+
 func TestAgentStandaloneRebindProbeFailureLeavesOldDomainRecordIntact(t *testing.T) {
 	directory := openAgentStandaloneTestDirectory(t)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
@@ -1304,6 +1438,36 @@ func createAgentStandaloneTestLock(
 		}
 	})
 	return lock
+}
+
+// createAgentStandalonePristineDomainFixture stages a registry that has its
+// permanent domain lock but has never published an authority record, so a claim
+// against it must take the exclusive lease before it can mint the domain.
+func createAgentStandalonePristineDomainFixture(t *testing.T) (*os.File, uint32, uint32) {
+	t.Helper()
+	directory := openAgentStandaloneTestDirectory(t)
+	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+	domain := createAgentStandaloneTestLock(t, directory, "domain.lock", ownerUID, ownerGID)
+	require.NoError(t, domain.Close())
+
+	return directory, ownerUID, ownerGID
+}
+
+// holdAgentStandaloneTestDomainShared takes a shared lease on the permanent
+// domain lock, which lets other shared readers in but keeps any contender that
+// needs the exclusive lease queued until the caller releases it.
+func holdAgentStandaloneTestDomainShared(
+	t *testing.T,
+	directory *os.File,
+	ownerUID uint32,
+	ownerGID uint32,
+) *os.File {
+	t.Helper()
+	held, err := openAgentStandaloneNamedLock(directory, "domain.lock", false, ownerUID, ownerGID)
+	require.NoError(t, err)
+	require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_SH|unix.LOCK_NB))
+
+	return held
 }
 
 func createAgentStandaloneMatchingDomainFixture(
