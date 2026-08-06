@@ -788,16 +788,21 @@ func TestBorrowedAgentIdentityDispositionRefusesUnprovenModes(t *testing.T) {
 	})
 
 	t.Run("authority root cannot be enumerated", func(t *testing.T) {
-		agentIdentityLockCovSeams(t)
+		_, root := agentIdentityLockCovAuthority(t)
 
-		root := configureAgentIdentityLockTestRoot(t)
+		failure := errors.New("injected authority enumeration failure")
+		production := agentStandaloneOpenat
+		agentStandaloneOpenat = func(dirfd int, path string, flags int, mode uint32) (int, error) {
+			if path == "." {
+				return -1, failure
+			}
 
-		directory, err := bootstrapAgentIdentityLockDirectory(
-			root, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
-		)
-		require.NoError(t, err)
-		require.NoError(t, directory.Close())
-		require.ErrorIs(t, rejectAgentIdentityDispositionTemporaries(directory), unix.EBADF)
+			return production(dirfd, path, flags, mode)
+		}
+
+		t.Cleanup(func() { agentStandaloneOpenat = production })
+
+		require.ErrorIs(t, validateBorrowedAgentIdentityDisposition(uid, gid, true, root), failure)
 	})
 }
 

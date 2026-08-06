@@ -24,8 +24,11 @@ var (
 	nativeOwnershipOpenFilesystemRoot = func() (int, error) {
 		return unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	}
-	nativeOwnershipFstat = unix.Fstat
-	nativeOwnershipClose = unix.Close
+	nativeOwnershipFstat   = unix.Fstat
+	nativeOwnershipClose   = unix.Close
+	nativeOwnershipReadDir = func(directory *os.File) ([]os.DirEntry, error) {
+		return directory.ReadDir(-1)
+	}
 )
 
 func handoffGeneratedNativeTree(root string, isolation *ProcessIsolation) error {
@@ -258,7 +261,7 @@ func handoffGeneratedNativeDirectory(directory *os.File, trustedUID uint32, trus
 		return err
 	}
 
-	entries, err := directory.ReadDir(-1)
+	entries, err := nativeOwnershipReadDir(directory)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}

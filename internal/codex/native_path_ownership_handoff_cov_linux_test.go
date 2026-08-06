@@ -3,6 +3,7 @@
 package codex
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,22 +133,31 @@ func TestNativeOwnershipHandoffRefusesUnsafeEntries(t *testing.T) {
 // TestNativeOwnershipHandoffRefusesUnenumerableDirectory proves a directory
 // whose contents cannot be listed is refused rather than chowned blind. Handing
 // the root over without enumerating it would transfer whatever it contains
-// unexamined. A descriptor the walk produced always enumerates, so the case
-// supplies an O_PATH descriptor: it answers the fstat the handoff validates with
-// and then refuses to be read.
+// unexamined. The failure is staged through the enumeration seam on a fully
+// usable descriptor, so a swallowed error cannot hide behind a descriptor that
+// also refuses the chown: without the guard the handoff would chown the root
+// and the ownership assertions below would catch the transfer.
 func TestNativeOwnershipHandoffRefusesUnenumerableDirectory(t *testing.T) {
 	native, _ := nativeOwnershipGeneratedRoot(t)
 	seed := filepath.Join(native, "input")
 	require.NoError(t, os.WriteFile(seed, []byte("seeded"), 0o600))
 
-	directory := nativeOwnershipPathDescriptor(t, native, true)
+	directory, err := os.Open(native)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = directory.Close() })
+
+	failure := errors.New("injected enumeration failure")
+	production := nativeOwnershipReadDir
+	nativeOwnershipReadDir = func(*os.File) ([]os.DirEntry, error) { return nil, failure }
+
+	t.Cleanup(func() { nativeOwnershipReadDir = production })
 
 	require.ErrorIs(
 		t,
 		handoffGeneratedNativeDirectory(
 			directory, 0, 0, nativeOwnershipTargetUID, nativeOwnershipTargetGID,
 		),
-		unix.EBADF,
+		failure,
 	)
 
 	nativeOwnershipRequireTrusted(t, native)

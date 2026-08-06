@@ -199,6 +199,8 @@ func TestNativeOwnedDirectoryRecheckDisagreeingWithTheWalkIsRefused(t *testing.T
 	isolation := nativeOwnershipIsolation()
 
 	baseline := nativeOwnershipFstat
+	t.Cleanup(func() { nativeOwnershipFstat = baseline })
+
 	total := 0
 	nativeOwnershipFstat = func(fd int, stat *unix.Stat_t) error {
 		total++
