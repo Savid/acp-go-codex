@@ -23,20 +23,26 @@ type promptResult struct {
 // preserve the shared app-server, and keep the logical session usable.
 func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
+	// The native process runs as the isolated identity, so the fixture tree has
+	// to be one that identity can traverse, a home it owns outright, and a
+	// directory it can publish its sentinels into.
+	root := testTraversableTempDir(t)
+	// A standalone isolation fences the durable home to its state root, so the
+	// home is the state root rather than a directory beside the fixture tree.
+	home := testStandaloneStateRoot()
 	scratch := filepath.Join(root, "scratch")
-	childStarted := filepath.Join(root, "child-started")
-	cancelReturned := filepath.Join(root, "cancel-returned")
-	childSentinel := filepath.Join(root, "child-sentinel")
-	rolloutPath := filepath.Join(root, "rollout.jsonl")
-	tailStopped := filepath.Join(root, "tail-stopped")
-	require.NoError(t, os.MkdirAll(home, 0o700))
-	require.NoError(t, os.MkdirAll(scratch, 0o700))
+	shared := testNativeSharedDir(t, root)
+	childStarted := filepath.Join(shared, "child-started")
+	cancelReturned := filepath.Join(shared, "cancel-returned")
+	childSentinel := filepath.Join(shared, "child-sentinel")
+	rolloutPath := filepath.Join(shared, "rollout.jsonl")
+	tailStopped := filepath.Join(shared, "tail-stopped")
+	require.NoError(t, os.MkdirAll(scratch, 0o711))
 
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
-		WithExecutablePath(os.Args[0]),
+		WithExecutablePath(testReachableExecutable(t)),
+		WithProcessIsolation(testProcessIsolation()),
 		WithHome(home),
 		WithScratchDir(scratch),
 		WithSessionStore(store),
@@ -119,19 +125,25 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 // child can no longer publish a side effect.
 func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
+	// The native process runs as the isolated identity, so the fixture tree has
+	// to be one that identity can traverse, a home it owns outright, and a
+	// directory it can publish its sentinels into.
+	root := testTraversableTempDir(t)
+	// A standalone isolation fences the durable home to its state root, so the
+	// home is the state root rather than a directory beside the fixture tree.
+	home := testStandaloneStateRoot()
 	scratch := filepath.Join(root, "scratch")
-	childStarted := filepath.Join(root, "child-started")
-	timeoutReturned := filepath.Join(root, "timeout-returned")
-	childSentinel := filepath.Join(root, "child-sentinel")
-	rolloutPath := filepath.Join(root, "rollout.jsonl")
-	require.NoError(t, os.MkdirAll(home, 0o700))
-	require.NoError(t, os.MkdirAll(scratch, 0o700))
+	shared := testNativeSharedDir(t, root)
+	childStarted := filepath.Join(shared, "child-started")
+	timeoutReturned := filepath.Join(shared, "timeout-returned")
+	childSentinel := filepath.Join(shared, "child-sentinel")
+	rolloutPath := filepath.Join(shared, "rollout.jsonl")
+	require.NoError(t, os.MkdirAll(scratch, 0o711))
 
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
-		WithExecutablePath(os.Args[0]),
+		WithExecutablePath(testReachableExecutable(t)),
+		WithProcessIsolation(testProcessIsolation()),
 		WithHome(home),
 		WithScratchDir(scratch),
 		WithSessionStore(store),
@@ -201,20 +213,26 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 
 func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
+	// The native process runs as the isolated identity, so the fixture tree has
+	// to be one that identity can traverse, a home it owns outright, and a
+	// directory it can publish its sentinels into.
+	root := testTraversableTempDir(t)
+	// A standalone isolation fences the durable home to its state root, so the
+	// home is the state root rather than a directory beside the fixture tree.
+	home := testStandaloneStateRoot()
 	scratch := filepath.Join(root, "scratch")
-	childStarted := filepath.Join(root, "child-started")
-	cancelReturned := filepath.Join(root, "cancel-returned")
-	childSentinel := filepath.Join(root, "child-sentinel")
-	rolloutPath := filepath.Join(root, "rollout.jsonl")
-	tailStopped := filepath.Join(root, "tail-stopped")
-	require.NoError(t, os.MkdirAll(home, 0o700))
-	require.NoError(t, os.MkdirAll(scratch, 0o700))
+	shared := testNativeSharedDir(t, root)
+	childStarted := filepath.Join(shared, "child-started")
+	cancelReturned := filepath.Join(shared, "cancel-returned")
+	childSentinel := filepath.Join(shared, "child-sentinel")
+	rolloutPath := filepath.Join(shared, "rollout.jsonl")
+	tailStopped := filepath.Join(shared, "tail-stopped")
+	require.NoError(t, os.MkdirAll(scratch, 0o711))
 
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
-		WithExecutablePath(os.Args[0]),
+		WithExecutablePath(testReachableExecutable(t)),
+		WithProcessIsolation(testProcessIsolation()),
 		WithHome(home),
 		WithScratchDir(scratch),
 		WithSessionStore(store),

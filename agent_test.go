@@ -1420,6 +1420,15 @@ func appendFakeCodexRolloutRow(path string, row string) error {
 	}
 	defer file.Close()
 
+	// The fake native process appends to this rollout as the isolated identity,
+	// so a file the test creates has to belong to that identity too.
+	uid, gid := testIsolationIdentity()
+	if uid != uint32(os.Getuid()) || gid != uint32(os.Getgid()) {
+		if err = file.Chown(int(uid), int(gid)); err != nil {
+			return err
+		}
+	}
+
 	_, err = fmt.Fprintln(file, row)
 
 	return err

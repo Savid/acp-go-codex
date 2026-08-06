@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -241,12 +240,18 @@ func TestTurnFailureProcessDeath(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
 	ctx := context.Background()
 
+	isolation := testProcessIsolation()
 	client, err := codex.NewAppServerClient(ctx, codex.Options{
-		CLIPath:          os.Args[0],
-		CodexHome:        t.TempDir(),
-		SupervisorRoot:   t.TempDir(),
+		CLIPath:          testReachableExecutable(t),
+		CodexHome:        testNativeOwnedTempDir(t),
+		SupervisorRoot:   testTraversableTempDir(t),
+		SupervisorParent: testTraversableTempDir(t),
 		DarwinBestEffort: runtime.GOOS == "darwin",
 		NativeVersion:    "0.144.1",
+		ProcessIsolation: &codex.ProcessIsolation{
+			UID: isolation.UID, GID: isolation.GID, BaseEnvironment: isolation.BaseEnvironment,
+			StandaloneOwnerID: isolation.StandaloneOwnerID, StandaloneStateRoot: isolation.StandaloneStateRoot,
+		},
 	})
 	if err != nil {
 		t.Fatalf("launch fake app-server: %v", err)
