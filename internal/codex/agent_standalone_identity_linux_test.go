@@ -742,13 +742,17 @@ func TestAgentStandaloneRebindRejectsOverlayFilesystemBeforeDomainMutation(t *te
 	require.NoError(t, err)
 	previousProbe := agentStandaloneFilesystemProbe
 	previousFstatfs := agentStandaloneProbeFstatfs
-	agentStandaloneProbeFstatfs = func(_ int, filesystem *unix.Statfs_t) error {
+	agentStandaloneFilesystemProbe = func(dir *os.File, _ bool) error {
+		return probeAgentStandaloneFilesystem(dir, false)
+	}
+	agentStandaloneProbeFstatfs = func(fd int, filesystem *unix.Statfs_t) error {
+		if previousErr := previousFstatfs(fd, filesystem); previousErr != nil {
+			return previousErr
+		}
+
 		filesystem.Type = 0x794c7630
 
 		return nil
-	}
-	agentStandaloneFilesystemProbe = func(dir *os.File, _ bool) error {
-		return probeAgentStandaloneFilesystem(dir, false)
 	}
 	t.Cleanup(func() {
 		agentStandaloneFilesystemProbe = previousProbe
