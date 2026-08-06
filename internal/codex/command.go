@@ -496,6 +496,10 @@ func (p *process) Close() error {
 
 			return closeErr
 		case <-time.After(processSupervisorCloseWait):
+			// The caller is done waiting, so retire the wait goroutine with it
+			// rather than leaving it polling markers past teardown.
+			p.supervisor.abandon()
+
 			closeErr := fmt.Errorf(
 				"%w: supervised process did not finish within %s",
 				ErrProcessContainmentIncomplete,

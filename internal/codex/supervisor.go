@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/savid/acp-go-codex/internal/homelock"
@@ -26,8 +27,14 @@ const (
 	supervisorReadyPrefix   = "acp-go-codex supervisor-ready "
 	supervisorConfigPrefix  = "supervisor-config-"
 	supervisorQuiesceWindow = 5 * time.Second
-	lifecycleRuntime        = "runtime"
-	lifecycleDiscovery      = "discovery"
+	// supervisorStartProofWait bounds the wait for the liveness start proof. It
+	// is not one of the budgets that must clear the standalone-claim maximum:
+	// it is armed only once the guardian has exited or has already quarantined,
+	// so it can never cancel a claim that is still walking /proc. It matches the
+	// window the sibling packages give a trusted helper to publish a marker.
+	supervisorStartProofWait = 5 * time.Second
+	lifecycleRuntime         = "runtime"
+	lifecycleDiscovery       = "discovery"
 )
 
 type supervisorConfig struct {
@@ -116,6 +123,8 @@ func (noopSupervisorIdentityLock) Close() error            { return nil }
 func (noopSupervisorIdentityLock) InheritedFile() *os.File { return nil }
 
 type supervisorProof struct {
+	abandoned        chan struct{}
+	abandonOnce      sync.Once
 	started          string
 	completion       string
 	quarantine       string
@@ -409,6 +418,7 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 	}
 
 	return cmd, &supervisorProof{
+		abandoned:        make(chan struct{}),
 		started:          config.Started,
 		completion:       config.Completion,
 		quarantine:       config.Quarantine,
@@ -456,7 +466,7 @@ func (p *supervisorProof) awaitCompletion() error {
 
 	startupWait := p.startupWait
 	if startupWait <= 0 {
-		startupWait = time.Second
+		startupWait = supervisorStartProofWait
 	}
 
 	startupDeadline := time.Now().Add(startupWait)
@@ -490,7 +500,9 @@ func (p *supervisorProof) awaitCompletion() error {
 			)
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		if err := p.pauseUntilAbandoned(); err != nil {
+			return err
+		}
 	}
 
 	completionWait := p.completionWait
@@ -519,8 +531,36 @@ func (p *supervisorProof) awaitCompletion() error {
 			return fmt.Errorf("%w: liveness supervisor started but did not publish completion within %s", ErrProcessContainmentIncomplete, completionWait)
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		if err := p.pauseUntilAbandoned(); err != nil {
+			return err
+		}
 	}
+}
+
+// pauseUntilAbandoned spaces out the marker polls and gives up the moment the
+// caller abandons the wait. The trusted supervisor keeps both capabilities
+// until the kernel proves ECHILD either way, so abandoning this poll retires
+// the waiting goroutine without retiring any proof.
+func (p *supervisorProof) pauseUntilAbandoned() error {
+	timer := time.NewTimer(10 * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case <-p.abandoned:
+		return fmt.Errorf("%w: containment proof wait abandoned at teardown", ErrProcessContainmentIncomplete)
+	case <-timer.C:
+		return nil
+	}
+}
+
+// abandon retires an awaitCompletion that outlived its caller. A nil channel
+// never fires, so a proof that was never armed keeps polling to its deadline.
+func (p *supervisorProof) abandon() {
+	if p == nil || p.abandoned == nil {
+		return
+	}
+
+	p.abandonOnce.Do(func() { close(p.abandoned) })
 }
 
 func (p *supervisorProof) removeTerminalMarkers() {
@@ -749,12 +789,12 @@ func runGuardian(config supervisorConfig) (runErr error) {
 		return errors.Join(fmt.Errorf("liveness supervisor failed before readiness: %w", errors.Join(readyErr, parseErr)), waitErr, proofErr)
 	}
 
+	// The guardian forwards its control input verbatim. Framing is the caller's
+	// decision and the liveness supervisor's to undo: a zero-length frame ends
+	// native stdin, while loss of this pipe means the caller died and starts
+	// containment. Reframing here would erase that distinction.
 	inputDone := make(chan struct{}, 1)
-	if config.FramedInput {
-		go copySupervisorFramedInput(stdin, input, inputDone)
-	} else {
-		go copySupervisorStream(stdin, input, inputDone)
-	}
+	go copySupervisorStream(stdin, input, inputDone)
 
 	streamDone := make(chan struct{}, 1)
 	go copySupervisorStream(errorOutput, control, streamDone)
@@ -1198,8 +1238,9 @@ func copySupervisorStream(dst io.Writer, src io.Reader, done chan<- struct{}) {
 const supervisorInputFrameLimit = 64 << 10
 
 // copySupervisorFramedInput distinguishes a deliberate native-stdin EOF from
-// loss of the guardian control pipe. A zero-length frame closes only native
-// stdin; the guardian keeps the outer pipe open until the native command exits.
+// loss of the control pipe. The caller writes a zero-length frame when its own
+// input ends, which closes only native stdin; the pipe itself stays open for
+// the command's lifetime, so a hangup on it always means the caller is gone.
 func copySupervisorFramedInput(dst io.WriteCloser, src io.Reader, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
 

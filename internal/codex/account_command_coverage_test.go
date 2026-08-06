@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -117,6 +118,82 @@ func TestRunAccountCommandProofBranches(t *testing.T) {
 		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.ErrorContains(t, err, "retained the identity lock")
 	})
+}
+
+// TestRunAccountCommandRefusesWithoutAControlPipe covers the control-input
+// pipe the command owns so the guardian never reads the caller's own stdin EOF
+// as caller death.
+func TestRunAccountCommandRefusesWithoutAControlPipe(t *testing.T) {
+	restoreAccountCommandHooks(t)
+	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return minCodexVersion, nil }
+	accountSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
+		return exec.Command("/bin/sh", "-c", "sleep 10"), &supervisorProof{}, nil
+	}
+
+	originalPipe := supervisorPipe
+	t.Cleanup(func() { supervisorPipe = originalPipe })
+	supervisorPipe = func() (*os.File, *os.File, error) { return nil, nil, errors.New("pipe exhausted") }
+
+	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
+		CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
+		ProcessIsolation: testProcessIsolation(),
+	}), "open account-command control input")
+}
+
+// TestSupervisorProofAbandonRetiresTheWait proves the containment-proof poll
+// stops when its caller stops waiting, and that abandoning an unarmed proof is
+// a no-op rather than a panic.
+func TestSupervisorProofAbandonRetiresTheWait(t *testing.T) {
+	root := t.TempDir()
+	proof := &supervisorProof{
+		abandoned:   make(chan struct{}),
+		started:     filepath.Join(root, "started"),
+		completion:  filepath.Join(root, "complete"),
+		startupWait: time.Hour,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- proof.awaitCompletion() }()
+
+	proof.abandon()
+	proof.abandon()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+		require.ErrorContains(t, err, "abandoned at teardown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("abandoned containment proof wait did not return")
+	}
+
+	(*supervisorProof)(nil).abandon()
+	(&supervisorProof{}).abandon()
+}
+
+// TestSupervisorProofAbandonStopsTheCompletionPoll covers the second poll,
+// which runs once the start proof exists but completion has not landed.
+func TestSupervisorProofAbandonStopsTheCompletionPoll(t *testing.T) {
+	root := t.TempDir()
+	started := filepath.Join(root, "started")
+	require.NoError(t, writeSupervisorMarker(started))
+	proof := &supervisorProof{
+		abandoned:      make(chan struct{}),
+		started:        started,
+		completion:     filepath.Join(root, "complete"),
+		completionWait: time.Hour,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- proof.awaitCompletion() }()
+
+	proof.abandon()
+
+	select {
+	case err := <-done:
+		require.ErrorContains(t, err, "abandoned at teardown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("abandoned containment proof wait did not return")
+	}
 }
 
 func TestProbeVersionRejectsPolicyAndLockFailures(t *testing.T) {

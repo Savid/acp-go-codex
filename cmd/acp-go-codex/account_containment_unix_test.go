@@ -35,6 +35,15 @@ func TestTerminalAuthContainsDescendantsAndHoldsHomeUntilQuiescence(t *testing.T
 	pidPath := filepath.Join(home, "child.pid")
 	rootPIDPath := filepath.Join(home, "root.pid")
 	writes := filepath.Join(home, "writes")
+	// The state root is the one durable path every fixture in this module
+	// claims, so a previous run's sentinels are still in it. Clear them first:
+	// a stale readiness file would satisfy the wait below before this run's
+	// tree exists and turn the live-home assertion into a race.
+	for _, sentinel := range []string{ready, pidPath, rootPIDPath, writes} {
+		if err := os.Remove(sentinel); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
 	script := filepath.Join(root, "codex")
 	requireWriteFile(t, script, `#!/bin/sh
 if [ "$1" = "--version" ]; then

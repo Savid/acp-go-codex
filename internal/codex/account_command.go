@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -144,7 +145,23 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return err
 	}
 
-	cmd.Stdin = options.Stdin
+	// The guardian reads a hangup on its control input as caller death and
+	// abandons agent identity acquisition. Handing the caller's reader straight
+	// to exec.Cmd makes os/exec close that pipe as soon as the reader ends, so a
+	// caller that supplies no terminal input hangs up on a claim that is still
+	// walking /proc and reports a containment failure that never happened. This
+	// command owns the write end for the command's lifetime and frames what the
+	// caller sends: a zero-length frame ends native stdin, and only the loss of
+	// this process closes the pipe.
+	controlRead, controlWrite, err := supervisorPipe()
+	if err != nil {
+		return errors.Join(fmt.Errorf("open account-command control input: %w", err), proof.closeInherited())
+	}
+
+	defer controlRead.Close()
+	defer controlWrite.Close()
+
+	cmd.Stdin = controlRead
 	cmd.Stdout = options.Stdout
 	cmd.Stderr = options.Stderr
 
@@ -154,6 +171,14 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 
 		return err
 	}
+
+	commandInput := options.Stdin
+	if commandInput == nil {
+		commandInput = bytes.NewReader(nil)
+	}
+
+	inputDone := make(chan struct{}, 1)
+	go copySupervisorFramedInput(controlWrite, commandInput, inputDone)
 
 	if closeErr := proof.closeInherited(); closeErr != nil {
 		_ = cmd.Process.Kill()
