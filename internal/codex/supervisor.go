@@ -21,10 +21,19 @@ import (
 )
 
 const (
-	supervisorModeEnv       = "ACP_GO_CODEX_INTERNAL_MODE"
-	supervisorModeGuardian  = "guardian"
-	supervisorModeLiveness  = "liveness"
-	supervisorReadyPrefix   = "acp-go-codex supervisor-ready "
+	supervisorModeEnv      = "ACP_GO_CODEX_INTERNAL_MODE"
+	supervisorModeGuardian = "guardian"
+	supervisorModeLiveness = "liveness"
+	supervisorReadyPrefix  = "acp-go-codex supervisor-ready "
+	// supervisorRefusedPrefix frames the terminal readiness line a supervisor
+	// publishes in place of the readiness it never reached. Readiness travels
+	// the child's stderr, so a refusal reason that is only printed there is
+	// forwarded to a stream nobody correlates while the reader reports the same
+	// wordless verdict whatever the cause. Framing the refusal alongside the
+	// readiness lets it name itself. It changes nothing about the verdict — a
+	// refusal is still a refusal — and a supervisor that dies without writing
+	// the frame still closes the pipe with nothing to say.
+	supervisorRefusedPrefix = "acp-go-codex supervisor-refused "
 	supervisorConfigPrefix  = "supervisor-config-"
 	supervisorQuiesceWindow = 5 * time.Second
 	// supervisorStartProofWait bounds the wait for the liveness start proof. It
@@ -200,7 +209,7 @@ func supervisorBootstrap() {
 	}
 
 	if err != nil {
-		_, _ = fmt.Fprintln(supervisorError, "acp-go-codex runtime supervisor:", err)
+		_, _ = fmt.Fprintln(supervisorError, supervisorRefusedPrefix+err.Error())
 
 		supervisorExit(1)
 
@@ -1211,6 +1220,10 @@ func readNativePID(path string) (int, error) {
 }
 
 func parseSupervisorReady(line string) (supervisorReady, error) {
+	if reason, refused := strings.CutPrefix(strings.TrimSpace(line), supervisorRefusedPrefix); refused {
+		return supervisorReady{}, fmt.Errorf("supervisor refused to start: %s", reason)
+	}
+
 	if !strings.HasPrefix(line, supervisorReadyPrefix) {
 		return supervisorReady{}, fmt.Errorf("invalid readiness frame %q", strings.TrimSpace(line))
 	}
