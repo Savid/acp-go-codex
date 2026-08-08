@@ -262,8 +262,8 @@ func TestAdoptLinuxAgentIdentityBindsOnlyTheInheritedDescriptors(t *testing.T) {
 	require.Nil(t, domain)
 
 	require.Equal(t, []inheritedRequest{
-		{fd: uintptr(3 + 1), name: "acp-go-codex-agent-identity-lock"},
-		{fd: uintptr(3 + 2), name: "acp-go-codex-agent-authority-domain"},
+		{fd: uintptr(3 + 1), name: "codex-agent-identity-lock"},
+		{fd: uintptr(3 + 2), name: "codex-agent-authority-domain"},
 	}, requested, "adoption must read the descriptors the launch put the capabilities at")
 }
 
