@@ -13,11 +13,23 @@ import (
 // system daemon account, which the standalone claim finds live on any host the
 // suite can see through the initial PID namespace and rightly refuses as
 // occupied. 65534 is the fleet-wide unprivileged stand-in, and the privileged
-// lock serializes it across repos.
+// lock serializes it across repos. On Linux an unprivileged runner shifts off
+// its own effective identity as well: the shared arm is selected by uid
+// equality, so a fixture that named the runner's own identity would quietly
+// move the whole suite onto it. No other platform has that arm, and the ones
+// that do not cannot hand a directory to a second identity anyway.
 func testIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 || gid == 0 {
 		uid, gid = 65534, 65534
+	}
+	if runtime.GOOS == "linux" {
+		if uid == os.Geteuid() {
+			uid++
+		}
+		if gid == os.Getegid() {
+			gid++
+		}
 	}
 
 	return uint32(uid), uint32(gid)
@@ -97,8 +109,20 @@ func testTraversableTempDir(t *testing.T) string {
 	return directory
 }
 
+// requireTwoPrincipalHarness skips a case whose fixture has to hand storage to
+// the identity the product isolates to. Handing anything to a second identity
+// is a privileged act, so an unprivileged runner cannot stage the case at all.
+// That is a property of the harness, not a verdict on the code.
+func requireTwoPrincipalHarness(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("requires a privileged two-principal fixture")
+	}
+}
+
 func testNativeOwnedTempDir(t *testing.T) string {
 	t.Helper()
+	requireTwoPrincipalHarness(t)
 	directory := testTraversableTempDir(t)
 	isolation := testProcessIsolation()
 	if err := os.Chown(directory, int(isolation.UID), int(isolation.GID)); err != nil {

@@ -741,10 +741,21 @@ var testCLIStandaloneStateRoot = sync.OnceValue(func() string {
 // also has to be a UID nothing on the host is already running as — the initial
 // PID namespace shows the suite every process on the box, and 65532 belongs to
 // the host cloudflared service.
+// On Linux an unprivileged runner shifts off its own effective identity as
+// well: the shared arm is selected by uid equality, so a fixture that named the
+// runner's own identity would quietly move the whole suite onto it.
 func testCLIIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 || gid == 0 {
 		uid, gid = 65531, 65531
+	}
+	if runtime.GOOS == "linux" {
+		if uid == os.Geteuid() {
+			uid++
+		}
+		if gid == os.Getegid() {
+			gid++
+		}
 	}
 
 	return uint32(uid), uint32(gid)

@@ -59,6 +59,12 @@ func writeLinuxSupervisorConfig(_ string, config supervisorConfig) (*os.File, er
 }
 
 func verifyLinuxTrustedSupervisorIdentity(uid uint32) error {
+	// A supervisor that is already the native identity has no descent to make,
+	// so the identity it would descend from is not one it can be asked to hold.
+	if sharedSupervisorIdentity(uid) {
+		return nil
+	}
+
 	if os.Geteuid() != 0 || uid == 0 || effectiveUID() == uid {
 		return errors.New("codex liveness supervisor requires a distinct trusted root identity")
 	}
@@ -73,6 +79,15 @@ func acquireLinuxAgentIdentityAuthority(
 	stateRoot string,
 	control io.Reader,
 ) (supervisorIdentityLock, supervisorIdentityLock, error) {
+	// The durable authority records who holds an identity host-wide, and it
+	// proves the claim by finding no live task running as it. A supervisor that
+	// runs as that identity is itself such a task, so the claim it would take is
+	// one it can never prove and one no unprivileged process can write anyway.
+	// The guardian takes an empty authority instead.
+	if sharedSupervisorIdentity(uid) {
+		return noopSupervisorIdentityLock{}, noopSupervisorIdentityLock{}, nil
+	}
+
 	canceled, stop := linuxSupervisorControlCancellation(control)
 	defer stop()
 
@@ -170,7 +185,16 @@ func validateLinuxSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) er
 // marker root is published while the release is unaccounted for.
 var linuxSupervisorProofClose = unix.Close
 
-func linuxSupervisorMarkerRoot(supervisorConfig) (string, error) {
+func linuxSupervisorMarkerRoot(config supervisorConfig) (string, error) {
+	// The proof namespace is root-owned storage the supervisor bootstraps from
+	// privilege it does not hold here. The markers themselves are O_EXCL 0600
+	// files, and the private scratch root the adapter already owns holds them
+	// under the same terms, which is what every platform without the namespace
+	// does.
+	if sharedSupervisorIdentity(config.IsolationUID) {
+		return config.Scratch, nil
+	}
+
 	fd, err := openLinuxSupervisorProofDirectory()
 	if err != nil {
 		return "", err

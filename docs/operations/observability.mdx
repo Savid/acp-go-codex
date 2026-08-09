@@ -34,7 +34,8 @@ and diff bodies are never metric attributes.
 
 Runtime containment selection is the integer gauge
 `acp_go_codex.runtime.containment`, recorded with value `1` and exactly one
-`containment=authoritative`, `containment=best_effort`, or
+`containment=authoritative`, `containment=best_effort`,
+`containment=shared_identity`, or
 `containment=unavailable` attribute. It is a mode signal, not a process count or
 quiescence proof. Best-effort Darwin publishes no provider-descendant snapshot,
 including no zero; its structured Agent warning and unconditional standalone

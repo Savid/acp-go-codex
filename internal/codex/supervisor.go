@@ -69,6 +69,7 @@ type supervisorConfig struct {
 	IdentityLock        bool              `json:"identityLock"`
 	AuthorityDomain     bool              `json:"authorityDomain"`
 	StandaloneAuthority bool              `json:"standaloneAuthority"`
+	SharedIdentity      bool              `json:"sharedIdentity"`
 	Isolation           *ProcessIsolation `json:"-"`
 }
 
@@ -229,6 +230,10 @@ func runSupervisor(mode string, configInput io.Reader) (runErr error) {
 		return errors.New("supervisor UID lock and authority domain are inconsistent")
 	}
 
+	if err := validateSupervisorIdentityDisposition(config); err != nil {
+		return err
+	}
+
 	if mode == supervisorModeLiveness && config.IdentityLock {
 		lock, lockErr := supervisorAdoptIdentityLock(config.IsolationUID)
 		if lockErr != nil {
@@ -349,7 +354,8 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 	config.StandaloneStateRoot = config.Isolation.StandaloneStateRoot
 	config.IdentityLock = config.Isolation.IdentityLock != nil
 	config.AuthorityDomain = config.Isolation.AuthorityDomain != nil
-	config.StandaloneAuthority = config.Isolation.IdentityLock == nil
+	config.SharedIdentity = sharedProcessIdentity(config.Isolation)
+	config.StandaloneAuthority = !config.SharedIdentity && config.Isolation.IdentityLock == nil
 
 	if config.ScratchParent == "" && config.Scratch != "" {
 		config.ScratchParent = filepath.Dir(config.Scratch)

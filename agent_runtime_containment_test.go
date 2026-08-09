@@ -137,6 +137,83 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	}
 }
 
+// TestContainmentModeReportsASharedAgentIdentity proves the report names the
+// boundary the launch actually has. A supervisor that runs the agent under its
+// own identity still proves whole-tree lifecycle, but there is no credential
+// separation between it and the agent, so reporting "authoritative" would
+// overstate what an operator is being given. Root can never reach the shared
+// report, and no platform but Linux has the boundary to weaken.
+func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
+	originalGOOS, originalUID := containmentGOOS, containmentEffectiveUID
+	t.Cleanup(func() {
+		containmentGOOS = originalGOOS
+		containmentEffectiveUID = originalUID
+	})
+
+	containmentEffectiveUID = func() int { return 1000 }
+	shared := Options{ProcessIsolation: &ProcessIsolation{UID: 1000, GID: 1000}}
+	distinct := Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}
+
+	containmentGOOS = "linux"
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(shared))
+	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(distinct))
+	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(Options{}))
+
+	// Decision 2 judges the boundary on the UID alone, so an equal uid with a
+	// different gid is still the shared shape.
+	require.Equal(t, RuntimeContainmentSharedIdentity,
+		containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 1000, GID: 1001}}))
+
+	containmentEffectiveUID = func() int { return 0 }
+	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(shared))
+	require.Equal(t, RuntimeContainmentAuthoritative,
+		containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 0, GID: 0}}))
+
+	containmentEffectiveUID = func() int { return 1000 }
+	containmentGOOS = "darwin"
+	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(shared))
+	require.Equal(t, RuntimeContainmentBestEffort,
+		containmentMode(Options{ProcessIsolation: shared.ProcessIsolation, DarwinBestEffortContainment: true}))
+}
+
+// TestSharedIdentityAgentKeepsItsLifecycleSurfaces proves the new report is not
+// read as a lost boundary. The provider inventory is published only where the
+// containment proof accounts for every descendant, and the shared arm's
+// subreaper tree accounts for exactly the same set as the trusted one.
+func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
+	originalGOOS, originalUID := containmentGOOS, containmentEffectiveUID
+	t.Cleanup(func() {
+		containmentGOOS = originalGOOS
+		containmentEffectiveUID = originalUID
+	})
+
+	containmentGOOS = "linux"
+	containmentEffectiveUID = func() int { return 1000 }
+
+	var observed []RuntimeContainmentMode
+
+	snapshots := 0
+	agent := NewAgent(
+		WithProcessIsolation(ProcessIsolation{UID: 1000, GID: 1000}),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
+				observed = append(observed, mode)
+			},
+			ObserveProcessSnapshot: func(context.Context, RuntimeProcessKind, int) { snapshots++ },
+		}),
+	)
+
+	require.Equal(t, []RuntimeContainmentMode{RuntimeContainmentSharedIdentity}, observed)
+	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
+
+	observer := agent.newProcessSnapshotObserver(t.Context())
+	observer.Observe(t.Context(), 7)
+	require.Equal(t, 1, snapshots)
+
+	require.False(t, RuntimeContainmentBestEffort.provesWholeTreeLifecycle())
+	require.False(t, RuntimeContainmentUnavailable.provesWholeTreeLifecycle())
+}
+
 func TestContainmentModeSelections(t *testing.T) {
 	original := containmentGOOS
 	t.Cleanup(func() { containmentGOOS = original })

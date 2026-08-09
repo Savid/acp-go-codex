@@ -182,6 +182,29 @@ same-directory atomic rename,
 and directory sync. Each newly created directory level is parent-synced before
 any lock becomes authoritative.
 
+A host that never held privilege can still supervise. When the configured
+native identity is the identity the host process already runs as, Linux selects
+a shared-identity arm: it skips the trusted-root assertion, the durable
+`/var/lib/acp-go` identity authority and its task-vacancy proof, the
+root-owned `/run/acp-go/supervisor-proofs` namespace — the containment markers
+move to the private scratch root — and the credential drop, because an
+unprivileged process can neither re-enter its own identity nor shed the
+supplementary groups of the account it was started under. A native group the
+supervisor is not already in is still refused. Everything the boundary is worth
+having for is unprivileged and unchanged: the guardian and liveness pair, both
+subreaper claims, no-new-privs, core-dump suppression, descendant adoption and
+reaping to kernel `ECHILD`, the process-group teardown, the sealed memfd config,
+the descriptor fences, and the whole readiness handshake. The parent stamps the
+decision into the sealed config and each child re-derives it from its own
+identity, refusing a config that disagrees either way. What is lost is identity
+separation: concurrent sessions share one account's HOME, credentials and
+journals, no host-global UID lock excludes a second runner, no durable
+quarantine record survives a crash, and the subreaper boundary is a lifecycle
+boundary rather than a security one. `ContainmentMode()` reports
+`shared_identity` rather than `authoritative` for exactly that reason. A trusted
+root supervisor can never select the arm: the native UID is required to be
+nonzero, so it can never equal a zero effective UID.
+
 Linux provides authoritative runtime containment. Windows rejects native launch
 before spawning Codex because its process API cannot apply the mandatory Unix
 UID/GID identity boundary with empty supplementary groups. Windows

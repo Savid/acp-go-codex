@@ -43,6 +43,14 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 // this for the answer every other platform gives so that check can be proved.
 var processIsolationValidateIdentity = validateProcessIsolationIdentity
 
+// sharedIdentitySupervisorRemedy states what an operator can change when the
+// supervisor was asked to launch the native process under the very identity it
+// already runs as and the shape it was handed describes something else. There
+// is no privilege boundary to cross in that deployment, so the two answers are
+// to give the supervisor one, or to describe the launch as what it is.
+const sharedIdentitySupervisorRemedy = "run the supervisor as root to isolate the agent identity, " +
+	"or launch the agent under the identity the supervisor already holds"
+
 func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	identityLock := isolation.IdentityLock != nil
 
@@ -64,6 +72,20 @@ func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	if identityLock {
 		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
 			return errors.New("borrowed process identity forbids standalone owner fields")
+		}
+
+		return nil
+	}
+
+	// A native identity the supervisor already holds cannot be recorded as a
+	// standalone one: the durable record proves the identity vacant across every
+	// live task, and the supervisor asking for it is such a task. No
+	// capabilities and no standalone fields is therefore the canonical shape,
+	// and fields promising a record this arm never writes are refused.
+	if sharedProcessIdentity(isolation) {
+		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
+			return errors.New("standalone owner fields describe an identity the supervisor already holds; " +
+				sharedIdentitySupervisorRemedy)
 		}
 
 		return nil

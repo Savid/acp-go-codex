@@ -142,8 +142,13 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and a nonblank turn nonce of at most 4096 bytes; invalid input omits route metadata so the agent rejects it. |
 | `CancelRequest` | Build an active-turn cancellation with the same bounded route; invalid input likewise fails closed. |
 
-`Agent.ContainmentMode()` returns `authoritative`, `best_effort`, or
-`unavailable`. Linux is authoritative. Windows is unavailable for native
+`Agent.ContainmentMode()` returns `authoritative`, `best_effort`,
+`shared_identity`, or
+`unavailable`. Linux is authoritative, or `shared_identity` when the configured
+native identity is the identity the host process already runs as: the subreaper
+tree, descendant reaping, and process-group teardown are unchanged, but there is
+no credential separation between the supervisor and the agent and no host-global
+record of who holds the identity. Windows is unavailable for native
 launch because the mandatory Unix UID/GID identity boundary with empty
 supplementary groups cannot be applied. A Windows cross-compile proves only
 that this refusal path builds; it is not runtime support. Opted-in Darwin is

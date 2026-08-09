@@ -19,10 +19,21 @@ import (
 // lock serializes it across repos.
 // The adapter package claims a different UID from the native package: go test
 // runs both concurrently, and the authority admits one live claimant per UID.
+// On Linux an unprivileged runner shifts off its own effective identity as
+// well: the shared arm is selected by uid equality, so a fixture that named the
+// runner's own identity would quietly move the whole suite onto it.
 func testIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 || gid == 0 {
 		uid, gid = 65533, 65533
+	}
+	if runtime.GOOS == "linux" {
+		if uid == os.Geteuid() {
+			uid++
+		}
+		if gid == os.Getegid() {
+			gid++
+		}
 	}
 
 	return uint32(uid), uint32(gid)

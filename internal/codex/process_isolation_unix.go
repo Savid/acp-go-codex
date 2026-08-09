@@ -24,6 +24,15 @@ func applyProcessCredential(cmd *exec.Cmd, isolation *ProcessIsolation) error {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 
+	shared, err := sharedProcessCredential(isolation)
+	if err != nil {
+		return err
+	}
+
+	if shared {
+		return nil
+	}
+
 	cmd.SysProcAttr.Credential = &syscall.Credential{
 		Uid: isolation.UID, Gid: isolation.GID, Groups: []uint32{}, NoSetGroups: false,
 	}
