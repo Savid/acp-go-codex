@@ -1666,7 +1666,7 @@ func auditAgentStandaloneAuthorityRoot(
 
 	inventory, inventoryErr := classifyAgentStandaloneAuthorityEntries(
 		directory, entries, ownerUID, ownerGID,
-		requireEmpty, allowCleanup, allowOwnerlessActive, deadline, canceled, signals,
+		requireEmpty, allowCleanup, deadline, canceled, signals,
 	)
 	if inventoryErr != nil {
 		return inventoryErr
@@ -1744,7 +1744,6 @@ func classifyAgentStandaloneAuthorityEntries(
 	ownerGID uint32,
 	requireEmpty bool,
 	allowCleanup bool,
-	allowOwnerlessActive bool,
 	deadline time.Time,
 	canceled <-chan struct{},
 	signals <-chan os.Signal,
@@ -1785,7 +1784,7 @@ func classifyAgentStandaloneAuthorityEntries(
 		}
 
 		temporary, temporaryErr := adjudicateAgentStandaloneAuthorityTemporary(
-			directory, name, ownerUID, ownerGID, allowCleanup, allowOwnerlessActive,
+			directory, name, ownerUID, ownerGID, allowCleanup,
 		)
 		if temporaryErr != nil {
 			return agentStandaloneAuthorityInventory{}, temporaryErr
@@ -1875,18 +1874,37 @@ func classifyAgentStandaloneAuthorityEntries(
 // adjudicateAgentStandaloneAuthorityTemporary decides what to do with one entry
 // that names a temporary. It reports whether the entry was a temporary at all,
 // so the classifying pass can fall through to the durable names when it was not.
-// A temporary is only ever cleaned up by a caller holding the domain-exclusive
-// lock; anyone else refuses rather than racing the holder.
+// Domain-global temporaries require the domain-exclusive lock. Owner and marker
+// temporaries are scoped by the UID lock held across their publication.
 func adjudicateAgentStandaloneAuthorityTemporary(
 	directory *os.File,
 	name string,
 	ownerUID uint32,
 	ownerGID uint32,
 	allowCleanup bool,
-	allowOwnerlessActive bool,
 ) (bool, error) {
 	switch {
 	case strings.Contains(name, ".owner.next-"):
+		uid, parseErr := parseAgentStandaloneOwnerTemporary(name)
+		if parseErr != nil {
+			return false, parseErr
+		}
+
+		if allowCleanup {
+			return false, fmt.Errorf("%w: %q", errAgentStandaloneOwnerTemporary, name)
+		}
+
+		transient, transientErr := agentStandaloneUIDTemporaryIsTransient(
+			directory, uid, name, ownerUID, ownerGID, agentStandaloneOwnerMax,
+		)
+		if transientErr != nil {
+			return false, transientErr
+		}
+
+		if transient {
+			return true, nil
+		}
+
 		return false, fmt.Errorf("%w: %q", errAgentStandaloneOwnerTemporary, name)
 	case strings.HasPrefix(name, "domain.json.next-"):
 		if !allowCleanup {
@@ -1914,23 +1932,15 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 			return false, parseErr
 		}
 
-		if validateErr := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); validateErr != nil {
-			// The names this pass adjudicates come from one listing of the
-			// root, and a marker temporary is the one entry another identity
-			// publishes and then renames away under its own UID lock. A name
-			// that has already gone was resolved by its owner between the
-			// listing and this stat: there is no entry left to account for and
-			// nothing left to refuse. Every other fault still refuses the whole
-			// registry, and a temporary that is still there is still judged.
-			if errors.Is(validateErr, unix.ENOENT) {
-				return true, nil
+		if !allowCleanup {
+			transient, transientErr := agentStandaloneUIDTemporaryIsTransient(
+				directory, uid, name, ownerUID, ownerGID, agentStandaloneMarkerMax,
+			)
+			if transientErr != nil {
+				return false, transientErr
 			}
 
-			return false, validateErr
-		}
-
-		if !allowCleanup {
-			if allowOwnerlessActive {
+			if transient {
 				return true, nil
 			}
 
@@ -1942,6 +1952,49 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 		}
 
 		return true, nil
+	}
+
+	return false, nil
+}
+
+func agentStandaloneUIDTemporaryIsTransient(
+	directory *os.File,
+	uid uint32,
+	name string,
+	ownerUID uint32,
+	ownerGID uint32,
+	maxSize int64,
+) (transient bool, resultErr error) {
+	if err := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, maxSize); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return true, nil
+		}
+
+		return false, err
+	}
+
+	uidLock, acquired, err := tryAgentStandaloneNamedLock(
+		directory, strconv.FormatUint(uint64(uid), 10)+".lock", false, ownerUID, ownerGID,
+	)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	if !acquired {
+		return true, nil
+	}
+	defer func() { resultErr = errors.Join(resultErr, uidLock.Close()) }()
+
+	if err = validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, maxSize); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return true, nil
+		}
+
+		return false, err
 	}
 
 	return false, nil

@@ -885,10 +885,17 @@ func TestAgentStandaloneSameDomainAllowsUnrelatedActiveAndLiveMarkerTemporary(t 
 		directory, ownerUID, ownerGID, false, false, true, deadline, nil, nil,
 	))
 	require.FileExists(t, temporary)
+
+	// An auditor that may not recover an ownerless ACTIVE marker still has to
+	// reach that adjudication. The live temporary beside it is another
+	// identity's publication in flight and is accounted for rather than
+	// refused, so the refusal names the durable marker both times: while the
+	// temporary is there, and once its publisher has resolved it.
 	err := auditAgentStandaloneAuthorityRoot(
 		directory, ownerUID, ownerGID, false, false, false, deadline, nil, nil,
 	)
-	require.ErrorContains(t, err, "domain-exclusive cleanup")
+	require.ErrorContains(t, err, "authoritative host recovery is required")
+	require.FileExists(t, temporary, "a live marker temporary is never touched by an audit that cannot clean it")
 	require.NoError(t, held.Close())
 	require.NoError(t, os.Remove(temporary))
 	err = auditAgentStandaloneAuthorityRoot(
@@ -1273,6 +1280,181 @@ func TestAgentStandaloneEndToEndRetainsActiveAndNativeChildHasNoAuthorityFD(t *t
 	marker, err = loadAgentStandaloneMarker(directory, uid, uint32(os.Geteuid()), uint32(os.Getegid()))
 	require.NoError(t, err)
 	require.Equal(t, "active", marker.State, "clean exit must retain standalone ACTIVE")
+}
+
+func TestAgentStandaloneAdoptedDispositionAdmitsAnotherIdentityInFlightTemporaries(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("standalone adopted disposition test requires root")
+	}
+	const uid, gid, concurrent = uint32(62111), uint32(62112), uint32(62113)
+	stateRoot := createAgentStandaloneProtectedStateRoot(t, uid, gid)
+	testRoot := t.TempDir()
+	require.NoError(t, os.Chmod(testRoot, 0o700))
+
+	identity, err := acquireAgentStandaloneIdentity(
+		uid, gid, "in-flight-neighbour", stateRoot, true, testRoot,
+		make(chan struct{}), make(chan os.Signal),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, identity.Close()) })
+
+	directory, err := bootstrapAgentIdentityLockDirectory(testRoot, uint32(os.Geteuid()), uint32(os.Getegid()))
+	require.NoError(t, err)
+	defer directory.Close()
+	authorityPath := filepath.Join(testRoot, "acp-go", "agent-identities")
+
+	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+	held := createAgentStandaloneTestLock(
+		t, directory, strconv.FormatUint(uint64(concurrent), 10)+".lock", ownerUID, ownerGID,
+	)
+	require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
+	ownersLock, err := openAgentStandaloneNamedLock(directory, "owners.lock", false, ownerUID, ownerGID)
+	require.NoError(t, err)
+	require.NoError(t, unix.Flock(int(ownersLock.Fd()), unix.LOCK_EX|unix.LOCK_NB))
+	ownerTemporary := filepath.Join(
+		authorityPath, strconv.FormatUint(uint64(concurrent), 10)+".owner.next-0123456789abcdef01234567",
+	)
+	require.NoError(t, os.WriteFile(ownerTemporary, []byte("partial"), 0o600))
+	require.NoError(t, validateAdoptedStandaloneAgentIdentityDisposition(
+		uid, gid, "in-flight-neighbour", stateRoot, true, testRoot,
+	))
+	require.FileExists(t, ownerTemporary)
+	require.NoError(t, os.Remove(ownerTemporary))
+	require.NoError(t, ownersLock.Close())
+
+	markerTemporary := filepath.Join(
+		authorityPath, strconv.FormatUint(uint64(concurrent), 10)+".quarantine.next-0123456789abcdef01234567",
+	)
+	require.NoError(t, os.WriteFile(markerTemporary, []byte("partial"), 0o600))
+	require.NoError(t, validateAdoptedStandaloneAgentIdentityDisposition(
+		uid, gid, "in-flight-neighbour", stateRoot, true, testRoot,
+	))
+	require.FileExists(t, markerTemporary)
+	require.NoError(t, os.Remove(markerTemporary))
+	require.NoError(t, held.Close())
+
+	for _, name := range []string{
+		strconv.FormatUint(uint64(uid), 10) + ".quarantine.next-0123456789abcdef01234567",
+		strconv.FormatUint(uint64(uid), 10) + ".owner.next-0123456789abcdef01234567",
+	} {
+		own := filepath.Join(authorityPath, name)
+		require.NoError(t, os.WriteFile(own, []byte("partial"), 0o600))
+		require.ErrorContains(t, validateAdoptedStandaloneAgentIdentityDisposition(
+			uid, gid, "in-flight-neighbour", stateRoot, true, testRoot,
+		), "unresolved temporary")
+		require.NoError(t, os.Remove(own))
+	}
+
+	for _, name := range []string{
+		strconv.FormatUint(uint64(concurrent), 10) + ".quarantine.next-0123456789abcdef01234567",
+		strconv.FormatUint(uint64(concurrent), 10) + ".owner.next-0123456789abcdef01234567",
+	} {
+		stale := filepath.Join(authorityPath, name)
+		require.NoError(t, os.WriteFile(stale, []byte("partial"), 0o600))
+		require.Error(t, validateAdoptedStandaloneAgentIdentityDisposition(
+			uid, gid, "in-flight-neighbour", stateRoot, true, testRoot,
+		))
+		require.NoError(t, os.Remove(stale))
+	}
+
+	untrusted := filepath.Join(
+		authorityPath, strconv.FormatUint(uint64(concurrent), 10)+".owner.next-fedcba9876543210fedcba98",
+	)
+	require.NoError(t, os.WriteFile(untrusted, []byte("partial"), 0o600))
+	require.NoError(t, os.Chmod(untrusted, 0o644))
+	require.ErrorContains(t, validateAdoptedStandaloneAgentIdentityDisposition(
+		uid, gid, "in-flight-neighbour", stateRoot, true, testRoot,
+	), "not a trusted bounded regular file")
+	require.NoError(t, os.Remove(untrusted))
+}
+
+func TestAgentStandaloneUIDTemporaryRevalidatesAfterTakingTheUIDLock(t *testing.T) {
+	const (
+		uid    = uint32(62115)
+		suffix = "0123456789abcdef01234567"
+	)
+	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+
+	for _, testCase := range []struct {
+		name      string
+		mutate    func(t *testing.T, path string)
+		transient bool
+		wantErr   string
+	}{
+		{
+			name: "publication completed",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				require.NoError(t, os.Remove(path))
+			},
+			transient: true,
+		},
+		{
+			name: "entry became untrusted",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				require.NoError(t, os.Chmod(path, 0o644))
+			},
+			wantErr: "not a trusted bounded regular file",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			directory := openAgentStandaloneTestDirectory(t)
+			lock := createAgentStandaloneTestLock(t, directory, "62115.lock", ownerUID, ownerGID)
+			require.NoError(t, lock.Close())
+			name := strconv.FormatUint(uint64(uid), 10) + ".owner.next-" + suffix
+			path := filepath.Join(directory.Name(), name)
+			require.NoError(t, os.WriteFile(path, []byte("partial"), 0o600))
+
+			previous := agentStandaloneFstatat
+			t.Cleanup(func() { agentStandaloneFstatat = previous })
+			reads := 0
+			agentStandaloneFstatat = func(fd int, entry string, stat *unix.Stat_t, flags int) error {
+				if entry == name {
+					reads++
+					if reads == 2 {
+						testCase.mutate(t, path)
+					}
+				}
+
+				return previous(fd, entry, stat, flags)
+			}
+
+			transient, err := agentStandaloneUIDTemporaryIsTransient(
+				directory, uid, name, ownerUID, ownerGID, agentStandaloneOwnerMax,
+			)
+			require.Equal(t, testCase.transient, transient)
+			if testCase.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, testCase.wantErr)
+			}
+			require.Equal(t, 2, reads)
+		})
+	}
+
+	t.Run("UID lock inspection failure", func(t *testing.T) {
+		directory := openAgentStandaloneTestDirectory(t)
+		name := strconv.FormatUint(uint64(uid), 10) + ".owner.next-" + suffix
+		require.NoError(t, os.WriteFile(filepath.Join(directory.Name(), name), []byte("partial"), 0o600))
+
+		wantErr := errors.New("inspect UID lock")
+		previous := agentStandaloneLockOpenat
+		t.Cleanup(func() { agentStandaloneLockOpenat = previous })
+		agentStandaloneLockOpenat = func(dirfd int, path string, flags int, mode uint32) (int, error) {
+			if path == "62115.lock" {
+				return -1, wantErr
+			}
+
+			return previous(dirfd, path, flags, mode)
+		}
+
+		transient, err := agentStandaloneUIDTemporaryIsTransient(
+			directory, uid, name, ownerUID, ownerGID, agentStandaloneOwnerMax,
+		)
+		require.False(t, transient)
+		require.ErrorIs(t, err, wantErr)
+	})
 }
 
 func TestAgentStandaloneVacancyReenumeratesDisappearingTaskAndFindsReplacement(t *testing.T) {
