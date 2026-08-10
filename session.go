@@ -30,6 +30,8 @@ type session struct {
 	reasoningEffort       string
 	serviceTier           string
 	personality           string
+	env                   map[string]string
+	extraPathDirs         []string
 	approvalPolicy        any
 	sandboxPolicy         any
 	rawMessages           rawMessageConfig
@@ -81,6 +83,8 @@ type sessionSnapshot struct {
 	reasoningEffort       string
 	serviceTier           string
 	personality           string
+	env                   map[string]string
+	extraPathDirs         []string
 	approvalPolicy        any
 	sandboxPolicy         any
 	outputSchema          any
@@ -113,6 +117,8 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		reasoningEffort:       firstNonEmpty(meta.ReasoningEffort, thread.ReasoningEffort),
 		serviceTier:           meta.ServiceTier,
 		personality:           meta.Personality,
+		env:                   cloneStringMap(meta.Env),
+		extraPathDirs:         cloneStrings(meta.ExtraPathDirs),
 		approvalPolicy:        cloneAny(meta.ApprovalPolicy),
 		sandboxPolicy:         cloneAny(meta.SandboxPolicy),
 		rawMessages:           meta.RawMessages,
@@ -208,14 +214,25 @@ func (s *session) resumeRequest() (codex.ThreadResumeRequest, error) {
 	threadID := s.codexThreadID
 	path := s.materializedPath
 	cwd := s.cwd
+	servers := cloneMCPServers(s.mcpServers)
+	approvalMode := s.mcpApprovalMode
+	env := cloneStringMap(s.env)
+	extraPathDirs := cloneStrings(s.extraPathDirs)
 	s.mu.Unlock()
 
-	config, err := s.threadConfig()
+	config, err := codex.MCPServerThreadConfig(servers, approvalMode)
 	if err != nil {
 		return codex.ThreadResumeRequest{}, err
 	}
 
-	return codex.ThreadResumeRequest{ThreadID: threadID, Path: path, Cwd: cwd, Config: config}, nil
+	return codex.ThreadResumeRequest{
+		ThreadID:      threadID,
+		Path:          path,
+		Cwd:           cwd,
+		Config:        config,
+		Environment:   env,
+		ExtraPathDirs: extraPathDirs,
+	}, nil
 }
 
 // activeThreadOwnership returns the native identity and rollout path owned by
@@ -264,6 +281,8 @@ func (s *session) applyActiveRebind(
 	s.reasoningEffort = firstNonEmpty(meta.ReasoningEffort, thread.ReasoningEffort)
 	s.serviceTier = meta.ServiceTier
 	s.personality = meta.Personality
+	s.env = cloneStringMap(meta.Env)
+	s.extraPathDirs = cloneStrings(meta.ExtraPathDirs)
 	s.approvalPolicy = cloneAny(meta.ApprovalPolicy)
 	s.sandboxPolicy = cloneAny(meta.SandboxPolicy)
 	s.rawMessages = meta.RawMessages
@@ -402,6 +421,8 @@ func (s *session) snapshot() sessionSnapshot {
 		reasoningEffort:       s.reasoningEffort,
 		serviceTier:           s.serviceTier,
 		personality:           s.personality,
+		env:                   cloneStringMap(s.env),
+		extraPathDirs:         cloneStrings(s.extraPathDirs),
 		approvalPolicy:        cloneAny(s.approvalPolicy),
 		sandboxPolicy:         cloneAny(s.sandboxPolicy),
 		outputSchema:          cloneAny(s.outputSchema),

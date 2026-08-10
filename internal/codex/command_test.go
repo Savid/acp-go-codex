@@ -70,14 +70,14 @@ func TestAppServerArgs(t *testing.T) {
 }
 
 func TestLaunchAppServerRefusesInvalidExplicitEnvironment(t *testing.T) {
-	transport, command, version, err := launchAppServer(context.Background(), context.Background(), Options{
+	transport, command, version, nativePath, err := launchAppServer(context.Background(), context.Background(), Options{
 		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1},
 	})
 	if err == nil || !strings.Contains(err.Error(), "base environment") {
 		t.Fatalf("launchAppServer environment error = %v", err)
 	}
-	if transport != nil || command != nil || version != "" {
-		t.Fatalf("failed launch returned transport=%v command=%v version=%q", transport, command, version)
+	if transport != nil || command != nil || version != "" || nativePath != "" {
+		t.Fatalf("failed launch returned transport=%v command=%v version=%q nativePath=%q", transport, command, version, nativePath)
 	}
 }
 
@@ -194,7 +194,7 @@ func TestOrdinaryRuntimeStartFailureReleasesHomeLock(t *testing.T) {
 
 	parent := t.TempDir()
 	writableHome := t.TempDir()
-	transport, command, version, err := launchAppServer(context.Background(), context.Background(), Options{
+	transport, command, version, nativePath, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath:          "/usr/bin/true",
 		CodexHome:        writableHome,
 		WritableHome:     writableHome,
@@ -208,8 +208,8 @@ func TestOrdinaryRuntimeStartFailureReleasesHomeLock(t *testing.T) {
 	if err == nil {
 		t.Fatal("ordinary runtime start failure succeeded")
 	}
-	if transport != nil || command != nil || version != "" {
-		t.Fatalf("failed ordinary runtime returned transport=%v command=%v version=%q", transport, command, version)
+	if transport != nil || command != nil || version != "" || nativePath != "" {
+		t.Fatalf("failed ordinary runtime returned transport=%v command=%v version=%q nativePath=%q", transport, command, version, nativePath)
 	}
 
 	lockRoot, err := HomeLockRoot(parent, writableHome)
@@ -323,7 +323,7 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 		return cmd
 	}
 	shell := sleepCommandPath(t)
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	if _, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: shell, NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
 	}); err == nil {
 		t.Fatal("launchAppServer ignored StdinPipe error")
@@ -337,7 +337,7 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return cmd
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	if _, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: shell, NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
 	}); err == nil {
 		t.Fatal("launchAppServer ignored StdoutPipe error")
@@ -349,25 +349,25 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 
 		return exec.Command(filepath.Join(t.TempDir(), "missing"))
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	if _, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: shell, NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
 	}); err == nil {
 		t.Fatal("launchAppServer ignored start error")
 	}
 	execCommandContext = origExec
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	if _, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: shell, NativeVersion: "0.1.0", skipSupervisor: true, ProcessIsolation: testProcessIsolation(),
 	}); err == nil {
 		t.Fatal("launchAppServer ignored version error")
 	}
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	if _, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: shell, NativeVersion: minCodexVersion, ProcessIsolation: testProcessIsolation(),
 	}); err == nil {
 		t.Fatal("launchAppServer ignored home-lock configuration error")
 	}
 	originalExecutable := supervisorExecutable
 	supervisorExecutable = func() (string, error) { return "", errors.New("no embedded supervisor") }
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	if _, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: shell, NativeVersion: minCodexVersion, SupervisorParent: os.TempDir(),
 		WritableHome: t.TempDir(), SupervisorRoot: t.TempDir(), ProcessIsolation: testProcessIsolation(),
 	}); err == nil {
@@ -376,7 +376,7 @@ func TestCommandLaunchAppServerErrors(t *testing.T) {
 	supervisorExecutable = originalExecutable
 	pathless := testProcessIsolation()
 	delete(pathless.BaseEnvironment, "PATH")
-	if _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	if _, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: pathless,
 	}); err == nil {
 		t.Fatal("launchAppServer ignored missing codex path")

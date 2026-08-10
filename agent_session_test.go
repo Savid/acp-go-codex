@@ -1340,6 +1340,126 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 	})
 }
 
+func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
+	oldPath := filepath.Join(t.TempDir(), "old-bin")
+	newPath := filepath.Join(t.TempDir(), "new-bin")
+	var resumed codex.ThreadResumeRequest
+	client := &activeRebindEdgeClient{spyCodexClient: newSpyCodexClient()}
+	client.resume = func(_ context.Context, request codex.ThreadResumeRequest) (codex.Thread, error) {
+		resumed = request
+
+		return codex.Thread{ID: request.ThreadID, Path: request.Path}, nil
+	}
+
+	agent := NewAgent()
+	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+		ID: "thread-active", Path: "/native/rollout.jsonl",
+	}, client, sessionMeta{
+		Env:           map[string]string{"WAGIE_API_TOKEN": "old-token"},
+		ExtraPathDirs: []string{oldPath},
+	}, nil)
+	agent.sessions[active.id] = active
+	agent.runtimeClient = client
+
+	meta := sessionMeta{
+		Env:           map[string]string{"WAGIE_API_TOKEN": "new-token", "WAGIE_OPERATION_ID": "operation-new"},
+		ExtraPathDirs: []string{newPath},
+	}
+	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
+	_, err := agent.rebindActiveStoredSession(
+		context.Background(),
+		ResumeSessionRequest("session", "/tmp/project"),
+		entries,
+		meta,
+		active,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "new-token", resumed.Environment["WAGIE_API_TOKEN"])
+	require.Equal(t, "operation-new", resumed.Environment["WAGIE_OPERATION_ID"])
+	for _, value := range resumed.Environment {
+		require.NotEqual(t, "old-token", value)
+	}
+	require.Equal(t, []string{newPath}, resumed.ExtraPathDirs)
+
+	snapshot := active.snapshot()
+	require.Equal(t, meta.Env, snapshot.env)
+	require.Equal(t, meta.ExtraPathDirs, snapshot.extraPathDirs)
+	meta.Env["WAGIE_API_TOKEN"] = "caller-mutated"
+	meta.ExtraPathDirs[0] = "caller-mutated"
+	require.Equal(t, "new-token", active.snapshot().env["WAGIE_API_TOKEN"])
+	require.Equal(t, newPath, active.snapshot().extraPathDirs[0])
+}
+
+func TestRuntimeCrashRecoveryPreservesRotatedThreadCarrier(t *testing.T) {
+	rotatedPath := filepath.Join(t.TempDir(), "rotated-bin")
+	agent := NewAgent()
+	session := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+		ID: "thread-active", Path: "/native/rollout.jsonl",
+	}, newSpyCodexClient(), sessionMeta{
+		Env: map[string]string{
+			"WAGIE_API_TOKEN":    "rotated-token",
+			"WAGIE_OPERATION_ID": "rotated-operation",
+		},
+		ExtraPathDirs: []string{rotatedPath},
+	}, nil)
+	recovery := newRuntimeRecordingClient()
+
+	thread, err := agent.resumeRuntimeSession(context.Background(), recovery, session)
+	require.NoError(t, err)
+	require.Equal(t, "thread-active", thread.ID)
+
+	recovery.mu.Lock()
+	require.Len(t, recovery.resumes, 1)
+	request := recovery.resumes[0]
+	recovery.mu.Unlock()
+	require.Equal(t, "rotated-token", request.Environment["WAGIE_API_TOKEN"])
+	require.Equal(t, "rotated-operation", request.Environment["WAGIE_OPERATION_ID"])
+	require.Equal(t, []string{rotatedPath}, request.ExtraPathDirs)
+	for _, value := range request.Environment {
+		require.NotEqual(t, "old-token", value)
+	}
+}
+
+func TestForkAppliesChildThreadCarrierToForkAndResume(t *testing.T) {
+	client := newSpyCodexClient()
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return client, nil
+	}))
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	parent, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	childPath := filepath.Join(t.TempDir(), "child-bin")
+	_, err = agent.forkSession(context.Background(), ForkSessionRequest(
+		parent.SessionId,
+		t.TempDir(),
+		WithSessionCodexOptions(NewCodexOptions(
+			WithCodexEnv(map[string]string{
+				"WAGIE_API_TOKEN":    "child-token",
+				"WAGIE_OPERATION_ID": "child-operation",
+			}),
+			WithCodexExtraPathDirs(childPath),
+		)),
+	))
+	require.NoError(t, err)
+
+	client.mu.Lock()
+	fork := client.fork
+	resume := client.resume
+	client.mu.Unlock()
+	for _, carrier := range []struct {
+		env  map[string]string
+		path []string
+	}{
+		{env: fork.Environment, path: fork.ExtraPathDirs},
+		{env: resume.Environment, path: resume.ExtraPathDirs},
+	} {
+		require.Equal(t, "child-token", carrier.env["WAGIE_API_TOKEN"])
+		require.Equal(t, "child-operation", carrier.env["WAGIE_OPERATION_ID"])
+		require.Equal(t, []string{childPath}, carrier.path)
+	}
+}
+
 func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}

@@ -31,20 +31,22 @@ var processSupervisorCloseWait = supervisorQuiesceWindow + time.Second
 // the version check, while procCtx governs the lifetime of the spawned process
 // (see NewAppServerClient): binding the process to procCtx prevents
 // exec.CommandContext from SIGKILLing codex when the launching request returns.
-func launchAppServer(ctx context.Context, procCtx context.Context, options Options) (*lineTransport, *exec.Cmd, string, error) {
+func launchAppServer(ctx context.Context, procCtx context.Context, options Options) (*lineTransport, *exec.Cmd, string, string, error) {
 	nativeEnv, err := buildMergedEnv(options)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
+
+	nativePath := searchPathFromEnvironment(nativeEnv)
 
 	path, err := resolveCodexPath(options.CLIPath, nativeEnv, options.ProcessIsolation)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
 
 	version, versionErr := validateCodexVersionOutput(options.NativeVersion)
 	if versionErr != nil {
-		return nil, nil, "", versionErr
+		return nil, nil, "", "", versionErr
 	}
 
 	var cmd *exec.Cmd
@@ -56,12 +58,12 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 
 		cmd.Env = nativeEnv
 		if credentialErr := applyProcessCredential(cmd, options.ProcessIsolation); credentialErr != nil {
-			return nil, nil, "", credentialErr
+			return nil, nil, "", "", credentialErr
 		}
 	} else {
 		lockRoot, lockErr := HomeLockRoot(options.SupervisorParent, firstNonEmpty(options.WritableHome, options.CodexHome))
 		if lockErr != nil {
-			return nil, nil, "", lockErr
+			return nil, nil, "", "", lockErr
 		}
 
 		cmd, supervisor, err = supervisorCommand(procCtx, supervisorConfig{
@@ -76,13 +78,13 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 			DarwinBestEffort: options.DarwinBestEffort,
 		})
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, "", "", err
 		}
 	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, nil, "", errors.Join(
+		return nil, nil, "", "", errors.Join(
 			err,
 			supervisor.closeInherited(),
 			supervisor.releaseOrdinaryHomeLock(),
@@ -93,7 +95,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	if err != nil {
 		_ = stdin.Close()
 
-		return nil, nil, "", errors.Join(
+		return nil, nil, "", "", errors.Join(
 			err,
 			supervisor.closeInherited(),
 			supervisor.releaseOrdinaryHomeLock(),
@@ -117,7 +119,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		_ = stdin.Close()
 		_ = stdout.Close()
 
-		return nil, nil, "", errors.Join(err, cleanupErr)
+		return nil, nil, "", "", errors.Join(err, cleanupErr)
 	}
 
 	if closeErr := supervisor.closeInherited(); closeErr != nil {
@@ -126,7 +128,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		waiter.start()
 		<-waiter.result()
 
-		return nil, nil, "", errors.Join(
+		return nil, nil, "", "", errors.Join(
 			fmt.Errorf("close inherited supervisor config: %w", closeErr),
 			supervisor.releaseOrdinaryHomeLock(),
 		)
@@ -147,7 +149,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		proc.processSnapshot = options.NewProcessSnapshotObserver(ctx)
 	}
 
-	return newLineTransport(stdout, stdin, proc), cmd, version, nil
+	return newLineTransport(stdout, stdin, proc), cmd, version, nativePath, nil
 }
 
 // appServerArgs builds the codex app-server argument list: the base launch

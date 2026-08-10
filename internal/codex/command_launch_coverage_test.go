@@ -42,6 +42,9 @@ func TestNewAppServerClientCompletesLaunchHandshake(t *testing.T) {
 	preserveLaunchHooks(t)
 
 	appServer := writeFakeAppServer(t)
+	nativePath := filepath.Join(testTraversableTempDir(t), "native-bin")
+	isolation := testProcessIsolation()
+	isolation.BaseEnvironment["PATH"] = nativePath
 	// The guardian is replaced by the app-server stand-in so the launch keeps
 	// its real supervisor config, inherited descriptor, and proof plumbing
 	// while the handshake runs on a host that cannot drop supplementary groups.
@@ -54,7 +57,7 @@ func TestNewAppServerClientCompletesLaunchHandshake(t *testing.T) {
 		CLIPath: appServer, CodexHome: testTraversableTempDir(t),
 		SupervisorRoot: testTraversableTempDir(t), SupervisorParent: os.TempDir(),
 		NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second,
-		ProcessIsolation: testProcessIsolation(),
+		ProcessIsolation: isolation,
 		NewProcessSnapshotObserver: func(context.Context) ProcessSnapshotObserver {
 			return ProcessSnapshotObserver{
 				Observe:  func(_ context.Context, count int) { observed <- count },
@@ -64,6 +67,7 @@ func TestNewAppServerClientCompletesLaunchHandshake(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, minCodexVersion, client.nativeVersion)
+	require.Equal(t, nativePath, client.nativePath, "supervisor launch must retain the native app-server environment PATH")
 
 	// No liveness supervisor published a completion proof for the stand-in, so
 	// the close must fail closed rather than report a clean containment.
@@ -87,12 +91,15 @@ func TestLaunchAppServerReportsLostInheritedDescriptor(t *testing.T) {
 		return file, nil
 	}
 
-	transport, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	transport, command, version, nativePath, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: sleeper.Path, SupervisorRoot: testTraversableTempDir(t), SupervisorParent: os.TempDir(),
 		WritableHome: testTraversableTempDir(t), NativeVersion: minCodexVersion,
 		ProcessIsolation: testProcessIsolation(),
 	})
 	require.Nil(t, transport)
+	require.Nil(t, command)
+	require.Empty(t, version)
+	require.Empty(t, nativePath)
 	require.ErrorContains(t, err, "close inherited supervisor config")
 }
 
@@ -109,10 +116,13 @@ func TestLaunchAppServerRevalidatesCredentialPolicy(t *testing.T) {
 		return exec.Command(sleeper.Path, "10")
 	}
 
-	transport, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	transport, command, version, nativePath, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: sleeper.Path, NativeVersion: minCodexVersion, skipSupervisor: true, ProcessIsolation: isolation,
 	})
 	require.Nil(t, transport)
+	require.Nil(t, command)
+	require.Empty(t, version)
+	require.Empty(t, nativePath)
 	require.ErrorContains(t, err, "uid and gid must be nonzero")
 }
 

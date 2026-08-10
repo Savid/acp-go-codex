@@ -3,6 +3,10 @@ package codexacp
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -14,6 +18,7 @@ type sessionMeta struct {
 	ServiceTier         string
 	Personality         string
 	Env                 map[string]string
+	ExtraPathDirs       []string
 	ApprovalPolicy      any
 	SandboxPolicy       any
 	OutputSchema        any
@@ -36,7 +41,8 @@ func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
 		ReasoningEffort:     codexOptions.ReasoningEffort,
 		ServiceTier:         codexOptions.ServiceTier,
 		Personality:         codexOptions.Personality,
-		Env:                 codexOptions.Env,
+		Env:                 cloneStringMap(codexOptions.Env),
+		ExtraPathDirs:       cloneStrings(codexOptions.ExtraPathDirs),
 		ApprovalPolicy:      codexOptions.ApprovalPolicy,
 		SandboxPolicy:       codexOptions.SandboxPolicy,
 		OutputSchema:        codexOptions.OutputSchema,
@@ -51,6 +57,7 @@ type codexOptions struct {
 	ServiceTier         string
 	Personality         string
 	Env                 map[string]string
+	ExtraPathDirs       []string
 	ApprovalPolicy      any
 	SandboxPolicy       any
 	OutputSchema        any
@@ -114,6 +121,15 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 		}
 
 		options.Env = env
+	}
+
+	if rawPathDirs, ok := optionsMap[metaExtraPathDirsKey]; ok {
+		dirs, dirsErr := extraPathDirsFromMeta(rawPathDirs)
+		if dirsErr != nil {
+			return codexOptions{}, dirsErr
+		}
+
+		options.ExtraPathDirs = dirs
 	}
 
 	if policy, ok := optionsMap[metaApprovalPolicyKey]; ok {
@@ -189,7 +205,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 
 			for optionKey := range optionsMap {
 				switch optionKey {
-				case metaModelKey, metaEnvKey, metaOutputSchemaKey, metaEffortKey, metaServiceTierKey, metaPersonalityKey, metaApprovalPolicyKey, metaSandboxPolicyKey, metaMCPToolApprovalModeKey:
+				case metaModelKey, metaEnvKey, metaExtraPathDirsKey, metaOutputSchemaKey, metaEffortKey, metaServiceTierKey, metaPersonalityKey, metaApprovalPolicyKey, metaSandboxPolicyKey, metaMCPToolApprovalModeKey:
 				default:
 					return unsupportedField("_meta.codex.options." + optionKey)
 				}
@@ -221,7 +237,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 func stringMapFromMeta(value any) (map[string]string, error) {
 	switch typed := value.(type) {
 	case map[string]string:
-		return cloneStringMap(typed), nil
+		return validatedSessionEnv(cloneStringMap(typed))
 	case map[string]any:
 		out := make(map[string]string, len(typed))
 		for key, raw := range typed {
@@ -233,10 +249,101 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 			out[key] = str
 		}
 
-		return out, nil
+		return validatedSessionEnv(out)
 	default:
 		return nil, fmt.Errorf("_meta.codex.options.env must be an object")
 	}
+}
+
+// validatedSessionEnv rejects the two classes of session environment key the
+// adapter owns: its own process-management names, and PATH. The thread PATH is
+// derived from extraPathDirs plus the app-server's native PATH, so a raw
+// session PATH would be a second, silently losing owner of the same value.
+func validatedSessionEnv(env map[string]string) (map[string]string, error) {
+	for key := range env {
+		if isPathEnvKey(key) {
+			return nil, acp.NewInvalidParams(map[string]any{
+				jsonFieldError: "session env must not set PATH; use _meta.codex.options.extraPathDirs",
+				jsonFieldField: "_meta.codex.options.env." + key,
+			})
+		}
+
+		if reservedCodexEnvKey(key) {
+			return nil, acp.NewInvalidParams(map[string]any{
+				jsonFieldError: "session env uses a reserved Codex adapter process-management key",
+				jsonFieldField: "_meta.codex.options.env." + key,
+			})
+		}
+	}
+
+	return env, nil
+}
+
+// pathEnvKey is the search-path variable this adapter derives for every native
+// thread. Windows environment keys are case insensitive, so "Path" is the same
+// owner there; on other platforms only the exact name is.
+const pathEnvKey = "PATH"
+
+var caseInsensitiveEnvKeys = runtime.GOOS == "windows"
+
+func isPathEnvKey(key string) bool {
+	return key == pathEnvKey || (caseInsensitiveEnvKeys && strings.EqualFold(key, pathEnvKey))
+}
+
+// extraPathDirsFromMeta accepts both decoded forms of an ordered directory
+// list: the Go-native []string an embedded caller supplies and the []any a JSON
+// decoder produces. Order and duplicates are preserved because native lookup
+// order is the whole point of the field.
+func extraPathDirsFromMeta(value any) ([]string, error) {
+	var raw []any
+
+	switch typed := value.(type) {
+	case []string:
+		return validatedExtraPathDirs(cloneStrings(typed))
+	case []any:
+		raw = typed
+	default:
+		return nil, unsupportedField("_meta.codex.options." + metaExtraPathDirsKey)
+	}
+
+	dirs := make([]string, 0, len(raw))
+
+	for index, element := range raw {
+		dir, ok := element.(string)
+		if !ok {
+			return nil, unsupportedField(extraPathDirField(index))
+		}
+
+		dirs = append(dirs, dir)
+	}
+
+	return validatedExtraPathDirs(dirs)
+}
+
+func validatedExtraPathDirs(dirs []string) ([]string, error) {
+	for index, dir := range dirs {
+		switch {
+		case dir == "":
+			return nil, invalidExtraPathDir(index, "must not be empty")
+		case strings.ContainsRune(dir, os.PathListSeparator):
+			return nil, invalidExtraPathDir(index, "must not contain the path list separator")
+		case !filepath.IsAbs(dir):
+			return nil, invalidExtraPathDir(index, "must be an absolute path")
+		}
+	}
+
+	return dirs, nil
+}
+
+func invalidExtraPathDir(index int, reason string) error {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: "session extra path dir " + reason,
+		jsonFieldField: extraPathDirField(index),
+	})
+}
+
+func extraPathDirField(index int) string {
+	return fmt.Sprintf("_meta.codex.options.%s[%d]", metaExtraPathDirsKey, index)
 }
 
 func unsupportedField(path string) error {
@@ -373,4 +480,12 @@ func cloneStringMap(values map[string]string) map[string]string {
 	}
 
 	return cloned
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+
+	return append([]string{}, values...)
 }

@@ -8,7 +8,31 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
+
+func TestCodexOptionsExtraPathDirsCloneAndMeta(t *testing.T) {
+	paths := []string{"/operation/first", "/operation/second", "/operation/first"}
+	option := WithCodexExtraPathDirs(paths...)
+	paths[0] = "/caller/mutated"
+
+	options := NewCodexOptions(option)
+	require.Equal(t, []string{"/operation/first", "/operation/second", "/operation/first"}, options.ExtraPathDirs)
+
+	meta := options.Meta()
+	codexMeta := asType[map[string]any](t, meta[codexMetaKey])
+	values := asType[map[string]any](t, codexMeta[metaOptionsKey])
+	metaPaths := asType[[]string](t, values[metaExtraPathDirsKey])
+	require.Equal(t, options.ExtraPathDirs, metaPaths)
+
+	options.ExtraPathDirs[0] = "/options/mutated"
+	require.Equal(t, "/operation/first", metaPaths[0])
+	metaPaths[1] = "/meta/mutated"
+
+	cloned := cloneCodexOptions(NewCodexOptions(option))
+	cloned.ExtraPathDirs[0] = "/clone/mutated"
+	require.Equal(t, "/operation/first", NewCodexOptions(option).ExtraPathDirs[0])
+}
 
 func TestRequestBuilderClones(t *testing.T) {
 	meta := map[string]any{"x": []any{map[string]any{"y": "z"}}}

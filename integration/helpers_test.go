@@ -45,6 +45,10 @@ func turnRouteMeta(turnNonce string) map[string]any {
 func newTurnRouteMeta() map[string]any { return turnRouteMeta(uuid.NewString()) }
 
 func TestMain(m *testing.M) {
+	if os.Getenv(sessionCLIHelperEnv) == "1" {
+		os.Exit(runSessionCLIHelper())
+	}
+
 	previousLogger := slog.Default()
 	if os.Getenv(envDebug) == "1" {
 		integrationLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))

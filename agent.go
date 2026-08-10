@@ -133,8 +133,6 @@ type Agent struct {
 	runtimeScratchRoot    string
 	runtimeScratchRelease func()
 	runtimeCleanupErr     error
-	runtimeEnv            map[string]string
-	runtimeEnvSet         bool
 	retainedThreads       map[acp.SessionId]*retainedRuntimeThread
 
 	clientCapabilities acp.ClientCapabilities
@@ -472,7 +470,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 }
 
 func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string, nativeVersion string) (codex.Client, error) {
-	env, _ := a.pinRuntimeEnvironment(nil)
+	env := a.staticRuntimeEnv()
 	home := a.resolvedCodexHomeForEnv(env)
 
 	if a.options.ProcessIsolation != nil && len(a.options.SeedFiles) > 0 {

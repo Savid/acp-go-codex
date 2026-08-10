@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -525,7 +524,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 }
 
 func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
-	env, _ := a.pinRuntimeEnvironment(nil)
+	env := a.staticRuntimeEnv()
 	home := a.resolvedCodexHomeForEnv(env)
 
 	if err := validateNativeOwnedDirectory(home, a.options.ProcessIsolation); err != nil {
@@ -565,74 +564,21 @@ func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
 	return version, probeErr
 }
 
-// pinRuntimeEnvironment fixes the immutable process environment for this
-// Agent-owned runtime key. Empty peer session env inherits the pinned value;
-// an explicit peer env must resolve to the same effective environment.
-func (a *Agent) pinRuntimeEnvironment(sessionEnv map[string]string) (map[string]string, error) {
-	for key := range sessionEnv {
-		if reservedCodexEnvKey(key) {
-			return nil, acp.NewInvalidParams(map[string]any{
-				jsonFieldError: "session env uses a reserved Codex adapter process-management key",
-				jsonFieldField: "_meta.codex.options.env",
-			})
-		}
+// staticRuntimeEnv is the app-server process environment: the operator's
+// top-level WithEnv values and nothing else. Session environment and session
+// path directories are thread scoped and never reach this Agent-wide surface,
+// so executable lookup, home resolution, version probing, telemetry, and
+// app-server launch cannot observe one session's credential.
+func (a *Agent) staticRuntimeEnv() map[string]string {
+	if len(a.options.Env) == 0 {
+		return nil
 	}
 
-	desired := cloneStringMap(a.options.Env)
-	if desired == nil {
-		desired = map[string]string{}
-	}
-
-	for key, value := range sessionEnv {
-		desired[key] = value
-	}
-
-	if len(desired) == 0 {
-		desired = nil
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if !a.runtimeEnvSet {
-		a.runtimeEnv = cloneStringMap(desired)
-		a.runtimeEnvSet = true
-
-		return cloneStringMap(a.runtimeEnv), nil
-	}
-
-	if len(sessionEnv) == 0 || maps.Equal(a.runtimeEnv, desired) {
-		return cloneStringMap(a.runtimeEnv), nil
-	}
-
-	return nil, acp.NewInvalidParams(map[string]any{
-		jsonFieldError: "session env conflicts with the immutable Codex runtime environment",
-		jsonFieldField: "_meta.codex.options.env",
-	})
-}
-
-func (a *Agent) canonicalizeSessionMeta(meta *sessionMeta) error {
-	env, err := a.pinRuntimeEnvironment(meta.Env)
-	if err != nil {
-		return err
-	}
-
-	meta.Env = env
-
-	return nil
+	return cloneStringMap(a.options.Env)
 }
 
 func (a *Agent) sessionMetaForLifecycle(values map[string]any) (sessionMeta, error) {
-	meta, err := sessionMetaFromLifecycle(values)
-	if err != nil {
-		return sessionMeta{}, err
-	}
-
-	if err := a.canonicalizeSessionMeta(&meta); err != nil {
-		return sessionMeta{}, err
-	}
-
-	return meta, nil
+	return sessionMetaFromLifecycle(values)
 }
 
 func (a *Agent) resolvedCodexHome() string {

@@ -59,18 +59,29 @@ type ThreadStartRequest struct {
 	Personality           any
 	Ephemeral             *bool
 	Config                map[string]any
+	// Environment is this thread's native shell environment. It is applied to
+	// the addressed thread only, never to the shared app-server process.
+	Environment map[string]string
+	// ExtraPathDirs are ordered absolute directories placed ahead of the
+	// app-server's native PATH for this thread.
+	ExtraPathDirs []string
 }
 
 type ThreadResumeRequest struct {
-	ThreadID string
-	Path     string
-	Cwd      string
-	Config   map[string]any
+	ThreadID      string
+	Path          string
+	Cwd           string
+	Config        map[string]any
+	Environment   map[string]string
+	ExtraPathDirs []string
 }
 
 type ThreadForkRequest struct {
-	ThreadID string
-	Cwd      string
+	ThreadID      string
+	Cwd           string
+	Config        map[string]any
+	Environment   map[string]string
+	ExtraPathDirs []string
 }
 
 type ThreadListRequest struct {

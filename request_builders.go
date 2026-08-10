@@ -14,6 +14,7 @@ const (
 	metaServiceTierKey         = "serviceTier"
 	metaPersonalityKey         = "personality"
 	metaEnvKey                 = "env"
+	metaExtraPathDirsKey       = "extraPathDirs"
 	metaApprovalPolicyKey      = "approvalPolicy"
 	metaSandboxPolicyKey       = "sandboxPolicy"
 	metaOutputSchemaKey        = "outputSchema"
@@ -33,8 +34,14 @@ type CodexOptions struct {
 	ServiceTier string `json:"serviceTier,omitempty"`
 	// Personality selects the Codex personality setting for turns in this session.
 	Personality string `json:"personality,omitempty"`
-	// Env contributes to the immutable process environment of this runtime key.
+	// Env is the native shell environment of this session's Codex thread. It is
+	// thread scoped: peer sessions on the same app-server never observe it. A
+	// raw PATH entry is rejected; ExtraPathDirs is the only session PATH
+	// authority.
 	Env map[string]string `json:"env,omitempty"`
+	// ExtraPathDirs are ordered absolute directories placed, in this order,
+	// ahead of the app-server's native PATH for this session's Codex thread.
+	ExtraPathDirs []string `json:"extraPathDirs,omitempty"`
 	// ApprovalPolicy configures Codex approval behavior for this session.
 	ApprovalPolicy any `json:"approvalPolicy,omitempty"`
 	// SandboxPolicy configures Codex sandbox behavior for turns in this session.
@@ -68,6 +75,10 @@ func (options CodexOptions) Meta() map[string]any {
 
 	if len(options.Env) > 0 {
 		values[metaEnvKey] = cloneStringMap(options.Env)
+	}
+
+	if len(options.ExtraPathDirs) > 0 {
+		values[metaExtraPathDirsKey] = cloneStrings(options.ExtraPathDirs)
 	}
 
 	if options.ApprovalPolicy != nil {
@@ -398,13 +409,26 @@ func WithCodexPersonality(personality string) CodexOption {
 	}
 }
 
-// WithCodexEnv contributes to the immutable Codex runtime-key environment.
-// Empty env inherits the pinned environment; conflicting peer env fails closed.
+// WithCodexEnv sets the native shell environment of this session's Codex
+// thread. Values are applied to that thread only, so concurrent sessions on one
+// app-server never share or overwrite each other's values. A raw PATH entry
+// fails closed; use WithCodexExtraPathDirs.
 func WithCodexEnv(env map[string]string) CodexOption {
 	cloned := cloneStringMap(env)
 
 	return func(options *CodexOptions) {
 		options.Env = cloneStringMap(cloned)
+	}
+}
+
+// WithCodexExtraPathDirs places ordered absolute directories ahead of the
+// app-server's native PATH on this session's Codex thread. Order is
+// significant and preserved; the first directory wins native lookup.
+func WithCodexExtraPathDirs(paths ...string) CodexOption {
+	cloned := cloneStrings(paths)
+
+	return func(options *CodexOptions) {
+		options.ExtraPathDirs = cloneStrings(cloned)
 	}
 }
 
@@ -444,12 +468,13 @@ func WithCodexMCPToolApprovalMode(mode string) CodexOption {
 
 func cloneCodexOptions(options CodexOptions) CodexOptions {
 	return CodexOptions{
-		Model:        options.Model,
-		OutputSchema: cloneAnyMap(options.OutputSchema),
-		Effort:       options.Effort,
-		ServiceTier:  options.ServiceTier,
-		Personality:  options.Personality,
-		Env:          cloneStringMap(options.Env),
+		Model:         options.Model,
+		OutputSchema:  cloneAnyMap(options.OutputSchema),
+		Effort:        options.Effort,
+		ServiceTier:   options.ServiceTier,
+		Personality:   options.Personality,
+		Env:           cloneStringMap(options.Env),
+		ExtraPathDirs: cloneStrings(options.ExtraPathDirs),
 		ApprovalPolicy: cloneAny(
 			options.ApprovalPolicy,
 		),

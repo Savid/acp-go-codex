@@ -66,6 +66,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		ApprovalPolicy:        meta.ApprovalPolicy,
 		Sandbox:               sandboxMode(meta.SandboxPolicy),
 		Config:                threadConfig,
+		Environment:           cloneStringMap(meta.Env),
+		ExtraPathDirs:         cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
 		return acp.NewSessionResponse{}, codexAuthRequiredError(err, nil)
@@ -356,6 +358,7 @@ type codexMetaForHash struct {
 	ServiceTier         string            `json:"serviceTier,omitempty"`
 	Personality         string            `json:"personality,omitempty"`
 	Env                 map[string]string `json:"env,omitempty"`
+	ExtraPathDirs       []string          `json:"extraPathDirs,omitempty"`
 	ApprovalPolicy      any               `json:"approvalPolicy,omitempty"`
 	SandboxPolicy       any               `json:"sandboxPolicy,omitempty"`
 	OutputSchema        any               `json:"outputSchema,omitempty"`
@@ -370,6 +373,7 @@ func codexMetaFingerprint(meta sessionMeta) codexMetaForHash {
 		ServiceTier:         meta.ServiceTier,
 		Personality:         meta.Personality,
 		Env:                 cloneStringMap(meta.Env),
+		ExtraPathDirs:       cloneStrings(meta.ExtraPathDirs),
 		ApprovalPolicy:      cloneAny(meta.ApprovalPolicy),
 		SandboxPolicy:       cloneAny(meta.SandboxPolicy),
 		OutputSchema:        cloneAny(meta.OutputSchema),
@@ -572,10 +576,12 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	threadID := firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: threadID,
-		Path:     path,
-		Cwd:      params.Cwd,
-		Config:   config,
+		ThreadID:      threadID,
+		Path:          path,
+		Cwd:           params.Cwd,
+		Config:        config,
+		Environment:   cloneStringMap(meta.Env),
+		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
 		_ = removeMaterializedRollout(path)
@@ -641,10 +647,12 @@ func (a *Agent) resumeRetainedRuntimeSession(
 	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	thread, err := retained.client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: retained.threadID,
-		Path:     retained.path,
-		Cwd:      params.Cwd,
-		Config:   config,
+		ThreadID:      retained.threadID,
+		Path:          retained.path,
+		Cwd:           params.Cwd,
+		Config:        config,
+		Environment:   cloneStringMap(meta.Env),
+		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
 		return acp.ResumeSessionResponse{}, nil, codexThreadACPError(err, nil)
@@ -746,10 +754,12 @@ func (a *Agent) rebindActiveStoredSession(
 	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: ownedThreadID,
-		Path:     ownedPath,
-		Cwd:      params.Cwd,
-		Config:   config,
+		ThreadID:      ownedThreadID,
+		Path:          ownedPath,
+		Cwd:           params.Cwd,
+		Config:        config,
+		Environment:   cloneStringMap(meta.Env),
+		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, active.accountMetaSnapshot())
@@ -1030,10 +1040,12 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	}
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
-		Path:     path,
-		Cwd:      params.Cwd,
-		Config:   config,
+		ThreadID:      firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
+		Path:          path,
+		Cwd:           params.Cwd,
+		Config:        config,
+		Environment:   cloneStringMap(meta.Env),
+		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
 		_ = removeMaterializedRollout(path)
@@ -1205,21 +1217,25 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	}
 
 	parentSnapshot := parent.snapshot()
+	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	thread, err := client.ForkThread(ctx, codex.ThreadForkRequest{
-		ThreadID: parentSnapshot.codexThreadID,
-		Cwd:      params.Cwd,
+		ThreadID:      parentSnapshot.codexThreadID,
+		Cwd:           params.Cwd,
+		Config:        cloneAnyMap(config),
+		Environment:   cloneStringMap(meta.Env),
+		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)
 	}
 
-	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
-
 	thread, err = client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: thread.ID,
-		Cwd:      params.Cwd,
-		Config:   config,
+		ThreadID:      thread.ID,
+		Cwd:           params.Cwd,
+		Config:        cloneAnyMap(config),
+		Environment:   cloneStringMap(meta.Env),
+		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)

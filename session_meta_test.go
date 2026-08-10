@@ -2,9 +2,11 @@ package codexacp
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSessionMetaStructuredOutputValidation(t *testing.T) {
@@ -85,6 +87,69 @@ func TestSessionMetaRejectsWrongTypedOptionValues(t *testing.T) {
 	if data, ok := reqErr.Data.(map[string]any); !ok || data["error"] != "unsupported" || data["field"] != "_meta.codex.options.model" {
 		t.Fatalf("wrong-typed model data = %#v, want unsupported/_meta.codex.options.model", reqErr.Data)
 	}
+}
+
+func TestLifecycleMetaValidatesExtraPathDirs(t *testing.T) {
+	absolute := t.TempDir()
+	second := t.TempDir()
+
+	for _, value := range []any{
+		[]string{absolute, second, absolute},
+		[]any{absolute, second, absolute},
+	} {
+		parsed, err := sessionMetaFromLifecycle(map[string]any{
+			codexMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: value}},
+		})
+		require.NoError(t, err)
+		require.Equal(t, []string{absolute, second, absolute}, parsed.ExtraPathDirs)
+	}
+
+	tests := []struct {
+		name  string
+		value any
+		field string
+	}{
+		{name: "wrong list type", value: "bad", field: "_meta.codex.options.extraPathDirs"},
+		{name: "wrong element type", value: []any{absolute, 1}, field: "_meta.codex.options.extraPathDirs[1]"},
+		{name: "empty", value: []string{absolute, ""}, field: "_meta.codex.options.extraPathDirs[1]"},
+		{name: "relative", value: []string{"relative"}, field: "_meta.codex.options.extraPathDirs[0]"},
+		{name: "separator", value: []string{absolute + string(os.PathListSeparator) + second}, field: "_meta.codex.options.extraPathDirs[0]"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := sessionMetaFromLifecycle(map[string]any{
+				codexMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: test.value}},
+			})
+			requireInvalidParamsField(t, err, test.field)
+		})
+	}
+
+	input := []string{absolute, second}
+	parsed, err := sessionMetaFromLifecycle(CodexOptions{ExtraPathDirs: input}.Meta())
+	require.NoError(t, err)
+	input[0] = "/caller/mutated"
+	require.Equal(t, absolute, parsed.ExtraPathDirs[0])
+}
+
+func TestLifecycleMetaRejectsRawPATH(t *testing.T) {
+	_, err := sessionMetaFromLifecycle(CodexOptions{Env: map[string]string{"PATH": "/operation/bin"}}.Meta())
+	requireInvalidParamsField(t, err, "_meta.codex.options.env.PATH")
+
+	original := caseInsensitiveEnvKeys
+	caseInsensitiveEnvKeys = true
+	t.Cleanup(func() { caseInsensitiveEnvKeys = original })
+	_, err = sessionMetaFromLifecycle(CodexOptions{Env: map[string]string{"Path": "/operation/bin"}}.Meta())
+	requireInvalidParamsField(t, err, "_meta.codex.options.env.Path")
+}
+
+func requireInvalidParamsField(t *testing.T, err error, field string) {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, err, &requestErr)
+	require.Equal(t, -32602, requestErr.Code)
+	data := asType[map[string]any](t, requestErr.Data)
+	require.Equal(t, field, data[jsonFieldField])
 }
 
 func TestValidateSchemaObjectRejectsUnmarshalable(t *testing.T) {

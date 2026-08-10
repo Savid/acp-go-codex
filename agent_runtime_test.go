@@ -1041,7 +1041,7 @@ func TestRuntimeFailureAndHelperBranches(t *testing.T) {
 }
 
 // The writable home a native launch is proven against resolves from the
-// explicit option first, then the pinned runtime environment, then the
+// explicit option first, then the static runtime environment, then the
 // construction-time environment and its construction-time home fallback.
 func TestResolvedCodexHomePrecedence(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/process-home")
@@ -1060,50 +1060,7 @@ func TestResolvedCodexHomePrecedence(t *testing.T) {
 	require.Equal(t, filepath.Join(home, ".codex"), NewAgent().resolvedCodexHomeForEnv(nil))
 }
 
-func TestRuntimeEnvironmentPinIsAtomicAndImmutable(t *testing.T) {
-	agent := NewAgent(WithEnv(map[string]string{"BASE": "agent"}))
-	start := make(chan struct{})
-
-	type result struct {
-		env map[string]string
-		err error
-	}
-	results := make(chan result, 2)
-	for _, value := range []string{"first", "second"} {
-		go func() {
-			<-start
-			env, err := agent.pinRuntimeEnvironment(map[string]string{"SESSION": value})
-			results <- result{env: env, err: err}
-		}()
-	}
-	close(start)
-
-	var winner map[string]string
-	failures := 0
-	for range 2 {
-		result := <-results
-		if result.err != nil {
-			failures++
-
-			continue
-		}
-		winner = result.env
-	}
-	if failures != 1 || winner["BASE"] != "agent" || (winner["SESSION"] != "first" && winner["SESSION"] != "second") {
-		t.Fatalf("environment race winner=%#v failures=%d", winner, failures)
-	}
-
-	inherited, err := agent.pinRuntimeEnvironment(nil)
-	require.NoError(t, err)
-	require.Equal(t, winner, inherited)
-	matching, err := agent.pinRuntimeEnvironment(map[string]string{"SESSION": winner["SESSION"]})
-	require.NoError(t, err)
-	require.Equal(t, winner, matching)
-}
-
 func TestRuntimeEnvironmentRejectsReservedSessionKeys(t *testing.T) {
-	agent := NewAgent()
-
 	for _, key := range []string{
 		"acp_go_codex_internal_spoof",
 		"acp_go_codex_runtime_id",
@@ -1112,7 +1069,7 @@ func TestRuntimeEnvironmentRejectsReservedSessionKeys(t *testing.T) {
 		"HOME",
 		"XDG_CONFIG_HOME",
 	} {
-		_, err := agent.pinRuntimeEnvironment(map[string]string{key: "1"})
+		_, err := sessionMetaFromLifecycle(CodexOptions{Env: map[string]string{key: "1"}}.Meta())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "_meta.codex.options.env")
 	}
@@ -1136,43 +1093,69 @@ func TestManagedHomeSessionEnvironmentFailsBeforeNativeCreation(t *testing.T) {
 	require.Zero(t, launches.Load())
 }
 
-func TestConflictingSessionEnvironmentFailsBeforeNativeCreation(t *testing.T) {
+func TestSessionEnvironmentDoesNotPinSharedRuntime(t *testing.T) {
+	client := newRuntimeRecordingClient()
 	var launches atomic.Int64
-	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		launches.Add(1)
-
-		return newSpyCodexClient(), nil
-	}))
-	_, err := agent.pinRuntimeEnvironment(map[string]string{"SESSION": "pinned"})
-	require.NoError(t, err)
-
-	_, err = agent.NewSession(context.Background(), NewSessionRequest("/tmp/project", WithSessionCodexOptions(
-		NewCodexOptions(WithCodexEnv(map[string]string{"SESSION": "conflict"})),
-	)))
-	require.Error(t, err)
-	require.Zero(t, launches.Load())
-}
-
-func TestPinnedSessionEnvironmentLaunchAndFingerprint(t *testing.T) {
 	var gotOptions codex.Options
 	agent := NewAgent(
 		WithEnv(map[string]string{"BASE": "agent"}),
 		withClientFactory(func(_ context.Context, options codex.Options) (codex.Client, error) {
+			launches.Add(1)
 			gotOptions = options
 
-			return newSpyCodexClient(), nil
+			return client, nil
 		}),
 	)
-	meta := sessionMeta{Env: map[string]string{"SESSION": "one"}}
-	require.NoError(t, agent.canonicalizeSessionMeta(&meta))
-	_, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion)
-	require.NoError(t, err)
-	require.Equal(t, map[string]string{"BASE": "agent", "SESSION": "one"}, gotOptions.Env)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
-	base := codexSessionStart{Cwd: "/tmp/project", Meta: meta}
-	changed := base
-	changed.Meta.Env = map[string]string{"BASE": "agent", "SESSION": "two"}
-	require.NotEqual(t, codexSessionStartFingerprint(base), codexSessionStartFingerprint(changed))
+	root := t.TempDir()
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for index, value := range []string{"one", "two"} {
+		go func() {
+			<-start
+			_, err := agent.NewSession(context.Background(), NewSessionRequest(
+				filepath.Join(root, fmt.Sprintf("workspace-%d", index)),
+				WithSessionCodexOptions(NewCodexOptions(
+					WithCodexEnv(map[string]string{"SESSION": value}),
+					WithCodexExtraPathDirs(filepath.Join(root, fmt.Sprintf("bin-%d", index))),
+				)),
+			))
+			errs <- err
+		}()
+	}
+	close(start)
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+	require.EqualValues(t, 1, launches.Load())
+	require.Equal(t, map[string]string{"BASE": "agent"}, gotOptions.Env)
+
+	client.mu.Lock()
+	starts := append([]codex.ThreadStartRequest(nil), client.starts...)
+	client.mu.Unlock()
+	require.Len(t, starts, 2)
+	seen := map[string]string{}
+	for _, request := range starts {
+		require.Len(t, request.ExtraPathDirs, 1)
+		seen[request.Environment["SESSION"]] = request.ExtraPathDirs[0]
+	}
+	require.Equal(t, filepath.Join(root, "bin-0"), seen["one"])
+	require.Equal(t, filepath.Join(root, "bin-1"), seen["two"])
+}
+
+func TestLifecycleFingerprintIncludesOrderedExtraPathDirs(t *testing.T) {
+	base := codexSessionStart{Cwd: "/tmp/project", Meta: sessionMeta{
+		Env:           map[string]string{"SESSION": "one"},
+		ExtraPathDirs: []string{"/operation/first", "/operation/second"},
+	}}
+
+	changedEnv := base
+	changedEnv.Meta.Env = map[string]string{"SESSION": "two"}
+	require.NotEqual(t, codexSessionStartFingerprint(base), codexSessionStartFingerprint(changedEnv))
+
+	reordered := base
+	reordered.Meta.ExtraPathDirs = []string{"/operation/second", "/operation/first"}
+	require.NotEqual(t, codexSessionStartFingerprint(base), codexSessionStartFingerprint(reordered))
 }
 
 func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {

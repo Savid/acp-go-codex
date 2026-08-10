@@ -39,7 +39,7 @@ func TestOrdinaryWindowsNativeRuntimeAndLogout(t *testing.T) {
 
 	parent := t.TempDir()
 	writableHome := t.TempDir()
-	transport, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
+	transport, _, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath:             executable,
 		CodexHome:           writableHome,
 		WritableHome:        writableHome,

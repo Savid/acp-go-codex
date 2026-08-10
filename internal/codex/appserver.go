@@ -85,6 +85,10 @@ type AppServerClient struct {
 	cmd           *exec.Cmd
 	procCancel    context.CancelFunc
 	nativeVersion string
+	// nativePath is the exact search path of the environment this app-server
+	// process was launched with. Every thread's derived PATH is composed
+	// against it rather than against the ambient process environment.
+	nativePath string
 
 	eventPumpOnce sync.Once
 	eventDone     chan struct{}
@@ -126,7 +130,7 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 	// (version check and initialize) below.
 	procCtx, procCancel := context.WithCancel(context.Background())
 
-	transport, cmd, version, err := launchAppServer(launchCtx, procCtx, options)
+	transport, cmd, version, nativePath, err := launchAppServer(launchCtx, procCtx, options)
 	if err != nil {
 		procCancel()
 
@@ -139,6 +143,7 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 		cmd:           cmd,
 		procCancel:    procCancel,
 		nativeVersion: version,
+		nativePath:    nativePath,
 	}
 	client.ensureEventPump()
 
@@ -196,8 +201,13 @@ func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartReques
 		params["ephemeral"] = *req.Ephemeral
 	}
 
-	if len(req.Config) > 0 {
-		params["config"] = req.Config
+	config, err := c.threadConfig(req.Config, req.Environment, req.ExtraPathDirs)
+	if err != nil {
+		return Thread{}, err
+	}
+
+	if len(config) > 0 {
+		params["config"] = config
 	}
 
 	var resp map[string]any
@@ -218,8 +228,13 @@ func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequ
 	setNonEmpty(params, fieldPath, req.Path)
 	setNonEmpty(params, "cwd", req.Cwd)
 
-	if len(req.Config) > 0 {
-		params["config"] = req.Config
+	config, err := c.threadConfig(req.Config, req.Environment, req.ExtraPathDirs)
+	if err != nil {
+		return Thread{}, err
+	}
+
+	if len(config) > 0 {
+		params["config"] = config
 	}
 
 	var resp map[string]any
@@ -239,12 +254,31 @@ func (c *AppServerClient) ForkThread(ctx context.Context, req ThreadForkRequest)
 	params := map[string]any{fieldThreadID: req.ThreadID}
 	setNonEmpty(params, "cwd", req.Cwd)
 
+	config, err := c.threadConfig(req.Config, req.Environment, req.ExtraPathDirs)
+	if err != nil {
+		return Thread{}, err
+	}
+
+	if len(config) > 0 {
+		params["config"] = config
+	}
+
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadFork, params, &resp); err != nil {
 		return Thread{}, normalizeThreadError(err)
 	}
 
 	return threadFromResponse(resp), nil
+}
+
+// threadConfig renders the one adapter-owned thread config: the caller's
+// deep-cloned config plus this thread's shell environment and derived PATH.
+func (c *AppServerClient) threadConfig(
+	config map[string]any,
+	environment map[string]string,
+	extraPathDirs []string,
+) (map[string]any, error) {
+	return threadSessionConfig(config, environment, extraPathDirs, c.nativePath)
 }
 
 func (c *AppServerClient) ListThreads(ctx context.Context, req ThreadListRequest) ([]Thread, error) {

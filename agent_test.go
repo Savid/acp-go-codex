@@ -517,6 +517,7 @@ type spyCodexClient struct {
 
 	start          codex.ThreadStartRequest
 	resume         codex.ThreadResumeRequest
+	fork           codex.ThreadForkRequest
 	lastTurn       codex.TurnStartRequest
 	steer          codex.TurnSteerRequest
 	compact        codex.ThreadCompactRequest
@@ -593,6 +594,9 @@ func (c *spyCodexClient) ForkThread(ctx context.Context, req codex.ThreadForkReq
 	if err := ctx.Err(); err != nil {
 		return codex.Thread{}, err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fork = req
 	thread := c.thread
 	thread.ID = "fork-thread"
 	thread.Cwd = req.Cwd
