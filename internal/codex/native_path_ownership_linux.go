@@ -124,6 +124,7 @@ func openNativeOwnedDirectory(name string, trustedUID uint32, trustedGID uint32,
 		final := index == len(components)
 		trusted := stat.Uid == trustedUID && stat.Gid == trustedGID
 		target := stat.Uid == targetUID && stat.Gid == targetGID
+
 		mode := stat.Mode & 0o7777
 		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 			_ = unix.Close(fd)
