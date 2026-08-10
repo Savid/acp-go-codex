@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/savid/acp-go-codex/internal/homelock"
 )
 
 func TestAppServerArgs(t *testing.T) {
@@ -67,8 +69,20 @@ func TestAppServerArgs(t *testing.T) {
 	}
 }
 
+func TestLaunchAppServerRefusesInvalidExplicitEnvironment(t *testing.T) {
+	transport, command, version, err := launchAppServer(context.Background(), context.Background(), Options{
+		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1},
+	})
+	if err == nil || !strings.Contains(err.Error(), "base environment") {
+		t.Fatalf("launchAppServer environment error = %v", err)
+	}
+	if transport != nil || command != nil || version != "" {
+		t.Fatalf("failed launch returned transport=%v command=%v version=%q", transport, command, version)
+	}
+}
+
 func TestCommandHelpers(t *testing.T) {
-	path, err := resolveCodexPath("/bin/sh", []string{"PATH=/usr/bin:/bin"})
+	path, err := resolveCodexPath("/bin/sh", []string{"PATH=/usr/bin:/bin"}, &ProcessIsolation{})
 	if err != nil || path != "/bin/sh" {
 		t.Fatalf("explicit path=%q err=%v", path, err)
 	}
@@ -115,7 +129,7 @@ func TestCommandHelpers(t *testing.T) {
 	if compareSemver("0.144.2", minCodexVersion) <= 0 || compareSemver("0.144.0", minCodexVersion) >= 0 || compareSemver(minCodexVersion, minCodexVersion) != 0 {
 		t.Fatal("compareSemver failed")
 	}
-	if _, err := resolveCodexPath("", []string{"PATH=/missing"}); err == nil {
+	if _, err := resolveCodexPath("", []string{"PATH=/missing"}, &ProcessIsolation{}); err == nil {
 		t.Fatal("resolveCodexPath without codex succeeded")
 	}
 }
@@ -145,6 +159,70 @@ func TestProcessCloserNil(t *testing.T) {
 	if err := killProcess(nil); err != nil {
 		t.Fatalf("killProcess nil returned error: %v", err)
 	}
+
+	home := filepath.Join(t.TempDir(), "home-lock")
+	lock, err := homelock.Acquire(home)
+	if err != nil {
+		t.Fatalf("acquire direct home lock: %v", err)
+	}
+	proc := &process{supervisor: &supervisorProof{ordinaryHomeLock: lock}}
+	if closeErr := proc.Close(); closeErr != nil {
+		t.Fatalf("close process without native root: %v", closeErr)
+	}
+	next, err := homelock.Acquire(home)
+	if err != nil {
+		t.Fatalf("direct home lock was not released: %v", err)
+	}
+	if err := next.Release(); err != nil {
+		t.Fatalf("release reacquired direct home lock: %v", err)
+	}
+}
+
+func TestOrdinaryRuntimeStartFailureReleasesHomeLock(t *testing.T) {
+	originalGOOS := processIsolationGOOS
+	originalCommand := execCommandContext
+	t.Cleanup(func() {
+		processIsolationGOOS = originalGOOS
+		execCommandContext = originalCommand
+	})
+	processIsolationGOOS = "darwin"
+
+	missing := filepath.Join(t.TempDir(), "missing-native")
+	execCommandContext = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command(missing)
+	}
+
+	parent := t.TempDir()
+	writableHome := t.TempDir()
+	transport, command, version, err := launchAppServer(context.Background(), context.Background(), Options{
+		CLIPath:          "/usr/bin/true",
+		CodexHome:        writableHome,
+		WritableHome:     writableHome,
+		SupervisorParent: parent,
+		SupervisorRoot:   t.TempDir(),
+		NativeVersion:    minCodexVersion,
+		ImplicitEnvironment: map[string]string{
+			"PATH": "/usr/bin:/bin",
+		},
+	})
+	if err == nil {
+		t.Fatal("ordinary runtime start failure succeeded")
+	}
+	if transport != nil || command != nil || version != "" {
+		t.Fatalf("failed ordinary runtime returned transport=%v command=%v version=%q", transport, command, version)
+	}
+
+	lockRoot, err := HomeLockRoot(parent, writableHome)
+	if err != nil {
+		t.Fatalf("resolve home lock root: %v", err)
+	}
+	lock, err := homelock.Acquire(lockRoot)
+	if err != nil {
+		t.Fatalf("runtime start failure retained home lock: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release home lock: %v", err)
+	}
 }
 
 func envContains(env []string, want string) bool {
@@ -164,7 +242,7 @@ func TestCommandLaunchAndProcessErrors(t *testing.T) {
 	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), nativeScriptMode); err != nil {
 		t.Fatalf("write codex: %v", err)
 	}
-	if resolved, err := resolveCodexPath("", []string{"PATH=" + dir}); err != nil || resolved != codexPath {
+	if resolved, err := resolveCodexPath("", []string{"PATH=" + dir}, &ProcessIsolation{}); err != nil || resolved != codexPath {
 		t.Fatalf("resolve PATH = %q err=%v", resolved, err)
 	}
 
@@ -196,7 +274,6 @@ while read line; do :; done
 		CodexHome:        testNativeOwnedTempDir(t),
 		SupervisorRoot:   testTraversableTempDir(t),
 		SupervisorParent: os.TempDir(),
-		DarwinBestEffort: true,
 		NativeVersion:    minCodexVersion,
 		Config:           map[string]any{"feature.enabled": true, "name": "x y"},
 		ExtraArgs:        []string{"--extra"},

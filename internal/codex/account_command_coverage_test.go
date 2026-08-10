@@ -35,20 +35,18 @@ func killedAfterTest(t *testing.T, cmd *exec.Cmd) *exec.Cmd {
 	return cmd
 }
 
-func TestRunAccountCommandRefusesUnownedHomeAndMissingIsolation(t *testing.T) {
+func TestRunAccountCommandContinuesWithoutIsolation(t *testing.T) {
 	restoreAccountCommandHooks(t)
+	originalGOOS := processIsolationGOOS
+	t.Cleanup(func() { processIsolationGOOS = originalGOOS })
+	processIsolationGOOS = processIsolationDarwin
+	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) {
+		return minCodexVersion, nil
+	}
 
-	foreign := testProcessIsolation()
-	foreign.UID++
-	foreign.GID++
-	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
-		ProcessIsolation: foreign,
-	}), "validate codex writable home")
-
-	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
-	}), "process isolation is required")
+	require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
+		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
+	}))
 }
 
 func TestRunAccountCommandRefusesWithoutAHomeLockRoot(t *testing.T) {
@@ -58,8 +56,7 @@ func TestRunAccountCommandRefusesWithoutAHomeLockRoot(t *testing.T) {
 	accountMkdirTemp = func(_ string, pattern string) (string, error) { return os.MkdirTemp(t.TempDir(), pattern) }
 
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
-		ProcessIsolation: testProcessIsolation(),
+		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
 	}), "home-lock scratch parent is required")
 }
 
@@ -72,8 +69,7 @@ func TestRunAccountCommandProofBranches(t *testing.T) {
 		}
 
 		require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
-			ProcessIsolation: testProcessIsolation(),
+			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
 		}), "close inherited supervisor config")
 	})
 
@@ -89,8 +85,7 @@ func TestRunAccountCommandProofBranches(t *testing.T) {
 		}
 
 		err := RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
-			ProcessIsolation: testProcessIsolation(),
+			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
 		})
 		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.ErrorContains(t, err, "not a directory")
@@ -112,8 +107,7 @@ func TestRunAccountCommandProofBranches(t *testing.T) {
 		}
 
 		err := RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
-			ProcessIsolation: testProcessIsolation(),
+			CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
 		})
 		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 		require.ErrorContains(t, err, "retained the identity lock")
@@ -135,8 +129,7 @@ func TestRunAccountCommandRefusesWithoutAControlPipe(t *testing.T) {
 	supervisorPipe = func() (*os.File, *os.File, error) { return nil, nil, errors.New("pipe exhausted") }
 
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), Mode: accountCommandLogout,
-		ProcessIsolation: testProcessIsolation(),
+		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
 	}), "open account-command control input")
 }
 
@@ -198,7 +191,7 @@ func TestSupervisorProofAbandonStopsTheCompletionPoll(t *testing.T) {
 
 func TestProbeVersionRejectsPolicyAndLockFailures(t *testing.T) {
 	_, err := ProbeVersion(context.Background(), VersionProbeOptions{CLIPath: "/usr/bin/true"})
-	require.ErrorContains(t, err, "process isolation is required")
+	require.ErrorContains(t, err, "home-lock scratch parent is required")
 
 	options := withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})
 	options.ScratchParent = ""

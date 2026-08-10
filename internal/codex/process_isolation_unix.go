@@ -13,24 +13,17 @@ import (
 
 var inheritedDescriptorFcntl = unix.FcntlInt
 
-func validateProcessIsolationPlatform() error { return nil }
-
 func applyProcessCredential(cmd *exec.Cmd, isolation *ProcessIsolation) error {
 	if err := validateProcessIsolation(isolation); err != nil {
 		return err
 	}
 
+	if isolation == nil {
+		return nil
+	}
+
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-
-	shared, err := sharedProcessCredential(isolation)
-	if err != nil {
-		return err
-	}
-
-	if shared {
-		return nil
 	}
 
 	cmd.SysProcAttr.Credential = &syscall.Credential{

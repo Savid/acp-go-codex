@@ -20,8 +20,7 @@ import (
 // The adapter package claims a different UID from the native package: go test
 // runs both concurrently, and the authority admits one live claimant per UID.
 // On Linux an unprivileged runner shifts off its own effective identity as
-// well: the shared arm is selected by uid equality, so a fixture that named the
-// runner's own identity would quietly move the whole suite onto it.
+// well because explicit isolation must name a distinct identity.
 func testIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 || gid == 0 {

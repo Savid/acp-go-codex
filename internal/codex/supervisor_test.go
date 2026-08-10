@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,13 +127,24 @@ func TestRunGuardianAndLivenessBranches(t *testing.T) {
 
 func TestSupervisorCommandAndProof(t *testing.T) {
 	root := t.TempDir()
-	_, _, err := supervisorCommand(context.Background(), supervisorConfig{})
-	require.Error(t, err)
+	originalGOOS := processIsolationGOOS
+	t.Cleanup(func() { processIsolationGOOS = originalGOOS })
+	processIsolationGOOS = "darwin"
+	cmd, ordinaryProof, err := supervisorCommand(context.Background(), supervisorConfig{
+		NativePath: "/usr/bin/true",
+		Home:       filepath.Join(root, "ordinary-home"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cmd)
+	require.NotNil(t, ordinaryProof)
+	require.NoError(t, ordinaryProof.releaseOrdinaryHomeLock())
+	processIsolationGOOS = originalGOOS
 
 	oldExecutable := supervisorExecutable
 	t.Cleanup(func() { supervisorExecutable = oldExecutable })
 	supervisorExecutable = func() (string, error) { return "", errors.New("executable failed") }
 	config := testSupervisorConfig(t, root, "/bin/sh", []string{"-c", "cat"})
+	config.DarwinBestEffort = false
 	_, _, err = supervisorCommand(context.Background(), config)
 	require.Error(t, err)
 
@@ -162,6 +174,149 @@ func TestSupervisorCommandAndProof(t *testing.T) {
 	}).awaitCompletion()
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	<-lateDone
+}
+
+func TestExplicitProcessIsolationNeverFallsBackToOrdinaryBackend(t *testing.T) {
+	originalGOOS := processIsolationGOOS
+	originalCommand := execCommandContext
+	t.Cleanup(func() {
+		processIsolationGOOS = originalGOOS
+		execCommandContext = originalCommand
+	})
+
+	processIsolationGOOS = "darwin"
+	called := false
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		called = true
+
+		return originalCommand(ctx, name, args...)
+	}
+
+	cmd, proof, err := supervisorCommand(context.Background(), supervisorConfig{
+		NativePath: "/usr/bin/true",
+		Isolation: &ProcessIsolation{
+			UID: 1, GID: 2,
+			BaseEnvironment:     map[string]string{"PATH": "/usr/bin:/bin"},
+			StandaloneOwnerID:   "test-owner",
+			StandaloneStateRoot: "/var/lib/acp-go-codex-test",
+		},
+	})
+	require.ErrorContains(t, err, "supported only on linux")
+	require.Nil(t, cmd)
+	require.Nil(t, proof)
+	require.False(t, called)
+}
+
+func TestSupervisorCommandRefusesConflictingOrUnsupportedDarwinBestEffort(t *testing.T) {
+	originalGOOS := processIsolationGOOS
+	t.Cleanup(func() { processIsolationGOOS = originalGOOS })
+	processIsolationGOOS = processIsolationLinux
+
+	_, _, err := supervisorCommand(context.Background(), supervisorConfig{
+		DarwinBestEffort: true,
+		Isolation:        testProcessIsolation(),
+	})
+	require.ErrorContains(t, err, "mutually exclusive")
+
+	_, _, err = supervisorCommand(context.Background(), supervisorConfig{DarwinBestEffort: true})
+	require.ErrorContains(t, err, "supported only on darwin")
+}
+
+func TestSupervisorRefusesInvalidOrdinaryIdentityAndMapsNativeIsolation(t *testing.T) {
+	root := t.TempDir()
+	configFile, err := writeSupervisorConfig(root, supervisorConfig{
+		NativePath:        "/usr/bin/true",
+		Home:              filepath.Join(root, "home"),
+		Scratch:           root,
+		OrdinaryExecution: true,
+		IsolationUID:      ^uint32(0),
+		IsolationGID:      ^uint32(0),
+	})
+	require.NoError(t, err)
+	require.Error(t, runSupervisor("unknown", configFile))
+
+	adopted := supervisedNativeIsolation(supervisorConfig{
+		IsolationUID:    123,
+		IsolationGID:    456,
+		NativeEnv:       []string{"PATH=/usr/bin:/bin"},
+		IdentityLock:    true,
+		AuthorityDomain: true,
+	})
+	require.True(t, adopted.identityAuthorityAdopted)
+	require.Empty(t, adopted.StandaloneOwnerID)
+
+	standalone := supervisedNativeIsolation(supervisorConfig{
+		IsolationUID:        123,
+		IsolationGID:        456,
+		StandaloneOwnerID:   "owner",
+		StandaloneStateRoot: "/var/lib/owner",
+	})
+	require.False(t, standalone.identityAuthorityAdopted)
+	require.Equal(t, "owner", standalone.StandaloneOwnerID)
+	require.Equal(t, "/var/lib/owner", standalone.StandaloneStateRoot)
+}
+
+func TestOrdinaryNonLinuxSupervisorUsesDirectBackend(t *testing.T) {
+	originalGOOS := processIsolationGOOS
+	originalCommand := execCommandContext
+	t.Cleanup(func() {
+		processIsolationGOOS = originalGOOS
+		execCommandContext = originalCommand
+	})
+
+	processIsolationGOOS = "darwin"
+	called := false
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		called = true
+
+		return originalCommand(ctx, name, args...)
+	}
+
+	home := filepath.Join(t.TempDir(), "home")
+	cmd, proof, err := supervisorCommand(context.Background(), supervisorConfig{
+		NativePath: "/usr/bin/true",
+		NativeArgs: []string{"--version"},
+		NativeEnv:  []string{"PATH=/usr/bin:/bin", "CANARY=present"},
+		Home:       home,
+	})
+	require.NoError(t, err)
+	require.True(t, called)
+	require.NotNil(t, proof)
+	require.Equal(t, "/usr/bin/true", cmd.Path)
+	require.Equal(t, []string{"/usr/bin/true", "--version"}, cmd.Args)
+	require.Equal(t, []string{"PATH=/usr/bin:/bin", "CANARY=present"}, cmd.Env)
+
+	_, err = homelock.AcquireClaim(home)
+	require.Error(t, err)
+	_, err = homelock.AcquireLiveness(home)
+	require.Error(t, err)
+	_, _, err = supervisorCommand(context.Background(), supervisorConfig{NativePath: "/usr/bin/true", Home: home})
+	require.Error(t, err)
+	require.NoError(t, proof.releaseOrdinaryHomeLock())
+	_, nextProof, err := supervisorCommand(context.Background(), supervisorConfig{NativePath: "/usr/bin/true", Home: home})
+	require.NoError(t, err)
+	require.NoError(t, nextProof.releaseOrdinaryHomeLock())
+}
+
+func TestDarwinBestEffortKeepsSupervisorBoundary(t *testing.T) {
+	originalGOOS := processIsolationGOOS
+	t.Cleanup(func() { processIsolationGOOS = originalGOOS })
+	processIsolationGOOS = "darwin"
+
+	root := t.TempDir()
+	_, proof, err := supervisorCommand(context.Background(), supervisorConfig{
+		NativePath:       "/usr/bin/true",
+		NativeEnv:        []string{"PATH=/usr/bin:/bin"},
+		Home:             filepath.Join(root, "home"),
+		Scratch:          root,
+		ScratchParent:    filepath.Dir(root),
+		DarwinBestEffort: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, proof)
+	require.Nil(t, proof.ordinaryHomeLock)
+	require.NotEmpty(t, proof.started)
+	require.NoError(t, proof.closeInherited())
 }
 
 func TestGuardianCleansQuarantineMarkersWithoutCaller(t *testing.T) {

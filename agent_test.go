@@ -1600,7 +1600,7 @@ func TestServeReturnsImmediatelyOnCanceledContext(t *testing.T) {
 	}
 }
 
-func TestCodexProcessIsolationClonesStandaloneBinding(t *testing.T) {
+func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	base := map[string]string{"CANARY": "base"}
 	policy := &ProcessIsolation{
 		UID: 12, GID: 34, BaseEnvironment: base,

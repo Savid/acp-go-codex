@@ -126,9 +126,18 @@ func TestRunErrorPathsAndVersion(t *testing.T) {
 	}
 }
 
-func TestRunRefusesUnusableProcessIsolation(t *testing.T) {
+func TestRunWithExplicitProcessIsolationConfigIsFailClosed(t *testing.T) {
 	original := processIsolationConfigLoader
-	t.Cleanup(func() { processIsolationConfigLoader = original })
+	originalServe := serve
+	t.Cleanup(func() {
+		processIsolationConfigLoader = original
+		serve = originalServe
+	})
+	serve = func(context.Context, io.Reader, io.Writer, ...codexacp.Option) error {
+		t.Fatal("Serve ran after an explicit isolation-policy failure")
+
+		return nil
+	}
 
 	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
 		return processIsolationConfig{}, assertError("policy is not root-owned")
@@ -151,7 +160,7 @@ func TestRunRefusesUnusableProcessIsolation(t *testing.T) {
 	}
 }
 
-func TestRunCodexCLISubcommandRefusesUnusableProcessIsolation(t *testing.T) {
+func TestRunCodexCLISubcommandRefusesInvalidInputsAndExplicitPolicy(t *testing.T) {
 	originalCLI := runCodexCLICommand
 	originalLoader := processIsolationConfigLoader
 	t.Cleanup(func() {
@@ -159,15 +168,15 @@ func TestRunCodexCLISubcommandRefusesUnusableProcessIsolation(t *testing.T) {
 		processIsolationConfigLoader = originalLoader
 	})
 
-	runCodexCLICommand = func(context.Context, string, string, string, string, bool, processIsolationConfig, io.Reader, io.Writer, io.Writer) error {
-		t.Fatal("account command ran without a usable isolation policy")
+	runCodexCLICommand = func(context.Context, string, string, string, string, bool, *processIsolationConfig, io.Reader, io.Writer, io.Writer) error {
+		t.Fatal("account command ran after its input or explicit policy was rejected")
 
 		return nil
 	}
 
 	var stderr bytes.Buffer
 	code := run(context.Background(), []string{loginCommand}, bytes.NewReader(nil), bytes.NewBuffer(nil), &stderr)
-	if code != 2 || !strings.Contains(stderr.String(), "acp-go-codex login: -"+processIsolationConfigFlag+" is required") {
+	if code != 1 || !strings.Contains(stderr.String(), "-home is required for native account mode") {
 		t.Fatalf("missing policy code/stderr = %d %q", code, stderr.String())
 	}
 
@@ -412,9 +421,9 @@ func TestRunCodexCLISubcommand(t *testing.T) {
 
 	var gotPath, gotHome, gotScratch, gotMode string
 	var gotDeviceAuth bool
-	runCodexCLICommand = func(_ context.Context, path string, home string, scratch string, mode string, deviceAuth bool, isolation processIsolationConfig, _ io.Reader, _ io.Writer, _ io.Writer) error {
+	runCodexCLICommand = func(_ context.Context, path string, home string, scratch string, mode string, deviceAuth bool, isolation *processIsolationConfig, _ io.Reader, _ io.Writer, _ io.Writer) error {
 		gotPath, gotHome, gotScratch, gotMode, gotDeviceAuth = path, home, scratch, mode, deviceAuth
-		if isolation.UID != 20001 {
+		if isolation == nil || isolation.UID != 20001 {
 			t.Fatalf("isolation = %#v", isolation)
 		}
 
@@ -427,7 +436,7 @@ func TestRunCodexCLISubcommand(t *testing.T) {
 		t.Fatalf("cli args path=%q home=%q scratch=%q mode=%q deviceAuth=%v", gotPath, gotHome, gotScratch, gotMode, gotDeviceAuth)
 	}
 
-	runCodexCLICommand = func(context.Context, string, string, string, string, bool, processIsolationConfig, io.Reader, io.Writer, io.Writer) error {
+	runCodexCLICommand = func(context.Context, string, string, string, string, bool, *processIsolationConfig, io.Reader, io.Writer, io.Writer) error {
 		return assertError("cli failed")
 	}
 	var stderr bytes.Buffer
@@ -503,7 +512,7 @@ func TestRunCodexCLI(t *testing.T) {
 	if err := os.Chmod(scratch, 0o711); err != nil {
 		t.Fatal(err)
 	}
-	if err := runCodexCLI(context.Background(), script, home, scratch, "login", true, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &commandStderr); err != nil {
+	if err := runCodexCLI(context.Background(), script, home, scratch, "login", true, &isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &commandStderr); err != nil {
 		t.Fatalf("runCodexCLI login returned error: %v", err)
 	}
 	raw, err := os.ReadFile(logPath)
@@ -513,10 +522,10 @@ func TestRunCodexCLI(t *testing.T) {
 	if !strings.Contains(string(raw), "login --device-auth:"+home) {
 		t.Fatalf("log = %q", string(raw))
 	}
-	if logoutErr := runCodexCLI(context.Background(), script, "", "", "logout", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); logoutErr == nil {
+	if logoutErr := runCodexCLI(context.Background(), script, "", "", "logout", false, &isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); logoutErr == nil {
 		t.Fatal("runCodexCLI accepted an implicit root home")
 	}
-	if badErr := runCodexCLI(context.Background(), script, home, scratch, "bad", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); badErr == nil {
+	if badErr := runCodexCLI(context.Background(), script, home, scratch, "bad", false, &isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); badErr == nil {
 		t.Fatal("unsupported CLI command succeeded")
 	}
 
@@ -524,7 +533,7 @@ func TestRunCodexCLI(t *testing.T) {
 	if writeErr := os.WriteFile(fail, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.144.1; exit 0; fi\nexit 7\n"), 0o755); writeErr != nil {
 		t.Fatalf("write failing script: %v", writeErr)
 	}
-	if failErr := runCodexCLI(context.Background(), fail, home, scratch, "login", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); failErr == nil || commandExitCode(failErr) == 0 {
+	if failErr := runCodexCLI(context.Background(), fail, home, scratch, "login", false, &isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); failErr == nil || commandExitCode(failErr) == 0 {
 		t.Fatalf("failing cli err=%v code=%d", failErr, commandExitCode(failErr))
 	}
 	pathDir := cliTempDir(t)
@@ -538,10 +547,10 @@ func TestRunCodexCLI(t *testing.T) {
 	t.Setenv("PATH", pathDir)
 	isolation = testCLIProcessIsolation()
 	var defaultStderr bytes.Buffer
-	if defaultPathErr := runCodexCLI(context.Background(), "", home, scratch, "logout", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &defaultStderr); defaultPathErr != nil {
+	if defaultPathErr := runCodexCLI(context.Background(), "", home, scratch, "logout", false, &isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &defaultStderr); defaultPathErr != nil {
 		t.Fatalf("runCodexCLI default path returned error: %v: %s", defaultPathErr, defaultStderr.String())
 	}
-	if missingErr := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), home, scratch, "logout", false, isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); missingErr == nil {
+	if missingErr := runCodexCLI(context.Background(), filepath.Join(pathDir, "missing"), home, scratch, "logout", false, &isolation, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); missingErr == nil {
 		t.Fatal("runCodexCLI accepted missing executable")
 	}
 
@@ -581,7 +590,7 @@ exit 2
 	go func() {
 		defer close(runDone)
 
-		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, scratch, "logout", false, isolation, holdRead, bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
+		errCh <- runCodexCLIWithSignals(context.Background(), signalScript, home, scratch, "logout", false, &isolation, holdRead, bytes.NewBuffer(nil), bytes.NewBuffer(nil), accountSignals)
 	}()
 	t.Cleanup(func() { reapSignalHarness(t, holdWrite, harnessPIDPath, runDone) })
 	waitUntilFor(t, 7*time.Second, func() bool {
@@ -610,10 +619,9 @@ exit 2
 	}
 }
 
-// TestRunCodexCLIRefusesUnownedHome exercises the account-command entrypoint on
-// every unix host, including the unprivileged ones where the full two-principal
-// harness fixture cannot run. The command is refused before it resolves a CLI
-// or spawns anything, so only the entrypoint's own wiring is under test.
+// TestRunCodexCLIRefusesUnownedHome exercises the account-command entrypoint
+// without spawning anything. Off Linux the explicit policy is refused at the
+// platform boundary; Linux additionally reaches the strict ownership check.
 func TestRunCodexCLIRefusesUnownedHome(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "unowned-home")
 	isolation := processIsolationConfig{
@@ -624,12 +632,16 @@ func TestRunCodexCLIRefusesUnownedHome(t *testing.T) {
 		StandaloneStateRoot: home,
 	}
 
-	if err := runCodexCLI(context.Background(), "", "", "", logoutCommand, false, isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err == nil {
+	if err := runCodexCLI(context.Background(), "", "", "", logoutCommand, false, &isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)); err == nil {
 		t.Fatal("runCodexCLI accepted an implicit root home")
 	}
 
-	err := runCodexCLI(context.Background(), "", home, "", logoutCommand, false, isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
-	if err == nil || !strings.Contains(err.Error(), "validate codex writable home") {
+	err := runCodexCLI(context.Background(), "", home, "", logoutCommand, false, &isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+	want := "validate codex writable home"
+	if runtime.GOOS != "linux" {
+		want = "explicit process isolation is supported only on linux"
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("runCodexCLI unowned-home error = %v", err)
 	}
 }
@@ -742,8 +754,7 @@ var testCLIStandaloneStateRoot = sync.OnceValue(func() string {
 // PID namespace shows the suite every process on the box, and 65532 belongs to
 // the host cloudflared service.
 // On Linux an unprivileged runner shifts off its own effective identity as
-// well: the shared arm is selected by uid equality, so a fixture that named the
-// runner's own identity would quietly move the whole suite onto it.
+// well because explicit isolation must name a distinct identity.
 func testCLIIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 || gid == 0 {

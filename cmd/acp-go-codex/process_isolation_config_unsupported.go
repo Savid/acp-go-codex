@@ -5,5 +5,5 @@ package main
 import "fmt"
 
 func loadProcessIsolationConfig(string) (processIsolationConfig, error) {
-	return processIsolationConfig{}, fmt.Errorf("standalone native mode is supported only on linux")
+	return processIsolationConfig{}, fmt.Errorf("explicit process isolation is supported only on linux")
 }

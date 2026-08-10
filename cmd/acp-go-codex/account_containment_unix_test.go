@@ -82,7 +82,7 @@ wait
 	go func() {
 		defer close(runDone)
 
-		errCh <- runCodexCLIWithSignals(ctx, script, home, scratch, loginCommand, false, isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), &commandStderr, signals)
+		errCh <- runCodexCLIWithSignals(ctx, script, home, scratch, loginCommand, false, &isolation, bytes.NewReader(nil), bytes.NewBuffer(nil), &commandStderr, signals)
 	}()
 	t.Cleanup(func() {
 		select {

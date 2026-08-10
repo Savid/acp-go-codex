@@ -44,7 +44,7 @@ var (
 
 func loadProcessIsolationConfig(path string) (processIsolationConfig, error) {
 	if path == "" {
-		return processIsolationConfig{}, fmt.Errorf("-%s is required", processIsolationConfigFlag)
+		return processIsolationConfig{}, fmt.Errorf("-%s must be a nonempty absolute path when supplied", processIsolationConfigFlag)
 	}
 
 	if !filepath.IsAbs(path) {

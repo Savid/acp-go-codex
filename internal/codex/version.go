@@ -12,27 +12,31 @@ const codexVersionArgument = "--version"
 // VersionProbeOptions describes one independently contained Codex discovery
 // root. Scratch is a fresh generation owned only by this probe.
 type VersionProbeOptions struct {
-	CLIPath          string
-	CodexHome        string
-	WritableHome     string
-	Scratch          string
-	ScratchParent    string
-	DarwinBestEffort bool
-	Env              map[string]string
-	ProcessIsolation *ProcessIsolation
+	CLIPath             string
+	CodexHome           string
+	WritableHome        string
+	Scratch             string
+	ScratchParent       string
+	DarwinBestEffort    bool
+	Env                 map[string]string
+	ImplicitEnvironment map[string]string
+	ProcessIsolation    *ProcessIsolation
 }
 
 var versionSupervisorCommand = supervisorCommand
 var versionStartProcess = startProcess
 
-// ProbeVersion runs codex --version through its own guardian/liveness pair.
+// ProbeVersion runs codex --version through the configured process backend.
 func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, error) {
-	nativeEnv, err := buildMergedEnv(Options{CodexHome: options.CodexHome, Env: options.Env, ProcessIsolation: options.ProcessIsolation})
+	nativeEnv, err := buildMergedEnv(Options{
+		CodexHome: options.CodexHome, Env: options.Env, ImplicitEnvironment: options.ImplicitEnvironment,
+		ProcessIsolation: options.ProcessIsolation,
+	})
 	if err != nil {
 		return "", err
 	}
 
-	path, err := resolveCodexPath(options.CLIPath, nativeEnv)
+	path, err := resolveCodexPath(options.CLIPath, nativeEnv, options.ProcessIsolation)
 	if err != nil {
 		return "", err
 	}
@@ -69,7 +73,11 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	// guardian a channel that is already closed before it starts.
 	controlRead, controlWrite, err := supervisorPipe()
 	if err != nil {
-		return "", fmt.Errorf("open codex CLI version probe control input: %w", err)
+		return "", errors.Join(
+			fmt.Errorf("open codex CLI version probe control input: %w", err),
+			proof.closeInherited(),
+			proof.releaseOrdinaryHomeLock(),
+		)
 	}
 
 	defer controlRead.Close()
@@ -81,9 +89,11 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 
 	waiter, err := versionStartProcess(cmd)
 	if err != nil {
-		_ = proof.closeInherited()
-
-		return "", fmt.Errorf("start codex CLI version probe: %w", err)
+		return "", errors.Join(
+			fmt.Errorf("start codex CLI version probe: %w", err),
+			proof.closeInherited(),
+			proof.releaseOrdinaryHomeLock(),
+		)
 	}
 
 	if err := proof.closeInherited(); err != nil {
@@ -92,7 +102,10 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 		waiter.start()
 		<-waiter.result()
 
-		return "", fmt.Errorf("close inherited supervisor config: %w", err)
+		return "", errors.Join(
+			fmt.Errorf("close inherited supervisor config: %w", err),
+			proof.releaseOrdinaryHomeLock(),
+		)
 	}
 
 	waiter.start()

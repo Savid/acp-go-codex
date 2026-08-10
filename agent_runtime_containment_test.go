@@ -16,7 +16,10 @@ import (
 
 func nativeContainmentTestOptions(options ...Option) []Option {
 	if runtime.GOOS == "darwin" {
-		return append(options, WithDarwinBestEffortContainment())
+		return append(options,
+			func(options *Options) { options.ProcessIsolation = nil },
+			WithDarwinBestEffortContainment(),
+		)
 	}
 
 	return options
@@ -83,10 +86,7 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 			observed = append(observed, mode)
 		},
 	}))
-	want := RuntimeContainmentUnavailable
-	if runtime.GOOS == "linux" {
-		want = RuntimeContainmentAuthoritative
-	}
+	want := RuntimeContainmentSharedIdentity
 	if got := defaultAgent.ContainmentMode(); got != want {
 		t.Fatalf("default mode = %q, want %q", got, want)
 	}
@@ -137,64 +137,36 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	}
 }
 
-// TestContainmentModeReportsASharedAgentIdentity proves the report names the
-// boundary the launch actually has. A supervisor that runs the agent under its
-// own identity still proves whole-tree lifecycle, but there is no credential
-// separation between it and the agent, so reporting "authoritative" would
-// overstate what an operator is being given. Root can never reach the shared
-// report, and no platform but Linux has the boundary to weaken.
-func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
-	originalGOOS, originalUID := containmentGOOS, containmentEffectiveUID
-	t.Cleanup(func() {
-		containmentGOOS = originalGOOS
-		containmentEffectiveUID = originalUID
-	})
+func TestContainmentModeReportsOrdinarySharedIdentity(t *testing.T) {
+	originalGOOS := containmentGOOS
+	t.Cleanup(func() { containmentGOOS = originalGOOS })
 
-	containmentEffectiveUID = func() int { return 1000 }
-	shared := Options{ProcessIsolation: &ProcessIsolation{UID: 1000, GID: 1000}}
-	distinct := Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}
+	explicit := Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}
 
 	containmentGOOS = "linux"
-	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(shared))
-	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(distinct))
-	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(Options{}))
+	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(explicit))
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
 
-	// Decision 2 judges the boundary on the UID alone, so an equal uid with a
-	// different gid is still the shared shape.
-	require.Equal(t, RuntimeContainmentSharedIdentity,
-		containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 1000, GID: 1001}}))
-
-	containmentEffectiveUID = func() int { return 0 }
-	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(shared))
-	require.Equal(t, RuntimeContainmentAuthoritative,
-		containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 0, GID: 0}}))
-
-	containmentEffectiveUID = func() int { return 1000 }
 	containmentGOOS = "darwin"
-	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(shared))
-	require.Equal(t, RuntimeContainmentBestEffort,
-		containmentMode(Options{ProcessIsolation: shared.ProcessIsolation, DarwinBestEffortContainment: true}))
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
+	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(explicit))
+	require.Equal(t, RuntimeContainmentBestEffort, containmentMode(Options{DarwinBestEffortContainment: true}))
+	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(Options{
+		DarwinBestEffortContainment: true,
+		ProcessIsolation:            explicit.ProcessIsolation,
+	}))
 }
 
-// TestSharedIdentityAgentKeepsItsLifecycleSurfaces proves the new report is not
-// read as a lost boundary. The provider inventory is published only where the
-// containment proof accounts for every descendant, and the shared arm's
-// subreaper tree accounts for exactly the same set as the trusted one.
-func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
-	originalGOOS, originalUID := containmentGOOS, containmentEffectiveUID
-	t.Cleanup(func() {
-		containmentGOOS = originalGOOS
-		containmentEffectiveUID = originalUID
-	})
+func TestSharedIdentityAgentSuppressesAuthoritativeLifecycleSurfaces(t *testing.T) {
+	originalGOOS := containmentGOOS
+	t.Cleanup(func() { containmentGOOS = originalGOOS })
 
 	containmentGOOS = "linux"
-	containmentEffectiveUID = func() int { return 1000 }
 
 	var observed []RuntimeContainmentMode
 
 	snapshots := 0
 	agent := NewAgent(
-		WithProcessIsolation(ProcessIsolation{UID: 1000, GID: 1000}),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
 				observed = append(observed, mode)
@@ -208,8 +180,9 @@ func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
 
 	observer := agent.newProcessSnapshotObserver(t.Context())
 	observer.Observe(t.Context(), 7)
-	require.Equal(t, 1, snapshots)
+	require.Zero(t, snapshots)
 
+	require.False(t, RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle())
 	require.False(t, RuntimeContainmentBestEffort.provesWholeTreeLifecycle())
 	require.False(t, RuntimeContainmentUnavailable.provesWholeTreeLifecycle())
 }
@@ -219,16 +192,16 @@ func TestContainmentModeSelections(t *testing.T) {
 	t.Cleanup(func() { containmentGOOS = original })
 
 	containmentGOOS = "linux"
-	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Linux mode = %q", got)
 	}
 	containmentGOOS = "windows"
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Windows mode = %q", got)
 	}
 
 	containmentGOOS = "darwin"
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Darwin default mode = %q", got)
 	}
 	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentBestEffort {
@@ -237,9 +210,19 @@ func TestContainmentModeSelections(t *testing.T) {
 	if err := validateContainmentOptions(Options{DarwinBestEffortContainment: true}); err != nil {
 		t.Fatal(err)
 	}
+	if err := validateContainmentOptions(Options{ProcessIsolation: &ProcessIsolation{}}); err == nil ||
+		!strings.Contains(err.Error(), "supported only on linux") {
+		t.Fatalf("Darwin explicit isolation error = %v", err)
+	}
+	if err := validateContainmentOptions(Options{
+		DarwinBestEffortContainment: true,
+		ProcessIsolation:            &ProcessIsolation{},
+	}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("combined Darwin and explicit isolation error = %v", err)
+	}
 
 	containmentGOOS = "freebsd"
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("unsupported mode = %q", got)
 	}
 	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentUnavailable {

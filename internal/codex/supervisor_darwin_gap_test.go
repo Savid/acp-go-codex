@@ -861,10 +861,16 @@ func TestSupervisorBootstrapInheritedDescriptors(t *testing.T) {
 		t.Setenv(supervisorModeEnv, supervisorModeLiveness)
 		supervisorInput = strings.NewReader("")
 		supervisorOutput = io.Discard
+		nativeEnv := make([]string, 0, len(os.Environ()))
+		for _, entry := range os.Environ() {
+			if !strings.HasPrefix(entry, supervisorModeEnv+"=") {
+				nativeEnv = append(nativeEnv, entry)
+			}
+		}
 
 		root := t.TempDir()
 		configFile, err := writeSupervisorConfig(root, supervisorConfig{
-			NativePath: filepath.Join(root, "missing-native"), NativeEnv: os.Environ(),
+			NativePath: filepath.Join(root, "missing-native"), NativeEnv: nativeEnv,
 			Home: filepath.Join(root, "home"), Scratch: root, ScratchParent: filepath.Dir(root),
 			LifecycleKind: lifecycleRuntime, DarwinBestEffort: true,
 			Started: filepath.Join(root, "started"), Completion: filepath.Join(root, "complete"),

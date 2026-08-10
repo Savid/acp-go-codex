@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -15,8 +16,8 @@ import (
 // Option configures the Codex ACP agent.
 type Option func(*Options)
 
-// ProcessIsolation defines the complete operating-system identity and base
-// environment inherited by every native Codex process.
+// ProcessIsolation defines an explicit operating-system identity and complete
+// base environment for every native Codex process.
 type ProcessIdentityLockCapability interface {
 	Duplicate() (*os.File, error)
 }
@@ -75,12 +76,9 @@ type RuntimeContainmentMode string
 const (
 	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
 	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity is the boundary a supervisor proves when
-	// the native identity is the identity it already runs as. The subreaper
-	// tree, the descendant reaping and the process-group teardown are the
-	// authoritative ones, so whole-tree lifecycle is still proven; what is
-	// absent is the credential separation between the supervisor and the agent,
-	// and the host-global record of who holds the identity.
+	// RuntimeContainmentSharedIdentity reports ordinary execution as the
+	// adapter's current identity. It carries no provider-descendant inventory,
+	// whole-tree quiescence, or credential-separation claim.
 	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
 	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
 )
@@ -129,8 +127,8 @@ type Options struct {
 	// Env is merged into launched Codex process environments. Managed config
 	// and identity root variables are rejected.
 	Env map[string]string
-	// ProcessIsolation is the mandatory process boundary for every native
-	// launch. Configure it with WithProcessIsolation.
+	// ProcessIsolation is an optional hardening boundary for native launches.
+	// Nil runs Codex as the adapter's current identity.
 	ProcessIsolation *ProcessIsolation
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
@@ -195,6 +193,7 @@ type Options struct {
 
 	clientFactory       func(context.Context, codex.Options) (codex.Client, error)
 	customClientFactory bool
+	implicitEnvironment map[string]string
 }
 
 func applyOptions(opts []Option) Options {
@@ -204,6 +203,7 @@ func applyOptions(opts []Option) Options {
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
 		ImageLimits:             defaultImageLimits(),
+		implicitEnvironment:     captureAmbientEnvironment(),
 		clientFactory: func(ctx context.Context, options codex.Options) (codex.Client, error) {
 			return codex.NewAppServerClient(ctx, options)
 		},
@@ -214,6 +214,25 @@ func applyOptions(opts []Option) Options {
 	}
 
 	return options
+}
+
+func captureAmbientEnvironment() map[string]string {
+	environment := make(map[string]string)
+
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && key != "" {
+			environment[key] = value
+		}
+	}
+
+	if environment[managedHomeEnv] == "" {
+		if home, err := runtimeUserHomeDir(); err == nil && home != "" {
+			environment[managedHomeEnv] = home
+		}
+	}
+
+	return environment
 }
 
 func withClientFactory(factory func(context.Context, codex.Options) (codex.Client, error)) Option {
@@ -251,9 +270,9 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation requires every native process to run as the supplied
-// uid/gid with no supplementary groups. BaseEnvironment is the complete native
-// environment base; the adapter never overlays os.Environ.
+// WithProcessIsolation explicitly hardens every native process with the
+// supplied uid/gid and no supplementary groups. BaseEnvironment is the
+// complete native environment base; the adapter never overlays os.Environ.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
 	return func(options *Options) {
 		cloned := isolation

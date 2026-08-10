@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode"
@@ -14,9 +15,26 @@ import (
 
 const standaloneAuthorityRoot = "/var/lib/acp-go/agent-identities"
 
+const processIsolationLinux = "linux"
+const processIsolationWindows = "windows"
+const processIsolationDarwin = "darwin"
+
+const (
+	ordinaryWindowsExtensionCOM = ".com"
+	ordinaryWindowsExtensionEXE = ".exe"
+	ordinaryWindowsExtensionBAT = ".bat"
+	ordinaryWindowsExtensionCMD = ".cmd"
+)
+
+var (
+	processIsolationGOOS  = runtime.GOOS
+	processEnviron        = os.Environ
+	ordinaryExecutableAbs = filepath.Abs
+)
+
 func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation == nil {
-		return errors.New("process isolation is required")
+		return nil
 	}
 
 	if isolation.UID == 0 || isolation.GID == 0 {
@@ -31,7 +49,21 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return fmt.Errorf("validate process isolation base environment: %w", err)
 	}
 
+	for key := range isolation.BaseEnvironment {
+		if privateProcessEnvironmentKey(key) {
+			return fmt.Errorf("process isolation base environment key %q is reserved", key)
+		}
+	}
+
 	return errors.Join(processIsolationValidateIdentity(isolation), validateProcessIsolationPlatform())
+}
+
+func validateProcessIsolationPlatform() error {
+	if processIsolationGOOS != processIsolationLinux {
+		return errors.New("explicit process isolation is supported only on linux")
+	}
+
+	return nil
 }
 
 // Seam for the platform's identity disposition validator. Only Linux owns an
@@ -42,14 +74,6 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 // is the only one there is off Linux and cannot be reached here. Tests swap
 // this for the answer every other platform gives so that check can be proved.
 var processIsolationValidateIdentity = validateProcessIsolationIdentity
-
-// sharedIdentitySupervisorRemedy states what an operator can change when the
-// supervisor was asked to launch the native process under the very identity it
-// already runs as and the shape it was handed describes something else. There
-// is no privilege boundary to cross in that deployment, so the two answers are
-// to give the supervisor one, or to describe the launch as what it is.
-const sharedIdentitySupervisorRemedy = "run the supervisor as root to isolate the agent identity, " +
-	"or launch the agent under the identity the supervisor already holds"
 
 func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	identityLock := isolation.IdentityLock != nil
@@ -72,20 +96,6 @@ func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	if identityLock {
 		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
 			return errors.New("borrowed process identity forbids standalone owner fields")
-		}
-
-		return nil
-	}
-
-	// A native identity the supervisor already holds cannot be recorded as a
-	// standalone one: the durable record proves the identity vacant across every
-	// live task, and the supervisor asking for it is such a task. No
-	// capabilities and no standalone fields is therefore the canonical shape,
-	// and fields promising a record this arm never writes are refused.
-	if sharedProcessIdentity(isolation) {
-		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
-			return errors.New("standalone owner fields describe an identity the supervisor already holds; " +
-				sharedIdentitySupervisorRemedy)
 		}
 
 		return nil
@@ -178,14 +188,30 @@ func environmentList(values map[string]string) []string {
 }
 
 func buildProcessEnvironment(isolation *ProcessIsolation, overlays ...map[string]string) ([]string, error) {
+	return buildProcessEnvironmentFrom(isolation, nil, overlays...)
+}
+
+func buildProcessEnvironmentFrom(
+	isolation *ProcessIsolation,
+	implicitEnvironment map[string]string,
+	overlays ...map[string]string,
+) ([]string, error) {
 	if err := validateProcessIsolation(isolation); err != nil {
 		return nil, err
 	}
 
-	values := make(map[string]string, len(isolation.BaseEnvironment))
-	for key, value := range isolation.BaseEnvironment {
-		values[key] = value
+	base := implicitEnvironment
+	if isolation != nil {
+		base = isolation.BaseEnvironment
+	} else if base == nil {
+		base = captureProcessEnvironment()
 	}
+
+	if isolation == nil {
+		base = withoutManagedRootOverrides(base)
+	}
+
+	values := cloneEnvironment(base)
 
 	for _, overlay := range overlays {
 		if err := validateEnvironmentMap(overlay); err != nil {
@@ -197,13 +223,66 @@ func buildProcessEnvironment(isolation *ProcessIsolation, overlays ...map[string
 		}
 	}
 
-	delete(values, supervisorModeEnv)
+	for key := range values {
+		if privateProcessEnvironmentKey(key) {
+			delete(values, key)
+		}
+	}
 
-	if err := validateProcessSearchPath(values["PATH"]); err != nil {
-		return nil, err
+	if isolation != nil {
+		if err := validateProcessSearchPath(values["PATH"]); err != nil {
+			return nil, err
+		}
 	}
 
 	return environmentList(values), nil
+}
+
+func privateProcessEnvironmentKey(key string) bool {
+	upperKey := strings.ToUpper(key)
+
+	return strings.HasPrefix(upperKey, privateAdapterEnvPrefix) ||
+		upperKey == DarwinRuntimeIDEnv || upperKey == DarwinScratchRootEnv
+}
+
+func captureProcessEnvironment() map[string]string {
+	return environmentMap(processEnviron())
+}
+
+func cloneEnvironment(environment map[string]string) map[string]string {
+	if environment == nil {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(environment))
+	for key, value := range environment {
+		cloned[key] = value
+	}
+
+	return cloned
+}
+
+func ordinaryProcessBackend(isolation *ProcessIsolation, darwinBestEffort bool) bool {
+	return isolation == nil && processIsolationGOOS != processIsolationLinux && !darwinBestEffort
+}
+
+func validateSupervisorIdentityDisposition(config supervisorConfig) error {
+	if !config.OrdinaryExecution {
+		return nil
+	}
+
+	uid, gid, err := currentProcessIdentity()
+	if err != nil {
+		return err
+	}
+
+	if config.IsolationUID != uid || config.IsolationGID != gid ||
+		config.IdentityLock || config.AuthorityDomain || config.StandaloneAuthority ||
+		config.StandaloneOwnerID != "" || config.StandaloneStateRoot != "" {
+		return errors.New("codex ordinary supervisor identity disposition is invalid")
+	}
+
+	return nil
 }
 
 func withoutManagedRootOverrides(env map[string]string) map[string]string {
@@ -280,4 +359,127 @@ func resolveProcessExecutable(path string, env []string) (string, error) {
 	}
 
 	return "", fmt.Errorf("find %s in process isolation PATH: %w", path, exec.ErrNotFound)
+}
+
+func resolveOrdinaryProcessExecutable(path string, env []string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("executable path is empty")
+	}
+
+	if strings.ContainsAny(path, `/\`) {
+		absolute, err := ordinaryExecutableAbs(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve executable %q: %w", path, err)
+		}
+
+		return resolveOrdinaryExecutableCandidate(absolute, env)
+	}
+
+	values := environmentMap(env)
+
+	search := ordinaryEnvironmentValue(values, "PATH")
+	if search == "" {
+		return "", fmt.Errorf("find %s: PATH is empty", path)
+	}
+
+	for _, directory := range filepath.SplitList(search) {
+		if directory == "" {
+			directory = "."
+		}
+
+		candidate, err := ordinaryExecutableAbs(filepath.Join(directory, path))
+		if err != nil {
+			return "", fmt.Errorf("find %s in PATH: %w", path, err)
+		}
+
+		resolved, err := resolveOrdinaryExecutableCandidate(candidate, env)
+		if err == nil {
+			return resolved, nil
+		}
+
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, exec.ErrNotFound) {
+			return "", fmt.Errorf("find %s in PATH: %w", path, err)
+		}
+	}
+
+	return "", fmt.Errorf("find %s in PATH: %w", path, exec.ErrNotFound)
+}
+
+func ordinaryEnvironmentValue(values map[string]string, key string) string {
+	if value, ok := values[key]; ok || processIsolationGOOS != processIsolationWindows {
+		return value
+	}
+
+	for candidate, value := range values {
+		if strings.EqualFold(candidate, key) {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func resolveOrdinaryExecutableCandidate(path string, env []string) (string, error) {
+	if processIsolationGOOS != processIsolationWindows {
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+
+		if info.IsDir() || info.Mode()&0o111 == 0 {
+			return "", exec.ErrNotFound
+		}
+
+		return path, nil
+	}
+
+	values := environmentMap(env)
+	extensions := ordinaryWindowsExecutableExtensions(ordinaryEnvironmentValue(values, "PATHEXT"))
+
+	candidates := []string{path}
+	if filepath.Ext(path) == "" {
+		for _, extension := range extensions {
+			candidates = append(candidates, path+extension)
+		}
+	}
+
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+
+	return "", exec.ErrNotFound
+}
+
+func ordinaryWindowsExecutableExtensions(value string) []string {
+	if value == "" {
+		return []string{
+			ordinaryWindowsExtensionCOM,
+			ordinaryWindowsExtensionEXE,
+			ordinaryWindowsExtensionBAT,
+			ordinaryWindowsExtensionCMD,
+		}
+	}
+
+	extensions := make([]string, 0)
+
+	for _, extension := range strings.Split(value, ";") {
+		if extension == "" {
+			continue
+		}
+
+		if extension[0] != '.' {
+			extension = "." + extension
+		}
+
+		extensions = append(extensions, strings.ToLower(extension))
+	}
+
+	return extensions
 }

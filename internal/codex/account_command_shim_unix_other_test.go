@@ -4,7 +4,7 @@ package codex
 
 import (
 	"context"
-	"os"
+	"errors"
 	"os/exec"
 	"testing"
 
@@ -27,31 +27,23 @@ func TestRunAccountCommandHandsTheBrowserShimToTheNativePrincipal(t *testing.T) 
 	}
 
 	require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), ScratchDir: parent,
-		Mode: accountCommandLogin, ProcessIsolation: testProcessIsolation(),
+		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), ScratchDir: parent,
+		Mode: accountCommandLogin,
 	}))
 	require.NotEmpty(t, shimDir)
 }
 
-func TestRunAccountCommandRefusesAShimHandoffToAChangedPrincipal(t *testing.T) {
+func TestRunAccountCommandRefusesFailedBrowserShimHandoff(t *testing.T) {
 	restoreAccountCommandHooks(t)
 	restoreBrowserShimHooks(t)
 
 	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return minCodexVersion, nil }
-
-	isolation := testProcessIsolation()
-	// The writable home was validated against the launch principal; a policy
-	// that changes identity before the generated shim is handed off must fail
-	// closed rather than leave the shim owned by the wrong principal.
-	browserShimMkdirTemp = func(parent string, pattern string) (string, error) {
-		isolation.UID++
-		isolation.GID++
-
-		return os.MkdirTemp(parent, pattern)
+	browserShimHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error {
+		return errors.New("handoff failed")
 	}
 
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: testNativeOwnedTempDir(t), ScratchDir: testTraversableTempDir(t),
-		Mode: accountCommandLogin, ProcessIsolation: isolation,
-	}), "ownership handoff is unsupported")
+		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), ScratchDir: testTraversableTempDir(t),
+		Mode: accountCommandLogin,
+	}), "handoff failed")
 }

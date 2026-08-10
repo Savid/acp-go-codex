@@ -83,6 +83,31 @@ type runtimeRecordingClient struct {
 	closeCount int
 }
 
+func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
+	const canary = "ACP_GO_CODEX_IMPLICIT_ENV_TEST"
+	t.Setenv(canary, "captured")
+
+	var launched codex.Options
+	agent := NewAgent(
+		WithScratchDir(t.TempDir()),
+		withClientFactory(func(_ context.Context, options codex.Options) (codex.Client, error) {
+			launched = options
+
+			return newRuntimeRecordingClient(), nil
+		}),
+	)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+	t.Setenv(canary, "mutated")
+
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	require.Nil(t, launched.ProcessIsolation)
+	require.Equal(t, "captured", launched.ImplicitEnvironment[canary])
+
+	launched.ImplicitEnvironment[canary] = "caller mutation"
+	require.Equal(t, "captured", agent.options.implicitEnvironment[canary])
+}
+
 func newRuntimeRecordingClient() *runtimeRecordingClient {
 	return &runtimeRecordingClient{spyCodexClient: newSpyCodexClient()}
 }
@@ -1016,8 +1041,8 @@ func TestRuntimeFailureAndHelperBranches(t *testing.T) {
 }
 
 // The writable home a native launch is proven against resolves from the
-// explicit option first, then the pinned runtime environment, then the process
-// environment, and finally the caller's home directory.
+// explicit option first, then the pinned runtime environment, then the
+// construction-time environment and its construction-time home fallback.
 func TestResolvedCodexHomePrecedence(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/process-home")
 
@@ -1031,7 +1056,8 @@ func TestResolvedCodexHomePrecedence(t *testing.T) {
 	home, err := runtimeUserHomeDir()
 	require.NoError(t, err)
 	t.Setenv("CODEX_HOME", "")
-	require.Equal(t, filepath.Join(home, ".codex"), agent.resolvedCodexHomeForEnv(nil))
+	require.Equal(t, filepath.Clean("/process-home"), agent.resolvedCodexHomeForEnv(nil), "the agent must retain its captured environment")
+	require.Equal(t, filepath.Join(home, ".codex"), NewAgent().resolvedCodexHomeForEnv(nil))
 }
 
 func TestRuntimeEnvironmentPinIsAtomicAndImmutable(t *testing.T) {
@@ -1240,6 +1266,10 @@ func TestRuntimeRemainingResourceAndEpochBranches(t *testing.T) {
 
 	oldHome := runtimeUserHomeDir
 	t.Cleanup(func() { runtimeUserHomeDir = oldHome })
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("HOME", "")
+	runtimeUserHomeDir = func() (string, error) { return "/captured-home", nil }
+	require.Equal(t, "/captured-home/.codex", NewAgent().resolvedCodexHome())
 	runtimeUserHomeDir = func() (string, error) { return "", errors.New("home failed") }
 	require.Empty(t, NewAgent().resolvedCodexHome())
 	runtimeUserHomeDir = func() (string, error) { return "", nil }

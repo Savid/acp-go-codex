@@ -123,7 +123,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	model := flags.String("model", "", "default Codex model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
-	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "absolute path to the required root-owned mode-0600 Linux child-isolation policy")
+	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "optional absolute path to a root-owned mode-0600 Linux child-isolation policy")
 	allowAccountLogout := flags.Bool("codex-allow-account-logout", false, "permit ACP logout to mutate adapter-owned Codex auth")
 
 	seedFiles := &seedFileFlag{}
@@ -142,24 +142,24 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return 0
 	}
 
-	if *isolationConfigPath == "" {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex: -%s is required for standalone native mode\n", processIsolationConfigFlag)
+	var isolation *processIsolationConfig
 
-		return 2
-	}
+	if *isolationConfigPath != "" {
+		loaded, err := processIsolationConfigLoader(*isolationConfigPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-codex: process isolation: %v\n", err)
 
-	isolation, err := processIsolationConfigLoader(*isolationConfigPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex: process isolation: %v\n", err)
+			return 1
+		}
 
-		return 1
-	}
+		isolation = &loaded
 
-	*codexHome, err = resolvedCodexIsolationHome(*codexHome, isolation, false)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex: native home: %v\n", err)
+		*codexHome, err = resolvedCodexIsolationHome(*codexHome, loaded, false)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-codex: native home: %v\n", err)
 
-		return 1
+			return 1
+		}
 	}
 
 	logger := slog.New(slog.DiscardHandler)
@@ -199,14 +199,17 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		codexacp.WithDefaultModel(*model),
 		codexacp.WithCodexAllowAccountLogout(*allowAccountLogout),
 		codexacp.WithLogger(logger),
-		codexacp.WithProcessIsolation(codexacp.ProcessIsolation{
+	)
+
+	if isolation != nil {
+		serveOptions = append(serveOptions, codexacp.WithProcessIsolation(codexacp.ProcessIsolation{
 			UID:                 isolation.UID,
 			GID:                 isolation.GID,
 			BaseEnvironment:     isolation.BaseEnvironment,
 			StandaloneOwnerID:   isolation.StandaloneOwnerID,
 			StandaloneStateRoot: isolation.StandaloneStateRoot,
-		}),
-	)
+		}))
+	}
 
 	if len(seedFiles.files) > 0 {
 		serveOptions = append(serveOptions, codexacp.WithSeedFiles(seedFiles.files))
@@ -247,31 +250,42 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 	codexPath := flags.String("path", "", "path to codex CLI")
 	codexHome := flags.String("home", "", "Codex home directory")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral account-command scratch; empty means the system temp directory")
-	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "absolute path to the required root-owned mode-0600 Linux child-isolation policy")
+	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "optional absolute path to a root-owned mode-0600 Linux child-isolation policy")
 
 	deviceAuth := flags.Bool("codex-device-auth", false, "use Codex device auth for login")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
 
-	if *isolationConfigPath == "" {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: -%s is required for native account mode\n", mode, processIsolationConfigFlag)
+	var isolation *processIsolationConfig
 
-		return 2
+	if *isolationConfigPath != "" {
+		loaded, err := processIsolationConfigLoader(*isolationConfigPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: process isolation: %v\n", mode, err)
+
+			return 1
+		}
+
+		isolation = &loaded
+
+		*codexHome, err = resolvedCodexIsolationHome(*codexHome, loaded, true)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: native home: %v\n", mode, err)
+
+			return 1
+		}
 	}
 
-	isolation, err := processIsolationConfigLoader(*isolationConfigPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: process isolation: %v\n", mode, err)
+	if isolation == nil {
+		var err error
 
-		return 1
-	}
+		*codexHome, err = resolvedCodexCLIHome(*codexHome)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: native home: %v\n", mode, err)
 
-	*codexHome, err = resolvedCodexIsolationHome(*codexHome, isolation, true)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: native home: %v\n", mode, err)
-
-		return 1
+			return 1
+		}
 	}
 
 	if err := runCodexCLICommand(ctx, *codexPath, *codexHome, *scratchDir, mode, *deviceAuth, isolation, stdin, stdout, stderr); err != nil {
@@ -283,7 +297,7 @@ func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, 
 	return 0
 }
 
-func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratchDir string, mode string, deviceAuth bool, isolation processIsolationConfig, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratchDir string, mode string, deviceAuth bool, isolation *processIsolationConfig, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	home, err := resolvedCodexCLIHome(codexHome)
 	if err != nil {
 		return err
@@ -304,30 +318,34 @@ func runCodexCLIWithSignals(
 	scratchDir string,
 	mode string,
 	deviceAuth bool,
-	isolation processIsolationConfig,
+	isolation *processIsolationConfig,
 	stdin io.Reader,
 	stdout io.Writer,
 	stderr io.Writer,
 	signals <-chan os.Signal,
 ) error {
-	return codex.RunAccountCommand(ctx, codex.AccountCommandOptions{
+	options := codex.AccountCommandOptions{
 		CLIPath:    codexPath,
 		CodexHome:  home,
 		ScratchDir: scratchDir,
 		Mode:       mode,
 		DeviceAuth: deviceAuth,
-		ProcessIsolation: &codex.ProcessIsolation{
+		Stdin:      stdin,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		Signals:    signals,
+	}
+	if isolation != nil {
+		options.ProcessIsolation = &codex.ProcessIsolation{
 			UID:                 isolation.UID,
 			GID:                 isolation.GID,
 			BaseEnvironment:     isolation.BaseEnvironment,
 			StandaloneOwnerID:   isolation.StandaloneOwnerID,
 			StandaloneStateRoot: isolation.StandaloneStateRoot,
-		},
-		Stdin:   stdin,
-		Stdout:  stdout,
-		Stderr:  stderr,
-		Signals: signals,
-	})
+		}
+	}
+
+	return codex.RunAccountCommand(ctx, options)
 }
 
 func resolvedCodexCLIHome(configured string) (string, error) {

@@ -4,8 +4,12 @@ package codex
 
 import "os/exec"
 
-func startProcess(*exec.Cmd) (*supervisorWaiter, error) {
-	return nil, validateProcessIsolationPlatform()
+func startProcess(cmd *exec.Cmd) (*supervisorWaiter, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return newSupervisorWaiter(cmd, true), nil
 }
 
 func killProcess(cmd *exec.Cmd) error {

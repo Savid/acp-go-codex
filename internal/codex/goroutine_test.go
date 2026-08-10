@@ -2,6 +2,9 @@ package codex
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"os"
 	"testing"
 
 	"go.uber.org/goleak"
@@ -27,5 +30,24 @@ func TestHandleCodexGoroutinePanicBranches(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	if os.Getenv("ACP_GO_CODEX_TEST_WINDOWS_NATIVE") == "1" {
+		if len(os.Args) < 2 {
+			os.Exit(2)
+		}
+
+		switch os.Args[1] {
+		case codexVersionArgument:
+			_, _ = fmt.Fprintln(os.Stdout, "codex-cli "+minCodexVersion)
+		case accountCommandLogout:
+		case appServerCommand:
+			_, _ = io.Copy(io.Discard, os.Stdin)
+		default:
+			os.Exit(2)
+		}
+
+		os.Exit(0)
+	}
+
+	processIsolationGOOS = processIsolationLinux
 	goleak.VerifyTestMain(m)
 }

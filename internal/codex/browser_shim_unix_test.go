@@ -16,7 +16,6 @@ import (
 )
 
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	restoreAccountCommandHooks(t)
 
 	marker := filepath.Join(t.TempDir(), "launched")
@@ -56,19 +55,18 @@ exit 0
 	}
 
 	require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath: cli, CodexHome: testNativeOwnedTempDir(t), ScratchDir: testTraversableTempDir(t),
-		Mode: accountCommandLogin, ProcessIsolation: testProcessIsolation(),
+		CLIPath: cli, CodexHome: t.TempDir(), ScratchDir: testTraversableTempDir(t),
+		Mode: accountCommandLogin,
 	}))
 	require.NoFileExists(t, marker)
 }
 
 func TestLogoutRunsWithoutABrowserShim(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	restoreAccountCommandHooks(t)
 	restoreBrowserShimHooks(t)
 
 	parent := testTraversableTempDir(t)
-	home := testNativeOwnedTempDir(t)
+	home := t.TempDir()
 
 	browserShimMkdirTemp = func(string, string) (string, error) {
 		t.Error("logout built a browser shim")
@@ -98,9 +96,9 @@ func TestLogoutRunsWithoutABrowserShim(t *testing.T) {
 
 	require.NoError(t, RunAccountCommand(context.Background(), AccountCommandOptions{
 		CLIPath: "/usr/bin/true", CodexHome: home, ScratchDir: parent, Mode: accountCommandLogout,
-		ProcessIsolation: testProcessIsolation(),
 	}))
-	require.ElementsMatch(t, upsertEnv(os.Environ(), envCodexHome, home), childEnv)
+	require.Equal(t, home, environmentMap(childEnv)[envCodexHome])
+	require.NotContains(t, environmentMap(childEnv), browserShimBrowserEnv)
 }
 
 func TestRunAccountCommandRefusesWithoutABrowserShim(t *testing.T) {
@@ -109,11 +107,10 @@ func TestRunAccountCommandRefusesWithoutABrowserShim(t *testing.T) {
 
 	browserShimMkdirTemp = func(string, string) (string, error) { return "", errors.New("shim parent") }
 	require.ErrorContains(t, RunAccountCommand(context.Background(), AccountCommandOptions{
-		CLIPath:          writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.1\n"),
-		CodexHome:        testNativeOwnedTempDir(t),
-		ScratchDir:       testTraversableTempDir(t),
-		Mode:             accountCommandLogin,
-		ProcessIsolation: testProcessIsolation(),
+		CLIPath:    writeAccountCommandScript(t, "#!/bin/sh\necho codex-cli 0.144.1\n"),
+		CodexHome:  t.TempDir(),
+		ScratchDir: testTraversableTempDir(t),
+		Mode:       accountCommandLogin,
 	}), "create browser shim directory")
 }
 
@@ -197,9 +194,11 @@ func restoreBrowserShimHooks(t *testing.T) {
 
 	mkdirTemp := browserShimMkdirTemp
 	writeFile := browserShimWriteFile
+	handoff := browserShimHandoffGeneratedNativeTree
 
 	t.Cleanup(func() {
 		browserShimMkdirTemp = mkdirTemp
 		browserShimWriteFile = writeFile
+		browserShimHandoffGeneratedNativeTree = handoff
 	})
 }

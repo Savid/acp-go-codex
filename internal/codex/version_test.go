@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/savid/acp-go-codex/internal/homelock"
 )
 
 func TestProbeVersionFailureBranches(t *testing.T) {
@@ -20,6 +22,11 @@ func TestProbeVersionFailureBranches(t *testing.T) {
 		versionStartProcess = originalStart
 		supervisorPipe = originalPipe
 	})
+	if _, err := ProbeVersion(context.Background(), VersionProbeOptions{
+		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1},
+	}); err == nil || !strings.Contains(err.Error(), "base environment") {
+		t.Fatalf("version environment error = %v", err)
+	}
 
 	t.Setenv("PATH", "")
 	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{})); err == nil {
@@ -139,5 +146,53 @@ func TestProbeVersionSuccessAndValidation(t *testing.T) {
 	}
 	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); err == nil {
 		t.Fatal("invalid version output succeeded")
+	}
+}
+
+func TestOrdinaryVersionStartFailureReleasesHomeLock(t *testing.T) {
+	originalSupervisor := versionSupervisorCommand
+	originalStart := versionStartProcess
+	t.Cleanup(func() {
+		versionSupervisorCommand = originalSupervisor
+		versionStartProcess = originalStart
+	})
+
+	var lockRoot string
+	versionSupervisorCommand = func(_ context.Context, config supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
+		lockRoot = config.Home
+		lock, err := homelock.Acquire(config.Home)
+		if err != nil {
+			t.Fatalf("acquire direct home lock: %v", err)
+		}
+
+		return exec.Command("/usr/bin/true"), &supervisorProof{ordinaryHomeLock: lock}, nil
+	}
+	versionStartProcess = func(*exec.Cmd) (*supervisorWaiter, error) {
+		return nil, errors.New("start failed")
+	}
+
+	parent := t.TempDir()
+	_, err := ProbeVersion(context.Background(), VersionProbeOptions{
+		CLIPath:       "/usr/bin/true",
+		CodexHome:     t.TempDir(),
+		WritableHome:  t.TempDir(),
+		Scratch:       t.TempDir(),
+		ScratchParent: parent,
+		ImplicitEnvironment: map[string]string{
+			"PATH": "/usr/bin:/bin",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "start failed") {
+		t.Fatalf("ordinary version start failure = %v", err)
+	}
+	if lockRoot == "" {
+		t.Fatal("version probe did not resolve a home lock root")
+	}
+	lock, err := homelock.Acquire(lockRoot)
+	if err != nil {
+		t.Fatalf("version start failure retained home lock: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release home lock: %v", err)
 	}
 }

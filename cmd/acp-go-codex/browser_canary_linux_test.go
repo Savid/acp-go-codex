@@ -122,7 +122,7 @@ func TestRealNativeBrowserContainment(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runCodexCLIWithSignals(ctx, browserCanaryNative, browserCanaryHome, browserCanaryScratch,
-			loginCommand, false, isolation, stdinRead, stdoutWrite, stdoutWrite, signals)
+			loginCommand, false, &isolation, stdinRead, stdoutWrite, stdoutWrite, signals)
 	}()
 
 	seenURL := false

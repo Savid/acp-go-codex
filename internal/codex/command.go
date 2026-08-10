@@ -20,6 +20,7 @@ const (
 	envHome          = "HOME"
 	envXDGConfigHome = "XDG_CONFIG_HOME"
 	minCodexVersion  = "0.144.1"
+	appServerCommand = "app-server"
 )
 
 var execCommandContext = exec.CommandContext
@@ -36,7 +37,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, "", err
 	}
 
-	path, err := resolveCodexPath(options.CLIPath, nativeEnv)
+	path, err := resolveCodexPath(options.CLIPath, nativeEnv, options.ProcessIsolation)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -81,14 +82,22 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", errors.Join(
+			err,
+			supervisor.closeInherited(),
+			supervisor.releaseOrdinaryHomeLock(),
+		)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 
-		return nil, nil, "", err
+		return nil, nil, "", errors.Join(
+			err,
+			supervisor.closeInherited(),
+			supervisor.releaseOrdinaryHomeLock(),
+		)
 	}
 
 	stderr := codexStderrWriter(options.Logger)
@@ -98,14 +107,17 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 
 	waiter, err := startProcess(cmd)
 	if err != nil {
-		_ = supervisor.closeInherited()
+		cleanupErr := errors.Join(
+			supervisor.closeInherited(),
+			supervisor.releaseOrdinaryHomeLock(),
+		)
 
 		observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, err)
 
 		_ = stdin.Close()
 		_ = stdout.Close()
 
-		return nil, nil, "", err
+		return nil, nil, "", errors.Join(err, cleanupErr)
 	}
 
 	if closeErr := supervisor.closeInherited(); closeErr != nil {
@@ -114,7 +126,10 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		waiter.start()
 		<-waiter.result()
 
-		return nil, nil, "", fmt.Errorf("close inherited supervisor config: %w", closeErr)
+		return nil, nil, "", errors.Join(
+			fmt.Errorf("close inherited supervisor config: %w", closeErr),
+			supervisor.releaseOrdinaryHomeLock(),
+		)
 	}
 
 	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, nil)
@@ -139,7 +154,7 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 // flags, per-key -c config overrides (emitted in sorted key order for
 // deterministic args), and any caller-supplied extra args.
 func appServerArgs(options Options) []string {
-	args := []string{"app-server", "--listen", "stdio://", "--disable", "plugins"}
+	args := []string{appServerCommand, "--listen", "stdio://", "--disable", "plugins"}
 
 	keys := make([]string, 0, len(options.Config))
 	for key := range options.Config {
@@ -209,12 +224,21 @@ func (w *stderrTail) tail() string {
 	return strings.TrimSpace(string(w.buf))
 }
 
-func resolveCodexPath(path string, env []string) (string, error) {
+func resolveCodexPath(path string, env []string, isolation *ProcessIsolation) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		path = "codex" //nolint:goconst // Executable identity is distinct from Darwin registry metadata.
 	}
 
-	resolved, err := resolveProcessExecutable(path, env)
+	var (
+		resolved string
+		err      error
+	)
+	if isolation == nil {
+		resolved, err = resolveOrdinaryProcessExecutable(path, env)
+	} else {
+		resolved, err = resolveProcessExecutable(path, env)
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("find codex CLI: %w", err)
 	}
@@ -288,7 +312,12 @@ func buildMergedEnv(options Options) ([]string, error) {
 		managed[envCodexHome] = options.CodexHome
 	}
 
-	return buildProcessEnvironment(options.ProcessIsolation, withoutManagedRootOverrides(options.Env), managed)
+	return buildProcessEnvironmentFrom(
+		options.ProcessIsolation,
+		options.ImplicitEnvironment,
+		withoutManagedRootOverrides(options.Env),
+		managed,
+	)
 }
 
 func upsertEnv(env []string, key string, value string) []string {
@@ -350,7 +379,7 @@ type process struct {
 }
 
 func (p *process) markSupervisorsReady(ctx context.Context) {
-	if p == nil || p.supervisor == nil {
+	if p == nil || p.supervisor == nil || p.supervisor.ordinaryHomeLock != nil {
 		return
 	}
 
@@ -483,12 +512,12 @@ func (p *process) Close() error {
 	}
 
 	if p.cmd == nil || p.cmd.Process == nil {
-		return nil
+		return p.supervisor.releaseOrdinaryHomeLock()
 	}
 
 	p.beginWait()
 
-	if p.supervisor != nil {
+	if p.supervisor != nil && p.supervisor.ordinaryHomeLock == nil {
 		select {
 		case <-p.waitDone:
 			closeErr := processCloseError(p.waitErr)

@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"io"
 	"strings"
 	"testing"
+
+	codexacp "github.com/savid/acp-go-codex"
 )
 
 const testProcessIsolationConfigPath = "/test/process-isolation.json"
@@ -64,12 +68,80 @@ func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
 	}
 }
 
-func TestRunRequiresProcessIsolationConfig(t *testing.T) {
+func TestRunWithoutProcessIsolationConfigUsesOrdinaryMode(t *testing.T) {
+	originalLoader := processIsolationConfigLoader
+	originalServe := serve
+	originalShutdown := shutdownOpenTelemetry
+	t.Cleanup(func() {
+		processIsolationConfigLoader = originalLoader
+		serve = originalServe
+		shutdownOpenTelemetry = originalShutdown
+	})
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		t.Fatal("ordinary mode loaded a process-isolation policy")
+
+		return processIsolationConfig{}, nil
+	}
+	var options codexacp.Options
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...codexacp.Option) error {
+		for _, option := range opts {
+			option(&options)
+		}
+
+		return nil
+	}
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
+
 	var stderr strings.Builder
-	if code := run(t.Context(), nil, strings.NewReader(""), &strings.Builder{}, &stderr); code != 2 {
+	if code := run(t.Context(), nil, strings.NewReader(""), &strings.Builder{}, &stderr); code != 0 {
 		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "-"+processIsolationConfigFlag+" is required") {
-		t.Fatalf("stderr = %q", stderr.String())
+	if options.ProcessIsolation != nil {
+		t.Fatalf("ordinary mode process isolation = %#v", options.ProcessIsolation)
+	}
+	if options.Home != "" {
+		t.Fatalf("ordinary mode home = %q", options.Home)
+	}
+}
+
+func TestAccountSubcommandWithoutProcessIsolationConfigUsesOrdinaryMode(t *testing.T) {
+	originalLoader := processIsolationConfigLoader
+	originalCommand := runCodexCLICommand
+	t.Cleanup(func() {
+		processIsolationConfigLoader = originalLoader
+		runCodexCLICommand = originalCommand
+	})
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		t.Fatal("ordinary account mode loaded a process-isolation policy")
+
+		return processIsolationConfig{}, nil
+	}
+	called := false
+	runCodexCLICommand = func(
+		_ context.Context,
+		_, home, _ string,
+		mode string,
+		_ bool,
+		isolation *processIsolationConfig,
+		_ io.Reader,
+		_, _ io.Writer,
+	) error {
+		called = true
+		if isolation != nil {
+			t.Fatalf("ordinary account process isolation = %#v", isolation)
+		}
+		if home != "/tmp/ordinary-codex" || mode != logoutCommand {
+			t.Fatalf("ordinary account home/mode = %q %q", home, mode)
+		}
+
+		return nil
+	}
+
+	var stderr strings.Builder
+	code := run(t.Context(), []string{logoutCommand, "-home", "/tmp/ordinary-codex"}, strings.NewReader(""), &strings.Builder{}, &stderr)
+	if code != 0 || !called {
+		t.Fatalf("ordinary account code/called/stderr = %d %t %q", code, called, stderr.String())
 	}
 }

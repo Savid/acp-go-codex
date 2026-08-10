@@ -550,14 +550,15 @@ func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
 	}
 
 	version, probeErr := runtimeProbeCodexVersion(ctx, codex.VersionProbeOptions{
-		CLIPath:          a.options.ExecutablePath,
-		CodexHome:        a.options.Home,
-		WritableHome:     home,
-		Scratch:          scratchRoot,
-		ScratchParent:    filepath.Dir(scratchRoot),
-		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
-		Env:              env,
-		ProcessIsolation: codexProcessIsolation(a.options.ProcessIsolation),
+		CLIPath:             a.options.ExecutablePath,
+		CodexHome:           home,
+		WritableHome:        home,
+		Scratch:             scratchRoot,
+		ScratchParent:       filepath.Dir(scratchRoot),
+		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
+		Env:                 env,
+		ImplicitEnvironment: cloneStringMap(a.options.implicitEnvironment),
+		ProcessIsolation:    codexProcessIsolation(a.options.ProcessIsolation),
 	})
 	probeErr = finalizeRuntimeResources(probeErr, nativeRelease, scratchRoot, scratchRelease)
 
@@ -647,16 +648,15 @@ func (a *Agent) resolvedCodexHomeForEnv(env map[string]string) string {
 		return filepath.Clean(value)
 	}
 
-	if value := os.Getenv("CODEX_HOME"); value != "" {
+	if value := a.options.implicitEnvironment["CODEX_HOME"]; value != "" {
 		return filepath.Clean(value)
 	}
 
-	home, err := runtimeUserHomeDir()
-	if err != nil || home == "" {
-		return ""
+	if home := a.options.implicitEnvironment["HOME"]; home != "" {
+		return filepath.Join(home, ".codex")
 	}
 
-	return filepath.Join(home, ".codex")
+	return ""
 }
 
 func (a *Agent) markRuntimeDead(client codex.Client) {

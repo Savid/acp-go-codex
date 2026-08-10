@@ -3,7 +3,6 @@ package codexacp
 import (
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"strings"
 )
@@ -22,57 +21,45 @@ const (
 
 var containmentGOOS = runtime.GOOS
 
-// containmentEffectiveUID is the seam the shared-identity report is derived
-// through. The mode is selected from a faked GOOS in tests, so the identity it
-// is compared against has to be selectable there too.
-var containmentEffectiveUID = os.Geteuid
-
-// sharedProcessIdentity reports whether the configured native identity is the
-// identity this process already runs as. Root never qualifies: a zero effective
-// uid is the trusted supervisor identity, and the native uid is required to be
-// nonzero.
-func sharedProcessIdentity(isolation *ProcessIsolation) bool {
-	if isolation == nil {
-		return false
-	}
-
-	effectiveUID := containmentEffectiveUID()
-
-	return effectiveUID > 0 && uint64(isolation.UID) == uint64(effectiveUID)
-}
-
 // provesWholeTreeLifecycle reports whether the selected boundary can prove that
-// every process it started has exited. Both Linux boundaries can: they differ
-// in whether the agent runs under its own credentials, not in what the
-// subreaper observes.
+// every process it started has exited. Ordinary current-identity execution and
+// Darwin best effort are deliberately non-authoritative.
 func (mode RuntimeContainmentMode) provesWholeTreeLifecycle() bool {
-	return mode == RuntimeContainmentAuthoritative || mode == RuntimeContainmentSharedIdentity
+	return mode == RuntimeContainmentAuthoritative
 }
 
 func containmentMode(options Options) RuntimeContainmentMode {
-	if options.DarwinBestEffortContainment && containmentGOOS != containmentOSDarwin {
+	if options.DarwinBestEffortContainment &&
+		(containmentGOOS != containmentOSDarwin || options.ProcessIsolation != nil) {
 		return RuntimeContainmentUnavailable
 	}
 
-	switch containmentGOOS {
-	case containmentOSLinux:
-		if sharedProcessIdentity(options.ProcessIsolation) {
-			return RuntimeContainmentSharedIdentity
-		}
+	if options.DarwinBestEffortContainment {
+		return RuntimeContainmentBestEffort
+	}
 
+	if options.ProcessIsolation == nil {
+		return RuntimeContainmentSharedIdentity
+	}
+
+	if containmentGOOS == containmentOSLinux {
 		return RuntimeContainmentAuthoritative
-	case containmentOSDarwin:
-		if options.DarwinBestEffortContainment {
-			return RuntimeContainmentBestEffort
-		}
 	}
 
 	return RuntimeContainmentUnavailable
 }
 
 func validateContainmentOptions(options Options) error {
+	if options.DarwinBestEffortContainment && options.ProcessIsolation != nil {
+		return errors.New("darwin best-effort containment and explicit process isolation are mutually exclusive")
+	}
+
 	if options.DarwinBestEffortContainment && containmentGOOS != containmentOSDarwin {
 		return errors.New("darwin best-effort containment is supported only on darwin")
+	}
+
+	if options.ProcessIsolation != nil && containmentGOOS != containmentOSLinux {
+		return errors.New("explicit process isolation is supported only on linux")
 	}
 
 	for key := range options.Env {

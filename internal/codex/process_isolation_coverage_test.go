@@ -5,7 +5,9 @@ package codex
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -31,6 +33,14 @@ func TestProcessIsolationBaseEnvironmentValidation(t *testing.T) {
 		StandaloneStateRoot: "/var/lib/acp-go-test",
 	}, map[string]string{"": "anonymous"})
 	require.ErrorContains(t, err, "invalid environment entry")
+
+	_, err = buildProcessEnvironment(&ProcessIsolation{
+		UID: 1, GID: 2,
+		BaseEnvironment:     map[string]string{strings.ToLower(privateAdapterEnvPrefix) + "SPOOF": "value"},
+		StandaloneOwnerID:   "test-owner",
+		StandaloneStateRoot: "/var/lib/acp-go-test",
+	})
+	require.ErrorContains(t, err, "is reserved")
 }
 
 func TestProcessIdentityAdoptedDispositionValidation(t *testing.T) {
@@ -112,8 +122,10 @@ func TestResolveProcessExecutableFindsSearchPathEntry(t *testing.T) {
 	require.Equal(t, executable, resolved)
 }
 
-func TestApplyProcessCredentialRequiresIsolation(t *testing.T) {
-	require.ErrorContains(t, applyProcessCredential(nil, nil), "process isolation is required")
+func TestApplyProcessCredentialLeavesOrdinaryIdentityUnchanged(t *testing.T) {
+	cmd := exec.Command("/usr/bin/true")
+	require.NoError(t, applyProcessCredential(cmd, nil))
+	require.Nil(t, cmd.SysProcAttr)
 }
 
 func TestCloseInheritedOnExecFailureModes(t *testing.T) {

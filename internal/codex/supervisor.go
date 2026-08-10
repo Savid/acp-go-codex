@@ -69,7 +69,7 @@ type supervisorConfig struct {
 	IdentityLock        bool              `json:"identityLock"`
 	AuthorityDomain     bool              `json:"authorityDomain"`
 	StandaloneAuthority bool              `json:"standaloneAuthority"`
-	SharedIdentity      bool              `json:"sharedIdentity"`
+	OrdinaryExecution   bool              `json:"ordinaryExecution"`
 	Isolation           *ProcessIsolation `json:"-"`
 }
 
@@ -134,16 +134,19 @@ func (noopSupervisorIdentityLock) Close() error            { return nil }
 func (noopSupervisorIdentityLock) InheritedFile() *os.File { return nil }
 
 type supervisorProof struct {
-	abandoned        chan struct{}
-	abandonOnce      sync.Once
-	started          string
-	completion       string
-	quarantine       string
-	nativePIDFile    string
-	providerSnapshot string
-	startupWait      time.Duration
-	completionWait   time.Duration
-	inherited        []*os.File
+	abandoned           chan struct{}
+	abandonOnce         sync.Once
+	started             string
+	completion          string
+	quarantine          string
+	nativePIDFile       string
+	providerSnapshot    string
+	startupWait         time.Duration
+	completionWait      time.Duration
+	inherited           []*os.File
+	ordinaryHomeLock    *homelock.Lock
+	homeLockReleaseOnce sync.Once
+	homeLockReleaseErr  error
 }
 
 func (p *supervisorProof) closeInherited() error {
@@ -159,6 +162,16 @@ func (p *supervisorProof) closeInherited() error {
 	p.inherited = nil
 
 	return result
+}
+
+func (p *supervisorProof) releaseOrdinaryHomeLock() error {
+	if p == nil || p.ordinaryHomeLock == nil {
+		return nil
+	}
+
+	p.homeLockReleaseOnce.Do(func() { p.homeLockReleaseErr = p.ordinaryHomeLock.Release() })
+
+	return p.homeLockReleaseErr
 }
 
 // init turns the embedding command itself into either member of the
@@ -273,7 +286,8 @@ func readSupervisorConfig(reader io.Reader) (supervisorConfig, error) {
 		return supervisorConfig{}, fmt.Errorf("decode private supervisor config: %w", err)
 	}
 
-	if config.NativePath == "" || config.Home == "" || config.Scratch == "" || config.IsolationUID == 0 || config.IsolationGID == 0 {
+	if config.NativePath == "" || config.Home == "" || config.Scratch == "" ||
+		(!config.OrdinaryExecution && (config.IsolationUID == 0 || config.IsolationGID == 0)) {
 		return supervisorConfig{}, errors.New("private supervisor config is incomplete")
 	}
 
@@ -335,27 +349,56 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 		return nil, nil, err
 	}
 
-	if err := validateProcessIsolation(config.Isolation); err != nil {
-		return nil, nil, err
+	if config.DarwinBestEffort && config.Isolation != nil {
+		return nil, nil, errors.New("darwin best-effort containment and explicit process isolation are mutually exclusive")
 	}
 
-	if (config.Isolation.IdentityLock == nil) != (config.Isolation.AuthorityDomain == nil) {
-		return nil, nil, errors.New("codex supervisor requires the UID lock and authority domain together")
+	if config.DarwinBestEffort && processIsolationGOOS != processIsolationDarwin {
+		return nil, nil, errors.New("darwin best-effort containment is supported only on darwin")
 	}
 
-	if err := supervisorVerifyTrustedIdentity(config.Isolation.UID); err != nil {
-		return nil, nil, err
+	if ordinaryProcessBackend(config.Isolation, config.DarwinBestEffort) {
+		homeLock, err := homelock.Acquire(config.Home)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		cmd := execCommandContext(ctx, config.NativePath, config.NativeArgs...)
+		cmd.Env = append([]string(nil), config.NativeEnv...)
+
+		return cmd, &supervisorProof{ordinaryHomeLock: homeLock}, nil
 	}
 
-	config.IsolationUID = config.Isolation.UID
+	if config.Isolation == nil {
+		uid, gid, err := currentProcessIdentity()
+		if err != nil {
+			return nil, nil, err
+		}
 
-	config.IsolationGID = config.Isolation.GID
-	config.StandaloneOwnerID = config.Isolation.StandaloneOwnerID
-	config.StandaloneStateRoot = config.Isolation.StandaloneStateRoot
-	config.IdentityLock = config.Isolation.IdentityLock != nil
-	config.AuthorityDomain = config.Isolation.AuthorityDomain != nil
-	config.SharedIdentity = sharedProcessIdentity(config.Isolation)
-	config.StandaloneAuthority = !config.SharedIdentity && config.Isolation.IdentityLock == nil
+		config.IsolationUID = uid
+		config.IsolationGID = gid
+		config.OrdinaryExecution = true
+	} else {
+		if err := validateProcessIsolation(config.Isolation); err != nil {
+			return nil, nil, err
+		}
+
+		if (config.Isolation.IdentityLock == nil) != (config.Isolation.AuthorityDomain == nil) {
+			return nil, nil, errors.New("codex supervisor requires the UID lock and authority domain together")
+		}
+
+		if err := supervisorVerifyTrustedIdentity(config.Isolation.UID); err != nil {
+			return nil, nil, err
+		}
+
+		config.IsolationUID = config.Isolation.UID
+		config.IsolationGID = config.Isolation.GID
+		config.StandaloneOwnerID = config.Isolation.StandaloneOwnerID
+		config.StandaloneStateRoot = config.Isolation.StandaloneStateRoot
+		config.IdentityLock = config.Isolation.IdentityLock != nil
+		config.AuthorityDomain = config.Isolation.AuthorityDomain != nil
+		config.StandaloneAuthority = config.Isolation.IdentityLock == nil
+	}
 
 	if config.ScratchParent == "" && config.Scratch != "" {
 		config.ScratchParent = filepath.Dir(config.Scratch)
@@ -379,7 +422,10 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 	config.Completion = filepath.Join(markerRoot, "supervisor-complete-"+markerNonce)
 	config.Quarantine = filepath.Join(markerRoot, "supervisor-quarantine-"+markerNonce)
 	config.NativePIDFile = filepath.Join(markerRoot, "supervisor-native-pid-"+markerNonce)
-	config.ProviderSnapshot = filepath.Join(markerRoot, "supervisor-provider-snapshot-"+markerNonce)
+
+	if !config.OrdinaryExecution {
+		config.ProviderSnapshot = filepath.Join(markerRoot, "supervisor-provider-snapshot-"+markerNonce)
+	}
 
 	configFile, err := supervisorWriteConfig(config.Scratch, config)
 	if err != nil {
@@ -410,7 +456,7 @@ func supervisorCommand(ctx context.Context, config supervisorConfig) (*exec.Cmd,
 	cmd.ExtraFiles = []*os.File{configFile}
 	inherited := []*os.File{configFile}
 
-	if config.Isolation.IdentityLock != nil {
+	if config.Isolation != nil && config.Isolation.IdentityLock != nil {
 		identityLock, duplicateErr := config.Isolation.IdentityLock.Duplicate()
 		if duplicateErr != nil {
 			_ = configFile.Close()
@@ -476,8 +522,12 @@ func supervisorNonce() (string, error) {
 // selected containment boundary complete. Absence of both markers is not a
 // no-start proof: an independently grouped liveness process may still start.
 func (p *supervisorProof) awaitCompletion() error {
-	if p == nil || (p.started == "" && p.completion == "") {
+	if p == nil {
 		return nil
+	}
+
+	if p.started == "" && p.completion == "" {
+		return p.releaseOrdinaryHomeLock()
 	}
 
 	startupWait := p.startupWait
@@ -626,7 +676,7 @@ func runGuardian(config supervisorConfig) (runErr error) {
 		authorityDomain supervisorIdentityLock = noopSupervisorIdentityLock{}
 	)
 
-	if config.IsolationUID != 0 {
+	if !config.OrdinaryExecution && config.IsolationUID != 0 {
 		if verifyErr := supervisorVerifyTrustedIdentity(config.IsolationUID); verifyErr != nil {
 			return verifyErr
 		}
@@ -857,7 +907,7 @@ func runGuardian(config supervisorConfig) (runErr error) {
 func runLiveness(config supervisorConfig) error {
 	input, output, errorOutput := supervisorInput, supervisorOutput, supervisorError
 
-	if config.IsolationUID != 0 {
+	if !config.OrdinaryExecution && config.IsolationUID != 0 {
 		if verifyErr := supervisorVerifyTrustedIdentity(config.IsolationUID); verifyErr != nil {
 			return verifyErr
 		}
@@ -895,7 +945,7 @@ func runLiveness(config supervisorConfig) error {
 	cmd := supervisorExecCommand(config.NativePath, config.NativeArgs...)
 	cmd.Env = config.NativeEnv
 
-	if config.IsolationUID != 0 || config.IsolationGID != 0 {
+	if !config.OrdinaryExecution && (config.IsolationUID != 0 || config.IsolationGID != 0) {
 		if credentialErr := applyProcessCredential(cmd, supervisedNativeIsolation(config)); credentialErr != nil {
 			return fmt.Errorf("apply supervised Codex native identity: %w", credentialErr)
 		}
@@ -1166,6 +1216,10 @@ func closeSupervisorQuarantineStreams() {
 }
 
 func publishProviderProcessSnapshot(path string, containment *livenessContainment) {
+	if path == "" {
+		return
+	}
+
 	if count, available := supervisorDescendantCount(containment); available {
 		// Failure to persist the optional observation makes the inventory
 		// unavailable; it must not turn into a fabricated zero or fail launch.

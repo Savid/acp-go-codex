@@ -18,6 +18,7 @@ type Options struct {
 	NativeVersion              string
 	DefaultModel               string
 	Env                        map[string]string
+	ImplicitEnvironment        map[string]string
 	ProcessIsolation           *ProcessIsolation
 	Config                     map[string]any
 	ExtraArgs                  []string
@@ -30,13 +31,13 @@ type Options struct {
 	NewProcessSnapshotObserver func(context.Context) ProcessSnapshotObserver
 
 	// skipSupervisor is restricted to package tests that exercise low-level
-	// command error branches. Production launches always use the supervisor
-	// pair and fail closed without its private scratch root.
+	// command error branches. Production always uses the selected process
+	// backend and never bypasses its writable-home exclusion.
 	skipSupervisor bool
 }
 
-// ProcessIsolation is the mandatory credential and complete environment base
-// applied to every provider process.
+// ProcessIsolation is an explicit credential and complete environment base.
+// Nil selects ordinary current-identity execution.
 type ProcessIdentityLockCapability interface {
 	Duplicate() (*os.File, error)
 }

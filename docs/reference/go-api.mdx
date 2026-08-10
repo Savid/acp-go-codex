@@ -17,12 +17,14 @@ options below.
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
 	codexacp.WithExecutablePath("/usr/local/bin/codex"),
-	codexacp.WithProcessIsolation(codexacp.ProcessIsolation{UID: agentUID, GID: agentGID, BaseEnvironment: agentEnv, StandaloneOwnerID: ownerID, StandaloneStateRoot: "/var/lib/acp-go-codex"}),
-	codexacp.WithHome("/var/lib/acp-go-codex"),
+	codexacp.WithHome("/tmp/codex-home"),
 	codexacp.WithDefaultModel("gpt-5.5"),
 	codexacp.WithLogger(logger),
 )
 ```
+
+This omission is ordinary current-identity execution. Add
+`WithProcessIsolation(...)` only for the explicit trusted-root Linux policy.
 
 `Serve` closes the agent before it returns. If shutdown fails, that close error
 takes precedence over EOF or context cancellation. In particular,
@@ -36,11 +38,11 @@ escaped descendants are absent on Darwin.
 | Option | Purpose |
 | --- | --- |
 | `WithExecutablePath(path)` | Codex CLI executable path (defaults to `codex` on `PATH`). |
-| `WithProcessIsolation(policy)` | Mandatory nonzero target UID/GID and complete replacement environment for native Codex processes. On Linux the guardian/liveness supervisors stay trusted root; only the native app-server receives the configured identity, with supplementary groups cleared. |
+| `WithProcessIsolation(policy)` | Explicit hardening with a nonzero target UID/GID and complete replacement environment. All privilege, ownership, authority, and cleanup proofs remain fail-closed. Omit it for ordinary current-identity execution. |
 | `WithHome(path)` | `CODEX_HOME` for launched Codex processes. Standalone isolation defaults it to `StandaloneStateRoot` and rejects any different explicit path. |
 | `WithScratchDir(dir)` | Parent directory for all ephemeral on-disk materialization; empty means the system temp directory. Created `0700` when missing. |
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
-| `WithEnv(env)` | Ordinary environment variables overlaid on `ProcessIsolation.BaseEnvironment`; the adapter never inherits its own environment. `CODEX_HOME`, `HOME`, XDG roots, and adapter-internal names are reserved and rejected. |
+| `WithEnv(env)` | Ordinary environment overrides. With explicit isolation they overlay `ProcessIsolation.BaseEnvironment`; otherwise they overlay the environment captured when the agent was constructed. Managed homes/XDG roots retain adapter precedence, and adapter-internal names are scrubbed or rejected. |
 | `WithLogger(logger)` | `*slog.Logger` for structured adapter diagnostics. |
 | `WithSessionStore(store)` | Replace the default in-memory lifecycle authority with a durable Codex rollout JSONL store. |
 | `WithSessionStoreLoadTimeout(d)` | Deadline for store-backed load/list (default `10s`; ≤ 0 uses the default). |
@@ -51,7 +53,7 @@ escaped descendants are absent on Darwin.
 | `WithProviderAuthRoot(path)` | Absolute durable directory holding the values-free provider-auth ledger. Unset — or set to a path that cannot be prepared — leaves every `_codex/auth/*` method unadvertised. |
 | `WithProviderAuthDirectHome(path)` | Exact `CODEX_HOME` the host consents to the `credential` and `disconnect` legs touching. Both legs are advertised only while this equals the resolved `WithHome`. |
 | `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
-| `WithDarwinBestEffortContainment()` | Explicitly accept Darwin's direct-child plus captured-process-group boundary. Rejected off Darwin; without it Darwin fails closed. |
+| `WithDarwinBestEffortContainment()` | Explicitly accept Darwin's direct-child plus captured-process-group boundary. Rejected off Darwin and mutually exclusive with `WithProcessIsolation`; without it Darwin uses ordinary current-identity execution and reports `shared_identity`. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
 | `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk, and the session-scoped `mcp_servers` keyspace is rejected. |
 | `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh callback. |
@@ -73,7 +75,7 @@ provider-owner binding, retained `ACTIVE`, and UID-lock acquisition. A
 mixed nil/non-nil pair fails closed. Borrowed authority rejects owned UIDs. Native
 processes receive neither capability nor descriptor.
 
-`ProcessIsolation.StandaloneOwnerID` and
+For an explicit policy, `ProcessIsolation.StandaloneOwnerID` and
 `ProcessIsolation.StandaloneStateRoot` are required when both capabilities
 are nil and forbidden when both are set. The owner ID is the nonsecret
 case-sensitive deployment identity: 1--256 canonical ASCII bytes beginning
@@ -144,18 +146,15 @@ err := codexacp.Serve(ctx, stdin, stdout,
 
 `Agent.ContainmentMode()` returns `authoritative`, `best_effort`,
 `shared_identity`, or
-`unavailable`. Linux is authoritative, or `shared_identity` when the configured
-native identity is the identity the host process already runs as: the subreaper
-tree, descendant reaping, and process-group teardown are unchanged, but there is
-no credential separation between the supervisor and the agent and no host-global
-record of who holds the identity. Windows is unavailable for native
-launch because the mandatory Unix UID/GID identity boundary with empty
-supplementary groups cannot be applied. A Windows cross-compile proves only
-that this refusal path builds; it is not runtime support. Opted-in Darwin is
-best-effort; it reaps the direct child and drains the captured original process
-group, but cannot contain `setsid` escapees or eliminate numeric-PGID-reuse
-collateral-signalling risk. FreeBSD, OpenBSD, NetBSD, and other unsupported
-platforms are unavailable.
+`unavailable`. Omitted isolation reports `shared_identity` on every platform
+where native launch works, for root and nonroot callers alike. It carries no
+credential-separation, provider-descendant inventory, or whole-tree quiescence
+claim. Explicit isolation is distinct, trusted-root Linux only, and reports
+`authoritative`; any validation, authority, or launch failure is terminal and
+never retries ordinary mode. Opted-in Darwin is `best_effort`; it reaps the
+direct child and drains the captured original process group, but cannot contain
+`setsid` escapees or eliminate numeric-PGID-reuse collateral-signalling risk.
+Windows supports ordinary runtimes and logout but refuses browser-based login.
 
 `RuntimeResourceHooks` exposes `AcquireNativeRoot`, `ReserveScratchRoot`,
 `ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
@@ -164,14 +163,15 @@ Admission callbacks receive one of `runtime`, `session`, `prompt`, or
 `discovery`; rejection is propagated fail closed. A successful hook must
 return a release function. The adapter releases a native-root reservation only
 after the full client process has exited, and a scratch reservation only after
-its root has been deleted. Codex reports the two actual home-lock supervisors
-after readiness and removes them when their waiter proves exit; it never
-derives that count from root permits. Absolute descendant snapshots are
-emitted only when containment proves them. Startup stages are `spawn`,
+its root has been deleted. On supervised boundaries Codex reports the two actual
+home-lock supervisors after readiness and removes them when their waiter proves
+exit; direct ordinary backends do not fabricate supervisor counts. Absolute
+descendant snapshots are emitted only for authoritative explicit isolation,
+never for ordinary or best-effort modes. Startup stages are `spawn`,
 `readiness`, `configuration`, and native `session` creation. Nil callbacks
 select standalone, adapter-owned unbounded accounting.
-Best-effort Darwin emits the containment selection but no provider-descendant
-snapshot, including no terminal zero. If cleanup returns
+Ordinary and best-effort modes emit the containment selection but no
+provider-descendant snapshot, including no terminal zero. If cleanup returns
 `ErrProcessContainmentIncomplete`, hosts must retain the exact scratch and
 native-root reservations as quarantined resources.
 

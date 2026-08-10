@@ -38,6 +38,11 @@ func (capability supervisorIdentityCapability) Duplicate() (*os.File, error) {
 func TestVerifyLinuxTrustedSupervisorIdentityRequiresADistinctRootSupervisor(t *testing.T) {
 	linuxSupervisorIdentitySeams(t)
 	const distinct = uint32(65534)
+	if os.Geteuid() != 0 {
+		require.EqualError(t, verifyLinuxTrustedSupervisorIdentity(distinct), linuxSupervisorTrustedIdentityMessage)
+
+		return
+	}
 
 	require.NoError(t, verifyLinuxTrustedSupervisorIdentity(distinct))
 

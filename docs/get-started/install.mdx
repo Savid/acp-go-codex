@@ -52,9 +52,10 @@ ACP logout is refused unless the adapter is started with
 misbehaving client can never clear the credentials of an operator-owned Codex
 home. See [Authentication](/docs/features/authentication) for the full flow.
 
-## Provision Linux identity authority
+## Provision explicit Linux identity authority
 
-Linux installations must persist the shared identity-lock root:
+Installations that supply a Linux process-isolation policy must persist the
+cross-process identity-authority root:
 
 ```sh
 sudo install -d -o root -g root -m 0700 \

@@ -169,7 +169,7 @@ func TestPrepareRolloutLiveCursors(t *testing.T) {
 }
 
 func TestAppendRolloutEntriesRetriesAndBoundsStoreCalls(t *testing.T) {
-	withRolloutAppendSettings(t, time.Millisecond, []time.Duration{0, 0})
+	withRolloutAppendSettings(t, time.Second, []time.Duration{0, 0})
 	var attempts int
 	transient := errors.New("transient")
 	store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
@@ -185,6 +185,7 @@ func TestAppendRolloutEntriesRetriesAndBoundsStoreCalls(t *testing.T) {
 		t.Fatalf("retry append err=%v attempts=%d", err, attempts)
 	}
 
+	withRolloutAppendSettings(t, 50*time.Millisecond, []time.Duration{0, 0})
 	attempts = 0
 	store = &appendFuncStore{append: func(ctx context.Context, _ SessionKey, _ []SessionStoreEntry) error {
 		attempts++

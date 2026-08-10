@@ -8,11 +8,11 @@ import (
 	"os/exec"
 )
 
-func validateProcessIsolationPlatform() error {
-	return errors.New("process isolation is unsupported on this platform")
-}
+func applyProcessCredential(_ *exec.Cmd, isolation *ProcessIsolation) error {
+	if isolation == nil {
+		return nil
+	}
 
-func applyProcessCredential(*exec.Cmd, *ProcessIsolation) error {
 	return errors.New("process isolation is unsupported on this platform")
 }
 

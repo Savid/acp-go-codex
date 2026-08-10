@@ -13,9 +13,9 @@ session is loaded, and logout first releases every loaded thread before
 mutating the account and closing the runtime. No thread can switch accounts
 independently.
 
-## Standalone credential input
+## Explicit-isolation credential input
 
-The standalone root supervisor never forwards its ambient environment.
+The explicit-isolation root supervisor never forwards its ambient environment.
 To pass `OPENAI_API_KEY`, name each variable explicitly in the
 `inheritEnvironment` array of the root-owned
 `-process-isolation-config` policy. The value must be set in the supervisor
@@ -23,7 +23,9 @@ environment or startup fails; identity, path, loader, XDG/native-home, and
 adapter-private variables cannot be inherited. File-backed or provider-broker
 credentials must live only in the explicit target-owned native home described
 by the adapter. No standalone path reads root `HOME`, root native config, or
-an unlisted root credential.
+an unlisted root credential. When isolation is omitted, the agent instead uses
+the environment captured at construction, after managed-home precedence and
+private-variable scrubbing.
 
 ## Terminal login
 
@@ -35,11 +37,11 @@ acp-go-codex login -codex-device-auth
 acp-go-codex logout
 ```
 
-Terminal account commands use the same two-lock guardian/liveness supervisor
-and selected containment backend as app-server runtimes. They fail immediately when
+Terminal account commands use the same portable claim/liveness exclusion and
+selected process backend as app-server runtimes. They fail immediately when
 another cooperating process owns the selected `CODEX_HOME`, and they return
-only after the selected containment boundary completes. Authoritative backends
-prove the Codex command and all descendants quiescent. Opted-in Darwin proves
+after the directly owned command completes. Explicit authoritative Linux
+isolation additionally proves all descendants quiescent. Opted-in Darwin proves
 only direct-child reaping plus absence of the captured original process group;
 a descendant that escapes with `setsid` may survive. The command therefore
 cannot mutate credentials alongside an active cooperating app-server. Codex
@@ -54,11 +56,9 @@ that execs `open` directly never reads `BROWSER`. Without both, `codex login`
 opens a tab on the operator's desktop that reaches its loopback listener and
 completes a grant with no further action. The directory is removed with the
 command's scratch. On Windows the launch cannot be shadowed this way, so
-`login` would refuse rather than open a browser. More fundamentally, Windows
-rejects every native Codex command before spawning because the mandatory Unix
-UID/GID identity boundary is unavailable, so both `login` and `logout` are
-unavailable there. On platforms where native launch is available, `logout`
-opens nothing and keeps the environment it would otherwise have had.
+`login` refuses rather than opening a browser. Ordinary Windows `logout` is
+available: it opens nothing and keeps the environment it would otherwise have
+had. Explicit isolation remains Linux-only.
 
 During ACP initialize, the terminal auth method is advertised only when the
 client declares terminal auth support. The agent auth method

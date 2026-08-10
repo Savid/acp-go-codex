@@ -14,10 +14,9 @@ import (
 // suite can see through the initial PID namespace and rightly refuses as
 // occupied. 65534 is the fleet-wide unprivileged stand-in, and the privileged
 // lock serializes it across repos. On Linux an unprivileged runner shifts off
-// its own effective identity as well: the shared arm is selected by uid
-// equality, so a fixture that named the runner's own identity would quietly
-// move the whole suite onto it. No other platform has that arm, and the ones
-// that do not cannot hand a directory to a second identity anyway.
+// its own effective identity as well because explicit isolation must always
+// name a distinct identity. Other platforms cannot hand a directory to a
+// second identity and refuse explicit isolation before launch.
 func testIsolationIdentity() (uint32, uint32) {
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 || gid == 0 {

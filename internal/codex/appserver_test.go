@@ -193,7 +193,7 @@ while read line; do :; done
 	client, err := NewAppServerClient(context.Background(), Options{
 		CLIPath: script, CodexHome: testNativeOwnedTempDir(t), SupervisorRoot: testTraversableTempDir(t),
 		SupervisorParent: os.TempDir(),
-		DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second,
+		NativeVersion:    minCodexVersion, LaunchTimeout: 5 * time.Second,
 		ProcessIsolation: testProcessIsolation(),
 	})
 	if err != nil {
@@ -1060,10 +1060,9 @@ while read line; do :; done
 		t.Fatalf("write init error script: %v", err)
 	}
 	if _, err := NewAppServerClient(context.Background(), Options{
-		CLIPath: initErrorScript, CodexHome: testNativeOwnedTempDir(t), SupervisorRoot: testTraversableTempDir(t),
+		CLIPath: initErrorScript, CodexHome: t.TempDir(), SupervisorRoot: testTraversableTempDir(t),
 		SupervisorParent: os.TempDir(),
-		DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: time.Second,
-		ProcessIsolation: testProcessIsolation(),
+		NativeVersion:    minCodexVersion, LaunchTimeout: time.Second,
 	}); err == nil {
 		t.Fatal("NewAppServerClient accepted initialize failure")
 	}

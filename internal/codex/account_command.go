@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"time"
 )
 
@@ -16,22 +17,24 @@ const (
 	accountCommandLogout        = "logout"
 )
 
-// AccountCommandOptions describes one terminal Codex account mutation. The
-// command is run through the same home-lock supervisor and process-tree
-// containment used by app-server runtimes.
+// AccountCommandOptions describes one terminal Codex account mutation. Linux
+// uses the same home-lock supervisor as app-server runtimes; ordinary native
+// backends on other platforms retain the same claim/liveness exclusion without
+// publishing a process-tree claim.
 type AccountCommandOptions struct {
-	CLIPath          string
-	CodexHome        string
-	ScratchDir       string
-	Mode             string
-	DeviceAuth       bool
-	DarwinBestEffort bool
-	Stdin            io.Reader
-	Stdout           io.Writer
-	Stderr           io.Writer
-	Signals          <-chan os.Signal
-	Env              map[string]string
-	ProcessIsolation *ProcessIsolation
+	CLIPath             string
+	CodexHome           string
+	ScratchDir          string
+	Mode                string
+	DeviceAuth          bool
+	DarwinBestEffort    bool
+	Stdin               io.Reader
+	Stdout              io.Writer
+	Stderr              io.Writer
+	Signals             <-chan os.Signal
+	Env                 map[string]string
+	ImplicitEnvironment map[string]string
+	ProcessIsolation    *ProcessIsolation
 }
 
 var accountScratchParent func(string) (string, error)
@@ -52,6 +55,8 @@ func SetScratchParentResolver(resolver func(string) (string, error)) {
 // the writable Codex home. It returns after the selected containment boundary
 // completes.
 func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (returnErr error) {
+	options = normalizedAccountCommandOptions(options)
+
 	args, err := accountCommandArgs(options.Mode, options.DeviceAuth)
 	if err != nil {
 		return err
@@ -61,12 +66,9 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return errors.New("codex writable home is required for account mutation")
 	}
 
-	if validationErr := validateNativeOwnedDirectory(options.CodexHome, options.ProcessIsolation); validationErr != nil {
-		return fmt.Errorf("validate codex writable home: %w", validationErr)
-	}
-
-	nativeEnv, err := buildProcessEnvironment(
+	nativeEnv, err := buildProcessEnvironmentFrom(
 		options.ProcessIsolation,
+		options.ImplicitEnvironment,
 		withoutManagedRootOverrides(options.Env),
 		map[string]string{envCodexHome: options.CodexHome},
 	)
@@ -74,7 +76,11 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return err
 	}
 
-	path, err := resolveCodexPath(options.CLIPath, nativeEnv)
+	if validationErr := validateNativeOwnedDirectory(options.CodexHome, options.ProcessIsolation); validationErr != nil {
+		return fmt.Errorf("validate codex writable home: %w", validationErr)
+	}
+
+	path, err := resolveCodexPath(options.CLIPath, nativeEnv, options.ProcessIsolation)
 	if err != nil {
 		return err
 	}
@@ -145,6 +151,10 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return err
 	}
 
+	if proof == nil || proof.ordinaryHomeLock != nil {
+		return runDirectAccountCommand(options, cmd, proof)
+	}
+
 	// The guardian reads a hangup on its control input as caller death and
 	// abandons agent identity acquisition. Handing the caller's reader straight
 	// to exec.Cmd makes os/exec close that pipe as soon as the reader ends, so a
@@ -167,9 +177,7 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 
 	waiter, err := accountStartProcess(cmd)
 	if err != nil {
-		_ = proof.closeInherited()
-
-		return err
+		return errors.Join(err, proof.closeInherited())
 	}
 
 	commandInput := options.Stdin
@@ -222,6 +230,47 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	}
 }
 
+func runDirectAccountCommand(options AccountCommandOptions, cmd *exec.Cmd, proof *supervisorProof) (returnErr error) {
+	defer func() { returnErr = errors.Join(returnErr, proof.releaseOrdinaryHomeLock()) }()
+
+	cmd.Stdin = options.Stdin
+	cmd.Stdout = options.Stdout
+	cmd.Stderr = options.Stderr
+
+	waiter, err := accountStartProcess(cmd)
+	if err != nil {
+		return err
+	}
+
+	waiter.start()
+	waitDone := waiter.result()
+	signals := options.Signals
+
+	for {
+		select {
+		case waitErr := <-waitDone:
+			return waitErr
+		case signalValue, ok := <-signals:
+			if !ok {
+				signals = nil
+
+				continue
+			}
+
+			_ = cmd.Process.Signal(signalValue)
+		}
+	}
+}
+
+func normalizedAccountCommandOptions(options AccountCommandOptions) AccountCommandOptions {
+	options.ImplicitEnvironment = cloneEnvironment(options.ImplicitEnvironment)
+	if options.ProcessIsolation == nil && options.ImplicitEnvironment == nil {
+		options.ImplicitEnvironment = captureProcessEnvironment()
+	}
+
+	return options
+}
+
 func runAccountVersionProbe(
 	ctx context.Context,
 	path string,
@@ -239,14 +288,15 @@ func runAccountVersionProbe(
 	}()
 
 	version, returnErr = accountProbeVersion(ctx, VersionProbeOptions{
-		CLIPath:          path,
-		CodexHome:        options.CodexHome,
-		WritableHome:     options.CodexHome,
-		Scratch:          scratch,
-		ScratchParent:    scratchParent,
-		DarwinBestEffort: options.DarwinBestEffort,
-		Env:              options.Env,
-		ProcessIsolation: options.ProcessIsolation,
+		CLIPath:             path,
+		CodexHome:           options.CodexHome,
+		WritableHome:        options.CodexHome,
+		Scratch:             scratch,
+		ScratchParent:       scratchParent,
+		DarwinBestEffort:    options.DarwinBestEffort,
+		Env:                 options.Env,
+		ImplicitEnvironment: options.ImplicitEnvironment,
+		ProcessIsolation:    options.ProcessIsolation,
 	})
 
 	return version, returnErr

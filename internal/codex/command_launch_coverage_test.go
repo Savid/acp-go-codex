@@ -53,7 +53,7 @@ func TestNewAppServerClientCompletesLaunchHandshake(t *testing.T) {
 	client, err := NewAppServerClient(context.Background(), Options{
 		CLIPath: appServer, CodexHome: testTraversableTempDir(t),
 		SupervisorRoot: testTraversableTempDir(t), SupervisorParent: os.TempDir(),
-		DarwinBestEffort: true, NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second,
+		NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second,
 		ProcessIsolation: testProcessIsolation(),
 		NewProcessSnapshotObserver: func(context.Context) ProcessSnapshotObserver {
 			return ProcessSnapshotObserver{
@@ -89,7 +89,7 @@ func TestLaunchAppServerReportsLostInheritedDescriptor(t *testing.T) {
 
 	transport, _, _, err := launchAppServer(context.Background(), context.Background(), Options{
 		CLIPath: sleeper.Path, SupervisorRoot: testTraversableTempDir(t), SupervisorParent: os.TempDir(),
-		WritableHome: testTraversableTempDir(t), DarwinBestEffort: true, NativeVersion: minCodexVersion,
+		WritableHome: testTraversableTempDir(t), NativeVersion: minCodexVersion,
 		ProcessIsolation: testProcessIsolation(),
 	})
 	require.Nil(t, transport)

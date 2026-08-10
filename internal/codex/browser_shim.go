@@ -21,6 +21,8 @@ const (
 // URL to a candidate this directory does not shadow.
 var browserShimScript = []byte("#!/bin/sh\nexit 0\n")
 
+var browserShimHandoffGeneratedNativeTree = handoffGeneratedNativeTree
+
 // browserLauncherNames are the programs a harness execs to open a URL. Darwin's
 // `open` is the entry a BROWSER-only remedy misses: the launcher execs it
 // directly and never reads BROWSER.
@@ -43,7 +45,7 @@ func (s *browserShim) handoff(isolation *ProcessIsolation) error {
 		return nil
 	}
 
-	return handoffGeneratedNativeTree(s.dir, isolation)
+	return browserShimHandoffGeneratedNativeTree(s.dir, isolation)
 }
 
 // environ returns env with the shim ahead of PATH and BROWSER pointed at one of

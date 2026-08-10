@@ -10,8 +10,20 @@ reach. For how common failures surface, see
 
 ## Standalone command boundary
 
-The standalone command launches native work only on Linux and requires the
-root-owned mode-`0600` `-process-isolation-config` policy. Resolution walks
+Omitting `-process-isolation-config` launches native work as the current
+identity. Linux still uses its ordinary guardian/liveness supervisor but
+takes no UID lock, authority domain, standalone disposition, or credential
+change. Other supported platforms use their native current-identity backend.
+Every ordinary backend reports non-authoritative `shared_identity`, publishes no
+provider-descendant inventory, and makes no whole-tree quiescence claim.
+The ordinary environment is captured once, then adapter-private names and
+ambient managed `CODEX_HOME`/`HOME`/XDG roots are removed before the resolved
+`CODEX_HOME` is restored. Ordinary executable lookup keeps normal relative
+executable and relative-`PATH` behavior; the absolute-`PATH` rule belongs only
+to the explicit closed policy.
+
+Supplying the flag selects the explicit Linux hardening contract and requires a
+root-owned mode-`0600` policy. Resolution walks
 from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
 must be root-owned and not writable by group or other, and the final single-link
 policy inode is read through the descriptor that was validated. The configured
@@ -19,12 +31,11 @@ account home is resolved the same way, must be a target-owned mode-`0700`
 directory beneath protected root-owned ancestry, and cannot be `/root` or
 `/nonexistent`.
 
-The adapter remains root, but its ambient environment is never copied wholesale
-to the child. Only the complete literal `baseEnvironment` plus names in
-`inheritEnvironment` reach native work. The CLI refuses Darwin, Windows, and
-other platforms; Darwin best-effort containment remains an explicit
-embedded-Go option only. `-version` and Darwin containment diagnostics launch
-no native worker and are exempt.
+Under explicit isolation the adapter remains root, but its ambient environment
+is never copied wholesale to the child. Only the complete literal
+`baseEnvironment` plus names in
+`inheritEnvironment` reach native work. An invalid explicit policy is rejected
+before spawn and is never retried using the ordinary backend.
 
 ## Home and account boundary
 
@@ -34,25 +45,26 @@ can never clear the credentials of the operator's normal Codex install.
 
 Only one cooperating app-server or terminal login/logout command may mutate a
 writable Codex home.
-The adapter takes two mode-0600, never-unlinked files in that home —
+The adapter derives a stable, protected per-home lock root beneath the selected
+scratch parent and takes two mode-0600, never-unlinked files there —
 `acp-go-codex-runtime.claim.lock` and
 `acp-go-codex-runtime.liveness.lock` — with build-tagged Unix `flock` and a
-Windows `LockFileEx` compile backend. The latter does not make native launch
-supported. A guardian process owns only the claim lock; its separate liveness
-supervisor owns only the liveness lock and directly parents the native root.
-The native process never inherits either descriptor. On Linux, each dedicated
-supervisor initially places the root and descendants in a process group and is
-also a child subreaper.
-It kills and reaps adopted descendants even when they escape the original
-process group with `setsid`, then requires a non-reaping
+Windows `LockFileEx` backend. On ordinary direct backends the adapter retains
+both locks until the direct native child is reaped. On Linux a guardian process
+owns only the claim lock; its separate liveness supervisor owns only the
+liveness lock and directly parents the native root. The native process never
+inherits either descriptor. Linux supervisors initially place the root and
+descendants in a process group and are child subreapers.
+For explicit isolation, Linux kills and reaps adopted descendants even when
+they escape the original process group with `setsid`, then requires a non-reaping
 `waitid(..., WNOWAIT)` `ECHILD` result as
 the kernel proof that no child remains. If either supervisor dies, the survivor
 performs the same containment; adapter/control EOF does too. Only after that
 proof does shutdown release liveness and then claim, so a second claimant fails
 closed while any old tree can still write the home.
 
-On Linux both supervisors stay root and run from `/` with a closed private
-environment. Private launch configuration carries the target identity and
+Under explicit Linux isolation both supervisors stay root and run from `/` with
+a closed private environment. Private launch configuration carries the target identity and
 native environment; only the Codex app-server receives the configured UID/GID
 with no supplementary groups. Before native start the independent trusted-root
 guardian/liveness pair validates and retains duplicates of the identical UID EX
@@ -182,36 +194,20 @@ same-directory atomic rename,
 and directory sync. Each newly created directory level is parent-synced before
 any lock becomes authoritative.
 
-A host that never held privilege can still supervise. When the configured
-native identity is the identity the host process already runs as, Linux selects
-a shared-identity arm: it skips the trusted-root assertion, the durable
-`/var/lib/acp-go` identity authority and its task-vacancy proof, the
-root-owned `/run/acp-go/supervisor-proofs` namespace — the containment markers
-move to the private scratch root — and the credential drop, because an
-unprivileged process can neither re-enter its own identity nor shed the
-supplementary groups of the account it was started under. A native group the
-supervisor is not already in is still refused. Everything the boundary is worth
-having for is unprivileged and unchanged: the guardian and liveness pair, both
-subreaper claims, no-new-privs, core-dump suppression, descendant adoption and
-reaping to kernel `ECHILD`, the process-group teardown, the sealed memfd config,
-the descriptor fences, and the whole readiness handshake. The parent stamps the
-decision into the sealed config and each child re-derives it from its own
-identity, refusing a config that disagrees either way. What is lost is identity
-separation: concurrent sessions share one account's HOME, credentials and
-journals, no host-global UID lock excludes a second runner, no durable
-quarantine record survives a crash, and the subreaper boundary is a lifecycle
-boundary rather than a security one. `ContainmentMode()` reports
-`shared_identity` rather than `authoritative` for exactly that reason. A trusted
-root supervisor can never select the arm: the native UID is required to be
-nonzero, so it can never equal a zero effective UID.
+Ordinary mode is selected only by omitting `ProcessIsolation`. It uses the
+caller's current root or nonroot identity without consulting account databases,
+the identity authority, sudo, or synthetic UID/GID policy. It retains the
+portable two-lock writable-home exclusion but reports `shared_identity` and
+publishes no descendant inventory or whole-tree quiescence result. A non-nil
+policy can never select this path: explicit isolation is distinct trusted-root
+Linux only and fails closed on every policy, authority, platform, or launch
+error.
 
-Linux provides authoritative runtime containment. Windows rejects native launch
-before spawning Codex because its process API cannot apply the mandatory Unix
-UID/GID identity boundary with empty supplementary groups. Windows
-cross-compilation proves only that this refusal path builds; it does not
-establish runtime support. Embedded Darwin hosts default to the same
-fail-closed behavior, but `WithDarwinBestEffortContainment()` explicitly
-accepts a weaker boundary. Each
+Windows supports ordinary native runtimes and logout when its NTFS/ReFS lock
+requirements are met; login refuses because the browser launch cannot be
+neutralised. Embedded Darwin hosts also default to ordinary `shared_identity`.
+`WithDarwinBestEffortContainment()` is mutually exclusive with explicit
+isolation and explicitly accepts a weaker supervisor boundary. Each
 native launch receives a fresh process group; the liveness supervisor captures
 that original PGID while the sole direct-child waiter is paused, records the
 child identity, begins that waiter before readiness, then uses one memoized
@@ -222,7 +218,6 @@ This is deliberately not authoritative. A descendant can call `setsid` and
 escape. Darwin exposes only a numeric PGID, so reuse can cause collateral
 signalling. Embedded hosts receive an unconditional warning, and
 provider-descendant inventory is unavailable rather than reported as zero.
-FreeBSD, OpenBSD, NetBSD, and other unsupported platforms remain fail closed.
 
 Before a Darwin best-effort launch, Codex writes a mode-0600 schema-1 record in
 the mode-0700 `acp-go-codex-containment` registry under the selected scratch
@@ -239,8 +234,8 @@ Linux accepts ext2, ext3, ext4, XFS, Btrfs, F2FS, and tmpfs; Windows accepts
 fixed or RAM drives formatted as NTFS or ReFS. Network mounts, overlay
 filesystems, unknown filesystem types, and platforms without a proved backend
 fail closed before either native runtime or terminal account mutation starts.
-The Windows filesystem check is only part of the compiled refusal path and
-does not override the mandatory identity-boundary rejection.
+These checks support ordinary Windows runtime/logout exclusion; they do not
+make explicit process isolation portable beyond Linux.
 
 ACP logout is disabled by default and is refused unless the adapter is started
 with `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)` and an

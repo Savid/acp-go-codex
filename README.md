@@ -88,17 +88,21 @@ OpenTelemetry providers.
 
 ## Platform containment
 
-Linux child-subreapers provide authoritative native-tree containment. Windows
-native launch fails closed because its process API cannot apply the mandatory
-Unix UID/GID identity boundary with empty supplementary groups;
-cross-compilation proves only that the refusal path builds, not runtime support.
-The standalone command is Linux-only. Embedded Darwin callers may explicitly
-accept the weaker process-group boundary with
+Omitting process isolation runs Codex as the adapter's current identity and
+reports non-authoritative `shared_identity` containment on every platform where
+the native backend and writable-home locking are supported. Ordinary mode does
+not publish provider-descendant inventory or claim whole-tree quiescence.
+Windows supports ordinary runtimes and logout; browser-based login is refused
+because its launch cannot be neutralised safely.
+
+An explicit isolation policy is Linux-only, requires a distinct trusted-root
+supervisor, and uses child subreapers for authoritative native-tree
+containment. It never falls back to ordinary execution. Embedded Darwin callers
+may instead explicitly accept the weaker process-group boundary with
 `codexacp.WithDarwinBestEffortContainment()`. This mode
 reaps the direct native child and performs a bounded `SIGTERM` then `SIGKILL`
 against the captured original process group. Descendants that call `setsid`
-can survive, and numeric PGID reuse can cause collateral signalling. FreeBSD,
-OpenBSD, NetBSD, and other unsupported platforms remain fail closed.
+can survive, and numeric PGID reuse can cause collateral signalling.
 
 Darwin operators can inspect or explicitly clean one marker-correlated runtime
 without signalling a recorded PGID:

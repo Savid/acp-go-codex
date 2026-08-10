@@ -37,9 +37,10 @@ Runtime containment selection is the integer gauge
 `containment=authoritative`, `containment=best_effort`,
 `containment=shared_identity`, or
 `containment=unavailable` attribute. It is a mode signal, not a process count or
-quiescence proof. Best-effort Darwin publishes no provider-descendant snapshot,
-including no zero; its structured Agent warning and unconditional standalone
-stderr warning carry `containment=best_effort` instead.
+quiescence proof. Ordinary `shared_identity` and best-effort Darwin publish no
+provider-descendant snapshot, including no zero. Best-effort Darwin's structured
+Agent warning and unconditional standalone stderr warning carry
+`containment=best_effort` instead.
 
 <Warning>
 stdout is the ACP JSON-RPC transport. `-debug` writes adapter diagnostics to
