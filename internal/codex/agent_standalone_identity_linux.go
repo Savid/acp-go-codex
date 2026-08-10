@@ -1987,6 +1987,7 @@ func agentStandaloneUIDTemporaryIsTransient(
 	if !acquired {
 		return true, nil
 	}
+
 	defer func() { resultErr = errors.Join(resultErr, uidLock.Close()) }()
 
 	if err = validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, maxSize); err != nil {
