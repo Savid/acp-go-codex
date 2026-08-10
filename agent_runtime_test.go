@@ -84,7 +84,7 @@ type runtimeRecordingClient struct {
 }
 
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
-	const canary = "ACP_GO_CODEX_IMPLICIT_ENV_TEST"
+	const canary = "ACP_GO_CODEX_TEST_ACTUAL_AMBIENT"
 	t.Setenv(canary, "captured")
 
 	var launched codex.Options

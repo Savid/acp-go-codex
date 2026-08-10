@@ -11,7 +11,8 @@ Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
 
 ## Optional standalone isolation policy
 
-Omitting `-process-isolation-config` selects ordinary current-identity mode. On
+Omitting `-process-isolation-config` selects ordinary current-identity mode for
+root or non-root callers. On
 every platform where native launch and writable-home locking are supported it
 reports non-authoritative `shared_identity`, publishes no descendant inventory,
 and makes no whole-tree quiescence claim. Native `login` and `logout` also
@@ -82,7 +83,7 @@ home for native tools.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-path` | `codex` on `PATH` | Codex CLI executable path. |
-| `-process-isolation-config` | unset | Optional absolute path to the explicit standalone Linux isolation policy described above. |
+| `-process-isolation-config` | unset | optional absolute path to the explicit standalone Linux isolation policy described above. |
 | `-home` | unset, or policy `standaloneStateRoot` | Codex home directory passed as `CODEX_HOME`; explicit isolation binds it to `standaloneStateRoot`. |
 | `-scratch-dir` | system temp | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-provider-auth-root` | unset | Durable host-owned root holding the values-free provider-auth ledger. Empty leaves the whole provider-auth surface unadvertised. |

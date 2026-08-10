@@ -35,7 +35,7 @@ func TestOrdinaryWindowsNativeRuntimeAndLogout(t *testing.T) {
 	require.NoError(t, err)
 
 	implicitEnvironment := environmentMap(os.Environ())
-	implicitEnvironment["ACP_GO_CODEX_TEST_WINDOWS_NATIVE"] = "1"
+	implicitEnvironment["ACP_GO_CODEX_WINDOWS_EXECUTABLE_CHILD"] = "1"
 
 	parent := t.TempDir()
 	writableHome := t.TempDir()

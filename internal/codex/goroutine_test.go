@@ -30,7 +30,7 @@ func TestHandleCodexGoroutinePanicBranches(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	if os.Getenv("ACP_GO_CODEX_TEST_WINDOWS_NATIVE") == "1" {
+	if os.Getenv("ACP_GO_CODEX_WINDOWS_EXECUTABLE_CHILD") == "1" {
 		if len(os.Args) < 2 {
 			os.Exit(2)
 		}
