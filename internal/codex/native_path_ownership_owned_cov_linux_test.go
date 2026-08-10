@@ -302,6 +302,24 @@ func TestNativeOwnedDirectoryUnderASharedIdentityAcceptsOnlyRootAncestors(t *tes
 	})
 }
 
+func TestNativeOwnedWalkRefusesANonDirectoryComponent(t *testing.T) {
+	regular := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(regular, []byte("seeded"), 0o600))
+
+	previous := nativeOwnershipOpenFilesystemRoot
+	nativeOwnershipOpenFilesystemRoot = func() (int, error) {
+		return unix.Open(regular, unix.O_PATH|unix.O_CLOEXEC, 0)
+	}
+
+	t.Cleanup(func() { nativeOwnershipOpenFilesystemRoot = previous })
+
+	require.ErrorContains(
+		t,
+		validateNativeOwnedDirectory("/home", nativeOwnershipIsolation()),
+		nativeOwnedUntrustedAncestry,
+	)
+}
+
 // TestNativeOwnedDirectoryFailsClosedOnKernelFaults proves the durable check
 // aborts whenever the kernel stops answering for a descriptor the walk already
 // accepted. None of these can be driven through a real filesystem — the kernel

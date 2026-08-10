@@ -177,6 +177,28 @@ func TestSupervisorIdentityDispositionRefusesAConfigItsIdentityContradicts(t *te
 	}
 }
 
+func TestRunSupervisorPropagatesADispositionRefusal(t *testing.T) {
+	sharedIdentitySeams(t)
+	processEffectiveUID = func() int { return 4242 }
+
+	config := supervisorConfig{
+		NativePath:     "/bin/true",
+		Home:           "home",
+		Scratch:        t.TempDir(),
+		IsolationUID:   1000,
+		IsolationGID:   1000,
+		SharedIdentity: true,
+	}
+
+	path, err := writeSupervisorConfig(config.Scratch, config)
+	require.NoError(t, err)
+
+	require.EqualError(t,
+		runSupervisor(supervisorModeLiveness, path),
+		"codex supervisor identity disposition does not match the identity it runs as",
+	)
+}
+
 // TestSharedIdentitySupervisorContainsARealNativeLaunch is the end-to-end proof
 // with no seams at all: the guardian and liveness pair self-exec, claim the home
 // locks, arm the subreaper, run a real native process under the identity the
