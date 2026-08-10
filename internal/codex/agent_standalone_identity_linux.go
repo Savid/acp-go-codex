@@ -1915,6 +1915,17 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 		}
 
 		if validateErr := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); validateErr != nil {
+			// The names this pass adjudicates come from one listing of the
+			// root, and a marker temporary is the one entry another identity
+			// publishes and then renames away under its own UID lock. A name
+			// that has already gone was resolved by its owner between the
+			// listing and this stat: there is no entry left to account for and
+			// nothing left to refuse. Every other fault still refuses the whole
+			// registry, and a temporary that is still there is still judged.
+			if errors.Is(validateErr, unix.ENOENT) {
+				return true, nil
+			}
+
 			return false, validateErr
 		}
 

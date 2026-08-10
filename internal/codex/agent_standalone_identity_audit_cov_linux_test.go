@@ -468,6 +468,44 @@ func TestAgentStandaloneCovAuthorityRootAuditCleansTrustedTemporaries(t *testing
 	require.NoFileExists(t, probeTemporary)
 }
 
+// TestAgentStandaloneCovAuthorityRootAuditSkipsAMarkerTemporaryThatVanished
+// proves the audit does not refuse a registry over an entry that stopped
+// existing while it was being read. The pass adjudicates the names in one
+// listing of the root, and a marker temporary is the entry another identity
+// publishes and then renames away under its own UID lock, so a concurrent
+// claimant is free to resolve one between the listing and the stat. Refusing
+// there would fail an audit that found nothing wrong: the entry is gone, and
+// the identity that owned it is the only one that could have removed it. The
+// disappearance is staged on the stat seam because a filesystem cannot be asked
+// to lose a file at a chosen instant, but the ENOENT the audit sees is the real
+// kernel answer for a name that is really no longer there.
+func TestAgentStandaloneCovAuthorityRootAuditSkipsAMarkerTemporaryThatVanished(t *testing.T) {
+	directory := openAgentStandaloneTestDirectory(t)
+	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+	name := "62661.quarantine.next-" + agentStandaloneCovSuffix
+	temporary := agentStandaloneCovWriteRegistryFile(t, directory, name, "partial")
+
+	previous := agentStandaloneFstatat
+	t.Cleanup(func() { agentStandaloneFstatat = previous })
+
+	resolved := 0
+	agentStandaloneFstatat = func(fd int, path string, stat *unix.Stat_t, flags int) error {
+		if path == name && resolved == 0 {
+			resolved++
+
+			require.NoError(t, os.Remove(temporary))
+		}
+
+		return previous(fd, path, stat, flags)
+	}
+
+	require.NoError(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, true, time.Now().Add(time.Second), nil, nil,
+	))
+	require.Equal(t, 1, resolved, "the audit never inspected the marker temporary it was given")
+	require.NoFileExists(t, temporary)
+}
+
 // TestAgentStandaloneCovAuthorityRootAuditAcceptsACoherentRegistry proves a
 // registry whose owners, markers and locks all agree is accepted, so every
 // refusal above is attributable to the single inconsistency it introduced.

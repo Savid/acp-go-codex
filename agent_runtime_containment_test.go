@@ -141,7 +141,8 @@ func TestContainmentModeReportsOrdinarySharedIdentity(t *testing.T) {
 	originalGOOS := containmentGOOS
 	t.Cleanup(func() { containmentGOOS = originalGOOS })
 
-	explicit := Options{ProcessIsolation: &ProcessIsolation{UID: 65534, GID: 65534}}
+	isolationUID, isolationGID := testIsolationIdentity()
+	explicit := Options{ProcessIsolation: &ProcessIsolation{UID: isolationUID, GID: isolationGID}}
 
 	containmentGOOS = "linux"
 	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(explicit))

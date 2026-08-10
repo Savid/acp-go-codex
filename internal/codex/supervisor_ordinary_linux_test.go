@@ -19,7 +19,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const ordinaryUserHelperEnv = "ACP_GO_CODEX_INTERNAL_ORDINARY_USER_TEST"
+// ordinaryUserHelperEnv marks the re-exec'd half of the ordinary-execution
+// case, where a privileged runner runs this same test binary as an unprivileged
+// identity. It carries the canonical internal-helper suffix the family reserves
+// for private self-exec test plumbing.
+const ordinaryUserHelperEnv = "ACP_GO_CODEX_INTERNAL_HELPER"
 
 func TestExplicitProcessIsolationRequiresDistinctTrustedRoot(t *testing.T) {
 	linuxSupervisorIdentitySeams(t)
@@ -127,17 +131,28 @@ func TestProcessIsolationOmissionAllowsOrdinaryUser(t *testing.T) {
 		return
 	}
 
-	root := t.TempDir()
-	require.NoError(t, os.Chmod(root, 0o711))
+	uid, gid := testIsolationIdentity()
+
+	// t.TempDir nests its leaf under a 0700 parent, so the unprivileged identity
+	// cannot traverse down to the helper it is asked to exec. The traversable
+	// root is flat and 0711, which is the only shape that ancestry admits.
+	root := testTraversableTempDir(t)
 	helper := filepath.Join(root, "ordinary-user.test")
 	binary, err := os.ReadFile(os.Args[0])
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(helper, binary, 0o755))
 
+	// The re-exec'd half calls t.TempDir itself, and the suite's TMPDIR is a
+	// root-owned tmpfs the unprivileged identity cannot create in. It gets its
+	// own temporary root, owned by the identity it will run as.
+	childTemp := filepath.Join(root, "tmp")
+	require.NoError(t, os.Mkdir(childTemp, 0o700))
+	require.NoError(t, os.Chown(childTemp, int(uid), int(gid)))
+
 	cmd := exec.Command(helper, "-test.run=^TestProcessIsolationOmissionAllowsOrdinaryUser$")
-	cmd.Env = append(os.Environ(), ordinaryUserHelperEnv+"=1")
+	cmd.Env = append(os.Environ(), ordinaryUserHelperEnv+"=1", "TMPDIR="+childTemp)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
-		Uid: 65534, Gid: 65534, Groups: []uint32{},
+		Uid: uid, Gid: gid, Groups: []uint32{},
 	}}
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))

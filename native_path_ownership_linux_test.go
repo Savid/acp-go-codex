@@ -46,7 +46,7 @@ func TestGeneratedNativeTreeDistinctIdentityTraversal(t *testing.T) {
 		t.Fatal(writeErr)
 	}
 
-	isolation := &ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}}
+	isolation := nativeOwnershipTestIsolation()
 	if handoffErr := handoffGeneratedNativeTree(native, isolation); handoffErr != nil {
 		t.Fatal(handoffErr)
 	}
@@ -97,7 +97,7 @@ func TestGeneratedNativeTreeRejectsUntraversableCallerRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	isolation := &ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}}
+	isolation := nativeOwnershipTestIsolation()
 	if err := handoffGeneratedNativeTree(native, isolation); err == nil {
 		t.Fatal("0700 caller root accepted")
 	}
@@ -151,7 +151,7 @@ func TestGeneratedNativeTreeRejectsUnsafeEntries(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			isolation := &ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}}
+			isolation := nativeOwnershipTestIsolation()
 			if err := handoffGeneratedNativeTree(native, isolation); err == nil || errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("unsafe tree result = %v", err)
 			}
@@ -166,7 +166,6 @@ const (
 	nativeOwnershipUntraversable     = "not traversable by the target identity"
 	nativeOwnershipDriftedRootMode   = "generated native directory mode 0750 is unsafe"
 	nativeOwnershipUnprovenHandoff   = "generated native inode ownership handoff could not be proven"
-	nativeOwnershipForeignInode      = "generated native inode owner changed to uid=65534 gid=65534"
 	nativeOwnedNotADirectory         = "native-owned path ancestry is not a directory"
 	nativeOwnedUnsafeLeaf            = "native-owned directory is not safely owned by the target identity"
 	nativeOwnedWritableAncestor      = "native-owned path ancestor mode 0771 is writable"
@@ -174,10 +173,20 @@ const (
 
 // nativeOwnershipTargetUID and nativeOwnershipTargetGID are the dropped
 // identity every case below hands a tree to. It is never the identity running
-// the test, which is what makes an ownership change observable.
-const (
-	nativeOwnershipTargetUID = uint32(65534)
-	nativeOwnershipTargetGID = uint32(65534)
+// the test, which is what makes an ownership change observable. It is this
+// package's own isolation identity rather than a literal: go test runs the
+// packages concurrently, and a case here that puts a live process on another
+// package's identity makes that package's standalone claim refuse a UID it
+// correctly reports as still occupied.
+var nativeOwnershipTargetUID, nativeOwnershipTargetGID = testIsolationIdentity()
+
+// nativeOwnershipForeignInode is the refusal the pre-chown revalidation owes an
+// inode that already belongs to the dropped identity. The identity is derived
+// rather than spelled out so the expectation cannot drift away from the one the
+// fixtures actually hand trees to.
+var nativeOwnershipForeignInode = fmt.Sprintf(
+	"generated native inode owner changed to uid=%d gid=%d",
+	nativeOwnershipTargetUID, nativeOwnershipTargetGID,
 )
 
 // requireNativeOwnershipRoot skips a case that cannot run unprivileged. Every
