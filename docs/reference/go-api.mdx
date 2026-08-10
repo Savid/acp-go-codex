@@ -140,7 +140,8 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `WithSessionRawEvents` | Enable `_codex/rawEvent`. |
 | `WithSessionOutputSchema` | Configure structured output. |
 | `WithSessionCodexOptions` | Merge `_meta.codex.options`. |
-| `WithCodexEnv` | Contribute to the immutable environment pinned by the first runtime construction; conflicting peer env and the adapter-reserved process-management names listed above fail closed. |
+| `WithCodexEnv` | Set cloned environment values on this session's Codex thread through `shell_environment_policy.set`. A raw `PATH` and adapter-reserved process-management or managed-home names fail closed. |
+| `WithCodexExtraPathDirs` | Set cloned, ordered absolute directories that prefix the app-server's native `PATH` for this session's Codex thread. Order and duplicates are preserved. |
 | `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and a nonblank turn nonce of at most 4096 bytes; invalid input omits route metadata so the agent rejects it. |
 | `CancelRequest` | Build an active-turn cancellation with the same bounded route; invalid input likewise fails closed. |
 

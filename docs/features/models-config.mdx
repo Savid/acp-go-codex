@@ -68,14 +68,21 @@ is never clobbered.
 Keep secrets out of the seeded file: set the API key with `WithEnv` (or the
 `ProcessIsolation.BaseEnvironment`) and reference it from the config with `env_key`.
 
-Session builders also expose `WithCodexEnv`. The first runtime construction
-pins the effective process `WithEnv` plus session overlay for that Agent-owned
-runtime key. Empty or identical env on peer sessions inherits that process; a
-conflicting peer env fails before Codex creates a thread. A distinct effective
-environment therefore requires a distinct Agent/runtime key.
+`WithEnv` configures the static environment used to launch the shared Codex
+app-server. Session builders use `WithCodexEnv` for cloned values installed only
+on that session's thread through `shell_environment_policy.set`; concurrent
+threads on one app-server may carry different values without crossing.
+`WithCodexExtraPathDirs` supplies the session's ordered search-path prefix. Its
+absolute directories, including duplicates, stay in caller order ahead of the
+exact native app-server `PATH`. Session `env` cannot set `PATH` directly.
+
 Both environment surfaces reject the adapter-reserved
 `ACP_GO_CODEX_INTERNAL_*` namespace and the `ACP_GO_CODEX_RUNTIME_ID` and
-`ACP_GO_CODEX_SCRATCH_ROOT` containment markers, case-insensitively.
+`ACP_GO_CODEX_SCRATCH_ROOT` containment markers, case-insensitively. Session
+values also reject managed home and XDG root names. New, load, resume, and fork
+requests apply their own carrier to the addressed thread; an active resume
+rebind replaces the saved carrier, and runtime recovery uses that latest
+snapshot.
 
 ## Config overrides
 

@@ -23,6 +23,11 @@ Accepted session lifecycle metadata:
         "approvalPolicy": "never",
         "sandboxPolicy": "workspace-write",
         "mcpToolApprovalMode": "approve",
+        "env": {
+          "WAGIE_OPERATION_ID": "operation-42",
+          "WAGIE_SESSION_BEARER": "session-bearer"
+        },
+        "extraPathDirs": ["/run/wagie/operation-42/bin"],
         "outputSchema": {"type": "object"}
       },
       "rawEvent": {
@@ -33,10 +38,28 @@ Accepted session lifecycle metadata:
 }
 ```
 
-Session `env` may add ordinary variables to the runtime's immutable environment.
-`CODEX_HOME`, `HOME`, and the XDG cache, config, data, runtime, and state roots
-are reserved and rejected before native creation; `WithHome` and the trusted
-process-isolation base environment remain authoritative.
+Session `env` is an object of string values installed on that session's Codex
+thread at `shell_environment_policy.set`. Peer threads on the same app-server do
+not share it. A raw `PATH` entry is rejected (case-insensitively on Windows), as
+are adapter-private process-management names, `CODEX_HOME`, `HOME`, and the XDG
+cache, config, data, runtime, and state roots. `WithHome` and the app-server's
+static launch environment remain authoritative.
+
+Session `extraPathDirs` is the only session search-path authority. It is an
+array whose elements must each be a string, nonempty, absolute, and free of the
+platform path-list separator. A rejected element names its exact field, such as
+`_meta.codex.options.extraPathDirs[1]`. Order and duplicates are preserved, and
+the listed directories are placed in order before the exact `PATH` used to
+launch the app-server; empty native path components are removed. The adapter
+then installs that derived `PATH` alongside `env` at
+`shell_environment_policy.set` and rejects another owner of that section or its
+`PATH` before sending a native lifecycle request.
+
+Every new, load, resume, and fork request carries its own complete values. A
+fork applies the child's values to both the native fork and its required resume.
+An active resume rebind replaces the adapter's saved carrier with the new
+request, so omitted or replaced values from the previous binding are neither
+sent nor retained. Runtime recovery reapplies the latest saved carrier.
 
 ## Initialize capabilities
 
