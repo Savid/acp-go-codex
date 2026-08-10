@@ -144,6 +144,14 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			want: "standalone owner temporary requires registry cleanup",
 		},
 		{
+			name: "malformed owner temporary",
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovWriteRegistryFile(t, directory, "bad.owner.next-"+suffix, "partial")
+			},
+			want: `owner temporary "bad.owner.next-` + suffix + `" has an invalid name`,
+		},
+		{
 			name: "domain temporary without exclusive cleanup",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
@@ -466,6 +474,29 @@ func TestAgentStandaloneCovAuthorityRootAuditCleansTrustedTemporaries(t *testing
 	))
 	require.NoFileExists(t, domainTemporary)
 	require.NoFileExists(t, probeTemporary)
+}
+
+// TestAgentStandaloneCovAuthorityRootAuditRefusesAnOwnerTemporaryItMayNotClean
+// proves the domain-exclusive audit refuses an owner temporary instead of
+// removing it, and refuses with the sentinel the claim path keys on to hand the
+// registry to the owners-lock drain. The audit holds the domain lock, not the
+// owners lock, and an owner temporary is published under the owners lock: only
+// the drain may resolve one, so an audit that cleaned it here would be deleting
+// another claimant's in-flight publication. The case that immediately precedes
+// this one proves the same audit does clean the domain-record and probe
+// temporaries, so this refusal cannot be a blanket refusal of every temporary.
+func TestAgentStandaloneCovAuthorityRootAuditRefusesAnOwnerTemporaryItMayNotClean(t *testing.T) {
+	directory := openAgentStandaloneTestDirectory(t)
+	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+	name := "62667.owner.next-" + agentStandaloneCovSuffix
+	temporary := agentStandaloneCovWriteRegistryFile(t, directory, name, "partial")
+
+	err := auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, true, false, time.Now().Add(time.Second), nil, nil,
+	)
+	require.ErrorIs(t, err, errAgentStandaloneOwnerTemporary)
+	require.ErrorContains(t, err, name)
+	require.FileExists(t, temporary, "a domain-exclusive audit must leave owner temporaries to the owners-lock drain")
 }
 
 // TestAgentStandaloneCovAuthorityRootAuditSkipsAMarkerTemporaryThatVanished

@@ -109,6 +109,35 @@ func TestSupervisorOrdinaryIdentityDispositionRefusesContradictions(t *testing.T
 	}))
 }
 
+// TestOrdinaryLinuxSupervisorRefusesAnUnavailableProcessIdentity proves both
+// halves of the ordinary-execution path fail closed when the kernel cannot name
+// the calling identity. An ordinary launch is defined entirely by that identity:
+// the supervisor stamps it into the sealed config, and the child re-derives it
+// and refuses any config that disagrees. With no identity to stamp there is
+// nothing to seal the launch against, so the supervisor must refuse before it
+// builds a command rather than proceed with a zero uid and gid — which is
+// exactly root. The seam returns the same negative the runtime returns when
+// geteuid is unavailable, and the refusal is required by its exact text so a
+// later disposition refusal could not be mistaken for it.
+func TestOrdinaryLinuxSupervisorRefusesAnUnavailableProcessIdentity(t *testing.T) {
+	processIdentitySeams(t)
+	processEffectiveUID = func() int { return -1 }
+
+	require.ErrorContains(t,
+		validateSupervisorIdentityDisposition(supervisorConfig{OrdinaryExecution: true}),
+		"current process identity is unavailable",
+	)
+
+	cmd, proof, err := supervisorCommand(context.Background(), supervisorConfig{
+		NativePath: "/bin/true",
+		NativeEnv:  []string{"PATH=/usr/bin:/bin"},
+		Scratch:    t.TempDir(),
+	})
+	require.ErrorContains(t, err, "current process identity is unavailable")
+	require.Nil(t, cmd, "no command may be built for a launch with no identity to seal it to")
+	require.Nil(t, proof)
+}
+
 func TestProcessIsolationOmissionAllowsRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires a root caller to prove ordinary root execution")
