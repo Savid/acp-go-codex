@@ -1149,7 +1149,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	client.mu.Lock()
 	require.Equal(t, 2, client.resumeCount)
 	require.Equal(t, nativePath, client.resume.Path)
-	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
+	require.Equal(t, []string{nativeThreadID, nativeThreadID}, client.unsubscribed)
 	client.mu.Unlock()
 
 	agent.setAgentClient(&errorAgentClient{
@@ -1199,6 +1199,47 @@ func (c *activeRebindEdgeClient) AccountRead(ctx context.Context) (codex.Account
 	}
 
 	return c.spyCodexClient.AccountRead(ctx)
+}
+
+type loadedThreadCarrierClient struct {
+	*spyCodexClient
+
+	mu            sync.Mutex
+	subscribed    bool
+	environment   map[string]string
+	extraPathDirs []string
+	calls         []string
+}
+
+func (c *loadedThreadCarrierClient) UnsubscribeThread(ctx context.Context, threadID string) error {
+	if err := c.spyCodexClient.UnsubscribeThread(ctx, threadID); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.subscribed = false
+	c.calls = append(c.calls, "unsubscribe")
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *loadedThreadCarrierClient) ResumeThread(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+	c.mu.Lock()
+	if !c.subscribed {
+		c.environment = cloneStringMap(req.Environment)
+		c.extraPathDirs = cloneStrings(req.ExtraPathDirs)
+	}
+	c.subscribed = true
+	c.calls = append(c.calls, "resume")
+	c.mu.Unlock()
+
+	thread, err := c.spyCodexClient.ResumeThread(ctx, req)
+	if thread.Path == "" {
+		thread.Path = req.Path
+	}
+
+	return thread, err
 }
 
 func TestActiveStoredRebindFailureBranches(t *testing.T) {
@@ -1388,6 +1429,47 @@ func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
 	meta.ExtraPathDirs[0] = "caller-mutated"
 	require.Equal(t, "new-token", active.snapshot().env["WAGIE_API_TOKEN"])
 	require.Equal(t, newPath, active.snapshot().extraPathDirs[0])
+}
+
+func TestActiveRebindDetachesLoadedThreadBeforeApplyingCarrier(t *testing.T) {
+	oldPath := filepath.Join(t.TempDir(), "old-bin")
+	newPath := filepath.Join(t.TempDir(), "new-bin")
+	client := &loadedThreadCarrierClient{
+		spyCodexClient: newSpyCodexClient(),
+		subscribed:     true,
+		environment:    map[string]string{"WAGIE_OPERATION_ID": "operation-old"},
+		extraPathDirs:  []string{oldPath},
+	}
+	client.thread.Path = "/native/rollout.jsonl"
+
+	agent := NewAgent()
+	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+		ID: "thread-active", Path: client.thread.Path,
+	}, client, sessionMeta{
+		Env:           cloneStringMap(client.environment),
+		ExtraPathDirs: cloneStrings(client.extraPathDirs),
+	}, nil)
+	agent.sessions[active.id] = active
+	agent.runtimeClient = client
+
+	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
+	_, err := agent.rebindActiveStoredSession(
+		context.Background(),
+		ResumeSessionRequest("session", "/tmp/project"),
+		entries,
+		sessionMeta{
+			Env:           map[string]string{"WAGIE_OPERATION_ID": "operation-new"},
+			ExtraPathDirs: []string{newPath},
+		},
+		active,
+	)
+	require.NoError(t, err)
+
+	client.mu.Lock()
+	require.Equal(t, []string{"unsubscribe", "resume"}, client.calls)
+	require.Equal(t, "operation-new", client.environment["WAGIE_OPERATION_ID"])
+	require.Equal(t, []string{newPath}, client.extraPathDirs)
+	client.mu.Unlock()
 }
 
 func TestRuntimeCrashRecoveryPreservesRotatedThreadCarrier(t *testing.T) {

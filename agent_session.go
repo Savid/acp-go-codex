@@ -728,8 +728,14 @@ func (a *Agent) rebindActiveStoredSession(
 	meta sessionMeta,
 	active *session,
 ) (acp.ResumeSessionResponse, error) {
-	if err := active.ensureLiveClient(ctx); err != nil {
-		return acp.ResumeSessionResponse{}, codexThreadACPError(err, active.accountMetaSnapshot())
+	releaseTurn, err := active.acquireTurn(ctx)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	defer releaseTurn()
+
+	if liveErr := active.ensureLiveClient(ctx); liveErr != nil {
+		return acp.ResumeSessionResponse{}, codexThreadACPError(liveErr, active.accountMetaSnapshot())
 	}
 
 	client, ownedThreadID, ownedPath, live := active.activeThreadOwnership()
@@ -752,6 +758,10 @@ func (a *Agent) rebindActiveStoredSession(
 	}
 
 	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+
+	if unsubscribeErr := client.UnsubscribeThread(ctx, ownedThreadID); unsubscribeErr != nil {
+		return acp.ResumeSessionResponse{}, codexThreadACPError(unsubscribeErr, active.accountMetaSnapshot())
+	}
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      ownedThreadID,
