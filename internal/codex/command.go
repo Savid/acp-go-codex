@@ -37,12 +37,17 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, "", "", err
 	}
 
-	nativePath := searchPathFromEnvironment(nativeEnv)
-
 	path, err := resolveCodexPath(options.CLIPath, nativeEnv, options.ProcessIsolation)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
+
+	path, nativeEnv, err = stagePackagedCodex(path, nativeEnv, options.SupervisorRoot)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+
+	nativePath := searchPathFromEnvironment(nativeEnv)
 
 	version, versionErr := validateCodexVersionOutput(options.NativeVersion)
 	if versionErr != nil {

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -126,19 +127,22 @@ func requireSessionCLITurn(
 
 	response := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		client.resetRecordedOutput()
+		command := fmt.Sprintf(
+			"test \"$(command -v wagie)\" = \"%s\" || exit 71; test \"${PATH%%%%:*}\" = \"%s\" || exit 72; wagie",
+			filepath.Join(shimPath, "wagie"),
+			shimPath,
+		)
 
 		return conn.Prompt(ctx, acp.PromptRequest{
 			Meta:      newTurnRouteMeta(),
 			SessionId: sessionID,
 			Prompt: []acp.ContentBlock{acp.TextBlock(fmt.Sprintf(
-				"Use the shell to run `command -v wagie`, then run `wagie`. Reply only with both command outputs. The expected executable directory is %s and the expected operation marker is %s.",
-				shimPath,
-				operation,
+				"Use the exec tool exactly once with this JavaScript, without changing it: `const result = await tools.exec_command({cmd: %s, login: false}); text(result.output);`.",
+				strconv.Quote(command),
 			))},
 		})
 	})
 	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
-	require.Contains(t, client.text(), filepath.Join(shimPath, "wagie"))
 	require.Contains(t, client.text(), operation)
 }
 
