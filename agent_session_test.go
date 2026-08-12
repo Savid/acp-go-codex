@@ -1259,6 +1259,20 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		return active
 	}
 
+	t.Run("turn admission failure", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent := NewAgent()
+		active := bind(agent, client)
+		releaseTurn, err := active.acquireTurn(ctx)
+		require.NoError(t, err)
+		defer releaseTurn()
+
+		_, err = agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, valueBackpressure)
+		require.Empty(t, client.unsubscribed)
+		require.Empty(t, client.resume.ThreadID)
+	})
+
 	t.Run("materialized dispatcher keeps active ownership", func(t *testing.T) {
 		client := newSpyCodexClient()
 		agent := NewAgent()
@@ -1302,6 +1316,15 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		active := bind(agent, client)
 		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
 		require.ErrorContains(t, err, "resume failed")
+	})
+
+	t.Run("unsubscribe failure", func(t *testing.T) {
+		client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), unsubscribeErr: errors.New("unsubscribe failed")}
+		agent := NewAgent()
+		active := bind(agent, client)
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "unsubscribe failed")
+		require.Empty(t, client.resume.ThreadID)
 	})
 
 	for _, tc := range []struct {
