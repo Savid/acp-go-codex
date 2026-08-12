@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 type packagedCodexFixture struct {
@@ -139,7 +140,15 @@ func preservePackagePathHooks(t *testing.T) {
 	chmod := stagePackagedCodexChmod
 	link := stagePackagedCodexLink
 	mkdir := stagePackagedCodexMkdir
+	openFile := stagePackagedCodexOpenFile
+	remove := stagePackagedCodexRemove
 	readDir := stagePackagedCodexReadDir
+	treeMkdir := stagePackagedCodexTreeMkdir
+	handoff := stagePackagedCodexHandoff
+	sourceOpen := stagePackagedCodexSourceOpen
+	sourceOpenat := stagePackagedCodexSourceOpenat
+	sourceFstat := stagePackagedCodexSourceFstat
+	sourceReadDir := stagePackagedCodexSourceReadDir
 	npmReadDir := npmCodexPackageReadDir
 	npmReadJSON := npmCodexPackageReadJSON
 	npmStatJSON := npmCodexPackageStatJSON
@@ -151,7 +160,15 @@ func preservePackagePathHooks(t *testing.T) {
 		stagePackagedCodexChmod = chmod
 		stagePackagedCodexLink = link
 		stagePackagedCodexMkdir = mkdir
+		stagePackagedCodexOpenFile = openFile
+		stagePackagedCodexRemove = remove
 		stagePackagedCodexReadDir = readDir
+		stagePackagedCodexTreeMkdir = treeMkdir
+		stagePackagedCodexHandoff = handoff
+		stagePackagedCodexSourceOpen = sourceOpen
+		stagePackagedCodexSourceOpenat = sourceOpenat
+		stagePackagedCodexSourceFstat = sourceFstat
+		stagePackagedCodexSourceReadDir = sourceReadDir
 		npmCodexPackageReadDir = npmReadDir
 		npmCodexPackageReadJSON = npmReadJSON
 		npmCodexPackageStatJSON = npmStatJSON
@@ -219,6 +236,490 @@ func TestStagePackagedCodexAllowsRelaunchInSameScratch(t *testing.T) {
 	require.FileExists(t, second)
 	require.NoDirExists(t, filepath.Join(filepath.Dir(filepath.Dir(first)), codexPackagePathDir))
 	require.NoDirExists(t, filepath.Join(filepath.Dir(filepath.Dir(second)), codexPackagePathDir))
+}
+
+func TestStagePackagedCodexIsolationUsesOwnedSiblingCopies(t *testing.T) {
+	preservePackagePathHooks(t)
+	fixture := newPackagedCodexFixture(t)
+	resource := filepath.Join(fixture.root, codexPackageResources, "nested", "data")
+	require.NoError(t, os.MkdirAll(filepath.Dir(resource), 0o755))
+	require.NoError(t, os.WriteFile(resource, []byte("resource\n"), 0o600))
+	executableResource := filepath.Join(fixture.root, codexPackageResources, "helper")
+	require.NoError(t, os.WriteFile(executableResource, []byte("helper\n"), 0o700))
+
+	parent := t.TempDir()
+	privateRuntime := filepath.Join(parent, "acp-go-codex-runtime-private")
+	require.NoError(t, os.Mkdir(privateRuntime, 0o700))
+	isolation := &ProcessIsolation{UID: 123, GID: 456}
+	var handedOff string
+	stagePackagedCodexHandoff = func(root string, got *ProcessIsolation) error {
+		handedOff = root
+		require.Same(t, isolation, got)
+
+		return nil
+	}
+
+	staged, env, ownedStageRoot, err := stagePackagedCodexForProcess(
+		fixture.executable,
+		[]string{"PATH=/native"},
+		privateRuntime,
+		parent,
+		isolation,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(ownedStageRoot)) })
+	require.Equal(t, handedOff, ownedStageRoot)
+	require.Equal(t, parent, filepath.Dir(ownedStageRoot))
+	require.NotEqual(t, privateRuntime, ownedStageRoot)
+	require.Equal(t, filepath.Dir(staged)+string(os.PathListSeparator)+"/native", environmentMap(env)[pathEnvKey])
+
+	sourceInfo, err := os.Stat(fixture.executable)
+	require.NoError(t, err)
+	stageInfo, err := os.Stat(staged)
+	require.NoError(t, err)
+	require.False(t, os.SameFile(sourceInfo, stageInfo))
+	require.Equal(t, os.FileMode(0o700), stageInfo.Mode().Perm())
+	require.Equal(t, os.FileMode(0o700), requireFileMode(t, filepath.Dir(staged)).Perm())
+	require.Equal(t, os.FileMode(0o600), requireFileMode(
+		t,
+		filepath.Join(ownedStageRoot, codexPackageResources, "nested", "data"),
+	).Perm())
+	require.Equal(t, os.FileMode(0o700), requireFileMode(
+		t,
+		filepath.Join(ownedStageRoot, codexPackageResources, "helper"),
+	).Perm())
+	_, err = os.Readlink(filepath.Join(filepath.Dir(staged), codexCodeModeHost))
+	require.Error(t, err)
+	_, err = os.Readlink(filepath.Join(filepath.Dir(staged), "rg"))
+	require.Error(t, err)
+	_, err = os.Readlink(filepath.Join(ownedStageRoot, codexPackageResources))
+	require.Error(t, err)
+}
+
+func TestStagePackagedCodexIsolationFailsClosedAndCleansSibling(t *testing.T) {
+	t.Run("missing scratch parent", func(t *testing.T) {
+		fixture := newPackagedCodexFixture(t)
+		_, _, _, err := stagePackagedCodexForProcess(
+			fixture.executable, nil, t.TempDir(), "", &ProcessIsolation{UID: 123, GID: 456},
+		)
+		require.ErrorContains(t, err, "runtime scratch parent is required")
+	})
+
+	t.Run("handoff", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		parent := t.TempDir()
+		privateRuntime := filepath.Join(parent, "acp-go-codex-runtime-private")
+		require.NoError(t, os.Mkdir(privateRuntime, 0o700))
+		var stageRoot string
+		stagePackagedCodexMkdir = func(parent, pattern string) (string, error) {
+			created, err := os.MkdirTemp(parent, pattern)
+			stageRoot = created
+
+			return created, err
+		}
+		stagePackagedCodexHandoff = func(string, *ProcessIsolation) error {
+			return errors.New("handoff failed")
+		}
+
+		_, _, _, err := stagePackagedCodexForProcess(
+			fixture.executable,
+			nil,
+			privateRuntime,
+			parent,
+			&ProcessIsolation{UID: 123, GID: 456},
+		)
+		require.ErrorContains(t, err, "handoff packaged Codex stage: handoff failed")
+		require.NoDirExists(t, stageRoot)
+		require.DirExists(t, privateRuntime)
+	})
+
+	t.Run("handoff cleanup failure", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		parent := t.TempDir()
+		privateRuntime := filepath.Join(parent, "acp-go-codex-runtime-private")
+		require.NoError(t, os.Mkdir(privateRuntime, 0o700))
+		stagePackagedCodexHandoff = func(string, *ProcessIsolation) error {
+			return errors.New("handoff failed")
+		}
+		var retained string
+		stagePackagedCodexRemove = func(path string) error {
+			retained = path
+
+			return errors.New("cleanup failed")
+		}
+
+		_, _, _, err := stagePackagedCodexForProcess(
+			fixture.executable,
+			nil,
+			privateRuntime,
+			parent,
+			&ProcessIsolation{UID: 123, GID: 456},
+		)
+		require.ErrorContains(t, err, "handoff failed")
+		require.ErrorIs(t, err, ErrPackageStageCleanupIncomplete)
+		require.ErrorContains(t, err, "cleanup failed")
+		require.DirExists(t, retained)
+		require.NoError(t, os.RemoveAll(retained))
+	})
+
+	t.Run("unsupported resource inode", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		require.NoError(t, os.Symlink(
+			"missing",
+			filepath.Join(fixture.root, codexPackageResources, "unsupported"),
+		))
+		parent := t.TempDir()
+		privateRuntime := filepath.Join(parent, "acp-go-codex-runtime-private")
+		require.NoError(t, os.Mkdir(privateRuntime, 0o700))
+
+		_, _, _, err := stagePackagedCodexForProcess(
+			fixture.executable,
+			nil,
+			privateRuntime,
+			parent,
+			&ProcessIsolation{UID: 123, GID: 456},
+		)
+		require.Error(t, err)
+	})
+}
+
+func TestStagePackagedCodexIsolationRejectsHostileSourceChanges(t *testing.T) {
+	run := func(t *testing.T, fixture packagedCodexFixture) error {
+		t.Helper()
+		parent := t.TempDir()
+		privateRuntime := filepath.Join(parent, "acp-go-codex-runtime-private")
+		require.NoError(t, os.Mkdir(privateRuntime, 0o700))
+		stagePackagedCodexHandoff = func(string, *ProcessIsolation) error { return nil }
+
+		_, _, _, err := stagePackagedCodexForProcess(
+			fixture.executable,
+			nil,
+			privateRuntime,
+			parent,
+			&ProcessIsolation{UID: 123, GID: 456},
+		)
+
+		return err
+	}
+
+	t.Run("direct symlink", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		secret := filepath.Join(t.TempDir(), "secret")
+		require.NoError(t, os.WriteFile(secret, []byte("must-not-copy"), 0o600))
+		host := filepath.Join(filepath.Dir(fixture.executable), codexCodeModeHost)
+		require.NoError(t, os.Remove(host))
+		require.NoError(t, os.Symlink(secret, host))
+
+		err := run(t, fixture)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "must-not-copy")
+	})
+
+	t.Run("hard link", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		secret := filepath.Join(t.TempDir(), "secret")
+		require.NoError(t, os.WriteFile(secret, []byte("must-not-copy"), 0o600))
+		host := filepath.Join(filepath.Dir(fixture.executable), codexCodeModeHost)
+		require.NoError(t, os.Remove(host))
+		require.NoError(t, os.Link(secret, host))
+
+		err := run(t, fixture)
+		require.ErrorContains(t, err, "2 links")
+		require.NotContains(t, err.Error(), "must-not-copy")
+	})
+
+	t.Run("leaf replacement", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		secret := filepath.Join(t.TempDir(), "secret")
+		require.NoError(t, os.WriteFile(secret, []byte("must-not-copy"), 0o600))
+		realOpenat := stagePackagedCodexSourceOpenat
+		replaced := false
+		stagePackagedCodexSourceOpenat = func(dirfd int, path string, flags int, mode uint32) (int, error) {
+			if path == "rg" && !replaced {
+				replaced = true
+				require.NoError(t, os.Remove(filepath.Join(fixture.packagePath, "rg")))
+				require.NoError(t, os.Symlink(secret, filepath.Join(fixture.packagePath, "rg")))
+			}
+
+			return realOpenat(dirfd, path, flags, mode)
+		}
+
+		err := run(t, fixture)
+		require.True(t, replaced)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "must-not-copy")
+	})
+
+	t.Run("directory replacement", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		outside := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "secret"), []byte("must-not-copy"), 0o600))
+		realOpenat := stagePackagedCodexSourceOpenat
+		opens := 0
+		stagePackagedCodexSourceOpenat = func(dirfd int, path string, flags int, mode uint32) (int, error) {
+			if path == codexPackageResources {
+				opens++
+				if opens == 2 {
+					resource := filepath.Join(fixture.root, codexPackageResources)
+					require.NoError(t, os.RemoveAll(resource))
+					require.NoError(t, os.Symlink(outside, resource))
+				}
+			}
+
+			return realOpenat(dirfd, path, flags, mode)
+		}
+
+		err := run(t, fixture)
+		require.Equal(t, 2, opens)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "must-not-copy")
+	})
+
+	t.Run("special inode", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		require.NoError(t, unix.Mkfifo(filepath.Join(fixture.root, codexPackageResources, "fifo"), 0o600))
+		require.ErrorContains(t, run(t, fixture), "unsupported type")
+	})
+}
+
+func TestPackagedCodexIsolationCopyErrors(t *testing.T) {
+	t.Run("source root", func(t *testing.T) {
+		_, err := openPackagedCodexSource("relative")
+		require.ErrorContains(t, err, "must be absolute")
+		_, err = openPackagedCodexSource(filepath.Join(t.TempDir(), "missing"))
+		require.Error(t, err)
+	})
+
+	t.Run("source unavailable and invalid relative", func(t *testing.T) {
+		_, _, err := (*packagedCodexSource)(nil).open("entry", false)
+		require.ErrorContains(t, err, "unavailable")
+
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		require.NoError(t, err)
+		source, err := openPackagedCodexSource(root)
+		require.NoError(t, err)
+		defer source.close()
+		_, _, err = source.open("../entry", false)
+		require.ErrorContains(t, err, "invalid")
+	})
+
+	t.Run("tree mkdir", func(t *testing.T) {
+		sourceDirectory := t.TempDir()
+		source, err := os.Open(sourceDirectory)
+		require.NoError(t, err)
+		defer source.Close()
+		require.Error(t, copyOpenPackagedCodexTree(source, t.TempDir()))
+	})
+
+	t.Run("tree read", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		source, err := os.Open(t.TempDir())
+		require.NoError(t, err)
+		defer source.Close()
+		stagePackagedCodexSourceReadDir = func(*os.File) ([]os.DirEntry, error) {
+			return nil, errors.New("read failed")
+		}
+		require.ErrorContains(t, copyOpenPackagedCodexTree(source, filepath.Join(t.TempDir(), "target")), "read failed")
+	})
+
+	t.Run("nested tree", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		sourceDirectory := t.TempDir()
+		require.NoError(t, os.Mkdir(filepath.Join(sourceDirectory, "nested"), 0o700))
+		source, err := os.Open(sourceDirectory)
+		require.NoError(t, err)
+		defer source.Close()
+		realMkdir := stagePackagedCodexTreeMkdir
+		stagePackagedCodexTreeMkdir = func(path string, mode os.FileMode) error {
+			if filepath.Base(path) == "nested" {
+				return errors.New("nested mkdir failed")
+			}
+
+			return realMkdir(path, mode)
+		}
+		require.ErrorContains(t, copyOpenPackagedCodexTree(source, filepath.Join(t.TempDir(), "target")), "nested mkdir failed")
+	})
+
+	t.Run("file output", func(t *testing.T) {
+		sourcePath := filepath.Join(t.TempDir(), "source")
+		target := filepath.Join(t.TempDir(), "target")
+		require.NoError(t, os.WriteFile(sourcePath, nil, 0o600))
+		source, err := os.Open(sourcePath)
+		require.NoError(t, err)
+		defer source.Close()
+		require.NoError(t, os.WriteFile(target, nil, 0o600))
+		require.Error(t, copyOpenPackagedCodexFile(source, target, 0o600))
+	})
+
+	t.Run("file copy", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		sourcePath := filepath.Join(t.TempDir(), "source")
+		target := filepath.Join(t.TempDir(), "target")
+		require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o600))
+		source, err := os.Open(sourcePath)
+		require.NoError(t, err)
+		defer source.Close()
+		stagePackagedCodexCopy = func(io.Writer, io.Reader) (int64, error) {
+			return 0, errors.New("copy failed")
+		}
+		require.ErrorContains(t, copyOpenPackagedCodexFile(source, target, 0o600), "copy failed")
+		require.NoFileExists(t, target)
+	})
+}
+
+func TestPackagedCodexSourceFailureCoverage(t *testing.T) {
+	t.Run("stage source open", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		stagePackagedCodexSourceOpen = func(string, int, uint32) (int, error) {
+			return -1, errors.New("source root failed")
+		}
+
+		_, _, _, err := stagePackagedCodexForProcess(
+			fixture.executable,
+			nil,
+			t.TempDir(),
+			t.TempDir(),
+			&ProcessIsolation{UID: 123, GID: 456},
+		)
+		require.ErrorContains(t, err, "source root failed")
+	})
+
+	t.Run("stage source validation", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		fixture := newPackagedCodexFixture(t)
+		metadata := filepath.Join(fixture.root, codexPackageMetadata)
+		hardlink := filepath.Join(fixture.root, "metadata-hardlink")
+		require.NoError(t, os.Link(metadata, hardlink))
+
+		_, _, _, err := stagePackagedCodexForProcess(
+			fixture.executable,
+			nil,
+			t.TempDir(),
+			t.TempDir(),
+			&ProcessIsolation{UID: 123, GID: 456},
+		)
+		require.ErrorContains(t, err, "2 links")
+	})
+
+	t.Run("filesystem root", func(t *testing.T) {
+		source, err := openPackagedCodexSource(string(filepath.Separator))
+		require.NoError(t, err)
+		source.close()
+	})
+
+	t.Run("source root fstat", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		realFstat := stagePackagedCodexSourceFstat
+		stagePackagedCodexSourceFstat = func(int, *unix.Stat_t) error {
+			return errors.New("fstat failed")
+		}
+		_, err := openPackagedCodexSource(string(filepath.Separator))
+		require.ErrorContains(t, err, "fstat failed")
+
+		stagePackagedCodexSourceFstat = func(fd int, stat *unix.Stat_t) error {
+			fstatErr := realFstat(fd, stat)
+			if fstatErr != nil {
+				return fstatErr
+			}
+			stat.Mode = unix.S_IFREG | 0o600
+
+			return nil
+		}
+		_, err = openPackagedCodexSource(string(filepath.Separator))
+		require.ErrorContains(t, err, "not a directory")
+	})
+
+	t.Run("layout", func(t *testing.T) {
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		require.NoError(t, err)
+		source, err := openPackagedCodexSource(root)
+		require.NoError(t, err)
+		defer source.close()
+		require.Error(t, source.validateLayout())
+
+		metadata := filepath.Join(root, codexPackageMetadata)
+		require.NoError(t, os.WriteFile(metadata, nil, 0o600))
+		require.NoError(t, os.Link(metadata, filepath.Join(root, "metadata-hardlink")))
+		require.ErrorContains(t, source.validateLayout(), "2 links")
+
+		require.NoError(t, os.Remove(filepath.Join(root, "metadata-hardlink")))
+		require.ErrorContains(t, source.validateLayout(), codexPackageBin)
+	})
+
+	t.Run("entry fstat and kind", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(root, "entry"), nil, 0o600))
+		source, err := openPackagedCodexSource(root)
+		require.NoError(t, err)
+		defer source.close()
+
+		realFstat := stagePackagedCodexSourceFstat
+		stagePackagedCodexSourceFstat = func(int, *unix.Stat_t) error {
+			return errors.New("fstat failed")
+		}
+		_, _, err = source.open("entry", false)
+		require.ErrorContains(t, err, "fstat failed")
+
+		stagePackagedCodexSourceFstat = func(fd int, stat *unix.Stat_t) error {
+			fstatErr := realFstat(fd, stat)
+			if fstatErr != nil {
+				return fstatErr
+			}
+			stat.Mode = unix.S_IFDIR | 0o700
+
+			return nil
+		}
+		_, _, err = source.open("entry", false)
+		require.ErrorContains(t, err, "unsupported type")
+	})
+
+	t.Run("regular type", func(t *testing.T) {
+		stat := unix.Stat_t{Mode: unix.S_IFDIR | 0o700}
+		require.ErrorContains(t, validatePackagedCodexRegular(stat), "unsupported type")
+	})
+
+	t.Run("read directory open", func(t *testing.T) {
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		require.NoError(t, err)
+		source, err := openPackagedCodexSource(root)
+		require.NoError(t, err)
+		defer source.close()
+		_, err = source.readDir("missing")
+		require.Error(t, err)
+	})
+
+	t.Run("tree child fstat", func(t *testing.T) {
+		preservePackagePathHooks(t)
+		root := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(root, "entry"), nil, 0o600))
+		source, err := os.Open(root)
+		require.NoError(t, err)
+		defer source.Close()
+		stagePackagedCodexSourceFstat = func(int, *unix.Stat_t) error {
+			return errors.New("fstat failed")
+		}
+		require.ErrorContains(t, copyOpenPackagedCodexTree(source, filepath.Join(t.TempDir(), "target")), "fstat failed")
+	})
+}
+
+func requireFileMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	return info.Mode()
 }
 
 func TestStagePackagedCodexLeavesOrdinaryExecutableUnchanged(t *testing.T) {
@@ -778,6 +1279,95 @@ func TestLaunchAppServerStagesPackagedCodex(t *testing.T) {
 	}
 	require.Len(t, launchedPaths, 2)
 	require.NotEqual(t, filepath.Dir(filepath.Dir(launchedPaths[0])), filepath.Dir(filepath.Dir(launchedPaths[1])))
+}
+
+func TestLaunchAppServerCleansIsolatedPackageStageAfterLaterFailure(t *testing.T) {
+	preservePackagePathHooks(t)
+	fixture := newPackagedCodexFixture(t)
+	parent := t.TempDir()
+	privateRuntime := filepath.Join(parent, "acp-go-codex-runtime-private")
+	require.NoError(t, os.Mkdir(privateRuntime, 0o700))
+	isolation := testProcessIsolation()
+
+	originalGOOS := processIsolationGOOS
+	originalRemoveAll := packagedCodexStageRemoveAll
+	t.Cleanup(func() {
+		processIsolationGOOS = originalGOOS
+		packagedCodexStageRemoveAll = originalRemoveAll
+	})
+	processIsolationGOOS = processIsolationLinux
+	stagePackagedCodexHandoff = func(string, *ProcessIsolation) error { return nil }
+	var removed string
+	packagedCodexStageRemoveAll = func(path string) error {
+		removed = path
+
+		return os.RemoveAll(path)
+	}
+
+	transport, command, version, nativePath, err := launchAppServer(
+		context.Background(),
+		context.Background(),
+		Options{
+			CLIPath:          fixture.executable,
+			SupervisorRoot:   privateRuntime,
+			SupervisorParent: parent,
+			NativeVersion:    "not-a-version",
+			ProcessIsolation: isolation,
+		},
+	)
+	require.Nil(t, transport)
+	require.Nil(t, command)
+	require.Empty(t, version)
+	require.Empty(t, nativePath)
+	require.ErrorContains(t, err, "could not parse")
+	require.NotEmpty(t, removed)
+	require.Equal(t, parent, filepath.Dir(removed))
+	require.NoDirExists(t, removed)
+	require.DirExists(t, privateRuntime)
+}
+
+func TestLaunchAppServerRetainsAdmissionSignalWhenIsolatedStageCleanupFails(t *testing.T) {
+	preservePackagePathHooks(t)
+	fixture := newPackagedCodexFixture(t)
+	parent := t.TempDir()
+	privateRuntime := filepath.Join(parent, "acp-go-codex-runtime-private")
+	require.NoError(t, os.Mkdir(privateRuntime, 0o700))
+	isolation := testProcessIsolation()
+
+	originalGOOS := processIsolationGOOS
+	originalRemoveAll := packagedCodexStageRemoveAll
+	t.Cleanup(func() {
+		processIsolationGOOS = originalGOOS
+		packagedCodexStageRemoveAll = originalRemoveAll
+	})
+	processIsolationGOOS = processIsolationLinux
+	stagePackagedCodexHandoff = func(string, *ProcessIsolation) error { return nil }
+	var retained string
+	packagedCodexStageRemoveAll = func(path string) error {
+		retained = path
+
+		return errors.New("cleanup failed")
+	}
+
+	transport, command, version, nativePath, err := launchAppServer(
+		context.Background(),
+		context.Background(),
+		Options{
+			CLIPath:          fixture.executable,
+			SupervisorRoot:   privateRuntime,
+			SupervisorParent: parent,
+			NativeVersion:    "not-a-version",
+			ProcessIsolation: isolation,
+		},
+	)
+	require.Nil(t, transport)
+	require.Nil(t, command)
+	require.Empty(t, version)
+	require.Empty(t, nativePath)
+	require.ErrorIs(t, err, ErrPackageStageCleanupIncomplete)
+	require.ErrorContains(t, err, "cleanup failed")
+	require.DirExists(t, retained)
+	require.NoError(t, os.RemoveAll(retained))
 }
 
 func TestLaunchAppServerReportsPackagedCodexStageFailure(t *testing.T) {

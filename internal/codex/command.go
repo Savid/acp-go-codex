@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -26,12 +27,17 @@ const (
 var execCommandContext = exec.CommandContext
 var processCloseGrace = 2 * time.Second
 var processSupervisorCloseWait = supervisorQuiesceWindow + time.Second
+var packagedCodexStageRemoveAll = os.RemoveAll
 
 // launchAppServer starts the codex app-server. The request-scoped ctx bounds
 // the version check, while procCtx governs the lifetime of the spawned process
 // (see NewAppServerClient): binding the process to procCtx prevents
 // exec.CommandContext from SIGKILLing codex when the launching request returns.
-func launchAppServer(ctx context.Context, procCtx context.Context, options Options) (*lineTransport, *exec.Cmd, string, string, error) {
+func launchAppServer(
+	ctx context.Context,
+	procCtx context.Context,
+	options Options,
+) (transport *lineTransport, command *exec.Cmd, version string, nativePath string, returnErr error) {
 	nativeEnv, err := buildMergedEnv(options)
 	if err != nil {
 		return nil, nil, "", "", err
@@ -42,12 +48,34 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 		return nil, nil, "", "", err
 	}
 
-	path, nativeEnv, err = stagePackagedCodex(path, nativeEnv, options.SupervisorRoot)
+	var ownedStageRoot string
+
+	if options.ProcessIsolation == nil {
+		path, nativeEnv, err = stagePackagedCodex(path, nativeEnv, options.SupervisorRoot)
+	} else {
+		path, nativeEnv, ownedStageRoot, err = stagePackagedCodexForProcess(
+			path,
+			nativeEnv,
+			options.SupervisorRoot,
+			options.SupervisorParent,
+			options.ProcessIsolation,
+		)
+	}
+
 	if err != nil {
 		return nil, nil, "", "", err
 	}
 
-	nativePath := searchPathFromEnvironment(nativeEnv)
+	defer func() {
+		if returnErr != nil && ownedStageRoot != "" {
+			returnErr = errors.Join(
+				returnErr,
+				packageStageCleanupError(packagedCodexStageRemoveAll(ownedStageRoot)),
+			)
+		}
+	}()
+
+	nativePath = searchPathFromEnvironment(nativeEnv)
 
 	version, versionErr := validateCodexVersionOutput(options.NativeVersion)
 	if versionErr != nil {
@@ -142,14 +170,17 @@ func launchAppServer(ctx context.Context, procCtx context.Context, options Optio
 	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, nil)
 
 	proc := &process{
-		cmd:            cmd,
-		stdin:          stdin,
-		stdout:         stdout,
-		stderr:         stderr,
-		supervisor:     supervisor,
-		processWaiter:  waiter,
-		observeProcess: options.ObserveProcess,
+		cmd:              cmd,
+		stdin:            stdin,
+		stdout:           stdout,
+		stderr:           stderr,
+		supervisor:       supervisor,
+		processWaiter:    waiter,
+		observeProcess:   options.ObserveProcess,
+		packageStageRoot: ownedStageRoot,
 	}
+	ownedStageRoot = ""
+
 	if options.NewProcessSnapshotObserver != nil {
 		proc.processSnapshot = options.NewProcessSnapshotObserver(ctx)
 	}
@@ -367,16 +398,19 @@ const processExitGrace = 2 * time.Second
 // stderr tail, and the single cmd.Wait reaper shared by the transport
 // process-death detection and the deliberate Close escalation.
 type process struct {
-	cmd           *exec.Cmd
-	stdin         io.WriteCloser
-	stdout        io.ReadCloser
-	stderr        *stderrTail
-	supervisor    *supervisorProof
-	processWaiter *supervisorWaiter
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	stdout           io.ReadCloser
+	stderr           *stderrTail
+	supervisor       *supervisorProof
+	processWaiter    *supervisorWaiter
+	packageStageRoot string
 
-	waitOnce sync.Once
-	waitErr  error
-	waitDone chan struct{}
+	waitOnce                sync.Once
+	waitErr                 error
+	waitDone                chan struct{}
+	packageStageCleanupOnce sync.Once
+	packageStageCleanupErr  error
 
 	observationMu       sync.Mutex
 	processExited       bool
@@ -509,7 +543,9 @@ func (p *process) exited(grace time.Duration) (status string, stderrTail string,
 	}
 }
 
-func (p *process) Close() error {
+func (p *process) Close() (returnErr error) {
+	defer func() { returnErr = p.cleanupPackageStage(returnErr) }()
+
 	if p.stdin != nil {
 		_ = p.stdin.Close()
 	}
@@ -572,6 +608,26 @@ func (p *process) Close() error {
 
 		return nil
 	}
+}
+
+func (p *process) cleanupPackageStage(processErr error) error {
+	if p == nil || p.packageStageRoot == "" || errors.Is(processErr, ErrProcessContainmentIncomplete) {
+		return processErr
+	}
+
+	p.packageStageCleanupOnce.Do(func() {
+		p.packageStageCleanupErr = packageStageCleanupError(packagedCodexStageRemoveAll(p.packageStageRoot))
+	})
+
+	return errors.Join(processErr, p.packageStageCleanupErr)
+}
+
+func packageStageCleanupError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %v", ErrPackageStageCleanupIncomplete, err)
 }
 
 // exitStatusZero is the rendered status for a process that exited cleanly.

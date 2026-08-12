@@ -796,6 +796,27 @@ func TestRuntimeResourceCleanupReleaseProofBoundaries(t *testing.T) {
 		require.ErrorIs(t, statErr, os.ErrNotExist)
 	})
 
+	t.Run("package stage cleanup failure retains scratch reservation", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "runtime")
+		require.NoError(t, os.Mkdir(root, 0o700))
+		var nativeReleased, scratchReleased atomic.Int64
+		stageErr := errors.Join(codex.ErrPackageStageCleanupIncomplete, errors.New("delete package stage"))
+
+		err := closeRuntimeResources(
+			context.Background(),
+			&errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: stageErr},
+			func() { nativeReleased.Add(1) },
+			root,
+			func() { scratchReleased.Add(1) },
+		)
+
+		require.ErrorIs(t, err, codex.ErrPackageStageCleanupIncomplete)
+		require.EqualValues(t, 1, nativeReleased.Load())
+		require.Zero(t, scratchReleased.Load())
+		_, statErr := os.Stat(root)
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+
 	t.Run("unproven process tree retains both reservations", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "runtime")
 		require.NoError(t, os.Mkdir(root, 0o700))
@@ -870,6 +891,30 @@ func TestSharedRuntimeLatchesUnprovenTreeFailure(t *testing.T) {
 	require.DirExists(t, root)
 	_, err = agent.sharedRuntime(context.Background())
 	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+}
+
+func TestSharedRuntimeLatchesPackageStageCleanupFailure(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runtime")
+	require.NoError(t, os.Mkdir(root, 0o700))
+	var nativeReleased, scratchReleased atomic.Int64
+	stageErr := errors.Join(codex.ErrPackageStageCleanupIncomplete, errors.New("delete package stage"))
+	agent := NewAgent()
+	agent.runtimeClient = &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(),
+		closeErr:       stageErr,
+	}
+	agent.runtimeNativeRelease = func() { nativeReleased.Add(1) }
+	agent.runtimeScratchRoot = root
+	agent.runtimeScratchRelease = func() { scratchReleased.Add(1) }
+
+	err := agent.closeSharedRuntime(context.Background())
+	require.ErrorIs(t, err, codex.ErrPackageStageCleanupIncomplete)
+	require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrPackageStageCleanupIncomplete)
+	require.EqualValues(t, 1, nativeReleased.Load())
+	require.Zero(t, scratchReleased.Load())
+	require.NoDirExists(t, root)
+	_, err = agent.sharedRuntime(context.Background())
+	require.ErrorIs(t, err, codex.ErrPackageStageCleanupIncomplete)
 }
 
 func TestCancelRuntimeQuiescenceWaitsForExistingTransitionAndLatchesUnprovenTree(t *testing.T) {

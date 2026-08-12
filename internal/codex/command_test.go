@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/savid/acp-go-codex/internal/homelock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAppServerArgs(t *testing.T) {
@@ -176,6 +177,41 @@ func TestProcessCloserNil(t *testing.T) {
 	if err := next.Release(); err != nil {
 		t.Fatalf("release reacquired direct home lock: %v", err)
 	}
+}
+
+func TestProcessPackageStageCleanup(t *testing.T) {
+	originalRemoveAll := packagedCodexStageRemoveAll
+	t.Cleanup(func() { packagedCodexStageRemoveAll = originalRemoveAll })
+
+	t.Run("empty", func(t *testing.T) {
+		require.NoError(t, (&process{}).cleanupPackageStage(nil))
+	})
+
+	t.Run("retained after incomplete containment", func(t *testing.T) {
+		stage := t.TempDir()
+		proc := &process{packageStageRoot: stage}
+		err := proc.cleanupPackageStage(ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+		require.DirExists(t, stage)
+	})
+
+	t.Run("removed once", func(t *testing.T) {
+		stage := t.TempDir()
+		var removals int
+		packagedCodexStageRemoveAll = func(path string) error {
+			removals++
+			require.Equal(t, stage, path)
+
+			return errors.New("remove failed")
+		}
+		proc := &process{packageStageRoot: stage}
+		first := proc.Close()
+		second := proc.cleanupPackageStage(nil)
+		require.ErrorIs(t, first, ErrPackageStageCleanupIncomplete)
+		require.ErrorContains(t, first, "remove failed")
+		require.EqualError(t, second, first.Error())
+		require.Equal(t, 1, removals)
+	})
 }
 
 func TestOrdinaryRuntimeStartFailureReleasesHomeLock(t *testing.T) {

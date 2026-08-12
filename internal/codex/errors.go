@@ -7,9 +7,10 @@ import (
 )
 
 var (
-	ErrConnectionClosed             = errors.New("codex app-server connection closed")
-	ErrThreadNotFound               = errors.New("codex thread not found")
-	ErrProcessContainmentIncomplete = errors.New("codex process containment incomplete")
+	ErrConnectionClosed              = errors.New("codex app-server connection closed")
+	ErrThreadNotFound                = errors.New("codex thread not found")
+	ErrProcessContainmentIncomplete  = errors.New("codex process containment incomplete")
+	ErrPackageStageCleanupIncomplete = errors.New("codex package stage cleanup incomplete")
 )
 
 // ProcessExitError reports that the codex app-server process terminated. It

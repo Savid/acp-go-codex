@@ -112,6 +112,8 @@ func finalizeRuntimeResources(
 		return runtimeErr
 	}
 
+	stageRetained := errors.Is(runtimeErr, codex.ErrPackageStageCleanupIncomplete)
+
 	if nativeRelease != nil {
 		nativeRelease()
 	}
@@ -121,11 +123,16 @@ func finalizeRuntimeResources(
 		removeErr = runtimeRemoveAll(scratchRoot)
 	}
 
-	if removeErr == nil && scratchRelease != nil {
+	if removeErr == nil && !stageRetained && scratchRelease != nil {
 		scratchRelease()
 	}
 
 	return errors.Join(runtimeErr, removeErr)
+}
+
+func latchRuntimeCleanup(err error) bool {
+	return errors.Is(err, codex.ErrProcessContainmentIncomplete) ||
+		errors.Is(err, codex.ErrPackageStageCleanupIncomplete)
 }
 
 func closeRuntimeResources(
@@ -440,7 +447,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			cancelStart()
 
 			a.mu.Lock()
-			if errors.Is(cleanupErr, codex.ErrProcessContainmentIncomplete) {
+			if latchRuntimeCleanup(cleanupErr) {
 				a.runtimeCleanupErr = cleanupErr
 			}
 
@@ -505,7 +512,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			err = errors.Join(newAgentClosedError(), cleanupErr)
 		}
 
-		if errors.Is(err, codex.ErrProcessContainmentIncomplete) {
+		if latchRuntimeCleanup(err) {
 			a.runtimeCleanupErr = err
 		}
 
@@ -676,7 +683,7 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 	)
 
 	a.mu.Lock()
-	if errors.Is(cleanupErr, codex.ErrProcessContainmentIncomplete) {
+	if latchRuntimeCleanup(cleanupErr) {
 		a.runtimeCleanupErr = cleanupErr
 	}
 
@@ -851,7 +858,7 @@ func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 		a.closeRuntimeGeneration(ctx, client, release, scratchRoot, scratchRelease, epoch),
 	)
 
-	if errors.Is(cleanupErr, codex.ErrProcessContainmentIncomplete) {
+	if latchRuntimeCleanup(cleanupErr) {
 		a.mu.Lock()
 		a.runtimeCleanupErr = cleanupErr
 		a.mu.Unlock()
