@@ -53,16 +53,19 @@ the route, and null, empty, or multi-variant route values are rejected.
 
 ## Capability gating
 
-Elicitation is gated on the capability the client advertised at initialize:
+Elicitation is gated on the matching mode the client explicitly advertised at
+initialize:
 
-- If the client advertised elicitation support, the request is forwarded and the
-  client's answer is returned to Codex.
-- If the client did **not** advertise support, the adapter rejects the Codex
-  server request outright rather than issuing an unsupported client call.
+- A non-null `form` capability admits form requests, and a non-null `url`
+  capability admits URL requests.
+- An omitted or null top-level elicitation capability, a bare
+  `elicitation: {}`, and null mode fields advertise no matching mode. The
+  adapter rejects the Codex server request rather than issuing an unsupported
+  client call.
 
 <Note>
-  Because elicitation is capability-gated, a client that omits the elicitation
-  capability will see affected Codex requests fail fast instead of hanging.
-  Raw diagnostics for these requests are available through
+  Because elicitation is capability-gated, a client that does not advertise
+  the request's matching mode will see affected Codex requests fail fast
+  instead of hanging. Raw diagnostics for these requests are available through
   [`_codex/rawEvent`](/docs/features/raw-events) when the session opts in.
 </Note>

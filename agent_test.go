@@ -70,6 +70,10 @@ func TestInitializeAdvertisesCodexCapabilities(t *testing.T) {
 	if rawMeta, rawOK := meta[rawEventCapabilityKey].(map[string]any); !rawOK || rawMeta[jsonFieldMethod] != RawEventMethod {
 		t.Fatalf("missing raw event capability: %#v", meta)
 	}
+	elicitationMeta, ok := meta["elicitation"].(map[string]any)
+	if !ok || elicitationMeta["unstable"] != true || elicitationMeta["tracks"] != "ACP v1 elicitation" {
+		t.Fatalf("unexpected elicitation capability: %#v", meta["elicitation"])
+	}
 	outputSchemaMeta, ok := meta[structuredOutputCapabilityKey].(map[string]any)
 	if !ok || outputSchemaMeta[jsonFieldResult] != "_meta.codex.structuredOutput" {
 		t.Fatalf("missing output schema capability: %#v", meta)

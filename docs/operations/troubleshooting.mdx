@@ -69,12 +69,12 @@ updates.
 Natively, Codex can pause a turn to ask for free-form input through
 `item/tool/requestUserInput`, and its MCP servers can raise
 `mcpServer/elicitation/request`. This adapter forwards both onto ACP
-`elicitation/create` only when the client advertised the elicitation
-capability at initialize. A client that omits that capability suppresses the
+`elicitation/create` only when the client explicitly advertised the request's
+matching form or URL mode at initialize. An omitted or null elicitation
+capability, a bare `elicitation: {}`, and a missing matching mode suppress the
 forwarding by design: the affected native request receives an empty answer
 without any client call, so the question simply never surfaces rather than
-hanging the turn. Advertise the elicitation capability to receive clarifying
-questions.
+hanging the turn. Advertise the matching mode to receive clarifying questions.
 
 A native request that carries a missing, stale, or post-turn `turnId` is
 rejected locally before any client call, so a late clarifying question never
