@@ -12,9 +12,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/savid/acp-go-codex/internal/homelock"
@@ -122,6 +124,8 @@ var supervisorValidateAdoptedAuthority func(supervisorConfig) error
 var supervisorOpenIdentityPlaceholder = func() (*os.File, error) { return os.Open(os.DevNull) }
 var supervisorGuardianPeer *os.File
 var supervisorValidateGuardianPeer func(*os.File, <-chan struct{}) error
+var supervisorNotifySignals = signal.Notify
+var supervisorStopSignals = signal.Stop
 
 type supervisorIdentityLock interface {
 	io.Closer
@@ -182,11 +186,51 @@ func init() {
 	supervisorBootstrap()
 }
 
+// holdSupervisorHangup keeps SIGHUP from terminating a trusted supervisor
+// role. When the guardian dies, the liveness supervisor reparents away and its
+// process group becomes orphaned; the kernel then sends SIGHUP and SIGCONT to
+// every member of a newly orphaned group that still holds a stopped job. At the
+// default disposition that hangup kills the survivor in the middle of
+// quiescence, before it can prove the tree gone or publish its completion.
+//
+// The disposition is a drained handler rather than SIG_IGN on purpose: SIG_IGN
+// survives execve and would leak into the native child, while a Go signal
+// handler is reset to the default for the executed image. Nothing reads the
+// hangup as intent — quiescence stays driven only by the authenticated guardian
+// peer descriptor and the guardian control EOF — so a spurious orphan hangup
+// can never be mistaken for an operator stop request. The returned release
+// retires both the notification and the drain.
+func holdSupervisorHangup() func() {
+	hangups := make(chan os.Signal, 1)
+
+	supervisorNotifySignals(hangups, syscall.SIGHUP)
+
+	go drainSupervisorHangups(hangups)
+
+	return func() {
+		supervisorStopSignals(hangups)
+		close(hangups)
+	}
+}
+
+func drainSupervisorHangups(hangups <-chan os.Signal) {
+	for {
+		_, held := <-hangups
+		if !held {
+			return
+		}
+	}
+}
+
 func supervisorBootstrap() {
 	mode := os.Getenv(supervisorModeEnv)
 	if mode == "" {
 		return
 	}
+
+	// The hold is scoped to the role's run and released when that run ends.
+	releaseHangupHold := holdSupervisorHangup()
+	defer releaseHangupHold()
 
 	var err error
 

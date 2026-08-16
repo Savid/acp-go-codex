@@ -130,7 +130,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.Var(seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, repeatable; contents are written under CODEX_HOME before codex launches")
 
 	configOverrides := &configOverrideFlag{}
-	flags.Var(configOverrides, "codex-config", "Codex config override as <key>=<value>, repeatable; passed to codex app-server as -c key=value (dotted keys set nested config, nothing is written to disk)")
+	flags.Var(configOverrides, "codex-config", "Codex config override as <key>=<value>, repeatable; passed to codex app-server as -c key=value (dotted keys set nested config, nothing is written to disk, and the mcp_servers and shell_environment_policy keyspaces are reserved)")
 
 	if err := flags.Parse(args); err != nil {
 		return 2

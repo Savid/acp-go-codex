@@ -3,12 +3,22 @@ package codex
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
+
+// ErrElicitationSecret reports a stable elicitation form that asks the host to
+// collect a credential. Marking a field `format: password` or write-only is not
+// a defence: it advertises an inbound secret and delegates its protection to
+// host redaction, while the collected value still travels back to the provider
+// in clear. The adapter refuses the whole form instead. The error names no
+// property and carries no schema content, so a refusal cannot disclose what was
+// being asked for.
+var ErrElicitationSecret = errors.New("codex elicitation marks a field as a secret")
 
 // Native app-server request method names. The root package dispatches on
 // these and bridges each request onto the matching ACP client call.
@@ -67,6 +77,11 @@ const (
 	fieldQuestions              = "questions"
 	defaultToolUserInputMessage = "Codex needs input"
 	schemaTypeString            = "string"
+
+	fieldFormat    = "format"
+	fieldWriteOnly = "writeOnly"
+	fieldIsSecret  = "isSecret"
+	formatPassword = "password"
 
 	scopeTurn          = "turn"
 	scopeSession       = "session"
@@ -340,10 +355,16 @@ func ToolUserInputToolCallID(req ServerRequest, params map[string]any) string {
 }
 
 // ToolUserInputForm renders the native tool questions as an ACP form
-// elicitation request.
-func ToolUserInputForm(params map[string]any, meta map[string]any) *acp.UnstableCreateElicitationForm {
+// elicitation request, or refuses with ErrElicitationSecret when a question
+// asks for a secret. The refusal happens here rather than after the fact so no
+// request object naming a credential ever exists to be sent.
+func ToolUserInputForm(params map[string]any, meta map[string]any) (*acp.UnstableCreateElicitationForm, error) {
 	questions := mapSlice(params, fieldQuestions)
-	properties, required := schemaFromToolQuestions(questions)
+
+	properties, required, err := schemaFromToolQuestions(questions)
+	if err != nil {
+		return nil, err
+	}
 
 	return &acp.UnstableCreateElicitationForm{
 		Message: toolUserInputMessage(questions),
@@ -355,7 +376,7 @@ func ToolUserInputForm(params map[string]any, meta map[string]any) *acp.Unstable
 			Required:   required,
 		},
 		Meta: meta,
-	}
+	}, nil
 }
 
 // EmptyToolUserInputResponse is the native payload carrying no answers.
@@ -565,8 +586,10 @@ func MCPUserElicitationRequestID(req ServerRequest, params map[string]any) *acp.
 }
 
 // MCPElicitationRequest renders a native MCP elicitation as an ACP
-// elicitation request in either URL or form mode.
-func MCPElicitationRequest(params map[string]any, meta map[string]any) acp.UnstableCreateElicitationRequest {
+// elicitation request in either URL or form mode, or refuses with
+// ErrElicitationSecret when the MCP server's schema asks for a secret. A URL
+// elicitation carries no schema and collects nothing through the adapter.
+func MCPElicitationRequest(params map[string]any, meta map[string]any) (acp.UnstableCreateElicitationRequest, error) {
 	message := firstNonEmpty(stringValue(params, fieldMessage), "MCP server needs input")
 
 	var request acp.UnstableCreateElicitationRequest
@@ -580,17 +603,22 @@ func MCPElicitationRequest(params map[string]any, meta map[string]any) acp.Unsta
 			Meta:          meta,
 		}
 
-		return request
+		return request, nil
+	}
+
+	schema, err := elicitationSchemaFromMap(mapValue(params, "requestedSchema"))
+	if err != nil {
+		return acp.UnstableCreateElicitationRequest{}, err
 	}
 
 	request.Form = &acp.UnstableCreateElicitationForm{
 		Message:         message,
 		Mode:            modeForm,
-		RequestedSchema: elicitationSchemaFromMap(mapValue(params, "requestedSchema")),
+		RequestedSchema: schema,
 		Meta:            meta,
 	}
 
-	return request
+	return request, nil
 }
 
 // AuthTokensRefreshResponse renders refreshed external ChatGPT tokens as the
@@ -631,11 +659,15 @@ func toolUserInputMessage(questions []map[string]any) string {
 	return defaultToolUserInputMessage
 }
 
-func schemaFromToolQuestions(questions []map[string]any) (map[string]any, []string) {
+func schemaFromToolQuestions(questions []map[string]any) (map[string]any, []string, error) {
 	properties := make(map[string]any, len(questions))
 
 	required := make([]string, 0, len(questions))
 	for _, question := range questions {
+		if truthySecretMarker(question[fieldIsSecret]) {
+			return nil, nil, ErrElicitationSecret
+		}
+
 		id := firstNonEmpty(stringValue(question, "id"), stringValue(question, "header"))
 		if id == "" {
 			continue
@@ -652,11 +684,6 @@ func schemaFromToolQuestions(questions []map[string]any) (map[string]any, []stri
 			property["oneOf"] = options
 		}
 
-		if secret, ok := question["isSecret"].(bool); ok && secret {
-			property["format"] = "password"
-			property["writeOnly"] = true
-		}
-
 		properties[id] = property
 	}
 
@@ -665,7 +692,7 @@ func schemaFromToolQuestions(questions []map[string]any) (map[string]any, []stri
 		required = []string{"answer"}
 	}
 
-	return properties, required
+	return properties, required, nil
 }
 
 func toolQuestionOptions(raw any) []map[string]any {
@@ -697,13 +724,13 @@ func toolQuestionOptions(raw any) []map[string]any {
 	return out
 }
 
-func elicitationSchemaFromMap(raw map[string]any) acp.UnstableElicitationSchema {
+func elicitationSchemaFromMap(raw map[string]any) (acp.UnstableElicitationSchema, error) {
 	schema := acp.UnstableElicitationSchema{
 		Type:       acp.UnstableElicitationSchemaTypeObject,
 		Properties: map[string]any{},
 	}
 	if raw == nil {
-		return schema
+		return schema, nil
 	}
 
 	if title := stringValue(raw, fieldTitle); title != "" {
@@ -723,10 +750,64 @@ func elicitationSchemaFromMap(raw map[string]any) acp.UnstableElicitationSchema 
 	}
 
 	if properties := mapValue(raw, "properties"); properties != nil {
+		for _, property := range properties {
+			if secretMarkedSchema(property) {
+				return acp.UnstableElicitationSchema{}, ErrElicitationSecret
+			}
+		}
+
 		schema.Properties = properties
 	}
 
-	return schema
+	return schema, nil
+}
+
+// secretMarkedSchema reports whether an MCP server's property schema asks for a
+// credential. The scan recurses because a password field one level down inside
+// a nested object or array schema asks for exactly the same thing, and a
+// top-level scan would hand it to the host untouched.
+func secretMarkedSchema(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if strings.EqualFold(stringValue(typed, fieldFormat), formatPassword) {
+			return true
+		}
+
+		for _, marker := range []string{fieldWriteOnly, fieldIsSecret} {
+			if truthySecretMarker(typed[marker]) {
+				return true
+			}
+		}
+
+		for _, nested := range typed {
+			if secretMarkedSchema(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if secretMarkedSchema(nested) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// truthySecretMarker reads a JSON boolean marker in either its boolean or its
+// quoted spelling, so a schema cannot dodge the scan by sending "true".
+func truthySecretMarker(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		marked, err := strconv.ParseBool(typed)
+
+		return err == nil && marked
+	default:
+		return false
+	}
 }
 
 func stringAnswersFromAny(value any) []string {

@@ -2,6 +2,8 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -91,9 +93,9 @@ func TestServerRequestDecisionHelpers(t *testing.T) {
 }
 
 func TestServerRequestSchemaAndMCPHelpers(t *testing.T) {
-	props, required := schemaFromToolQuestions(nil)
-	if props["answer"] == nil || len(required) != 1 {
-		t.Fatalf("default tool schema props=%#v required=%#v", props, required)
+	props, required, err := schemaFromToolQuestions(nil)
+	if err != nil || props["answer"] == nil || len(required) != 1 {
+		t.Fatalf("default tool schema props=%#v required=%#v err=%v", props, required, err)
 	}
 	mcpApprovalParams := map[string]any{
 		"serverName": "remote",
@@ -120,18 +122,20 @@ func TestServerRequestSchemaAndMCPHelpers(t *testing.T) {
 	if value := mcpMetaString(map[string]any{mcpApprovalToolTitleKey: "direct"}, mcpApprovalToolTitleKey); value != "direct" {
 		t.Fatalf("MCP direct meta value = %q", value)
 	}
-	choiceProps, _ := schemaFromToolQuestions([]map[string]any{{
+	choiceProps, _, err := schemaFromToolQuestions([]map[string]any{{
 		"id":       "choice",
 		"question": "Choose",
 		"options":  []any{map[string]any{}, map[string]any{"label": "A", "description": "first"}},
-		"isSecret": true,
 	}})
+	if err != nil {
+		t.Fatalf("tool question schema error = %v", err)
+	}
 	choice, ok := choiceProps["choice"].(map[string]any)
 	if !ok {
 		t.Fatalf("tool question property type = %#v", choiceProps["choice"])
 	}
 	oneOf, ok := choice["oneOf"].([]map[string]any)
-	if !ok || choice["format"] != "password" || len(oneOf) != 1 {
+	if !ok || len(oneOf) != 1 {
 		t.Fatalf("tool question property = %#v", choice)
 	}
 	if meta := mcpMeta(map[string]any{"_meta": map[string]any{"serverName": "direct"}}); stringValue(meta, "serverName") != "direct" {
@@ -255,18 +259,18 @@ func TestToolUserInputBuilders(t *testing.T) {
 		t.Fatalf("tool input id method fallback = %q", got)
 	}
 
-	form := ToolUserInputForm(map[string]any{"questions": []any{map[string]any{"id": "name", "question": "Name?"}}}, map[string]any{"m": true})
-	if form == nil || form.Message != "Name?" || form.Mode != modeForm || form.RequestedSchema.Properties["name"] == nil {
-		t.Fatalf("tool input form = %#v", form)
+	form, err := ToolUserInputForm(map[string]any{"questions": []any{map[string]any{"id": "name", "question": "Name?"}}}, map[string]any{"m": true})
+	if err != nil || form == nil || form.Message != "Name?" || form.Mode != modeForm || form.RequestedSchema.Properties["name"] == nil {
+		t.Fatalf("tool input form = %#v err=%v", form, err)
 	}
 
-	multi := ToolUserInputForm(map[string]any{"questions": []any{
+	multi, err := ToolUserInputForm(map[string]any{"questions": []any{
 		map[string]any{"id": "a", "question": "A?"},
 		map[string]any{"question": "skipped"},
 		map[string]any{"id": "opts", "options": "bad"},
 	}}, nil)
-	if multi.Message != defaultToolUserInputMessage || len(multi.RequestedSchema.Required) != 2 {
-		t.Fatalf("multi-question form = %#v", multi)
+	if err != nil || multi.Message != defaultToolUserInputMessage || len(multi.RequestedSchema.Required) != 2 {
+		t.Fatalf("multi-question form = %#v err=%v", multi, err)
 	}
 
 	if got := toolUserInputMessage([]map[string]any{{"header": "no question"}}); got != defaultToolUserInputMessage {
@@ -348,11 +352,11 @@ func TestMCPElicitationRequestBuilders(t *testing.T) {
 	if !IsURLElicitation(map[string]any{"mode": "url"}) || IsURLElicitation(map[string]any{"mode": "form"}) {
 		t.Fatal("IsURLElicitation mode detection failed")
 	}
-	urlReq := MCPElicitationRequest(map[string]any{"mode": "url", "url": "https://example.com", "elicitationId": "e1"}, map[string]any{"m": true})
-	if urlReq.Url == nil || urlReq.Url.Url != "https://example.com" || urlReq.Url.Message != "MCP server needs input" {
-		t.Fatalf("url elicitation request = %#v", urlReq)
+	urlReq, err := MCPElicitationRequest(map[string]any{"mode": "url", "url": "https://example.com", "elicitationId": "e1"}, map[string]any{"m": true})
+	if err != nil || urlReq.Url == nil || urlReq.Url.Url != "https://example.com" || urlReq.Url.Message != "MCP server needs input" {
+		t.Fatalf("url elicitation request = %#v err=%v", urlReq, err)
 	}
-	formReq := MCPElicitationRequest(map[string]any{
+	formReq, err := MCPElicitationRequest(map[string]any{
 		"message": "Need input",
 		"requestedSchema": map[string]any{
 			"title":       "T",
@@ -361,12 +365,12 @@ func TestMCPElicitationRequestBuilders(t *testing.T) {
 			"properties":  map[string]any{"token": map[string]any{"type": "string"}},
 		},
 	}, nil)
-	if formReq.Form == nil || formReq.Form.Message != "Need input" || formReq.Form.RequestedSchema.Title == nil || len(formReq.Form.RequestedSchema.Required) != 1 {
-		t.Fatalf("form elicitation request = %#v", formReq)
+	if err != nil || formReq.Form == nil || formReq.Form.Message != "Need input" || formReq.Form.RequestedSchema.Title == nil || len(formReq.Form.RequestedSchema.Required) != 1 {
+		t.Fatalf("form elicitation request = %#v err=%v", formReq, err)
 	}
-	bareForm := MCPElicitationRequest(nil, nil)
-	if bareForm.Form == nil || len(bareForm.Form.RequestedSchema.Properties) != 0 {
-		t.Fatalf("bare form elicitation request = %#v", bareForm)
+	bareForm, err := MCPElicitationRequest(nil, nil)
+	if err != nil || bareForm.Form == nil || len(bareForm.Form.RequestedSchema.Properties) != 0 {
+		t.Fatalf("bare form elicitation request = %#v err=%v", bareForm, err)
 	}
 
 	if text := permissionProfileText(map[string]any{"fs": true}); text == "" {
@@ -435,5 +439,89 @@ func TestAuthTokensRefreshResponse(t *testing.T) {
 	}
 	if _, ok := minimal["expiresAt"]; ok {
 		t.Fatalf("minimal refresh response carries expiresAt: %#v", minimal)
+	}
+}
+
+// TestStableElicitationFormsRefuseSecretMarkers proves both stable-form
+// producers refuse a secret marker outright rather than annotating it, that the
+// scan reaches markers nested inside object and array schemas and cannot be
+// dodged by quoting the flag, and that the refusal carries no schema content.
+func TestStableElicitationFormsRefuseSecretMarkers(t *testing.T) {
+	for name, marker := range map[string]any{
+		"boolean true": true,
+		"quoted true":  "true",
+		"quoted one":   "1",
+	} {
+		t.Run("tool question "+name, func(t *testing.T) {
+			form, err := ToolUserInputForm(map[string]any{"questions": []any{
+				map[string]any{"id": "api_token", "question": "Paste the token", "isSecret": marker},
+			}}, map[string]any{"m": true})
+			if !errors.Is(err, ErrElicitationSecret) {
+				t.Fatalf("secret tool question error = %v", err)
+			}
+			if form != nil {
+				t.Fatalf("secret tool question built a form = %#v", form)
+			}
+			if strings.Contains(err.Error(), "api_token") || strings.Contains(err.Error(), "token") {
+				t.Fatalf("refusal disclosed the field: %v", err)
+			}
+		})
+	}
+
+	for name, schema := range map[string]map[string]any{
+		"password format": {"api_token": map[string]any{"type": "string", "format": "password"}},
+		"uppercase password format": {
+			"api_token": map[string]any{"type": "string", "format": "PASSWORD"},
+		},
+		"write only": {"api_token": map[string]any{"type": "string", "writeOnly": true}},
+		"quoted write only": {
+			"api_token": map[string]any{"type": "string", "writeOnly": "true"},
+		},
+		"secret marker": {"api_token": map[string]any{"type": "string", "isSecret": true}},
+		"nested object": {
+			"credentials": map[string]any{"type": "object", "properties": map[string]any{
+				"api_token": map[string]any{"type": "string", "format": "password"},
+			}},
+		},
+		"array items": {
+			"credentials": map[string]any{"type": "array", "items": []any{
+				map[string]any{"type": "string", "writeOnly": true},
+			}},
+		},
+	} {
+		t.Run("mcp schema "+name, func(t *testing.T) {
+			request, err := MCPElicitationRequest(map[string]any{
+				"message":         "Need input",
+				"requestedSchema": map[string]any{"type": "object", "properties": schema},
+			}, map[string]any{"m": true})
+			if !errors.Is(err, ErrElicitationSecret) {
+				t.Fatalf("secret MCP schema error = %v", err)
+			}
+			if request.Form != nil || request.Url != nil {
+				t.Fatalf("secret MCP schema built a request = %#v", request)
+			}
+			if strings.Contains(err.Error(), "api_token") || strings.Contains(err.Error(), "credentials") {
+				t.Fatalf("refusal disclosed the field: %v", err)
+			}
+		})
+	}
+
+	// A URL elicitation carries no schema, and an ordinary form is untouched.
+	urlReq, err := MCPElicitationRequest(map[string]any{"mode": "url", "url": "https://example.com"}, nil)
+	if err != nil || urlReq.Url == nil {
+		t.Fatalf("url elicitation = %#v err=%v", urlReq, err)
+	}
+	plain, err := MCPElicitationRequest(map[string]any{
+		"requestedSchema": map[string]any{"properties": map[string]any{
+			"branch": map[string]any{"type": "string", "writeOnly": false, "format": "date"},
+			"count":  42,
+			"notes":  []any{"free text"},
+		}},
+	}, nil)
+	if err != nil || plain.Form == nil || len(plain.Form.RequestedSchema.Properties) != 3 {
+		t.Fatalf("plain form elicitation = %#v err=%v", plain, err)
+	}
+	if truthySecretMarker(42) || truthySecretMarker(nil) || truthySecretMarker("not a bool") {
+		t.Fatal("non-boolean marker was read as set")
 	}
 }

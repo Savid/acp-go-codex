@@ -51,6 +51,27 @@ elicitation ID as `requestId`. The adapter mints a random string correlation
 when neither is usable. Numeric request-ID union values are never written to
 the route, and null, empty, or multi-variant route values are rejected.
 
+## Secrets are refused
+
+The adapter never collects a credential through elicitation. Before it builds
+the ACP request it inspects the stable form:
+
+- A native tool question marked `isSecret` is refused. The tool receives the
+  empty native answer set, which is the same refusal shape this leg uses
+  whenever it cannot collect an answer.
+- An MCP `requestedSchema` is scanned property by property, including nested
+  object and array schemas. A property marked `format: "password"`,
+  `writeOnly`, or `isSecret` is refused, and the elicitation is answered with
+  the native `decline` action — the request reached a decision, so declining is
+  what the MCP server and the model are told.
+
+Marking the field instead of refusing it would advertise an inbound credential
+and delegate its protection to host redaction, while the collected value would
+still travel back to Codex in clear. Because the refusal happens before the
+request is constructed, no value is ever collected and nothing is echoed back.
+The refusal names no property and carries no schema content, in logs or in the
+error, so it cannot disclose what was being asked for.
+
 ## Capability gating
 
 Elicitation is gated on the matching mode the client explicitly advertised at

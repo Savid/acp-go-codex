@@ -93,14 +93,19 @@ home for native tools.
 | `-version` | `false` | Print adapter version and exit. |
 | `-codex-allow-account-logout` | `false` | Permit ACP logout to call Codex logout. |
 | `-seed-file` | unset | Seed file as `<relpath>=<hostpath>`, repeatable. Host file contents are written under `CODEX_HOME` before codex launches. Requires `-home`. |
-| `-codex-config` | unset | Codex config override as `<key>=<value>`, repeatable. Passed to `codex app-server` as `-c key=value`; dotted keys set nested config and nothing is written to disk. |
+| `-codex-config` | unset | Codex config override as `<key>=<value>`, repeatable. Passed to `codex app-server` as `-c key=value`; dotted keys set nested config and nothing is written to disk. The `mcp_servers` and `shell_environment_policy` roots are reserved and fail closed. |
 
 ## Codex config
 
 Override Codex config directly on the app-server (repeat `-codex-config` per key).
 Dotted keys set nested config, string values are TOML-quoted automatically, and
 nothing is written to disk — so `-home` can point at the operator's real Codex
-dir and its `config.toml`/auth stay untouched. Point Codex at a LiteLLM gateway:
+dir and its `config.toml`/auth stay untouched. The `mcp_servers` and
+`shell_environment_policy` roots are reserved whole — including every dotted
+child such as `shell_environment_policy.set.FOO` — because a process-global
+override would apply to every thread at once, outside the per-thread ownership
+that authors those sections. Supplying either makes `initialize` fail closed
+with `-32602`. Point Codex at a LiteLLM gateway:
 
 ```sh
 acp-go-codex \

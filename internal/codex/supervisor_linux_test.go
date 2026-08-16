@@ -331,36 +331,81 @@ func TestGuardianPersistentProofFailureQuarantinesUntilRecovery(t *testing.T) {
 	require.ErrorIs(t, <-done, ErrProcessContainmentIncomplete)
 }
 
-func TestSupervisorGuardianSIGKILLLeavesLivenessLockedUntilTreeExit(t *testing.T) {
+// TestSupervisorGuardianSIGKILLOrphanHangupLeavesLivenessLockedUntilTreeExit
+// runs the real orphan case. Killing the guardian reparents the liveness
+// supervisor away, which orphans its process group; because the group holds a
+// stopped job the kernel sends the whole group SIGHUP and then SIGCONT. The
+// witness inside that group reports the hangup, so the case cannot pass with
+// the kernel's signal suppressed. The survivor must live through it, keep every
+// lock it holds until the kernel proves the tree gone, and quiesce only because
+// the guardian died rather than because a hangup arrived.
+func TestSupervisorGuardianSIGKILLOrphanHangupLeavesLivenessLockedUntilTreeExit(t *testing.T) {
 	runtime := startSupervisedNative(t)
+	guardianPID := runtime.cmd.Process.Pid
+
+	// Neither trusted role reaches for SIG_IGN, which execve would have carried
+	// into the native child and left it deaf to a real hangup.
+	requireHangupNotIgnored(t, runtime.livenessPID)
+	requireHangupNotIgnored(t, guardianPID)
+	requireHangupNotIgnored(t, runtime.rootPID)
+
+	// A hangup is not an operator stop request. Quiescence answers only to the
+	// guardian peer descriptor and the guardian control EOF.
+	require.NoError(t, syscall.Kill(runtime.livenessPID, syscall.SIGHUP))
+	require.NoError(t, syscall.Kill(guardianPID, syscall.SIGHUP))
+	require.Never(t, func() bool {
+		_, err := os.Stat(runtime.proof.completion)
+
+		return err == nil
+	}, 500*time.Millisecond, 25*time.Millisecond, "a bare hangup quiesced the supervised tree")
+	requireLivenessLockHeld(t, runtime.home)
+	require.NoError(t, syscall.Kill(runtime.rootPID, 0), "native root died on a bare hangup")
+	require.NoError(t, syscall.Kill(runtime.descPID, 0), "setsid descendant died on a bare hangup")
+
+	witness := startOrphanHangupWitness(t, runtime.livenessPID)
+
+	// The native group stays frozen so quiescence cannot finish before the
+	// survivor's locks have been observed, and the witness is the stopped job
+	// the kernel requires before it signals a newly orphaned group.
 	stopProcessGroup(t, runtime.rootPID)
-	stopProcess(t, runtime.livenessPID)
-	t.Cleanup(func() { _ = syscall.Kill(runtime.livenessPID, syscall.SIGCONT) })
+	stopProcess(t, witness.pid)
+
 	require.NoError(t, runtime.cmd.Process.Kill())
 
-	var claim *homelock.Lock
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		claim, _ = homelock.AcquireClaim(runtime.home)
-		if claim != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	require.NotNil(t, claim, "guardian death must release only claim")
+	// The witness ran its hangup trap, so the kernel really did send the
+	// orphaned group SIGHUP, and really did send the SIGCONT that thawed the
+	// witness enough to act on it.
+	waitFile(t, witness.marker)
+	require.NoError(t, syscall.Kill(runtime.livenessPID, 0), "liveness supervisor died on the orphan hangup")
+
+	// Freeze the survivor mid-quiescence. The group is already orphaned, so no
+	// second hangup follows, and every lock it still owes stays observable.
+	stopProcess(t, runtime.livenessPID)
+
+	claim := acquireClaimEventually(t, runtime.home)
 	defer func() { require.NoError(t, claim.Release()) }()
-	_, err := homelock.AcquireLiveness(runtime.home)
-	require.Error(t, err, "surviving liveness supervisor must retain its lock")
-	require.NoError(t, syscall.Kill(runtime.descPID, 0), "setsid descendant must still be live during authority contention")
+	requireLivenessLockHeld(t, runtime.home)
 	assertAgentIdentityAuthorityLocked(t, runtime.isolationUID)
+
 	require.NoError(t, syscall.Kill(runtime.livenessPID, syscall.SIGCONT))
+
+	// Completion is published only after the subreaper's waitid reported
+	// ECHILD, so the whole tree is already gone the moment the marker appears.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(runtime.proof.completion)
+
+		return err == nil
+	}, 15*time.Second, 10*time.Millisecond, "liveness supervisor never published completion")
+	require.ErrorIs(t, syscall.Kill(runtime.rootPID, 0), syscall.ESRCH)
+	require.ErrorIs(t, syscall.Kill(runtime.descPID, 0), syscall.ESRCH)
+
 	runtime.waiter.start()
 	<-runtime.waiter.result()
+	runtime.cancel()
+	require.NoError(t, runtime.proof.awaitCompletion())
 
 	liveness := acquireLivenessEventually(t, runtime.home)
 	require.NoError(t, liveness.Release())
-	assertProcessGone(t, runtime.rootPID)
-	assertProcessGone(t, runtime.descPID)
 	assertAgentIdentityAuthorityReacquires(t, runtime.isolationUID)
 }
 
@@ -639,11 +684,13 @@ func TestSupervisorPropagatesKernelProofFailure(t *testing.T) {
 
 func startSupervisedNative(t *testing.T) *supervisedNative {
 	t.Helper()
-	// Adopt the supervisor pair's orphans. Without this the kernel reparents a
-	// killed guardian's liveness supervisor to init, which orphans its process
-	// group; POSIX then resumes a group that holds stopped jobs with SIGHUP and
-	// SIGCONT, so a frozen survivor would thaw before it could be observed.
-	require.NoError(t, unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0))
+	// Production runs no subreaper above the supervisor pair, so a killed
+	// guardian's liveness supervisor really does reparent away and really does
+	// end up in an orphaned process group. Other cases in this package set the
+	// attribute on the test process as a side effect of running a supervisor
+	// role in-process; clearing it here keeps every fixture user on the
+	// production topology instead of a suppressed one.
+	require.NoError(t, unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0))
 
 	const standaloneStateRoot = "/var/lib/acp-go-codex-test"
 	require.NoError(t, os.MkdirAll(standaloneStateRoot, 0o700))
@@ -916,6 +963,169 @@ func acquireLivenessEventually(t *testing.T, home string) *homelock.Lock {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("liveness lock was not released after tree quiescence")
+
+	return nil
+}
+
+// hangupSignalMask selects SIGHUP inside the hexadecimal signal masks
+// /proc/<pid>/status publishes, which number signal N at bit N-1.
+const hangupSignalMask = uint64(1) << (uint(syscall.SIGHUP) - 1)
+
+// orphanHangupWitness is a process planted inside the liveness supervisor's
+// process group that reports the SIGHUP the kernel sends a newly orphaned
+// group. Its parent lives outside the supervised session, so the group's
+// orphan status turns on the guardian alone.
+type orphanHangupWitness struct {
+	pid    int
+	marker string
+}
+
+func startOrphanHangupWitness(t *testing.T, groupPID int) orphanHangupWitness {
+	t.Helper()
+
+	root := t.TempDir()
+	witness := orphanHangupWitness{marker: filepath.Join(root, "hangup")}
+	pidPath := filepath.Join(root, "witness.pid")
+	script := filepath.Join(root, "witness.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/bin/sh
+if [ "$1" = "witness" ]; then
+  trap 'printf hangup > "$WITNESS_MARKER"; exit 0' HUP
+  echo "$$" > "$WITNESS_PID_FILE"
+  while :; do sleep 30; done
+fi
+"$0" witness &
+`), 0o755))
+
+	// The launcher joins the group and then exits, so the witness it leaves
+	// behind is reparented away from this test process before the group's
+	// orphan status is ever computed.
+	launcher := exec.Command(script)
+	launcher.Env = append(os.Environ(), "WITNESS_MARKER="+witness.marker, "WITNESS_PID_FILE="+pidPath)
+	launcher.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: groupPID}
+	require.NoError(t, launcher.Start())
+
+	witness.pid = waitWitnessPID(t, pidPath)
+	t.Cleanup(func() {
+		_ = syscall.Kill(witness.pid, syscall.SIGCONT)
+		_ = syscall.Kill(witness.pid, syscall.SIGKILL)
+	})
+
+	require.NoError(t, launcher.Wait())
+	require.Equal(t, groupPID, procStatField(t, witness.pid, procStatProcessGroup),
+		"orphan hangup witness must share the liveness supervisor's process group")
+
+	// A process group stays connected while any member has a parent in another
+	// group of the same session, and the witness reparents to whatever would
+	// adopt the liveness supervisor. An adopter inside this session would
+	// suppress the exact signal this proof is about, so it is a failure here
+	// rather than a reason to stand the case down.
+	parent := procStatField(t, witness.pid, procStatParent)
+	if parent != 1 {
+		require.NotEqual(t, procStatField(t, groupPID, procStatSession), procStatField(t, parent, procStatSession),
+			"the orphan hangup proof needs the supervisor pair to reparent outside its own session, but process %d adopted it from within",
+			parent)
+	}
+
+	return witness
+}
+
+func waitWitnessPID(t *testing.T, path string) int {
+	t.Helper()
+
+	pid := 0
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			parsed, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if parseErr == nil && parsed > 0 {
+				pid = parsed
+
+				break
+			}
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	require.Positive(t, pid, "orphan hangup witness never published its PID")
+
+	return pid
+}
+
+// The stat fields that follow comm, as procStatFields returns them.
+const (
+	procStatParent       = 1
+	procStatProcessGroup = 2
+	procStatSession      = 3
+)
+
+func procStatField(t *testing.T, pid int, index int) int {
+	t.Helper()
+
+	fields, err := procStatFields(fmt.Sprintf("/proc/%d/stat", pid))
+	require.NoError(t, err)
+	require.Greater(t, len(fields), index)
+
+	value, err := strconv.Atoi(fields[index])
+	require.NoError(t, err)
+
+	return value
+}
+
+// requireHangupNotIgnored proves a process reached SIGHUP through a handler
+// rather than SIG_IGN. Only SIG_IGN survives execve, so an ignored hangup in a
+// trusted role would leave the native child it launches deaf to a real one.
+func requireHangupNotIgnored(t *testing.T, pid int) {
+	t.Helper()
+	require.Zero(t, procSignalMask(t, pid, "SigIgn")&hangupSignalMask, "process %d ignores SIGHUP", pid)
+}
+
+func procSignalMask(t *testing.T, pid int, field string) uint64 {
+	t.Helper()
+
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	require.NoError(t, err)
+
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		value, found := strings.CutPrefix(line, field+":")
+		if !found {
+			continue
+		}
+
+		mask, parseErr := strconv.ParseUint(strings.TrimSpace(value), 16, 64)
+		require.NoError(t, parseErr)
+
+		return mask
+	}
+
+	require.FailNowf(t, "missing signal mask", "/proc/%d/status published no %s field", pid, field)
+
+	return 0
+}
+
+func requireLivenessLockHeld(t *testing.T, home string) {
+	t.Helper()
+
+	_, err := homelock.AcquireLiveness(home)
+	require.Error(t, err, "liveness supervisor must still hold its lock")
+}
+
+func acquireClaimEventually(t *testing.T, home string) *homelock.Lock {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		lock, err := homelock.AcquireClaim(home)
+		if err == nil {
+			return lock
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	require.FailNow(t, "guardian death did not release the home claim")
 
 	return nil
 }

@@ -55,7 +55,7 @@ escaped descendants are absent on Darwin.
 | `WithRuntimeResourceHooks(hooks)` | Exact-lifetime host accounting for native roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment()` | Explicitly accept Darwin's direct-child plus captured-process-group boundary. Rejected off Darwin and mutually exclusive with `WithProcessIsolation`; without it Darwin uses ordinary current-identity execution and reports `shared_identity`. |
 | `WithSeedFiles(files)` | Write relative-path files into `CODEX_HOME` before each Codex process launches. Requires an explicit `WithHome`. |
-| `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk, and the session-scoped `mcp_servers` keyspace is rejected. |
+| `WithCodexConfigOverrides(overrides)` | TOML config overrides passed to `codex app-server` as `-c key=value`; dotted keys set nested config, nothing is written to disk, and the session-scoped `mcp_servers` and thread-owned `shell_environment_policy` keyspaces are rejected whole. |
 | `WithCodexChatGPTAuthTokenRefresher(fn)` | External ChatGPT token refresh callback. |
 | `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout to mutate adapter-owned Codex auth. Enabling it requires an explicit `WithHome` consent boundary. |
 | `WithAgentName(name)` | Protocol identifier advertised at initialize. |

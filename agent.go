@@ -233,10 +233,20 @@ func (a *Agent) ContainmentMode() RuntimeContainmentMode {
 	return a.containmentMode
 }
 
+// codexReservedConfigRoots names the app-server config roots the adapter
+// authors per thread, mapped to the owner a rejected override names. A `-c`
+// override applies to every thread of the app-server process at once, which is
+// outside the per-thread ownership entirely: reserving only a dotted child
+// would leave its siblings open, so each root is reserved whole.
+var codexReservedConfigRoots = map[string]string{
+	"mcp_servers":              "session-scoped MCP",
+	"shell_environment_policy": "the thread-owned shell environment",
+}
+
 func validateCodexConfigOverrides(config map[string]any) error {
 	for key := range config {
-		if codexConfigRootKey(key) == "mcp_servers" {
-			return fmt.Errorf("%s config override %q is reserved for session-scoped MCP", codexMetaKey, key)
+		if owner, reserved := codexReservedConfigRoots[codexConfigRootKey(key)]; reserved {
+			return fmt.Errorf("%s config override %q is reserved for %s", codexMetaKey, key, owner)
 		}
 	}
 

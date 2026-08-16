@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -400,4 +401,43 @@ func TestSupervisorConfigRootPermissions(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, cmd.WaitDelay)
 	require.Nil(t, cmd.Cancel)
+}
+
+// TestSupervisorHoldsHangupWithoutIgnoringIt proves a trusted supervisor role
+// takes SIGHUP through a drained notification rather than SIG_IGN. The
+// disposition matters as much as the outcome: SIG_IGN survives execve into the
+// native child, a Go handler does not.
+func TestSupervisorHoldsHangupWithoutIgnoringIt(t *testing.T) {
+	notify, stop := supervisorNotifySignals, supervisorStopSignals
+	t.Cleanup(func() {
+		supervisorNotifySignals, supervisorStopSignals = notify, stop
+	})
+
+	var (
+		held      chan<- os.Signal
+		requested []os.Signal
+		stopped   chan<- os.Signal
+	)
+
+	supervisorNotifySignals = func(channel chan<- os.Signal, signals ...os.Signal) {
+		held = channel
+		requested = signals
+	}
+	supervisorStopSignals = func(channel chan<- os.Signal) { stopped = channel }
+
+	release := holdSupervisorHangup()
+	require.Equal(t, []os.Signal{syscall.SIGHUP}, requested)
+	require.NotNil(t, held)
+
+	// The hold drains rather than filling a one-deep buffer and dropping the
+	// rest: the second send can only complete once the first was received.
+	held <- syscall.SIGHUP
+	held <- syscall.SIGHUP
+
+	release()
+	require.Equal(t, held, stopped)
+
+	closed := make(chan os.Signal)
+	close(closed)
+	drainSupervisorHangups(closed)
 }

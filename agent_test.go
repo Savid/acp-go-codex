@@ -1626,3 +1626,46 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 		t.Fatal("nil isolation did not remain nil")
 	}
 }
+
+// TestInitializeRejectsGlobalShellEnvironmentPolicyOverrides proves the whole
+// shell_environment_policy root is reserved to the thread that owns the session
+// environment. A `-c` override applies to every thread of the app-server at
+// once, so reserving only `.set` would leave the sibling keys open, and every
+// TOML spelling of the root has to be recognised for the reservation to mean
+// anything.
+func TestInitializeRejectsGlobalShellEnvironmentPolicyOverrides(t *testing.T) {
+	ctx := context.Background()
+
+	for _, key := range []string{
+		"shell_environment_policy",
+		"shell_environment_policy.set.FOO",
+		"shell_environment_policy.inherit",
+		"shell_environment_policy.exclude",
+		"shell_environment_policy.ignore_default_excludes",
+		"shell_environment_policy . set . FOO",
+		`"shell_environment_policy".set.FOO`,
+		`"shell\u005fenvironment\u005fpolicy".set.FOO`,
+		`'shell_environment_policy'.set.FOO`,
+	} {
+		agent := NewAgent(WithCodexConfigOverrides(map[string]any{key: "bar"}))
+
+		_, err := agent.Initialize(ctx, acp.InitializeRequest{})
+
+		reqErr, ok := err.(*acp.RequestError)
+		if !ok {
+			t.Fatalf("Initialize accepted process-global shell environment override %q: %T %v", key, err, err)
+		}
+		if reqErr.Code != -32602 {
+			t.Fatalf("shell environment override %q error = %#v, want code=-32602", key, reqErr)
+		}
+		if !strings.Contains(fmt.Sprint(reqErr.Data), "thread-owned shell environment") {
+			t.Fatalf("shell environment override %q data = %#v", key, reqErr.Data)
+		}
+	}
+
+	// A neighbouring root that only shares the prefix stays available.
+	agent := NewAgent(WithCodexConfigOverrides(map[string]any{"shell_environment_policy_extra": "ok"}))
+	if _, err := agent.Initialize(ctx, acp.InitializeRequest{}); err != nil {
+		t.Fatalf("Initialize rejected an unreserved config root: %v", err)
+	}
+}

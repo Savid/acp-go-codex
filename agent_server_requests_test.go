@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 func enableClientElicitation(agent *Agent, form bool, url bool) {
@@ -718,4 +719,96 @@ func TestServerRequestElicitationCapabilityBranches(t *testing.T) {
 	if err != nil || len(asType[map[string]any](t, asType[map[string]any](t, input)["answers"])) != 0 {
 		t.Fatalf("canceled tool input = %#v err=%v", input, err)
 	}
+}
+
+// TestElicitationRefusesSecretMarkedStableForms proves both stable-form
+// producers fail closed on a secret marker: the native tool question and the
+// MCP server's verbatim requestedSchema. Neither reaches the client, so no
+// value is ever collected and nothing can be echoed back to Codex, and the
+// refusal payload discloses nothing about what was asked for.
+func TestElicitationRefusesSecretMarkedStableForms(t *testing.T) {
+	for name, secret := range map[string]struct {
+		method   string
+		params   string
+		wantBody map[string]any
+	}{
+		"tool question marked secret": {
+			method: codex.RequestToolUserInput,
+			params: `{"turnId":"native-permission-turn","itemId":"ask-1","questions":[` +
+				`{"id":"api_token","header":"API token","question":"Paste the production API token","isSecret":true}]}`,
+			wantBody: map[string]any{"answers": map[string]any{}},
+		},
+		"tool question quotes the secret marker": {
+			method: codex.RequestToolUserInput,
+			params: `{"turnId":"native-permission-turn","itemId":"ask-2","questions":[` +
+				`{"id":"api_token","question":"Paste the production API token","isSecret":"true"}]}`,
+			wantBody: map[string]any{"answers": map[string]any{}},
+		},
+		"mcp schema marks a password format": {
+			method: codex.RequestMCPElicitation,
+			params: `{"turnId":"native-permission-turn","serverName":"vault","mode":"form","message":"Need input",` +
+				`"requestedSchema":{"type":"object","required":["api_token"],"properties":{` +
+				`"api_token":{"type":"string","title":"API token","format":"password"}}}}`,
+			wantBody: map[string]any{"action": "decline"},
+		},
+		"mcp schema hides a write-only field in a nested object": {
+			method: codex.RequestMCPElicitation,
+			params: `{"turnId":"native-permission-turn","serverName":"vault","mode":"form","message":"Need input",` +
+				`"requestedSchema":{"type":"object","properties":{"credentials":{"type":"object","properties":{` +
+				`"api_token":{"type":"string","writeOnly":true}}}}}}`,
+			wantBody: map[string]any{"action": "decline"},
+		},
+		"mcp schema hides a secret field in an array item": {
+			method: codex.RequestMCPElicitation,
+			params: `{"turnId":"native-permission-turn","serverName":"vault","mode":"form","message":"Need input",` +
+				`"requestedSchema":{"type":"object","properties":{"credentials":{"type":"array","items":[` +
+				`{"type":"string","isSecret":true}]}}}}`,
+			wantBody: map[string]any{"action": "decline"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent, session, conn, turnCtx := newStrictPermissionSession(t)
+			enableClientElicitation(agent, true, false)
+
+			params := `{"threadId":"` + session.codexThreadID + `",` + strings.TrimPrefix(secret.params, "{")
+
+			response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+				ID:     json.RawMessage(`91`),
+				Method: secret.method,
+				Params: json.RawMessage(params),
+			})
+			require.NoError(t, err)
+			require.Equal(t, secret.wantBody, asType[map[string]any](t, response))
+
+			// Nothing was asked of the client, so nothing was collected and the
+			// reverse leg has no answer to echo back to Codex.
+			require.Empty(t, conn.elicitations)
+			require.Empty(t, conn.scopes)
+
+			encoded, marshalErr := json.Marshal(response)
+			require.NoError(t, marshalErr)
+
+			for _, disclosure := range []string{"api_token", "API token", "password", "writeOnly", "isSecret", "production"} {
+				require.NotContains(t, string(encoded), disclosure)
+			}
+		})
+	}
+}
+
+// TestElicitationAdmitsFormsWithoutSecretMarkers proves the refusal is scoped
+// to the marker and not to stable forms in general.
+func TestElicitationAdmitsFormsWithoutSecretMarkers(t *testing.T) {
+	agent, session, conn, turnCtx := newStrictPermissionSession(t)
+	enableClientElicitation(agent, true, false)
+
+	_, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+		ID:     json.RawMessage(`92`),
+		Method: codex.RequestToolUserInput,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn",` +
+			`"itemId":"ask-3","questions":[{"id":"branch","question":"Which branch?","isSecret":false}]}`),
+	})
+	require.NoError(t, err)
+	require.Len(t, conn.elicitations, 1)
+	require.NotNil(t, conn.elicitations[0].Form)
+	require.Contains(t, conn.elicitations[0].Form.RequestedSchema.Properties, "branch")
 }

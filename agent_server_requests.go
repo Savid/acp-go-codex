@@ -213,8 +213,18 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 		return codex.EmptyToolUserInputResponse(), nil
 	}
 
+	form, err := codex.ToolUserInputForm(params, map[string]any{codexMetaKey: params})
+	if err != nil {
+		a.log.WarnContext(ctx, "refused a Codex tool question that asks the user for a secret")
+
+		// The tool question surface has no decline verb: an empty answer set is
+		// how every refusal on this leg is reported, and it keeps the refused
+		// question away from ToolUserInputResponse entirely.
+		return codex.EmptyToolUserInputResponse(), nil //nolint:nilerr // A refused question is answered, not failed.
+	}
+
 	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
-		Form: codex.ToolUserInputForm(params, map[string]any{codexMetaKey: params}),
+		Form: form,
 	}, elicitationScope{
 		SessionID:  session.id,
 		TurnNonce:  turnNonce,
@@ -319,12 +329,19 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 		return codex.ElicitationDeclineResponse(), nil
 	}
 
-	request := codex.MCPElicitationRequest(params, map[string]any{codexMetaKey: params})
+	request, err := codex.MCPElicitationRequest(params, map[string]any{codexMetaKey: params})
+	if err != nil {
+		a.log.WarnContext(ctx, "refused an MCP elicitation whose schema asks the user for a secret")
+
+		// Decline, not cancel: the request reached a decision and was refused,
+		// which is what the MCP server and the model should be told. Cancel
+		// claims the interaction went away, which would be a lie here.
+		return codex.ElicitationDeclineResponse(), nil //nolint:nilerr // A refused elicitation is declined, not failed.
+	}
+
 	nativeToolID := codex.MCPUserElicitationToolCallID(params)
 
 	var resp acp.UnstableCreateElicitationResponse
-
-	var err error
 
 	if nativeToolID != "" {
 		var associated bool

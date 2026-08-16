@@ -94,8 +94,11 @@ paths that set nested config, string values are TOML-quoted automatically, and
 config-file overlay flag.
 
 The `mcp_servers` key and its dotted children are reserved for session-scoped
-MCP configuration. Supplying them as process config overrides makes ACP
-initialization fail closed.
+MCP configuration. The `shell_environment_policy` key and its dotted children —
+`set`, `inherit`, `exclude`, and `ignore_default_excludes` — are reserved for
+the thread that owns the session environment, because a process config override
+would apply to every thread of the app-server at once. Supplying either root as
+a process config override makes ACP initialization fail closed with `-32602`.
 
 Point Codex at a [LiteLLM](https://docs.litellm.ai/) gateway entirely through
 overrides:

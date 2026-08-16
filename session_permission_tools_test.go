@@ -545,10 +545,13 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 	require.Equal(t, "cancel", asType[map[string]any](t, userElicitation)["action"])
 	require.Empty(t, conn.scopes)
 
+	outsideRequest, err := codex.MCPElicitationRequest(map[string]any{"mode": "form"}, nil)
+	require.NoError(t, err)
+
 	_, associated, err := session.createElicitationForMCPTool(
 		ctx,
 		conn,
-		codex.MCPElicitationRequest(map[string]any{"mode": "form"}, nil),
+		outsideRequest,
 		"exec-outside-turn",
 		map[string]any{"turnId": "native-outside", "serverName": "wagie"},
 	)
