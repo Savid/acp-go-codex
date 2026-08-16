@@ -1283,10 +1283,16 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	}, nil
 }
 
-// SetSessionConfigOption accepts only the value-id variant. A boolean payload
-// and an absent value both name `value`: every advertised config option is a
-// select, so neither a boolean nor nothing at all is a value one of them takes.
+// SetSessionConfigOption accepts only the value-id variant, and the two ways to
+// miss it fault different request members. Every advertised config option is a
+// select, so a boolean payload picked the wrong `type` discriminator — `value`
+// would name a member that request never carried. A request with neither
+// variant omitted `value`, which is the member the union decodes on.
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+	if params.Boolean != nil {
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
+	}
+
 	if params.ValueId == nil {
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 	}

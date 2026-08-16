@@ -83,10 +83,11 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 }
 
 // TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape pins
-// session/set_config_option to the uniform unsupported-field error. Every
-// advertised option is a select, so a boolean payload and an absent value are
-// both unsupported values rather than unsupported options, and only an
-// unrecognised configId names configId.
+// session/set_config_option to the uniform unsupported-field error and to the
+// request member each rejection actually faults. Every advertised option is a
+// select, so a boolean payload faults the `type` discriminator that selected
+// the boolean variant, an unadvertised or absent value faults `value`, and only
+// an unrecognised configId names configId.
 func TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
@@ -116,11 +117,11 @@ func TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape(t *test
 			params: SetConfigOptionRequest(resp.SessionId, "unknown", "x"),
 			field:  jsonFieldConfigID,
 		},
-		"boolean payload": {
+		"boolean discriminator": {
 			params: acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{
 				SessionId: resp.SessionId, ConfigId: configMode, Value: true,
 			}},
-			field: jsonFieldValue,
+			field: jsonFieldType,
 		},
 		"no value at all": {
 			params: acp.SetSessionConfigOptionRequest{},

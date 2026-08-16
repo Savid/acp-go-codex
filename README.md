@@ -86,56 +86,19 @@ scratch directory, default model, session storage, external ChatGPT token
 refresh, guarded logout, explicit Darwin containment selection, and
 OpenTelemetry providers.
 
-## Platform containment
-
-Omitting process isolation runs Codex as the adapter's current identity and
-reports non-authoritative `shared_identity` containment on every platform where
-the native backend and writable-home locking are supported. Ordinary mode does
-not publish provider-descendant inventory or claim whole-tree quiescence.
-Windows supports ordinary runtimes and logout; browser-based login is refused
-because its launch cannot be neutralised safely.
-
-An explicit isolation policy is Linux-only, requires a distinct trusted-root
-supervisor, and uses child subreapers for authoritative native-tree
-containment. It never falls back to ordinary execution. Embedded Darwin callers
-may instead explicitly accept the weaker process-group boundary with
-`codexacp.WithDarwinBestEffortContainment()`. This mode
-reaps the direct native child and performs a bounded `SIGTERM` then `SIGKILL`
-against the captured original process group. Descendants that call `setsid`
-can survive, and numeric PGID reuse can cause collateral signalling.
-
-Darwin operators can inspect or explicitly clean one marker-correlated runtime
-without signalling a recorded PGID:
-
-```sh
-acp-go-codex containment diagnose -scratch-dir /path/to/scratch-parent
-acp-go-codex containment cleanup -scratch-dir /path/to/scratch-parent -runtime-id <32-lowercase-hex> -force
-```
-
-Correlation is not ownership or proof that escaped descendants are absent;
-inherited environment markers can also be scrubbed.
-
 ## What It Provides
 
-- ACP session lifecycle: create, prompt, cancel, close, list, load, resume, and
-  fork.
-- One shared Codex app-server per Agent with thread-scoped session routing,
+- ACP session lifecycle — create, prompt, cancel, close, list, load, resume, and
+  fork — over one shared Codex app-server per Agent with thread-scoped routing,
   crash fencing, all-thread restore, and bounded MCP readiness canaries.
 - Prompt streaming for messages, reasoning, plans, tool calls, diffs, usage, and
-  session metadata, including durable native turn and terminal assistant
-  identities.
-- Validated PNG, JPEG, GIF, and WebP prompt images, with selected-model input
+  session metadata, carrying durable native turn and terminal assistant
+  identities alongside optional session-level JSON Schema structured output.
+- Validated PNG, JPEG, GIF, and WebP prompt images with selected-model input
   gating, decoded-byte limits advertised at initialize as
-  `acp-go.dev/mediaEnvelope`, and a gated embedded blob channel whatever the
-  declared media type.
-- Optional digest-verified local handoff for prompt images, so a co-located host
-  hands over a file under one read-only root instead of base64
-  (`WithInputHandoffRoot`).
-- Native image generation and image-view results as ACP tool-call image
-  content. Image generation has full store-backed replay parity while the
-  bounded artifact record remains available; a replayed image view renders as
-  its plain tool call without re-materialized typed image content.
-- Structured output through session-level JSON Schema on `turn/start`.
+  `acp-go.dev/mediaEnvelope`, optional digest-verified local handoff under one
+  read-only root (`WithInputHandoffRoot`), and native image generation and
+  image-view results returned as ACP tool-call image content.
 - Command, file, and generic permission prompts, tool user input, and MCP
   elicitation bridging.
 - Thread-scoped MCP stdio and streamable HTTP configuration, including
@@ -149,9 +112,16 @@ inherited environment markers can also be scrubbed.
   replaceable by a host-provided durable store; stored rows are Codex rollout
   JSONL keyed by `{SessionID, Subpath}`, and residual native threads are never
   listed, loaded, or resumed without those rows.
-- Optional raw Codex rollout extension notifications through `_codex/rawEvent`.
-- OpenTelemetry adapter telemetry plus native Codex app-server OTLP mapping
-  without recording prompt or tool secrets by default.
+- Same-identity native execution by default on every supported platform,
+  reporting non-authoritative `shared_identity` containment with no
+  provider-descendant inventory and no whole-tree quiescence claim.
+- Opt-in containment upgrades — a Linux-only trusted-root isolation policy that
+  reaps the native tree to kernel proof, or an explicitly accepted best-effort
+  Darwin process-group boundary — detailed in
+  [Security](docs/operations/security.mdx).
+- Optional raw Codex rollout extension notifications through `_codex/rawEvent`,
+  plus OpenTelemetry adapter telemetry and native Codex app-server OTLP mapping
+  that record no prompt or tool secrets by default.
 
 ## Slash Commands
 
