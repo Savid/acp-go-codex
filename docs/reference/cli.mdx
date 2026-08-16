@@ -92,7 +92,7 @@ home for native tools.
 | `-debug` | `false` | Write adapter debug logs to stderr. |
 | `-version` | `false` | Print adapter version and exit. |
 | `-codex-allow-account-logout` | `false` | Permit ACP logout to call Codex logout. |
-| `-seed-file` | unset | Seed file as `<relpath>=<hostpath>`, repeatable. Host file contents are written under `CODEX_HOME` before codex launches. Requires `-home`. |
+| `-seed-file` | unset | Seed file as `<relpath>=<hostpath>`, repeatable. Host file contents are written under `CODEX_HOME` before codex launches. Requires `-home`. A seeded `config.toml` declaring the reserved `mcp_servers` or `shell_environment_policy` root fails closed. |
 | `-codex-config` | unset | Codex config override as `<key>=<value>`, repeatable. Passed to `codex app-server` as `-c key=value`; dotted keys set nested config and nothing is written to disk. The `mcp_servers` and `shell_environment_policy` roots are reserved and fail closed. |
 
 ## Codex config
@@ -119,7 +119,10 @@ acp-go-codex \
 
 Seed Codex config from host files (repeat `-seed-file` per file). Each host
 file's contents are written to the relative path under `CODEX_HOME`, so requires
-an explicit `-home`.
+an explicit `-home`. Codex loads configuration from `CODEX_HOME/config.toml`,
+which is the same keyspace `-codex-config` reaches, so seeding that file with
+the reserved `mcp_servers` or `shell_environment_policy` root is refused in
+every TOML spelling.
 
 ## Subcommands
 

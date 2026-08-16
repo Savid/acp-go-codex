@@ -95,7 +95,11 @@ different explicit home fails construction validation.
 Codex process launches, so Codex reads them as its own config. Paths are
 relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
 keys fail closed at session start. `WithHome` must be set explicitly — seeding
-never writes into the operator's default `~/.codex`. Writes are tracked in a
+never writes into the operator's default `~/.codex`. A seeded
+`CODEX_HOME/config.toml` feeds the same app-server keyspace as
+`WithCodexConfigOverrides`, so it carries the same reservation: a file
+declaring the `mcp_servers` or `shell_environment_policy` root in any TOML
+spelling fails closed before any file is written. Writes are tracked in a
 `.seed-manifest.json` ownership manifest: a managed file is overwritten in
 place (prior bytes kept in a `<relpath>.seed.bak` sidecar when content changes),
 while an existing file the adapter does not own fails closed and is never

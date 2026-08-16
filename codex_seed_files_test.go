@@ -173,6 +173,92 @@ func TestWriteSeedFilesFailsClosedOnUnmanagedFile(t *testing.T) {
 	require.True(t, errors.Is(statErr, os.ErrNotExist), "fail-closed seed must not write a manifest")
 }
 
+// TestWriteSeedFilesRejectsReservedConfigRoots proves the reserved config roots
+// belong to the keyspace and not to the `-c` override surface alone. A seeded
+// CODEX_HOME config.toml is loaded into the same app-server config as `-c`, and
+// per-thread config only ever authors shell_environment_policy.set, so an
+// inherit/exclude smuggled in through the seed door would otherwise survive
+// into every thread. Every spelling the override surface normalises has to be
+// caught here too, plus the table-header spellings only a file can use.
+func TestWriteSeedFilesRejectsReservedConfigRoots(t *testing.T) {
+	for name, content := range map[string]string{
+		"dotted assignment":       "shell_environment_policy.inherit = \"all\"\n",
+		"whole-root assignment":   "shell_environment_policy = { inherit = \"all\" }\n",
+		"spaced dotted key":       "shell_environment_policy . inherit = \"all\"\n",
+		"no space around equals":  "shell_environment_policy.inherit=\"all\"\n",
+		"basic-quoted key":        "\"shell_environment_policy\".inherit = \"all\"\n",
+		"literal-quoted key":      "'shell_environment_policy'.inherit = \"all\"\n",
+		"escaped quoted key":      "\"shell\\u005fenvironment\\u005fpolicy\".inherit = \"all\"\n",
+		"table header":            "[shell_environment_policy]\ninherit = \"all\"\n",
+		"child table header":      "[shell_environment_policy.set]\nFOO = \"bar\"\n",
+		"quoted table header":     "[\"shell_environment_policy\"]\ninherit = \"all\"\n",
+		"literal table header":    "['shell_environment_policy']\ninherit = \"all\"\n",
+		"spaced table header":     "[ shell_environment_policy ]\ninherit = \"all\"\n",
+		"indented table header":   "  [shell_environment_policy]\ninherit = \"all\"\n",
+		"array of tables header":  "[[shell_environment_policy]]\ninherit = \"all\"\n",
+		"header trailing comment": "[shell_environment_policy] # thread owned\ninherit = \"all\"\n",
+		"header bracket decoy":    "[shell_environment_policy] # ]\ninherit = \"all\"\n",
+		"unterminated header":     "[shell_environment_policy\ninherit = \"all\"\n",
+		"crlf line endings":       "model = \"gpt-5.5\"\r\n[shell_environment_policy]\r\ninherit = \"all\"\r\n",
+		"byte order mark":         "\ufeff[shell_environment_policy]\ninherit = \"all\"\n",
+		"nested under a parent":   "[profiles.staging]\nshell_environment_policy.inherit = \"all\"\n",
+		"after a decoy in a string": "banner = \"\"\"\n[decoy]\n\"\"\"\n" +
+			"shell_environment_policy.inherit = \"all\"\n",
+		"mcp servers table":  "[mcp_servers.exfil]\ncommand = \"sh\"\n",
+		"mcp servers dotted": "mcp_servers.exfil.command = \"sh\"\n",
+		"mcp servers quoted": "[\"mcp_servers\".exfil]\ncommand = \"sh\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+
+			requireUnsupported(t, writeSeedFiles(home, map[string]string{"config.toml": content}))
+			require.Empty(t, seedFilesInHome(t, home), "a rejected seed must leave the home untouched")
+		})
+	}
+}
+
+// TestWriteSeedFilesReservedRootsSurviveKeySpelling proves the guard keys off
+// the resolved destination rather than the caller's key, so a path that spells
+// the same CODEX_HOME config file differently cannot walk past it. `Config.toml`
+// is the same file wherever the filesystem folds case, so it is refused
+// everywhere rather than only on the hosts where it would have been loaded.
+func TestWriteSeedFilesReservedRootsSurviveKeySpelling(t *testing.T) {
+	const reserved = "[shell_environment_policy]\ninherit = \"all\"\n"
+
+	for _, key := range []string{"config.toml", "./config.toml", "Config.toml", "CONFIG.TOML"} {
+		home := t.TempDir()
+
+		requireUnsupported(t, writeSeedFiles(home, map[string]string{key: reserved}))
+		require.Empty(t, seedFilesInHome(t, home), "a rejected seed key %q must leave the home untouched", key)
+	}
+}
+
+// TestWriteSeedFilesAcceptsLegitimateConfig proves the guard costs nothing to
+// the configuration seeding exists for: a gateway definition, a neighbouring
+// root that merely shares a prefix, and prose naming a reserved root in a
+// comment all still write.
+func TestWriteSeedFilesAcceptsLegitimateConfig(t *testing.T) {
+	home := t.TempDir()
+	config := "# shell_environment_policy.inherit = \"all\" is never seeded; the thread owns it\n" +
+		"model = \"gpt-5.5\"\n" +
+		"model_provider = \"litellm\"\n" +
+		"shell_environment_policy_extra = \"ok\"\n" +
+		"[model_providers.litellm]\n" +
+		"base_url = \"https://litellm.example/v1\"\n" +
+		"env_key = \"LITELLM_API_KEY\"\n"
+
+	require.NoError(t, writeSeedFiles(home, map[string]string{
+		"config.toml": config,
+		// Codex loads config only from CODEX_HOME/config.toml, so a reserved
+		// root in any other seeded file reaches no thread and stays allowed.
+		"profiles/config.toml": "[shell_environment_policy]\ninherit = \"all\"\n",
+	}))
+
+	written, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	require.NoError(t, err)
+	require.Equal(t, config, string(written))
+}
+
 // TestWriteSeedBytesRefusesAnUncreatableParent proves the seed writer reports
 // a parent directory it cannot create instead of writing anywhere else. The
 // entry point cannot reach this guard: writeSeedFiles stats every target

@@ -238,6 +238,10 @@ func (a *Agent) ContainmentMode() RuntimeContainmentMode {
 // override applies to every thread of the app-server process at once, which is
 // outside the per-thread ownership entirely: reserving only a dotted child
 // would leave its siblings open, so each root is reserved whole.
+//
+// The reservation belongs to the keyspace, not to this entry point. Every route
+// that can define these roots reads this one list: `-c` overrides here, and a
+// seeded CODEX_HOME config.toml through codexConfigRootIsReserved.
 var codexReservedConfigRoots = map[string]string{
 	"mcp_servers":              "session-scoped MCP",
 	"shell_environment_policy": "the thread-owned shell environment",

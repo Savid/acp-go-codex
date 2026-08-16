@@ -58,6 +58,18 @@ error — seeding never writes into the operator's default `~/.codex`. Paths are
 relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
 keys are rejected.
 
+A seeded `CODEX_HOME/config.toml` is loaded into the same app-server config as
+`-codex-config`, so it is held to the same reservation: the `mcp_servers` and
+`shell_environment_policy` roots are refused, and seeding fails closed with the
+uniform invalid error before anything is written. The check reads the file's
+TOML line structure, so every spelling of a reserved root is caught — table
+headers (`[shell_environment_policy]`, `[[...]]`, quoted, spaced, indented),
+dotted assignments, and quoted or escaped keys — including one nested under
+another table. It is deliberately strict rather than exact: a reserved root name
+appearing in a key position anywhere in the file is refused, even inside a
+multi-line string value. Only `config.toml` at the root of `CODEX_HOME` is
+checked, because it is the only file Codex loads configuration from there.
+
 Seed writes go through an ownership manifest (`.seed-manifest.json` in the
 seed root). A seeded file the adapter already owns is overwritten in place (the
 prior bytes are kept in a `<relpath>.seed.bak` sidecar when the content
