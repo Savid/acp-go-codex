@@ -1,7 +1,6 @@
 package codexacp
 
 import (
-	"errors"
 	"os"
 	"testing"
 
@@ -46,46 +45,49 @@ func TestSessionMetaStructuredOutputValidation(t *testing.T) {
 	if err != nil || parsedAnyEnv.Env["C"] != "D" {
 		t.Fatalf("parsed map env = %#v err=%v", parsedAnyEnv.Env, err)
 	}
-
-	cases := []map[string]any{
-		{codexMetaKey: "bad"},
-		{codexMetaKey: map[string]any{"options": "bad"}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"old": true}}},
-		{codexMetaKey: map[string]any{"rawEvent": "bad"}},
-		{codexMetaKey: map[string]any{"rawEvent": map[string]any{"enabled": "yes"}}},
-		{codexMetaKey: map[string]any{"rawEvent": map[string]any{"extra": true}}},
-		{codexMetaKey: map[string]any{"unexpected": true}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"outputSchema": "bad"}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"effort": "bad"}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"personality": "bad"}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"mcpToolApprovalMode": "bad"}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"env": "bad"}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"env": map[string]any{"A": 1}}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"model": 42}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"effort": 42}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"serviceTier": 42}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"personality": 42}}},
-		{codexMetaKey: map[string]any{"options": map[string]any{"mcpToolApprovalMode": 42}}},
-	}
-	for _, tc := range cases {
-		if _, err := sessionMetaFromLifecycle(tc); err == nil {
-			t.Fatalf("expected error for %#v", tc)
-		}
-	}
 }
 
-func TestSessionMetaRejectsWrongTypedOptionValues(t *testing.T) {
-	_, err := sessionMetaFromLifecycle(map[string]any{
-		codexMetaKey: map[string]any{"options": map[string]any{"model": 42}},
-	})
-
-	var reqErr *acp.RequestError
-	if !errors.As(err, &reqErr) || reqErr.Code != -32602 {
-		t.Fatalf("wrong-typed model error = %#v, want -32602 invalid params", err)
+// TestLifecycleMetaRejectionsCarryTheUniformUnsupportedShape pins every
+// _meta.codex rejection to invalid params whose data is exactly
+// {"error":"unsupported","field":<json path>} and nothing else. An unknown
+// field and a wrong-typed one answer alike: both name a value this adapter does
+// not accept at the path the caller wrote it, and neither has a shape of its
+// own to report.
+func TestLifecycleMetaRejectionsCarryTheUniformUnsupportedShape(t *testing.T) {
+	options := func(values map[string]any) map[string]any {
+		return map[string]any{codexMetaKey: map[string]any{metaOptionsKey: values}}
 	}
-	if data, ok := reqErr.Data.(map[string]any); !ok || data["error"] != "unsupported" || data["field"] != "_meta.codex.options.model" {
-		t.Fatalf("wrong-typed model data = %#v, want unsupported/_meta.codex.options.model", reqErr.Data)
+
+	for name, test := range map[string]struct {
+		meta  map[string]any
+		field string
+	}{
+		"vendor block is not an object":   {meta: map[string]any{codexMetaKey: "bad"}, field: "_meta.codex"},
+		"unknown vendor key":              {meta: map[string]any{codexMetaKey: map[string]any{"unexpected": true}}, field: "_meta.codex.unexpected"},
+		"options is not an object":        {meta: map[string]any{codexMetaKey: map[string]any{metaOptionsKey: "bad"}}, field: "_meta.codex.options"},
+		"unknown option key":              {meta: options(map[string]any{"old": true}), field: "_meta.codex.options.old"},
+		"rawEvent is not an object":       {meta: map[string]any{codexMetaKey: map[string]any{rawEventKey: "bad"}}, field: "_meta.codex.rawEvent"},
+		"rawEvent enabled is not boolean": {meta: map[string]any{codexMetaKey: map[string]any{rawEventKey: map[string]any{rawEventEnabledKey: "yes"}}}, field: "_meta.codex.rawEvent.enabled"},
+		"unknown rawEvent key":            {meta: map[string]any{codexMetaKey: map[string]any{rawEventKey: map[string]any{"extra": true}}}, field: "_meta.codex.rawEvent.extra"},
+		"model is not a string":           {meta: options(map[string]any{metaModelKey: 42}), field: "_meta.codex.options.model"},
+		"serviceTier is not a string":     {meta: options(map[string]any{metaServiceTierKey: 42}), field: "_meta.codex.options.serviceTier"},
+		"effort is not a string":          {meta: options(map[string]any{metaEffortKey: 42}), field: "_meta.codex.options.effort"},
+		"effort is not an accepted value": {meta: options(map[string]any{metaEffortKey: "bad"}), field: "_meta.codex.options.effort"},
+		"personality is not a string":     {meta: options(map[string]any{metaPersonalityKey: 42}), field: "_meta.codex.options.personality"},
+		"personality is not accepted":     {meta: options(map[string]any{metaPersonalityKey: "bad"}), field: "_meta.codex.options.personality"},
+		"approval mode is not a string":   {meta: options(map[string]any{metaMCPToolApprovalModeKey: 42}), field: "_meta.codex.options.mcpToolApprovalMode"},
+		"approval mode is not accepted":   {meta: options(map[string]any{metaMCPToolApprovalModeKey: "bad"}), field: "_meta.codex.options.mcpToolApprovalMode"},
+		"env is not an object":            {meta: options(map[string]any{metaEnvKey: "bad"}), field: "_meta.codex.options.env"},
+		"env value is not a string":       {meta: options(map[string]any{metaEnvKey: map[string]any{"A": 1}}), field: "_meta.codex.options.env.A"},
+		"env claims a reserved key":       {meta: options(map[string]any{metaEnvKey: map[string]string{managedCodexHomeEnv: "/x"}}), field: "_meta.codex.options.env." + managedCodexHomeEnv},
+		"output schema is not an object":  {meta: options(map[string]any{metaOutputSchemaKey: "bad"}), field: outputSchemaConfigPath},
+		"output schema is empty":          {meta: options(map[string]any{metaOutputSchemaKey: map[string]any{}}), field: outputSchemaConfigPath},
+		"output schema is not encodable":  {meta: options(map[string]any{metaOutputSchemaKey: map[string]any{"bad": func() {}}}), field: outputSchemaConfigPath},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := sessionMetaFromLifecycle(test.meta)
+			requireInvalidParamsField(t, err, test.field)
+		})
 	}
 }
 
@@ -142,14 +144,19 @@ func TestLifecycleMetaRejectsRawPATH(t *testing.T) {
 	requireInvalidParamsField(t, err, "_meta.codex.options.env.Path")
 }
 
+// requireInvalidParamsField asserts the whole data object, not just the field
+// path: the uniform unsupported-field error carries exactly two keys, so a
+// third one is itself a conformance failure.
 func requireInvalidParamsField(t *testing.T, err error, field string) {
 	t.Helper()
 
 	var requestErr *acp.RequestError
 	require.ErrorAs(t, err, &requestErr)
 	require.Equal(t, -32602, requestErr.Code)
-	data := asType[map[string]any](t, requestErr.Data)
-	require.Equal(t, field, data[jsonFieldField])
+	require.Equal(t, map[string]any{
+		jsonFieldError: errValueUnsupported,
+		jsonFieldField: field,
+	}, requestErr.Data)
 }
 
 func TestValidateSchemaObjectRejectsUnmarshalable(t *testing.T) {

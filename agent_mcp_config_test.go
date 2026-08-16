@@ -92,7 +92,7 @@ func TestMCPConfigRejectsReservedProcessManagementEnvironment(t *testing.T) {
 		require.ErrorAs(t, err, &reqErr)
 		require.Equal(t, -32602, reqErr.Code)
 		require.Equal(t, map[string]any{
-			jsonFieldError: "MCP server env uses a reserved Codex adapter process-management key",
+			jsonFieldError: errValueUnsupported,
 			jsonFieldField: "mcpServers[0].env[0].name",
 		}, reqErr.Data)
 	}

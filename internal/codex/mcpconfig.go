@@ -1,8 +1,6 @@
 package codex
 
 import (
-	"fmt"
-
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -10,30 +8,33 @@ const (
 	mcpApprovalModeAuto    = "auto"
 	mcpApprovalModePrompt  = "prompt"
 	mcpApprovalModeApprove = "approve"
-	mcpServersKey          = "mcpServers"
 	mcpServersConfigKey    = "mcp_servers"
 )
 
 // MCPServerThreadConfig renders ACP MCP servers into Codex's thread-scoped
 // config.mcp_servers object. Credentials travel only inside the app-server
 // JSON-RPC stream; they are never placed in process arguments or environment.
-func MCPServerThreadConfig(servers []acp.McpServer, defaultApprovalMode string) (map[string]any, error) {
-	if defaultApprovalMode != "" && !ValidMCPApprovalMode(defaultApprovalMode) {
-		return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: "_meta.codex.options.mcpToolApprovalMode must be one of auto, prompt, approve"})
-	}
-
+//
+// It renders and never validates. The ACP session-start validator owns every
+// verdict over these inputs (accepted transport, non-empty unique name,
+// approval mode) and is the single place a caller learns which field it got
+// wrong; a second opinion here could only disagree with it.
+func MCPServerThreadConfig(servers []acp.McpServer, defaultApprovalMode string) map[string]any {
 	if len(servers) == 0 {
-		return map[string]any{}, nil
+		return map[string]any{}
 	}
 
 	native := make(map[string]any, len(servers))
-	for index, server := range servers {
-		name := mcpServerName(server)
+
+	for _, server := range servers {
+		name := ""
 		config := map[string]any{}
 
 		switch {
 		case server.Stdio != nil:
+			name = server.Stdio.Name
 			config["command"] = server.Stdio.Command
+
 			if len(server.Stdio.Args) > 0 {
 				config["args"] = append([]string(nil), server.Stdio.Args...)
 			}
@@ -47,7 +48,9 @@ func MCPServerThreadConfig(servers []acp.McpServer, defaultApprovalMode string) 
 				config["env"] = env
 			}
 		case server.Http != nil:
+			name = server.Http.Name
 			config["url"] = server.Http.Url
+
 			if len(server.Http.Headers) > 0 {
 				headers := make(map[string]string, len(server.Http.Headers))
 				for _, header := range server.Http.Headers {
@@ -60,12 +63,6 @@ func MCPServerThreadConfig(servers []acp.McpServer, defaultApprovalMode string) 
 					config["http_headers"] = headers
 				}
 			}
-		case server.Acp != nil:
-			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: "ACP MCP transport is not supported"})
-		case server.Sse != nil:
-			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: "SSE MCP is not supported by Codex"})
-		default:
-			return nil, acp.NewInvalidParams(map[string]any{mcpServersKey: fmt.Sprintf("server %d has no transport", index)})
 		}
 
 		if defaultApprovalMode != "" {
@@ -75,22 +72,7 @@ func MCPServerThreadConfig(servers []acp.McpServer, defaultApprovalMode string) 
 		native[name] = config
 	}
 
-	return map[string]any{mcpServersConfigKey: native}, nil
-}
-
-func mcpServerName(server acp.McpServer) string {
-	switch {
-	case server.Http != nil:
-		return server.Http.Name
-	case server.Sse != nil:
-		return server.Sse.Name
-	case server.Acp != nil:
-		return server.Acp.Name
-	case server.Stdio != nil:
-		return server.Stdio.Name
-	default:
-		return ""
-	}
+	return map[string]any{mcpServersConfigKey: native}
 }
 
 func ValidMCPApprovalMode(mode string) bool {

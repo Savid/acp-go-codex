@@ -88,7 +88,7 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 
 	if effort != "" {
 		if !validReasoningEffort(effort) {
-			return codexOptions{}, fmt.Errorf("_meta.codex.options.effort is unsupported")
+			return codexOptions{}, unsupportedField("_meta.codex.options." + metaEffortKey)
 		}
 
 		options.ReasoningEffort = effort
@@ -108,7 +108,7 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 
 	if personality != "" {
 		if !validPersonality(personality) {
-			return codexOptions{}, fmt.Errorf("_meta.codex.options.personality is unsupported")
+			return codexOptions{}, unsupportedField("_meta.codex.options." + metaPersonalityKey)
 		}
 
 		options.Personality = personality
@@ -155,7 +155,7 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 
 	if mode != "" {
 		if !codex.ValidMCPApprovalMode(mode) {
-			return codexOptions{}, fmt.Errorf("_meta.codex.options.mcpToolApprovalMode is unsupported")
+			return codexOptions{}, unsupportedField("_meta.codex.options." + metaMCPToolApprovalModeKey)
 		}
 
 		options.MCPToolApprovalMode = mode
@@ -189,7 +189,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 	codexMeta, ok := meta[codexMetaKey].(map[string]any)
 	if !ok {
 		if _, exists := meta[codexMetaKey]; exists {
-			return fmt.Errorf("_meta.codex must be an object")
+			return unsupportedField("_meta.codex")
 		}
 
 		return nil
@@ -200,7 +200,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 		case metaOptionsKey:
 			optionsMap, ok := value.(map[string]any)
 			if !ok {
-				return fmt.Errorf("_meta.codex.options must be an object")
+				return unsupportedField("_meta.codex." + metaOptionsKey)
 			}
 
 			for optionKey := range optionsMap {
@@ -213,14 +213,14 @@ func validateLifecycleMeta(meta map[string]any) error {
 		case rawEventKey:
 			rawEvent, ok := value.(map[string]any)
 			if !ok {
-				return fmt.Errorf("_meta.codex.rawEvent must be an object")
+				return unsupportedField("_meta.codex." + rawEventKey)
 			}
 
 			for rawKey, rawValue := range rawEvent {
 				switch rawKey {
 				case rawEventEnabledKey:
 					if _, ok := rawValue.(bool); !ok {
-						return fmt.Errorf("_meta.codex.rawEvent.enabled must be a boolean")
+						return unsupportedField("_meta.codex.rawEvent." + rawEventEnabledKey)
 					}
 				default:
 					return unsupportedField("_meta.codex.rawEvent." + rawKey)
@@ -243,7 +243,7 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 		for key, raw := range typed {
 			str, ok := raw.(string)
 			if !ok {
-				return nil, fmt.Errorf("_meta.codex.options.env.%s must be a string", key)
+				return nil, unsupportedField("_meta.codex.options." + metaEnvKey + "." + key)
 			}
 
 			out[key] = str
@@ -251,7 +251,7 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 
 		return validatedSessionEnv(out)
 	default:
-		return nil, fmt.Errorf("_meta.codex.options.env must be an object")
+		return nil, unsupportedField("_meta.codex.options." + metaEnvKey)
 	}
 }
 
@@ -261,18 +261,8 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 // session PATH would be a second, silently losing owner of the same value.
 func validatedSessionEnv(env map[string]string) (map[string]string, error) {
 	for key := range env {
-		if isPathEnvKey(key) {
-			return nil, acp.NewInvalidParams(map[string]any{
-				jsonFieldError: "session env must not set PATH; use _meta.codex.options.extraPathDirs",
-				jsonFieldField: "_meta.codex.options.env." + key,
-			})
-		}
-
-		if reservedCodexEnvKey(key) {
-			return nil, acp.NewInvalidParams(map[string]any{
-				jsonFieldError: "session env uses a reserved Codex adapter process-management key",
-				jsonFieldField: "_meta.codex.options.env." + key,
-			})
+		if isPathEnvKey(key) || reservedCodexEnvKey(key) {
+			return nil, unsupportedField("_meta.codex.options." + metaEnvKey + "." + key)
 		}
 	}
 
@@ -320,26 +310,18 @@ func extraPathDirsFromMeta(value any) ([]string, error) {
 	return validatedExtraPathDirs(dirs)
 }
 
+// validatedExtraPathDirs rejects a directory the adapter cannot splice into a
+// native PATH: a list separator would smuggle a second entry past this check,
+// and only an absolute path resolves identically from the adapter's cwd and the
+// harness's. The empty string fails the absolute test, so it needs no case.
 func validatedExtraPathDirs(dirs []string) ([]string, error) {
 	for index, dir := range dirs {
-		switch {
-		case dir == "":
-			return nil, invalidExtraPathDir(index, "must not be empty")
-		case strings.ContainsRune(dir, os.PathListSeparator):
-			return nil, invalidExtraPathDir(index, "must not contain the path list separator")
-		case !filepath.IsAbs(dir):
-			return nil, invalidExtraPathDir(index, "must be an absolute path")
+		if strings.ContainsRune(dir, os.PathListSeparator) || !filepath.IsAbs(dir) {
+			return nil, unsupportedField(extraPathDirField(index))
 		}
 	}
 
 	return dirs, nil
-}
-
-func invalidExtraPathDir(index int, reason string) error {
-	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: "session extra path dir " + reason,
-		jsonFieldField: extraPathDirField(index),
-	})
 }
 
 func extraPathDirField(index int) string {
@@ -356,11 +338,13 @@ func unsupportedField(path string) error {
 func validateSchemaObject(schema any) error {
 	obj, ok := schema.(map[string]any)
 	if !ok || len(obj) == 0 {
-		return fmt.Errorf("output schema must be a non-empty JSON object")
+		return unsupportedField(outputSchemaConfigPath)
 	}
 
+	// An embedded Go caller can hand over a value no JSON encoder accepts, and
+	// the schema is forwarded verbatim into the native request.
 	if _, err := json.Marshal(obj); err != nil {
-		return fmt.Errorf("output schema must be JSON serializable: %w", err)
+		return unsupportedField(outputSchemaConfigPath)
 	}
 
 	return nil

@@ -82,7 +82,12 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 	}
 }
 
-func TestSetSessionConfigOptionRejectsBadModeValue(t *testing.T) {
+// TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape pins
+// session/set_config_option to the uniform unsupported-field error. Every
+// advertised option is a select, so a boolean payload and an absent value are
+// both unsupported values rather than unsupported options, and only an
+// unrecognised configId names configId.
+func TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
@@ -90,8 +95,42 @@ func TestSetSessionConfigOptionRejectsBadModeValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{SessionId: resp.SessionId, ConfigId: configMode, Value: "bad"}}); err == nil {
-		t.Fatal("mode config accepted bad value")
+
+	for name, test := range map[string]struct {
+		params acp.SetSessionConfigOptionRequest
+		field  string
+	}{
+		"mode value is not advertised": {
+			params: SetConfigOptionRequest(resp.SessionId, configMode, "bad"),
+			field:  jsonFieldValue,
+		},
+		"effort value is not advertised": {
+			params: SetConfigOptionRequest(resp.SessionId, configEffort, "bad"),
+			field:  jsonFieldValue,
+		},
+		"personality value is not advertised": {
+			params: SetConfigOptionRequest(resp.SessionId, configPersonality, "bad"),
+			field:  jsonFieldValue,
+		},
+		"config id is not advertised": {
+			params: SetConfigOptionRequest(resp.SessionId, "unknown", "x"),
+			field:  jsonFieldConfigID,
+		},
+		"boolean payload": {
+			params: acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{
+				SessionId: resp.SessionId, ConfigId: configMode, Value: true,
+			}},
+			field: jsonFieldValue,
+		},
+		"no value at all": {
+			params: acp.SetSessionConfigOptionRequest{},
+			field:  jsonFieldValue,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := agent.SetSessionConfigOption(ctx, test.params)
+			requireInvalidParamsField(t, err, test.field)
+		})
 	}
 }
 
@@ -242,18 +281,6 @@ func TestSetSessionConfigOptionErrorBranches(t *testing.T) {
 	agent := NewAgent()
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("missing", configModel, "gpt")); err == nil {
 		t.Fatal("SetSessionConfigOption accepted missing session")
-	}
-	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {
-		t.Fatal("SetSessionConfigOption accepted empty request")
-	}
-	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
-		Boolean: &acp.SetSessionConfigOptionBoolean{
-			SessionId: "missing",
-			ConfigId:  configModel,
-			Value:     true,
-		},
-	}); err == nil {
-		t.Fatal("SetSessionConfigOption accepted boolean config")
 	}
 	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{}); err == nil {
 		t.Fatal("SetSessionMode succeeded")

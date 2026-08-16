@@ -1206,15 +1206,9 @@ func TestLifecycleFingerprintIncludesOrderedExtraPathDirs(t *testing.T) {
 func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	invalid := &session{agent: agent, mcpApprovalMode: "invalid"}
-	_, err := invalid.resumeRequest()
-	require.Error(t, err)
-	_, err = agent.resumeRuntimeSession(ctx, newSpyCodexClient(), invalid)
-	require.Error(t, err)
-
 	valid := &session{agent: agent, id: "s", codexThreadID: "thread", cwd: "/work"}
 	resumeFailure := &runtimeFailureClient{runtimeRecordingClient: newRuntimeRecordingClient(), resumeErr: errors.New("resume")}
-	_, err = agent.resumeRuntimeSession(ctx, resumeFailure, valid)
+	_, err := agent.resumeRuntimeSession(ctx, resumeFailure, valid)
 	require.Error(t, err)
 
 	mismatch := &mismatchedResumeClient{runtimeRecordingClient: newRuntimeRecordingClient()}
@@ -1307,9 +1301,6 @@ func TestRuntimeRemainingResourceAndEpochBranches(t *testing.T) {
 func TestRuntimeRemainingCanaryAndObserverBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	invalid := &session{agent: agent, id: "invalid", codexThreadID: "thread", mcpApprovalMode: "invalid"}
-	require.Error(t, agent.runtimeReadyCanary(ctx, newSpyCodexClient(), invalid))
-
 	valid := &session{
 		agent: agent, id: "valid", codexThreadID: "thread", cwd: "/work",
 		mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example.test/mcp", nil)},

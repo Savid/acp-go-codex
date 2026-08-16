@@ -200,7 +200,7 @@ func (s *session) setClientDead(dead bool) {
 	s.mu.Unlock()
 }
 
-func (s *session) threadConfig() (map[string]any, error) {
+func (s *session) threadConfig() map[string]any {
 	s.mu.Lock()
 	servers := cloneMCPServers(s.mcpServers)
 	approvalMode := s.mcpApprovalMode
@@ -209,7 +209,7 @@ func (s *session) threadConfig() (map[string]any, error) {
 	return codex.MCPServerThreadConfig(servers, approvalMode)
 }
 
-func (s *session) resumeRequest() (codex.ThreadResumeRequest, error) {
+func (s *session) resumeRequest() codex.ThreadResumeRequest {
 	s.mu.Lock()
 	threadID := s.codexThreadID
 	path := s.materializedPath
@@ -220,19 +220,14 @@ func (s *session) resumeRequest() (codex.ThreadResumeRequest, error) {
 	extraPathDirs := cloneStrings(s.extraPathDirs)
 	s.mu.Unlock()
 
-	config, err := codex.MCPServerThreadConfig(servers, approvalMode)
-	if err != nil {
-		return codex.ThreadResumeRequest{}, err
-	}
-
 	return codex.ThreadResumeRequest{
 		ThreadID:      threadID,
 		Path:          path,
 		Cwd:           cwd,
-		Config:        config,
+		Config:        codex.MCPServerThreadConfig(servers, approvalMode),
 		Environment:   env,
 		ExtraPathDirs: extraPathDirs,
-	}, nil
+	}
 }
 
 // activeThreadOwnership returns the native identity and rollout path owned by

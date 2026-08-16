@@ -288,7 +288,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 	case configMode:
 		mode := acp.SessionModeId(params.Value)
 		if mode != modeDefault && mode != modePlan {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId, jsonFieldValue: params.Value})
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
 		session.mu.Lock()
@@ -297,7 +297,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.mu.Unlock()
 	case configEffort:
 		if !validReasoningEffort(string(params.Value)) {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId, jsonFieldValue: params.Value})
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
 		session.mu.Lock()
@@ -311,7 +311,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.mu.Unlock()
 	case configPersonality:
 		if !validPersonality(string(params.Value)) {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId, jsonFieldValue: params.Value})
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
 		session.mu.Lock()
@@ -319,7 +319,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.updatedAt = nowRFC3339()
 		session.mu.Unlock()
 	default:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.ConfigId})
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldConfigID)
 	}
 
 	models := modelList(ctx, session.client)

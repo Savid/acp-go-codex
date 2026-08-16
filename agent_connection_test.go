@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"testing"
@@ -33,11 +34,73 @@ func TestLocalAgentConnectionHandleBranches(t *testing.T) {
 	if _, reqErr := conn.handle(ctx, ForkSessionMethod, json.RawMessage(`{`)); reqErr == nil {
 		t.Fatal("invalid extension payload succeeded")
 	}
+}
 
-	cancelCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	if got := requestError(cancelCtx.Err()); got == nil || got.Code != -32800 || got.Message != "Request cancelled" {
-		t.Fatalf("requestError(context canceled) = %#v", got)
+// TestRequestErrorCancelPrecedence pins which signal decides -32800. Only an
+// honored $/cancel_request cancels a request context with cause
+// context.Canceled, and it outranks whatever error the handler was carrying;
+// a connection teardown or an adapter deadline carries a different cause and
+// must not be reported as a cancellation even when the error itself wraps
+// context.Canceled.
+func TestRequestErrorCancelPrecedence(t *testing.T) {
+	invalidParams := acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
+
+	for name, test := range map[string]struct {
+		cause    error
+		err      error
+		wantCode int
+		wantSame bool
+	}{
+		"honored cancel outranks a request error": {
+			cause:    context.Canceled,
+			err:      invalidParams,
+			wantCode: -32800,
+		},
+		"honored cancel with a plain error": {
+			cause:    context.Canceled,
+			err:      context.Canceled,
+			wantCode: -32800,
+		},
+		"connection teardown is not a cancellation": {
+			cause:    errors.New("connection closed"),
+			err:      fmt.Errorf("write update: %w", context.Canceled),
+			wantCode: -32603,
+		},
+		"adapter deadline is an internal failure": {
+			cause:    context.DeadlineExceeded,
+			err:      context.DeadlineExceeded,
+			wantCode: -32603,
+		},
+		"live request keeps its request error": {
+			err:      invalidParams,
+			wantCode: -32602,
+			wantSame: true,
+		},
+		"live request wraps an opaque failure": {
+			err:      errors.New("boom"),
+			wantCode: -32603,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(errors.New("test cleanup"))
+
+			if test.cause != nil {
+				cancel(test.cause)
+			}
+
+			got := requestError(ctx, test.err)
+			if got == nil || got.Code != test.wantCode {
+				t.Fatalf("requestError = %#v, want code %d", got, test.wantCode)
+			}
+			if test.wantSame && got != invalidParams {
+				t.Fatalf("requestError = %#v, want the original request error", got)
+			}
+		})
+	}
+
+	if got := requestError(context.Background(), nil); got != nil {
+		t.Fatalf("requestError(nil) = %#v", got)
 	}
 }
 
@@ -191,13 +254,6 @@ func TestLocalAgentConnectionClientCallBackpressure(t *testing.T) {
 }
 
 func TestLocalAgentConnectionHelpers(t *testing.T) {
-	if got := requestError(nil); got != nil {
-		t.Fatalf("requestError(nil) = %#v", got)
-	}
-	if got := requestError(errors.New("plain failure")); got == nil || got.Code != -32603 {
-		t.Fatalf("requestError(internal) = %#v", got)
-	}
-
 	agent := NewAgent()
 	if _, err := (&localAgentConnection{agent: agent}).CreateElicitation(context.Background(), acp.UnstableCreateElicitationRequest{}, elicitationScope{}); err == nil {
 		t.Fatal("CreateElicitation accepted empty request")

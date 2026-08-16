@@ -698,10 +698,7 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 }
 
 func (a *Agent) resumeRuntimeSession(ctx context.Context, client codex.Client, session *session) (codex.Thread, error) {
-	request, err := session.resumeRequest()
-	if err != nil {
-		return codex.Thread{}, err
-	}
+	request := session.resumeRequest()
 
 	thread, err := client.ResumeThread(ctx, request)
 	if err != nil {
@@ -722,11 +719,7 @@ func (a *Agent) resumeRuntimeSession(ctx context.Context, client codex.Client, s
 }
 
 func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, session *session) error {
-	config, err := session.threadConfig()
-	if err != nil {
-		return err
-	}
-
+	config := session.threadConfig()
 	if len(config) == 0 {
 		return nil
 	}

@@ -28,7 +28,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
-		return acp.NewSessionResponse{}, lifecycleMetaError(err)
+		return acp.NewSessionResponse{}, err
 	}
 
 	start := codexSessionStart{
@@ -50,7 +50,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
-	threadConfig := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+	threadConfig := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
@@ -485,7 +485,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
-		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
+		return acp.ResumeSessionResponse{}, err
 	}
 
 	start := codexSessionStart{
@@ -528,7 +528,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
-		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
+		return acp.ResumeSessionResponse{}, err
 	}
 
 	if active := a.activeSession(params.SessionId); active != nil {
@@ -562,7 +562,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
@@ -644,7 +644,7 @@ func (a *Agent) resumeRetainedRuntimeSession(
 		return acp.ResumeSessionResponse{}, nil, err
 	}
 
-	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	thread, err := retained.client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      retained.threadID,
@@ -757,7 +757,7 @@ func (a *Agent) rebindActiveStoredSession(
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	if unsubscribeErr := client.UnsubscribeThread(ctx, ownedThreadID); unsubscribeErr != nil {
 		return acp.ResumeSessionResponse{}, codexThreadACPError(unsubscribeErr, active.accountMetaSnapshot())
@@ -859,7 +859,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
-		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
+		return acp.LoadSessionResponse{}, err
 	}
 
 	start := codexSessionStart{
@@ -986,7 +986,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
-		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
+		return acp.LoadSessionResponse{}, err
 	}
 
 	if active := a.activeSession(params.SessionId); active != nil {
@@ -1038,7 +1038,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, err
 	}
 
-	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
@@ -1206,7 +1206,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
-		return acp.UnstableForkSessionResponse{}, lifecycleMetaError(err)
+		return acp.UnstableForkSessionResponse{}, err
 	}
 
 	idValue, err := newSessionID()
@@ -1227,7 +1227,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	}
 
 	parentSnapshot := parent.snapshot()
-	config := preparedMCPThreadConfig(mcpServers, meta.MCPToolApprovalMode)
+	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	thread, err := client.ForkThread(ctx, codex.ThreadForkRequest{
 		ThreadID:      parentSnapshot.codexThreadID,
@@ -1283,15 +1283,15 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	}, nil
 }
 
+// SetSessionConfigOption accepts only the value-id variant. A boolean payload
+// and an absent value both name `value`: every advertised config option is a
+// select, so neither a boolean nor nothing at all is a value one of them takes.
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
-	switch {
-	case params.ValueId != nil:
-		return a.setSessionConfigValue(ctx, params.ValueId)
-	case params.Boolean != nil:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldConfigID: params.Boolean.ConfigId})
-	default:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"config": validationRequired})
+	if params.ValueId == nil {
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 	}
+
+	return a.setSessionConfigValue(ctx, params.ValueId)
 }
 
 // SetSessionMode exists only because github.com/coder/acp-go-sdk's generated
@@ -1373,13 +1373,4 @@ func codexThreadACPError(err error, account map[string]any) error {
 
 func newUnknownSession() *acp.RequestError {
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: "unknown session", jsonFieldField: jsonFieldSessionID})
-}
-
-func lifecycleMetaError(err error) error {
-	var reqErr *acp.RequestError
-	if errors.As(err, &reqErr) {
-		return reqErr
-	}
-
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 }

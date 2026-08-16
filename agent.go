@@ -438,7 +438,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			"key":    []string{jsonFieldSessionID, "subpath"},
 		},
 		structuredOutputCapabilityKey: map[string]any{
-			"config":        "_meta.codex.options.outputSchema",
+			"config":        outputSchemaConfigPath,
 			jsonFieldResult: "_meta.codex.structuredOutput",
 			"schema":        "json_schema",
 		},

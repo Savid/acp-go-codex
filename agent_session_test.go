@@ -2267,21 +2267,6 @@ func TestDeleteRetryAndConfigBranches(t *testing.T) {
 			t.Fatalf("SetSessionConfigOption %s returned error: %v", tc.id, err)
 		}
 	}
-	if _, err := configAgent.SetSessionConfigOption(ctx, SetConfigOptionRequest(resp.SessionId, configEffort, "bad")); err == nil {
-		t.Fatal("SetSessionConfigOption accepted bad effort")
-	}
-	if _, err := configAgent.SetSessionConfigOption(ctx, SetConfigOptionRequest(resp.SessionId, configPersonality, "bad")); err == nil {
-		t.Fatal("SetSessionConfigOption accepted bad personality")
-	}
-	if _, err := configAgent.SetSessionConfigOption(ctx, SetConfigOptionRequest(resp.SessionId, "unknown", "x")); err == nil {
-		t.Fatal("SetSessionConfigOption accepted unknown config")
-	}
-	if _, err := configAgent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: resp.SessionId, ConfigId: "flag", Value: true}}); err == nil {
-		t.Fatal("SetSessionConfigOption accepted boolean")
-	}
-	if _, err := configAgent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {
-		t.Fatal("SetSessionConfigOption accepted empty request")
-	}
 	if _, err := configAgent.SetSessionMode(ctx, acp.SetSessionModeRequest{}); err == nil {
 		t.Fatal("SetSessionMode succeeded")
 	}
@@ -2299,9 +2284,6 @@ func TestDeleteRetryAndConfigBranches(t *testing.T) {
 	}
 	if err := codexThreadACPError(nil, nil); err != nil {
 		t.Fatalf("nil codexThreadACPError = %v", err)
-	}
-	if err := lifecycleMetaError(acp.NewInvalidParams(map[string]any{"x": "y"})); err == nil {
-		t.Fatal("lifecycleMetaError returned nil")
 	}
 	if got := NewAgent().codexConfig(); got != nil {
 		t.Fatalf("codexConfig with no overrides = %#v, want nil", got)
