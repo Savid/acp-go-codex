@@ -105,7 +105,7 @@ dir and its `config.toml`/auth stay untouched. The `mcp_servers` and
 child such as `shell_environment_policy.set.FOO` — because a process-global
 override would apply to every thread at once, outside the per-thread ownership
 that authors those sections. Supplying either makes `initialize` fail closed
-with `-32602`. Point Codex at a LiteLLM gateway:
+with `-32603`. Point Codex at a LiteLLM gateway:
 
 ```sh
 acp-go-codex \

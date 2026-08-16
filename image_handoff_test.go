@@ -1355,7 +1355,7 @@ func TestValidateInputHandoffRoot(t *testing.T) {
 
 	// Construction fails closed, so a relative root can never be consulted.
 	_, err := NewAgent(WithInputHandoffRoot("relative")).Initialize(t.Context(), acp.InitializeRequest{})
-	require.Error(t, err)
+	requireOptionsInternalError(t, err)
 }
 
 // countingHandoffOpens wraps the real opener so a descriptor that is opened and

@@ -405,10 +405,25 @@ func (a *Agent) externalAuthTokens() (ChatGPTAuthTokens, bool) {
 	return *a.authTokens, true
 }
 
+// optionsError answers the construction-time option verdict. An agent built
+// from options it refuses cannot serve anything, so every entry point asks
+// this and not just initialize: an embedded host can open a session and prompt
+// without ever handshaking. The code is internal error rather than invalid
+// params because the caller's params are fine — what is broken is the agent
+// the embedding host built. The joined Go text is the whole payload because
+// there is no wire field to name, and the prose is all the operator has.
+func (a *Agent) optionsError() error {
+	if a.optionsErr == nil {
+		return nil
+	}
+
+	return acp.NewInternalError(map[string]any{jsonFieldError: a.optionsErr.Error()})
+}
+
 // Initialize implements ACP initialize.
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
-	if a.optionsErr != nil {
-		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
+	if err := a.optionsError(); err != nil {
+		return acp.InitializeResponse{}, err
 	}
 
 	title := a.options.AgentTitle
@@ -727,11 +742,7 @@ func (a *Agent) ensureOpen() error {
 		return newAgentClosedError()
 	}
 
-	if a.optionsErr != nil {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
-	}
-
-	return nil
+	return a.optionsError()
 }
 
 func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {

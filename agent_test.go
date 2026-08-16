@@ -16,8 +16,27 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
+
+// requireOptionsInternalError pins the construction-time option verdict to
+// internal error, not invalid params: the caller's params were valid and the
+// agent the embedding host built is what is broken. The data object carries
+// exactly one key because there is no wire field to name.
+func requireOptionsInternalError(t *testing.T, err error) {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+	require.Equal(t, -32603, requestErr.Code)
+	require.Equal(t, "Internal error", requestErr.Message)
+
+	data := asType[map[string]any](t, requestErr.Data)
+	require.Len(t, data, 1)
+	require.NotEmpty(t, asType[string](t, data[jsonFieldError]))
+}
 
 // asType performs a checked type assertion, failing the test if v is not a T.
 func asType[T any](t *testing.T, v any) T {
@@ -412,9 +431,14 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	}
 	for _, limits := range invalidLimits {
 		agent := NewAgent(WithConcurrencyLimits(limits))
-		if _, err := agent.Initialize(ctx, acp.InitializeRequest{}); err == nil {
-			t.Fatalf("Initialize accepted invalid limits %#v", limits)
-		}
+
+		_, err := agent.Initialize(ctx, acp.InitializeRequest{})
+		requireOptionsInternalError(t, err)
+
+		// Every entry point answers the verdict, not just the handshake: an
+		// embedded host can open a session without ever calling initialize.
+		_, err = agent.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir()})
+		requireOptionsInternalError(t, err)
 	}
 	for _, key := range []string{
 		"mcp_servers",
@@ -425,9 +449,9 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 		`'mcp_servers'.tools`,
 	} {
 		agent := NewAgent(WithCodexConfigOverrides(map[string]any{key: "forbidden"}))
-		if _, err := agent.Initialize(ctx, acp.InitializeRequest{}); err == nil {
-			t.Fatalf("Initialize accepted process-global MCP override %q", key)
-		}
+
+		_, err := agent.Initialize(ctx, acp.InitializeRequest{})
+		requireOptionsInternalError(t, err)
 	}
 	for key, want := range map[string]string{
 		"":                   "",
@@ -1651,12 +1675,11 @@ func TestInitializeRejectsGlobalShellEnvironmentPolicyOverrides(t *testing.T) {
 
 		_, err := agent.Initialize(ctx, acp.InitializeRequest{})
 
+		requireOptionsInternalError(t, err)
+
 		reqErr, ok := err.(*acp.RequestError)
 		if !ok {
 			t.Fatalf("Initialize accepted process-global shell environment override %q: %T %v", key, err, err)
-		}
-		if reqErr.Code != -32602 {
-			t.Fatalf("shell environment override %q error = %#v, want code=-32602", key, reqErr)
 		}
 		if !strings.Contains(fmt.Sprint(reqErr.Data), "thread-owned shell environment") {
 			t.Fatalf("shell environment override %q data = %#v", key, reqErr.Data)

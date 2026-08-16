@@ -509,9 +509,8 @@ func TestProviderAuthRelativeRootFailsTheAgentClosed(t *testing.T) {
 		t.Fatal("provider auth broker was built under a failed options verdict")
 	}
 
-	if _, err := agent.Initialize(context.Background(), acp.InitializeRequest{}); err == nil {
-		t.Fatal("initialize succeeded under a failed options verdict")
-	}
+	_, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
+	requireOptionsInternalError(t, err)
 }
 
 func TestProviderAuthCapabilityListsTheEnabledLegs(t *testing.T) {

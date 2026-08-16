@@ -191,7 +191,7 @@ type ImageLimits struct {
 }
 ```
 
-Negative values make initialization fail with invalid params. The prompt total
+Negative values make initialization fail with an internal error. The prompt total
 is across every image in one request. The tool-call total is across the
 complete image content snapshot for one native image tool call.
 

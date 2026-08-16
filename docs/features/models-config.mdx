@@ -110,7 +110,7 @@ MCP configuration. The `shell_environment_policy` key and its dotted children â€
 `set`, `inherit`, `exclude`, and `ignore_default_excludes` â€” are reserved for
 the thread that owns the session environment, because a process config override
 would apply to every thread of the app-server at once. Supplying either root as
-a process config override makes ACP initialization fail closed with `-32602`.
+a process config override makes ACP initialization fail closed with `-32603`.
 
 Point Codex at a [LiteLLM](https://docs.litellm.ai/) gateway entirely through
 overrides:
