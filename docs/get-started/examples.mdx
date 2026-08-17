@@ -1,0 +1,38 @@
+---
+title: "Examples"
+description: "Run the bundled reference clients that exercise the adapter end to end."
+---
+
+The example programs live in this repository and run from a checkout of it, so
+clone it first:
+
+```sh
+git clone https://github.com/savid/acp-go-codex && cd acp-go-codex
+```
+
+## Minimal Client
+
+```sh
+go run ./examples/minimal-client "Reply with hello from ACP"
+```
+
+The client launches `acp-go-codex`, initializes ACP, creates a session, sends
+one prompt, and closes the session.
+
+## Interactive Chat
+
+```sh
+go run ./examples/interactive-chat
+```
+
+The interactive example keeps one ACP session open and streams updates to the
+terminal.
+
+## Resume From File
+
+```sh
+go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl
+```
+
+This example seeds an in-process `SessionStore` with Codex rollout JSONL and
+then calls `session/load`.

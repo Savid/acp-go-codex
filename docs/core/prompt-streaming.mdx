@@ -1,0 +1,188 @@
+---
+title: "Prompt Streaming"
+description: "How Codex turn events become ACP updates and how a turn fails."
+---
+
+A `session/prompt` call opens a Codex turn and streams its progress back to the
+host as ACP `session/update` notifications. The adapter translates each native
+Codex event into the closest ACP update, and completes the call when the turn
+ends — successfully, by cancellation, or with a failure.
+
+Prompt content fails closed before any turn starts: an empty prompt, an audio
+block, or an unknown or empty content block is rejected with invalid params
+whose data is `{"error": "unsupported", "field": "prompt"}`. Nothing is
+silently dropped.
+
+Image blocks and image-typed embedded blob resources carry inline base64 data.
+A URI on an embedded block is provenance only and is never fetched. Accepted
+MIME values are exactly `image/png`, `image/jpeg`, `image/gif`, and
+`image/webp`; the declared type is matched as written, while routing ignores
+casing and MIME parameters, so `IMAGE/PNG` reaches the image path and is
+rejected there rather than slipping down the generic resource path. The adapter
+decodes and structurally inspects every image, rejects animated GIF, WebP, and
+APNG input, verifies the declared MIME against the bytes, and applies
+`ImageLimits` before starting the native turn.
+
+An embedded blob resource is gated whatever it declares. A blob whose media type
+is not an image reaches no native image transport — Codex receives a
+`[resource: <uri>]` reference line, as it always has — but its base64 must still
+decode and its decoded bytes are still charged against `MaxInputBytesPerImage`
+and the per-prompt total. The channel cannot carry undecodable or unbounded
+payloads.
+
+The advertised bounds a host can pre-check against are published at initialize
+under [`acp-go.dev/mediaEnvelope`](/docs/reference/meta#media-envelope).
+
+Image invalid-params data always contains `field:"prompt.image"`, an `index`
+counted across every gated media block in request order, and one of these
+`error` values:
+
+- `missing_data`
+- `invalid_base64`
+- `invalid_media_type`
+- `media_type_mismatch`
+- `animated_not_supported`
+- `invalid_dimensions`
+- `too_large`
+- `unsupported_by_model`
+- `invalid_handoff`
+- `path_not_allowed`
+- `missing_file`
+- `handoff_digest_mismatch`
+
+`too_large` also includes decoded `sizeBytes` and `maxBytes`. The four handoff
+values carry a fixed `message` naming the stage that refused; a refusal never
+reports a path, a filename, an observed digest, or an observed byte count.
+`field` names the inbound block type — `prompt.image` for an image block and
+`prompt.resource` for an embedded resource, whatever media type routed it.
+Validation stops at the first failing block in request order. At prompt time the selected model's native
+`inputModalities` field is authoritative when present: a text-only declaration
+rejects the image, an `image` declaration accepts it, and absent model metadata
+forwards the validated input to Codex.
+
+### Local handoff input
+
+A co-located host can hand an image over as a file instead of as base64, which
+keeps a multi-image prompt's JSON-RPC frame small.
+[`WithInputHandoffRoot`](/docs/reference/go-api#agent-options) enables the form and
+confines it to one read-only root. A handoff block carries empty `data`, a
+`file://` URI under that root, and an envelope:
+
+```json
+{
+  "type": "image",
+  "mimeType": "image/png",
+  "data": "",
+  "uri": "file:///var/lib/host/handoff/2f/9c3a.png",
+  "_meta": {
+    "acp-go.dev/handoff": {
+      "version": 1,
+      "digest": "<sha256 hex>",
+      "sizeBytes": 123456
+    }
+  }
+}
+```
+
+Form selection runs ahead of every other image gate, per block:
+
+1. Non-empty `data` is the embedded form — data still wins over a URI, even
+   when a handoff envelope is also present.
+2. Empty `data` plus handoff intent — an `acp-go.dev/handoff` key or a `file://`
+   URI — is the handoff form.
+3. Empty `data` with neither is `missing_data`, exactly as before.
+
+The handoff form then verifies before any embedded gate runs, first failure
+winning. The first three rows are decided from the request alone, so a block the
+adapter was never going to accept costs no filesystem access at all — and a
+refused declaration cannot be used to learn whether the path it named exists:
+
+| `error` | Cause |
+| --- | --- |
+| `invalid_handoff` | The block is malformed as a block: no handoff root is configured, the envelope is absent, not an object, carries a field other than `version`, `digest`, and `sizeBytes`, declares a version other than `1`, a digest that is not 64 lowercase hex characters, or a negative or non-integer `sizeBytes` — or the `uri` is absent, unparsable, not `file`, names another host, or is not an absolute path. |
+| `invalid_media_type` | The declared media type is outside the four-format allowlist. |
+| `too_large` | The declared `sizeBytes` is past the effective per-image limit. |
+| `path_not_allowed` | The confined root refused the open — a name that climbs out of the root, an absolute symlink, or a link whose target is outside it — or the opened file is not a regular file. |
+| `missing_file` | The name is inside the root but does not exist, including a relative symlink whose target has been removed — the expected outcome when a host cleans up early. |
+| `handoff_digest_mismatch` | The bytes do not match the declared size and sha256. Verification fails closed and never falls back to the embedded form. |
+
+The path is opened relative to the configured root through a confined directory
+handle, so containment is decided by the kernel at the moment of the open rather
+than by resolving the path first and reading it afterwards.
+
+The read is bounded at one byte more than the block declared, not at the
+per-image limit: the work a block commits the adapter to is charged to the size
+its own envelope stood behind, so a host cannot provoke a large read without
+declaring one. A file larger than it declares is `handoff_digest_mismatch`,
+because it is not the file the declared digest covers, and no size reported by
+the filesystem takes part in any verdict.
+
+One prompt reads at most 64 handoff-form blocks. The block that crosses the cap
+is `too_large` with the block count as `sizeBytes` and 64 as `maxBytes`, and it
+is never read — so a prompt's file reads stay bounded even when the per-prompt
+byte limit is disabled.
+
+Everything after verification is identical to the embedded form. The bytes take
+the same allowlist, sniff, dimension, animation, and byte gates, count toward
+the same per-prompt total, and convert to the same native input — a handoff turn
+and an embedded turn over the same bytes build the same native request. The
+host's path never reaches Codex: when the native transport is a file, the
+verified bytes are copied into the adapter's own scratch directory under
+[`WithScratchDir`](/docs/reference/go-api#agent-options) and removed when the turn
+ends.
+
+The root is read-only. The adapter never creates, modifies, or removes anything
+under it, and the host may delete a handoff file as soon as `session/prompt`
+returns.
+
+## From Codex events to ACP updates
+
+| Codex event | ACP update |
+| --- | --- |
+| assistant text | `agent_message_chunk` |
+| reasoning text | `agent_thought_chunk` |
+| plan changes | `plan` |
+| tool start/output/complete | tool call updates |
+| image generation / image view | tool call with ACP image content |
+| usage | usage update |
+| account change | session metadata update |
+
+Image tool updates carry complete content snapshots. A native failed image
+tool emits failed tool state without fabricated content. Successful output is
+decoded, raster-sniffed, bounded, and emitted live with its sniffed MIME.
+Image generation is stored for replay, so `session/load` re-materializes it as
+typed image content; a replayed image view renders as its plain tool call
+without typed image content.
+
+An image output the adapter will not ship — resolving outside the allowed
+roots, missing, not a regular file, over the byte bound, not a raster, or
+declaring a media type its bytes contradict — fails **that tool call only**.
+The failed tool call carries fixed guidance as its own content, saying what to
+do next without naming the path, filename, size, or operating-system error,
+and the turn keeps running with its context. Only a session-store failure
+(`reason:"storage_failed"`) still ends the turn with `stage:"image_output"`.
+
+At the terminal fence, a standard session metadata update carries the native
+turn checkpoint at `_meta.codex.turnId` plus the final assistant response-item
+identity at `_meta.codex.messageId` when one exists. The same metadata is
+returned by `session/prompt`; an empty assistant completion still emits its
+identity-bearing update.
+
+Raw, unmapped rollout rows are never placed on the ACP wire; they are available
+only through the [`_codex/rawEvent`](/docs/features/raw-events) opt-in.
+
+## When a turn fails
+
+A turn that cannot complete resolves the `session/prompt` call with the uniform
+[`codex_turn_failed`](/docs/reference/updates#turn-failure) wire error rather
+than a partial success. The error's `cause` field classifies why:
+
+| `cause` | Meaning |
+| --- | --- |
+| `provider` | The model provider rejected or failed the turn (may carry `statusCode` / `providerCode`). |
+| `timeout` | The turn exceeded [`WithTurnTimeout`](/docs/core/sessions#turn-deadlines) and was aborted. |
+| `process_exit` | The Codex `app-server` process died mid-turn; the message names the exit status. |
+| `transport` | The app-server connection closed unexpectedly. |
+
+A `process_exit` or `transport` failure marks the session for lazy relaunch, so
+the next prompt starts a fresh Codex process on the same session.

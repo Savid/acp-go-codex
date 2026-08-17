@@ -1,0 +1,63 @@
+---
+title: "Quickstart"
+description: "Go from a fresh checkout to your first successful ACP turn against Codex."
+---
+
+This tutorial takes you from a fresh checkout to one completed ACP prompt turn
+against Codex, driven by the bundled `minimal-client` example. The example
+programs are repo-relative, so you run them from a checkout.
+
+## Prerequisites
+
+- A Go toolchain satisfying the `go` directive in this repo's `go.mod`.
+- A local `codex` CLI, version `0.144.1` or newer, installed and
+  [authenticated](/docs/features/authentication). Older Codex CLIs fail fast at
+  session start.
+- An [ACP client](https://agentclientprotocol.com/overview/clients) or one of
+  the [examples](/docs/get-started/examples) in this repo.
+
+## Steps
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/savid/acp-go-codex && cd acp-go-codex
+    ```
+  </Step>
+  <Step title="Confirm the Codex CLI is reachable">
+    The adapter launches whatever `codex` binary it is pointed at:
+
+    ```bash
+    codex --version
+    ```
+  </Step>
+  <Step title="Run a single prompt">
+    The `minimal-client` example starts the agent, initializes ACP, creates a
+    session in the current directory, sends one prompt, prints streamed
+    text/tool updates, and closes the session:
+
+    ```bash
+    go run ./examples/minimal-client "Reply with hello from ACP"
+    ```
+  </Step>
+</Steps>
+
+## Verify
+
+The example prints the streamed reply to stdout and exits `0`. A greeting
+derived from your prompt confirms the full path worked: session creation, the
+`codex app-server` launch, the prompt turn, and streaming back through ACP.
+
+If you instead launch the raw adapter for an ACP host to drive, it blocks on
+stdin waiting for JSON-RPC frames (Ctrl-C to exit). stdout carries ACP JSON-RPC
+only; add `-debug` to send diagnostics to stderr:
+
+```bash
+go run ./cmd/acp-go-codex -debug
+```
+
+## Next steps
+
+- [Run modes](/docs/get-started/run-modes) — standalone binary versus embedded `Serve`.
+- [Examples](/docs/get-started/examples) — the interactive-chat and resume clients.
+- [Sessions](/docs/core/sessions) — the lifecycle behind that first turn.

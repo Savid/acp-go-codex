@@ -1,0 +1,117 @@
+---
+title: "Sessions"
+description: "How ACP sessions map onto Codex threads, turns, and rollout state."
+---
+
+An ACP session is a thin handle over a Codex thread. The adapter owns the
+mapping in both directions: ACP session methods drive Codex thread and turn
+operations, and Codex thread state is what a session resolves back to when a
+host reconnects.
+
+## Session lifecycle
+
+`session/new` starts a Codex thread rooted at an absolute `cwd`. `session/prompt`
+starts a Codex turn on that thread and streams
+[ACP updates](/docs/core/prompt-streaming) until Codex completes, the turn is
+cancelled, or it fails. `session/cancel` interrupts the in-flight native turn,
+then lists and terminates every background terminal owned by that exact Codex
+thread and verifies the list is empty before returning. This additional fence
+is required because a native interrupt acknowledgement alone does not terminate
+background terminals. `session/close` unsubscribes and releases that logical
+thread without closing
+the shared app-server. The logical session remains addressable when native
+unsubscribe fails. Only after unsubscribe succeeds, and while that app-server
+generation remains live, the adapter retains the closed thread's native ID and
+canonical rollout path under the same ACP session ID. A later store-backed load
+or resume can reattach the thread without assigning its live native identity to
+a newly materialized rollout. Close, resume, and delete admission is serialized
+per session; the retained record either moves once into the new active session
+or is released when native thread/runtime ownership ends.
+
+One Agent owns one Codex `app-server` and multiplexes all of its ACP sessions as
+independent native threads. Working directory, model, approval/sandbox policy,
+MCP configuration, callbacks, event streams, and cancellation remain keyed by
+thread. Cancelling one turn never closes the shared generation: its background
+terminal process IDs are enumerated and terminated through thread-scoped native
+requests, while concurrent peer turns and terminals remain live. Agent close
+owns ordinary app-server shutdown and its app-server-wide containment proof. If
+native interrupt or thread-scoped containment fails, the adapter exceptionally
+retires the accepting generation; it never returns while an uncontained target
+tree is merely suspected.
+
+If the shared process dies, its runtime epoch is fenced and every bound thread
+is marked unavailable. The next explicit operation starts one replacement, but
+only the addressed logical session resumes with its own
+`thread/resume.config.mcp_servers`; peers stay unavailable until independently
+used. A stale peer therefore cannot block an unrelated session from loading or
+starting. For each MCP-bearing resumed thread, an adapter-owned `runtime_ready`
+marker turn must succeed within five attempts and two minutes before that
+session is rebound. Native MCP status is telemetry only, and no user prompt is
+replayed as a probe.
+
+## Turn route identity
+
+Every `session/prompt` must carry exactly this reserved metadata object, with a
+fresh, unguessable nonce minted by the host:
+
+```json
+{"acp-go.dev/route":{"version":1,"turnNonce":"host-minted-nonce"}}
+```
+
+An active-turn `session/cancel` must carry the identical object. Missing,
+malformed, stale, or greater-than-4096-byte nonces are rejected; cancellation
+never falls back to a mutable "current turn". Embedded Go clients should use `PromptRequest`,
+`TextPromptRequest`, and `CancelRequest`, which require the nonce explicitly.
+
+Every live-turn `session/update` and `_codex/rawEvent` notification carries the
+same exact `{version, turnNonce}` object in its notification `_meta`; raw-event
+payloads also carry their structural `sessionId`. Lifecycle and load-history
+updates remain outside a turn epoch and omit the envelope.
+
+## Load, resume, and fork
+
+`session/resume` reuses an exact active in-memory binding when one exists;
+otherwise it resolves only through the configured
+[`SessionStore`](/docs/features/session-store). `session/load` always requires
+committed store rows because its replay is store-authoritative, even when the
+wrapper is active. Native `thread/list`/`thread/read` state is never a fallback:
+a residual Codex thread absent from the default or configured store is unknown
+and is not adopted.
+
+When a lifecycle request refreshes configuration for a session whose native
+thread is still owned by the current app-server, the adapter rebinds that same
+thread at its owned native rollout path. This applies both to an active wrapper
+session and to a thread retained after `session/close`. It never materializes
+the mirror as a second rollout. The native thread ID in the stored
+`session_meta` row must match the active or retained thread; a mismatch is
+rejected before Codex is called.
+
+Forking is exposed as the Codex extension method `_codex/session/fork`; the
+stable ACP `session/fork` method is intentionally not routed. See
+[ACP methods](/docs/reference/acp-methods) for the full routing table.
+
+## Turn deadlines
+
+By default a prompt turn runs without an adapter-imposed deadline. Set
+`WithTurnTimeout` (a process option) to bound a single `session/prompt`. When a
+turn exceeds the deadline the native Codex turn is interrupted, the shared
+runtime performs the same thread-scoped background-terminal containment as
+explicit cancellation, and `session/prompt` fails with the
+[`codex_turn_failed`](/docs/reference/updates#turn-failure) error carrying
+`cause: "timeout"`. The timed-out session and its peers remain usable. The
+default of `0` disables the deadline.
+
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+	codexacp.WithTurnTimeout(2*time.Minute),
+)
+```
+
+The timeout bounds one turn, not the session: the session remains usable and
+the host can send another prompt after a timed-out turn returns.
+
+## Deletion
+
+`session/delete` writes a store tombstone first, then closes any active session,
+and hides the session from list, load, and resume. Deleting the main subpath
+cascades to every subpath of that session.

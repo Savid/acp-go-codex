@@ -1,0 +1,101 @@
+---
+title: "Session Store"
+description: "Use Codex rollout rows as the authority for inactive session lifecycle."
+---
+
+Every Agent has a `SessionStore`. It mirrors Codex rollout rows and is the sole
+authority for inactive `session/list`, `session/load`, and `session/resume`.
+The default implementation is in-memory; a host can replace it with durable
+storage so sessions survive Agent restart or move between hosts. A native Codex
+thread that has no store entry is unknown and is never listed or adopted.
+
+## When to wire a store
+
+Provide a store when sessions must outlive a single process or move between
+hosts — for example a remote service that restores a user's session on a fresh
+machine. If you leave it unset, the adapter uses a volatile in-process store;
+there is no fallback to app-server `thread/list`, `thread/read`, or direct
+resume of a residual native thread.
+
+## Host wiring
+
+Pass your implementation with `WithSessionStore`, and optionally bound
+store-backed load and list operations with `WithSessionStoreLoadTimeout`:
+
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+	codexacp.WithSessionStore(store),
+	codexacp.WithSessionStoreLoadTimeout(15*time.Second),
+)
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `WithSessionStore` | in-process store | Durable mirror of Codex rollout JSONL rows. |
+| `WithSessionStoreLoadTimeout` | `10s` | Deadline for store-backed load and list operations; values ≤ 0 use the default. |
+
+## The interface
+
+```go
+const SessionStoreMainSubpath = ""
+const SessionStoreFormat = "codex-rollout-jsonl-v1"
+
+type SessionKey struct {
+	SessionID string
+	Subpath   string
+}
+
+type SessionStore interface {
+	Append(context.Context, SessionKey, []SessionStoreEntry) error
+	Load(context.Context, SessionKey) ([]SessionStoreEntry, error)
+	Replace(context.Context, SessionKey, []SessionStoreReplacement) error
+	Delete(context.Context, SessionKey) error
+	ListSessions(context.Context) ([]SessionSummary, error)
+	ListSubkeys(context.Context, SessionKey) ([]string, error)
+}
+```
+
+Rows are stored in the `codex-rollout-jsonl-v1` format. The main session lives
+at the empty subpath (`SessionStoreMainSubpath`). Session-owned image artifact
+records live under additional subpaths. Each generated image has one canonical
+record keyed by stable native identity and byte fingerprint; rollout rows carry
+only the artifact reference, while raw events carry sanitized metadata.
+
+The adapter derives the terminal native checkpoint from these unmodified rows:
+the last turn's `turn_id` and the final assistant `response_item.id` are exposed
+as `_meta.codex.turnId` and `_meta.codex.messageId`. Store-backed
+`session/load` emits an identity-bearing replay update even when that final
+assistant item has empty content.
+
+An already-active wrapper remains usable for prompt, cancel, close, and
+`session/resume`; that resume reuses the existing binding and adopts nothing.
+`session/load` always requires committed store rows, including for an active
+wrapper, because replay is store-authoritative. When the current app-server
+still owns the stored thread, load/resume keep its native rollout path and
+require the stored `session_meta` thread ID as an exact identity check. Missing
+or mismatched identity is rejected; stored rows cannot redirect one logical
+session to another native thread or rollout path.
+One resume/load request claims retained ownership before making a native call.
+Concurrent resume, load, or delete requests fail closed until that claim is
+committed or rolled back; a failed native rebind is unsubscribed before the
+claim becomes retryable.
+
+## Generations and deletion
+
+`Replace` writes one complete committed generation for a session: the main key
+must be present exactly once, and unlisted subpaths are hidden atomically.
+`Delete` writes a tombstone first; deleting the main subpath cascades to every
+subpath and hides the session from list, load, and resume before residual native
+cleanup is attempted.
+
+Image artifact records are bounded and are reclaimed by adapter cleanup in
+addition to cascading session deletion: each record expires 24 hours after it
+is written. A replay or load that needs bytes no
+longer present fails with `stage:"image_output"` and
+`reason:"storage_failed"`; it never emits a transcript with missing image
+content. A host that needs a longer image history should persist the image
+content when it is first delivered.
+
+Keys with an empty `SessionID` are rejected by `Append` and `Replace` with a
+"session id is required" error; `Delete` of such a key is a pure no-op and
+writes no tombstone.

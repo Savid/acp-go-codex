@@ -1,0 +1,102 @@
+package codexacp
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/coder/acp-go-sdk"
+)
+
+func (a *Agent) materializeStoredRollout(
+	ctx context.Context,
+	sessionID acp.SessionId,
+	entries []SessionStoreEntry,
+) (string, func(), error) {
+	if len(entries) == 0 {
+		return "", func() {}, nil
+	}
+
+	hydrated, err := a.hydrateStoredImageArtifacts(ctx, sessionID, entries)
+	if err != nil {
+		return "", nil, err
+	}
+
+	release, err := a.reserveScratchRoot(ctx, RuntimeResourceSession)
+	if err != nil {
+		return "", nil, err
+	}
+
+	path, err := materializeRollout(a.options.ScratchDir, hydrated)
+	if err != nil {
+		release()
+
+		return "", nil, err
+	}
+
+	if err := handoffGeneratedNativeTree(filepath.Dir(path), a.options.ProcessIsolation); err != nil {
+		_ = removeMaterializedRollout(path)
+
+		release()
+
+		return "", nil, err
+	}
+
+	return path, release, nil
+}
+
+type materializedRolloutFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Close() error
+}
+
+var (
+	materializedRolloutTempDirPrefix = "acp-go-codex-rollout-"
+	createMaterializedRolloutTemp    = func(scratchDir string) (materializedRolloutFile, error) {
+		return createPrivateTempFile(scratchDir, materializedRolloutTempDirPrefix, "rollout-*.jsonl")
+	}
+	removeMaterializedRolloutFile = os.Remove
+)
+
+func materializeRollout(scratchDir string, entries []SessionStoreEntry) (string, error) {
+	if len(entries) == 0 {
+		return "", nil
+	}
+
+	file, err := createMaterializedRolloutTemp(scratchDir)
+	if err != nil {
+		return "", fmt.Errorf("create materialized rollout: %w", err)
+	}
+
+	name := file.Name()
+
+	for _, entry := range entries {
+		if _, err := file.Write(entry); err != nil {
+			_ = file.Close()
+			_ = removeMaterializedRollout(name)
+
+			return "", fmt.Errorf("write materialized rollout: %w", err)
+		}
+
+		if _, err := file.Write([]byte{'\n'}); err != nil {
+			_ = file.Close()
+			_ = removeMaterializedRollout(name)
+
+			return "", fmt.Errorf("write materialized rollout newline: %w", err)
+		}
+	}
+
+	if err := file.Close(); err != nil {
+		_ = removeMaterializedRollout(name)
+
+		return "", fmt.Errorf("close materialized rollout: %w", err)
+	}
+
+	return name, nil
+}
+
+func removeMaterializedRollout(path string) error {
+	return removePrivateTempFile(path, materializedRolloutTempDirPrefix, removeMaterializedRolloutFile)
+}

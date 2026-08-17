@@ -1,0 +1,170 @@
+---
+title: "CLI"
+description: "Every flag and subcommand the acp-go-codex command accepts, with defaults."
+---
+
+```sh
+acp-go-codex [flags]
+```
+
+Run with no subcommand, the binary serves ACP JSON-RPC over stdin/stdout.
+
+## Optional standalone isolation policy
+
+Omitting `-process-isolation-config` selects ordinary current-identity mode for
+root or non-root callers. On
+every platform where native launch and writable-home locking are supported it
+reports non-authoritative `shared_identity`, publishes no descendant inventory,
+and makes no whole-tree quiescence claim. Native `login` and `logout` also
+permit omission but still require an explicit canonical `-home` as their exact
+mutation-consent boundary.
+Ordinary mode uses one captured, scrubbed ambient environment and retains normal
+relative executable and relative-`PATH` lookup. The explicit policy's absolute
+`PATH` restriction is not applied to omission.
+
+Supplying `-process-isolation-config=/absolute/path/process-isolation.json`
+explicitly selects the hardened Linux policy. Serve mode then defaults `-home`
+to `standaloneStateRoot`; `login` and `logout` require that exact home. An
+invalid supplied policy fails before ACP serving or native spawn, with no
+ordinary-mode retry.
+The policy must be a root-owned, single-link regular file with mode `0600`.
+Every component is opened from `/` without following symlinks, and every
+ancestor must be root-owned and not writable by group or other. Unknown JSON
+fields and trailing JSON values are rejected.
+
+```json
+{
+  "uid": 20001,
+  "gid": 20001,
+  "standaloneOwnerId": "codex-deployment-1",
+  "standaloneStateRoot": "/var/lib/acp-go-codex",
+  "baseEnvironment": {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/var/lib/acp-go-codex",
+    "USER": "acp-go-codex",
+    "LOGNAME": "acp-go-codex",
+    "LANG": "C.UTF-8"
+  },
+  "inheritEnvironment": []
+}
+```
+
+`standaloneOwnerId` is the nonsecret, case-sensitive deployment identity:
+1--256 ASCII bytes, beginning alphanumeric, with remaining bytes limited to
+alphanumerics and `._:@/-`. `standaloneStateRoot` is the existing dedicated
+durable provider state root, is neither `/` nor equal to or beneath
+`/var/lib/acp-go/agent-identities`, and must equal the configured native home. Its clean
+absolute UTF-8 path is limited to 4096 bytes with no control character, and
+Linux resolves the complete path componentwise from `/` without following
+symlinks or magic links. Every ancestor is root-owned and not group/world
+writable; the final directory is owned by the configured UID:GID with mode
+`0700`. It binds the exact path, device, and inode.
+
+The supervisor must run as root. The UID/GID must name a nonroot account with
+that same-name private primary group, no supplementary groups, and a target-owned mode
+`0700` home matching `HOME`, reached without symlinks beneath protected
+root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
+`LOGNAME` must match the account.
+`PATH` must contain existing canonical absolute directories. The child gets
+only `baseEnvironment` plus variables explicitly named in
+`inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
+home, and adapter-private variables cannot be inherited. Unset or duplicate
+inheritance entries fail startup. Darwin, Windows, and other platforms refuse
+this explicit Linux policy rather than weakening its contract.
+
+Provision the target as a locked system account with a non-login shell, its
+same-name private group, and no sudo policy. Its UID and primary GID cannot be
+shared by another account. Password locking is not a substitute for disabling
+login paths, and a locked account still needs the validated private writable
+home for native tools.
+
+## Serve flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-path` | `codex` on `PATH` | Codex CLI executable path. |
+| `-process-isolation-config` | unset | optional absolute path to the explicit standalone Linux isolation policy described above. |
+| `-home` | unset, or policy `standaloneStateRoot` | Codex home directory passed as `CODEX_HOME`; explicit isolation binds it to `standaloneStateRoot`. |
+| `-scratch-dir` | system temp | Parent directory for ephemeral session scratch; empty means the system temp directory. |
+| `-provider-auth-root` | unset | Durable host-owned root holding the values-free provider-auth ledger. Empty leaves the whole provider-auth surface unadvertised. |
+| `-provider-auth-direct-home` | unset | Exact `CODEX_HOME` the operator consents to the `credential` and `disconnect` legs touching. It must equal `-home`; empty leaves those two legs unadvertised. |
+| `-model` | unset | Default model preference. |
+| `-debug` | `false` | Write adapter debug logs to stderr. |
+| `-version` | `false` | Print adapter version and exit. |
+| `-codex-allow-account-logout` | `false` | Permit ACP logout to call Codex logout. |
+| `-seed-file` | unset | Seed file as `<relpath>=<hostpath>`, repeatable. Host file contents are written under `CODEX_HOME` before codex launches. Requires `-home`. A seeded `config.toml` declaring the reserved `mcp_servers` or `shell_environment_policy` root fails closed. |
+| `-codex-config` | unset | Codex config override as `<key>=<value>`, repeatable. Passed to `codex app-server` as `-c key=value`; dotted keys set nested config and nothing is written to disk. The `mcp_servers` and `shell_environment_policy` roots are reserved and fail closed. |
+
+## Codex config
+
+Override Codex config directly on the app-server (repeat `-codex-config` per key).
+Dotted keys set nested config, string values are TOML-quoted automatically, and
+nothing is written to disk — so `-home` can point at the operator's real Codex
+dir and its `config.toml`/auth stay untouched. The `mcp_servers` and
+`shell_environment_policy` roots are reserved whole — including every dotted
+child such as `shell_environment_policy.set.FOO` — because a process-global
+override would apply to every thread at once, outside the per-thread ownership
+that authors those sections. Supplying either makes `initialize` fail closed
+with `-32603`. Point Codex at a LiteLLM gateway:
+
+```sh
+acp-go-codex \
+  -codex-config model=gpt-5.5 \
+  -codex-config model_provider=litellm \
+  -codex-config model_providers.litellm.name=LiteLLM \
+  -codex-config model_providers.litellm.base_url=https://litellm.example/v1 \
+  -codex-config model_providers.litellm.env_key=LITELLM_API_KEY \
+  -codex-config model_providers.litellm.wire_api=responses
+```
+
+Seed Codex config from host files (repeat `-seed-file` per file). Each host
+file's contents are written to the relative path under `CODEX_HOME`, so requires
+an explicit `-home`. Codex loads configuration from `CODEX_HOME/config.toml`,
+which is the same keyspace `-codex-config` reaches, so seeding that file with
+the reserved `mcp_servers` or `shell_environment_policy` root is refused in
+every TOML spelling.
+
+## Subcommands
+
+Login helpers delegate to the Codex CLI:
+
+```sh
+acp-go-codex login -home DIR [-process-isolation-config POLICY] [-path PATH] [-scratch-dir DIR] [-codex-device-auth]
+acp-go-codex logout -home DIR [-process-isolation-config POLICY] [-path PATH] [-scratch-dir DIR]
+```
+
+Both subcommands require Codex CLI 0.144.1 or newer and run under the same
+writable-home lock and selected containment backend as app-server mode.
+`-scratch-dir` selects the parent for their private supervisor scratch and
+defaults to system temp. A command fails closed when the home is already
+claimed or is not on an approved local filesystem. `login` also neutralises
+browser launches from the same scratch parent. Windows supports ordinary
+runtime and `logout`, which opens no browser. Windows `login` is refused because
+browser launch cannot be neutralised there. Explicit isolation remains
+Linux-only. See [Authentication](/docs/features/authentication).
+
+## Darwin containment operations
+
+These operational commands remain available to inspect generations left by an
+embedded Darwin best-effort host. Ordinary Darwin launches do not claim that
+containment boundary.
+
+```sh
+acp-go-codex containment diagnose -scratch-dir <parent>
+acp-go-codex containment cleanup -scratch-dir <parent> -runtime-id <id> -force
+```
+
+`diagnose` is read-only. `cleanup` acts only on the selected 128-bit lowercase
+hex runtime ID, re-enumerates same-UID processes carrying both exact runtime
+markers, and revalidates each PID, start identity, UID, and both markers before
+each individual signal. It never signals a recorded PID or PGID by itself.
+PID revalidation and signalling are separate operations, so PID reuse in that
+gap can still cause collateral signalling of unrelated same-UID work. The
+fixed five-second cleanup deadline starts before process enumeration.
+
+Success writes exactly one JSON object and newline to stdout. Usage errors exit
+`2`; operational errors exit `1` with one `acp-go-codex: ...` line on stderr.
+A completed cleanup that still finds correlated or ambiguous PIDs writes its
+populated JSON result and exits `1`. Every report warns that correlation is not
+ownership or proof of absence and that inherited markers can be scrubbed.
+It also warns about the PID-reuse race between revalidation and signalling.

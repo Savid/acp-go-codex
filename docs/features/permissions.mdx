@@ -1,0 +1,50 @@
+---
+title: "Permissions"
+description: "Bridge Codex approvals to ACP and set per-session sandbox policy."
+---
+
+Codex asks for approval before it runs commands or touches files outside its
+sandbox. The adapter bridges those requests to the host so the user stays in
+control, and lets a host preset the approval and sandbox posture per session.
+
+## Session approval and sandbox
+
+Set the Codex approval policy and sandbox policy in session metadata when you
+create the session:
+
+```go
+codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+	codexacp.WithCodexApprovalPolicy("never"),
+	codexacp.WithCodexSandboxPolicy("workspace-write"),
+))
+```
+
+| Option | Purpose |
+| --- | --- |
+| `WithCodexApprovalPolicy` | Codex approval policy for the session, passed through to Codex verbatim. |
+| `WithCodexSandboxPolicy` | Codex sandbox policy for turns in this session, passed through to Codex verbatim. |
+| `WithCodexMCPToolApprovalMode` | Trust level for MCP tool calls: `auto`, `prompt`, or `approve`. |
+
+The approval and sandbox values are owned by the Codex CLI; the adapter forwards
+them without interpreting the vocabulary.
+
+## MCP tool trust
+
+MCP tool approval is configured separately from command approval:
+
+```go
+codexacp.WithCodexMCPToolApprovalMode("approve")
+```
+
+This applies to every [MCP server](/docs/features/mcp) configured for the
+session.
+
+## How approvals reach the host
+
+<Warning>
+  Native command, file-change, permission-profile, and MCP approval requests MUST
+  carry the non-empty `turnId` of the currently active native turn. Missing,
+  stale, and post-turn requests are denied locally before any client callback.
+  Current-turn permission requests are bridged onto ACP
+  `session/request_permission` and are never silently auto-approved.
+</Warning>

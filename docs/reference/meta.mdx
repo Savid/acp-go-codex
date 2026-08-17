@@ -1,0 +1,202 @@
+---
+title: "Metadata"
+description: "The _meta.codex vocabulary for session options, capabilities, and native turn identity, plus the reserved acp-go.dev keys."
+---
+
+The adapter reserves the `_meta.codex` namespace for its extension vocabulary,
+and reads and writes a small set of `acp-go.dev/*` keys that are not
+vendor-specific. This page lists the metadata it reads and writes.
+
+## Session options
+
+Accepted session lifecycle metadata:
+
+```json
+{
+  "_meta": {
+    "codex": {
+      "options": {
+        "model": "gpt-5.5",
+        "effort": "high",
+        "serviceTier": "flex",
+        "personality": "pragmatic",
+        "approvalPolicy": "never",
+        "sandboxPolicy": "workspace-write",
+        "mcpToolApprovalMode": "approve",
+        "env": {
+          "HOST_OPERATION_ID": "operation-42",
+          "HOST_SESSION_BEARER": "session-bearer"
+        },
+        "extraPathDirs": ["/run/host/operation-42/bin"],
+        "outputSchema": {"type": "object"}
+      },
+      "rawEvent": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+Session `env` is an object of string values installed on that session's Codex
+thread at `shell_environment_policy.set`. Peer threads on the same app-server do
+not share it. A raw `PATH` entry is rejected (case-insensitively on Windows), as
+are adapter-private process-management names, `CODEX_HOME`, `HOME`, and the XDG
+cache, config, data, runtime, and state roots. `WithHome` and the app-server's
+static launch environment remain authoritative.
+
+Session `extraPathDirs` is the only session search-path authority. It is an
+array whose elements must each be a string, nonempty, absolute, and free of the
+platform path-list separator. A rejected element names its exact field, such as
+`_meta.codex.options.extraPathDirs[1]`. Order and duplicates are preserved, and
+the listed directories are placed in order before the exact `PATH` used to
+launch the app-server; empty native path components are removed. The adapter
+then installs that derived `PATH` alongside `env` at
+`shell_environment_policy.set` and rejects another owner of that section or its
+`PATH` before sending a native lifecycle request.
+
+Every new, load, resume, and fork request carries its own complete values. A
+fork applies the child's values to both the native fork and its required resume.
+An active resume rebind replaces the adapter's saved carrier with the new
+request, so omitted or replaced values from the previous binding are neither
+sent nor retained. Runtime recovery reapplies the latest saved carrier.
+
+## Initialize capabilities
+
+Accepted initialize capability metadata under `_meta.codex`:
+
+| Key | Purpose |
+| --- | --- |
+| `fork` | `_codex/session/fork` extension method. |
+| `elicitation` | Client capability gated elicitation support. |
+| `rawEvent` | `_codex/rawEvent` notification opt-in details. |
+| `sessionStore` | Store format and key shape. |
+| `structuredOutput` | JSON Schema request and response paths. |
+| `providerAuth` | A single `methods` array naming the enabled `_codex/auth/*` extension names. Present only while `-provider-auth-root` is configured, and it carries no `injectionKey`: a brokered ChatGPT credential returns through the existing `codex-chatgpt-auth-tokens` auth method, so `_meta.codex.options.providerAuth` is an unsupported option field. |
+
+## Media envelope
+
+Every initialize response advertises the bounds this adapter enforces on inbound
+prompt media, under the reserved `acp-go.dev/mediaEnvelope` key in
+`agentCapabilities._meta`. A host reads it to reject an oversize or unsupported
+attachment before it spends a turn on one:
+
+```json
+{
+  "agentCapabilities": {
+    "_meta": {
+      "acp-go.dev/mediaEnvelope": {
+        "maxBytes": 6291456,
+        "maxPromptBytes": 6291456,
+        "maxDimension": 0,
+        "imageFormats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        "documentFormats": []
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `maxBytes` | Effective decoded bound on one prompt image: the tighter of [`ImageLimits.MaxInputBytesPerImage`](/docs/reference/go-api#agent-options) and the hard frame bound, which also applies when that limit is disabled. |
+| `maxPromptBytes` | Effective decoded bound on every image in one prompt — `ImageLimits.MaxInputBytesPerPrompt`. `0` means no aggregate byte bound is enforced. |
+| `maxDimension` | Per-dimension pixel bound. Always `0`: Codex reads dimensions only to prove they exist and rejects nothing for being large in pixels. |
+| `imageFormats` | The inbound allowlist, in this order. |
+| `documentFormats` | Media types mapped to a native document representation. Always an empty array: Codex has none, so a host should materialize documents rather than embedding their bytes. |
+
+The block is always present. Both byte values are read from the same
+effective-limit functions the gates call rather than from the configured fields,
+so an advertised number is always the number a `too_large` rejection reports.
+A disabled `MaxInputBytesPerImage` still advertises the frame bound that binds
+in its place; a disabled `MaxInputBytesPerPrompt` advertises `0`, because no
+aggregate byte bound is enforced at all — the cap on how many handoff-form
+blocks one prompt may read bounds that work instead, and it is a block count
+rather than a byte number. `0` on `maxDimension` means no bound rather than no
+pixels.
+
+The envelope is captured per agent instance, so it expresses only bounds the
+adapter enforces. It cannot express whether the session's currently selected
+model accepts images, which stays a prompt-time result
+([`unsupported_by_model`](/docs/core/prompt-streaming)).
+
+## Handoff advertisement
+
+When — and only when — [`WithInputHandoffRoot`](/docs/reference/go-api#agent-options)
+is configured, initialize also advertises the local handoff input transport:
+
+```json
+{
+  "agentCapabilities": {
+    "_meta": {
+      "acp-go.dev/handoff": {"versions": [1]}
+    }
+  }
+}
+```
+
+The key's absence is the actionable signal that no handoff root reached this
+adapter, so a host can check its own configuration rather than discovering the
+gap on a rejected prompt. The inbound envelope a host sends per block is
+documented with the [handoff input form](/docs/core/prompt-streaming).
+
+## Rules
+
+Unknown keys in the adapter-owned namespace fail closed with invalid params.
+Wrong-typed values for known option keys are also rejected with invalid params
+whose data is `{"error": "unsupported", "field": "_meta.codex.options.<key>"}`
+— never silently ignored. There is no command capability or command metadata
+under `_meta.codex`.
+
+Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are not commands
+and are not projected as `AvailableCommand` entries.
+
+## Native turn identity
+
+Successful native turns expose their durable Codex correlation under
+`_meta.codex` on a standard `session/update` notification and on the terminal
+`session/prompt` response:
+
+```json
+{
+  "_meta": {
+    "codex": {
+      "turnId": "<native turn id>",
+      "messageId": "<final assistant response-item id>"
+    }
+  }
+}
+```
+
+`turnId` comes from the Codex app-server turn. `messageId`, when present, is
+the final assistant `response_item.id` from that turn; it is not an
+adapter-generated ACP message id. A completion with no assistant item carries
+`turnId` alone. Store-backed `session/load` replays the same terminal identity
+from the mirrored rollout.
+
+## Provider-auth error data
+
+A failed `_codex/auth/*` leg returns JSON-RPC `-32000` whose `data` carries:
+
+| Field | Meaning |
+| --- | --- |
+| `error` | Always `codex_auth_failed`. |
+| `cause` | One of `native_veto`, `provider_refused`, `transport`, `process`, `timeout`, `harvest_failed`, `unsupported_variant`, `flow_expired`, `flow_state`, `flow_cancelled`, `policy`, `binding_conflict`. |
+| `retryable` | Always present; `true` only for the transport-shaped causes. |
+| `providerId` / `method` / `flowId` | Present when the failure names one. |
+
+There is no free-form field and no native message text. A caller-owned
+addressing failure — an unknown, superseded, or cross-session `flowId`, a stale
+`methodsGeneration`, or a `method` that does not match the flow — is invalid
+params (`-32602`) carrying the offending field path instead. `connectionId` is
+caller-minted and bounded to at most 128 bytes of `A-Z`, `a-z`, `0-9`, `-`, and
+`_`; every leg that carries one checks it before the value is compared or
+recorded, and anything outside that shape is `-32602` naming `connectionId`.
+
+`binding_conflict` comes only from `_codex/auth/disconnect`, and it means the
+`connectionId` and `bindingGeneration` you sent do not match the binding the
+adapter recorded — no entry, a different connection, or a generation already
+spent. Nothing is mutated: no generation bump and no native logout. Reconnect to
+get a current binding; retrying the same one never succeeds. It is deliberately
+not `policy`, which is the adapter refusing on its own terms and which
+reconnecting does not clear.

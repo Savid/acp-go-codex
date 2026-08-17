@@ -1,0 +1,109 @@
+---
+title: "Troubleshooting"
+description: "Common failure symptoms, their causes, and the native Codex app-server behaviors this adapter absorbs."
+---
+
+Failures surface as explicit ACP errors, never as silent state drift. The table
+below maps common symptoms to their cause and fix; the sections after it
+describe native Codex app-server behaviors that can look like adapter bugs but
+are absorbed by design.
+
+## Common symptoms
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Session start fails with "codex CLI ... is too old; need >= 0.144.1" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
+| Session start or terminal auth reports unapproved filesystem lock semantics | `CODEX_HOME` is on a network, overlay, or unknown filesystem. Move it to a supported local filesystem. |
+| Terminal login/logout reports a writable-home claim failure | Another cooperating runtime or terminal account command still owns that home. Quiesce it before retrying. |
+| Cancellation reports a background-terminal containment error | Codex did not prove the target thread's terminal set empty, so the adapter retired the shared runtime generation as a containment fallback. Inspect the native app-server error, then retry; logical sessions resume lazily on a replacement generation. |
+| Darwin reports `shared_identity` containment | This is the honest non-authoritative posture of ordinary current-identity mode. Embedded callers may use `WithDarwinBestEffortContainment` only after accepting escaped-descendant and numeric-PGID-reuse risks. |
+| Darwin cleanup reports correlated or ambiguous PIDs | Inspect the JSON result. The generation root is retained; resolve the selected processes and rerun the exact runtime-ID cleanup if appropriate. Never treat an empty report as proof that marker-scrubbing escapees are absent. |
+| `session/prompt` fails with `codex_turn_failed` `cause: "timeout"` | The turn exceeded [`WithTurnTimeout`](/docs/core/sessions#turn-deadlines). Raise or clear the timeout; the session stays usable. |
+| `session/prompt` fails with authentication-required (`-32000`) | Codex credentials are missing or expired. Run `acp-go-codex login` or supply a token refresher. |
+| ACP logout is refused | Logout is gated. Start with `-codex-allow-account-logout` for an adapter-owned `CODEX_HOME`. |
+| `codex_turn_failed` `cause: "process_exit"` / `"transport"` | The Codex process or its connection dropped. The session relaunches lazily; retry the prompt. |
+
+## MCP tools missing after a native resume
+
+The Codex app-server does not persist thread-scoped MCP configuration across a
+native resume: `thread/start.config.mcp_servers` is not serialized into the
+rollout, so a thread resumed on a replacement app-server has no MCP servers
+until the configuration is supplied again through
+`thread/resume.config.mcp_servers`. Without that re-supply, MCP tools simply
+appear missing on the resumed thread — the native harness raises no error.
+
+This adapter re-sends each session's own MCP configuration on every
+`thread/resume` and, for each MCP-bearing thread, requires an adapter-owned
+`runtime_ready` marker turn to succeed before the session is rebound and any
+user turn runs. A configuration that cannot be proved live therefore surfaces
+as a resume error naming `runtime_ready`, not as silently absent tools
+mid-conversation. `TestCodexNativeTwoThreadMCPRebindIsolation` in
+`integration/mcp_rebind_test.go` reproduces the native behavior: two threads
+using the same MCP server name with different endpoints and credentials are
+resumed on a replacement app-server, and each thread keeps exactly its own
+configuration — tool results and bearer credentials never cross threads.
+
+## Structured output absent from a completed turn
+
+The Codex app-server can complete a turn without emitting the structured
+output requested through `outputSchema`, and natively that omission raises no
+error. When a session has an output schema, this adapter parses the turn's
+final assistant text: valid JSON is returned as `_meta.codex.structuredOutput`
+on the `session/prompt` response, and structured output is never exposed as a
+visible tool-call update. When the harness omits or malforms the output, the
+key is absent and the turn still completes with its native stop reason.
+
+<Note>
+  Treat the presence of `_meta.codex.structuredOutput` as the success signal
+  for a schema-bearing turn. An `end_turn` stop reason alone does not prove the
+  requested structured output was produced.
+</Note>
+
+`TestCodexCLIStructuredOutput` in `integration/live_matrix_test.go` asserts
+the delivered shape: the schema-conforming value rides the prompt-response
+metadata, and no `StructuredOutput` tool call becomes visible in session
+updates.
+
+## Clarifying questions never reach the user
+
+Natively, Codex can pause a turn to ask for free-form input through
+`item/tool/requestUserInput`, and its MCP servers can raise
+`mcpServer/elicitation/request`. This adapter forwards both onto ACP
+`elicitation/create` only when the client explicitly advertised the request's
+matching form or URL mode at initialize. An omitted or null elicitation
+capability, a bare `elicitation: {}`, and a missing matching mode suppress the
+forwarding by design: the affected native request receives an empty answer
+without any client call, so the question simply never surfaces rather than
+hanging the turn. Advertise the matching mode to receive clarifying questions.
+
+A native request that carries a missing, stale, or post-turn `turnId` is
+rejected locally before any client call, so a late clarifying question never
+reaches the user either. `TestTurnScopedServerRequestsRejectMissingOrStaleNativeTurn`
+in `agent_server_requests_test.go` pins this turn scoping across both native
+mechanisms, and `TestCodexCLIClarifyingQuestionElicitation` in
+`integration/live_matrix_test.go` proves a live clarifying question lands as an
+ACP `elicitation/create` when the client advertises the capability.
+
+Codex only offers its clarifying-question tool (`item/tool/requestUserInput`)
+when the session runs in plan collaboration mode; in the default mode the tool
+is unavailable and the model reports it as such, so no question surfaces even
+with the elicitation capability advertised — which is why
+`TestCodexCLIClarifyingQuestionElicitation` drives the session in plan mode.
+
+## Rate limits look stale or empty
+
+The Codex app-server reports rate-limit usage on some responses only, and the
+explicit `account/rateLimits/read` request exists only on native versions from
+0.142.0. The `_codex/rateLimits` extension method therefore prefers a fresh
+read against a live session whose native version supports the request; when no
+such session exists, the read fails, or the fresh snapshot is empty, the
+adapter falls back to the latest cached snapshot. The cache is fed by
+successful fresh reads and by native rate-limit update events observed during
+turns. When nothing has ever been reported, the response is an empty window
+set — absence is never an error.
+
+`agent_ratelimits_test.go` pins this behavior:
+`TestRateLimitsFallsBackToCacheOnError` and
+`TestRateLimitsFallsBackWhenFreshQueryEmpty` cover the cached fallback,
+`TestApplyCodexClientEventCachesRateLimits` covers event-driven caching, and
+`TestRateLimitsEmptyWhenNothingKnown` covers the empty, error-free default.

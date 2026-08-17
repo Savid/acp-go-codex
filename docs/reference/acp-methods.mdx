@@ -1,0 +1,95 @@
+---
+title: "ACP Methods"
+description: "The ACP methods the adapter routes and the namespaced Codex extensions it adds."
+---
+
+The adapter routes the standard ACP method set and adds namespaced
+`_codex/*` extensions. This page lists each method and its behavior.
+
+## Supported methods
+
+| Method | Status |
+| --- | --- |
+| `initialize` | implemented |
+| `session/new` | implemented |
+| `session/prompt` | implemented |
+| `session/cancel` | implemented |
+| `session/close` | implemented |
+| `session/list` | implemented |
+| `session/load` | implemented |
+| `session/resume` | implemented |
+| `session/delete` | implemented |
+| `session/set_config_option` | implemented |
+
+`session/prompt` and active-turn `session/cancel` require the exact version-1
+`acp-go.dev/route` metadata described in [Sessions](/docs/core/sessions#turn-route-identity).
+Missing and stale turn nonces are invalid params; there is no unstamped path.
+
+## Extensions and unsupported methods
+
+Codex extension methods live under the `_codex/*` namespace:
+
+| Method | Status |
+| --- | --- |
+| `_codex/session/fork` | implemented through `HandleExtensionMethod` |
+| `_codex/rateLimits` | implemented through `HandleExtensionMethod` |
+| `_codex/rawEvent` | notification only |
+| `_codex/auth/methods` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/authorize` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/callback` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/status` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/cancel` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/inventory` | implemented through `HandleExtensionMethod` |
+| `_codex/auth/credential` | implemented through `HandleExtensionMethod`, consent-gated |
+| `_codex/auth/disconnect` | implemented through `HandleExtensionMethod`, consent-gated |
+
+The eight `_codex/auth/*` legs broker a ChatGPT or API-key login for the
+account `CODEX_HOME` holds. They are advertised together under
+`agentCapabilities._meta.codex.providerAuth` only while `-provider-auth-root`
+is configured, and `credential` and `disconnect` additionally require
+`-provider-auth-direct-home` equal to `-home`; every unadvertised leg returns
+method-not-found (see [Authentication](/docs/features/authentication)).
+
+Unsupported or removed methods return method-not-found uniformly. `session/fork`
+and `session/set_mode` are intentionally not routed.
+
+### `_codex/rateLimits`
+
+`_codex/rateLimits` reports the harness's subscription rate-limit usage. It is an
+agent-level request: the params are an empty object (`{}`) and carry no
+`sessionId`. A malformed params value that does not decode as an object is
+rejected with invalid-params.
+
+The response reports only harness-supplied values — nothing is derived from token
+counts or fabricated:
+
+```json
+{
+  "windows": [
+    { "id": "primary", "usedPercent": 42, "resetsAt": "2026-07-09T18:00:00Z" },
+    { "id": "secondary", "usedPercent": 12 }
+  ],
+  "planType": "pro"
+}
+```
+
+`windows` is always present, and is an empty array when the harness has reported
+no usage. Each window `id` is codex-native (`primary` or `secondary`),
+`usedPercent` is passed through in the range 0-100, and `resetsAt` is an RFC3339
+instant included only when the harness supplies one. `planType` is included only
+when reported.
+
+The adapter resolves the view from harness data in order: a fresh
+`account/rateLimits/read` query against a live session whose native codex version
+supports it (0.142.0 or newer); otherwise the latest snapshot seen on the
+app-server rate-limit update stream (cached agent-level, latest-wins); otherwise
+an empty window set. Absence is never an error.
+
+## Slash commands
+
+acp-go-codex advertises no ACP slash commands. `/review`, `/plan`, `/compact`,
+and other slash-prefixed text remains ordinary `session/prompt` text and reaches
+Codex as `turn/start` input.
+
+Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items) are not commands
+and are not projected as `AvailableCommand` entries.

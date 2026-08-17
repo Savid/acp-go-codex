@@ -1,0 +1,55 @@
+---
+title: "Overview"
+description: "How acp-go-codex turns a local Codex CLI into an embeddable ACP agent, and what it owns."
+---
+
+`acp-go-codex` exposes the local `codex` CLI as an
+[Agent Client Protocol](https://agentclientprotocol.com/) agent. It speaks ACP
+over [JSON-RPC streams](https://agentclientprotocol.com/protocol/transports),
+starts one `codex app-server` per Agent on demand, maps many ACP sessions onto
+native threads, maps
+[ACP prompts](https://agentclientprotocol.com/protocol/prompt-turn) and client
+callbacks into Codex app-server requests, and streams
+[ACP session updates](/docs/reference/updates) back to the host.
+
+Use it when you want a Codex agent that speaks ACP while keeping Codex protocol
+details behind a small Go adapter boundary.
+
+## What it owns
+
+The adapter owns the ACP surface and the lifecycle of the Codex runtime it
+launches: it translates ACP methods into thread-scoped `codex app-server` requests, streams
+the resulting events back as ACP updates, and bridges client callbacks
+(permissions, elicitation, MCP) across the boundary. It does **not** own Codex
+itself — authentication, model availability, MCP behavior, native telemetry,
+and rollout persistence are governed by the installed `codex` CLI version and
+the user's Codex configuration. Codex protocol details stay inside the adapter
+and never leak onto the ACP wire except through the documented `_codex/*`
+extension namespace.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Two integration modes" icon="route" href="/docs/get-started/run-modes">
+    Run it as a standalone ACP subprocess or embed it in another Go application with `Serve`.
+  </Card>
+  <Card title="ACP method surface" icon="plug" href="/docs/reference/acp-methods">
+    Initialize, create sessions, prompt, cancel, load, resume, fork, stream updates, and bridge MCP through ACP.
+  </Card>
+  <Card title="Session runtime" icon="terminal" href="/docs/core/sessions">
+    Codex threads, app-server ownership, prompt turns, cancellation, replay, resume, fork, and rollout storage.
+  </Card>
+  <Card title="Production controls" icon="shield" href="/docs/operations/security">
+    Session-scoped policies and MCP, account auth boundaries, writable-home exclusivity, path validation, and predictable cleanup.
+  </Card>
+  <Card title="Observable by default" icon="chart-line" href="/docs/operations/observability">
+    Optional OpenTelemetry spans, metrics, trace propagation, structured logs, and native Codex OTEL forwarding.
+  </Card>
+</CardGroup>
+
+<Note>
+  This project wraps the local `codex` CLI. Authentication, model availability,
+  MCP behavior, native telemetry, and rollout persistence are ultimately
+  governed by the installed Codex CLI version and the user's Codex
+  configuration.
+</Note>
