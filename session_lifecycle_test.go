@@ -327,16 +327,79 @@ func TestLifecycleConstructionAndDeliveryFailures(t *testing.T) {
 	require.NoError(t, unaccepted.settle(ctx, acp.StopReasonCancelled, lifecycle.OutcomeCancelled))
 }
 
+// The advertisement is the whole reachability condition for the version-1
+// stream, so it is pinned as the exact bytes an initialize response carries and
+// then followed through to the envelopes one real prompt delivers.
+func TestLifecycleAdvertisementAnswersOfferAndOpensForegroundStream(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return newSpyCodexClient(), nil
+	}))
+	recorder := newRecordingAgentClient()
+	agent.setAgentClient(recorder)
+
+	initialized, err := agent.Initialize(ctx, acp.InitializeRequest{
+		Meta: map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1.0}}},
+	})
+	require.NoError(t, err)
+	require.JSONEq(
+		t,
+		`{"acp-go.dev/lifecycle":{"versions":[1],"updatesOutsidePrompt":false,`+
+			`"authoritativeQuiescence":false,"activityKinds":[]}}`,
+		requireJSON(t, initialized.Meta),
+	)
+
+	// The negotiated answer lives on the response's own `_meta` and nowhere else.
+	require.NotContains(t, initialized.AgentCapabilities.Meta, lifecycle.MetaKey)
+
+	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+
+	promptRequest := TextPromptRequest(created.SessionId, "turn-nonce", "hello")
+	promptRequest.Meta[lifecycle.MetaKey] = map[string]any{
+		"version":    1,
+		"submission": map[string]any{"submissionId": "submission", "clientNonce": "nonce"},
+	}
+	response, err := agent.Prompt(ctx, promptRequest)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+
+	var events []string
+
+	streams := map[string]struct{}{}
+
+	for _, update := range recorder.updates {
+		envelope, carried := update.Meta[lifecycle.MetaKey].(map[string]any)
+		if !carried {
+			continue
+		}
+
+		require.NotNil(t, update.Update.SessionInfoUpdate, "the identity-only carrier is the only legal one")
+
+		streamID, ok := envelope["streamId"].(string)
+		require.True(t, ok)
+
+		event, ok := envelope["event"].(map[string]any)
+		require.True(t, ok)
+
+		eventType, ok := event["type"].(string)
+		require.True(t, ok)
+
+		streams[streamID] = struct{}{}
+		events = append(events, eventType)
+	}
+
+	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update"}, events)
+	require.Len(t, streams, 1, "one prompt opens exactly one incarnation")
+}
+
 func TestLifecycleNegotiationAndReservedExtensionDispatch(t *testing.T) {
 	agent := NewAgent()
 	answer, err := agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1.0}}})
 	require.NoError(t, err)
-	require.False(t, answer.Present())
-	require.Nil(t, lifecycleResponseMeta(answer))
+	require.True(t, answer.Present())
+	require.NotNil(t, lifecycleResponseMeta(answer))
 	require.Nil(t, lifecycleResponseMeta(lifecycle.Negotiated{}))
-	require.NotNil(t, lifecycleResponseMeta(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
-	}))
 
 	answer, err = agent.negotiateLifecycle(nil)
 	require.NoError(t, err)

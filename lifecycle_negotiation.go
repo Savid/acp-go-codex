@@ -7,17 +7,50 @@ import (
 	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
-// negotiateLifecycle validates the host's reserved offer but omits an answer.
-// Codex has no registry-accepted captured-native evidence for the family
-// extension, so advertising even a degenerate intersection would claim an
-// evidence gate this adapter has not passed.
+// negotiateLifecycle answers the host's reserved offer with the facts this
+// configuration proves. An absent offer and an empty version intersection are
+// both answered by omitting the key; a non-empty intersection is answered, even
+// though every fact in it is negative, because the answer is what makes the
+// version-1 foreground stream reachable at all.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, error) {
-	_, _, refusal := lifecycle.DecodeOffer(meta)
+	offer, present, refusal := lifecycle.DecodeOffer(meta)
 	if refusal != nil {
 		return lifecycle.Negotiated{}, lifecycleInvalidParams(refusal)
 	}
 
-	return lifecycle.Negotiated{}, nil
+	if !present {
+		return lifecycle.Negotiated{}, nil
+	}
+
+	negotiated, answered := offer.Answer(a.provenLifecycleFacts())
+	if !answered {
+		return lifecycle.Negotiated{}, nil
+	}
+
+	return negotiated, nil
+}
+
+// provenLifecycleFacts states what this adapter's active configuration can
+// actually prove, read from the boundaries that enforce it rather than from a
+// compiled-in claim:
+//
+//   - A session opens one incarnation per prompt and fences it at settlement,
+//     so no lifecycle envelope is ever delivered while no prompt is in flight.
+//   - Nothing here proves one logical session's descendants gone while the
+//     app-server generation they live in keeps serving every peer, so no
+//     quiescence proof class is claimed and no source is named.
+//   - Codex activity reaches ACP as ordinary tool-call updates; this adapter
+//     reads no structured native activity registry, so it emits no
+//     activity_update and advertises no kind.
+//
+// Every one of those is a negative fact, which is the truthful answer for a
+// prompt-contained configuration rather than a gap papered over.
+func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
+	return lifecycle.Negotiated{
+		UpdatesOutsidePrompt:    false,
+		AuthoritativeQuiescence: false,
+		ActivityKinds:           []lifecycle.ActivityKind{},
+	}
 }
 
 // negotiatedLifecycle reports the answer this connection settled on.
