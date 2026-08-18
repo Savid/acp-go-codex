@@ -505,6 +505,81 @@ func TestLifecycleReservedCancelRejectedBeforeNativeInterrupt(t *testing.T) {
 	require.False(t, s.turnCancelled)
 }
 
+// TestCancelRoutesBeforeItRefusesTheReservedKey pins the one order a surface
+// carrying both reserved objects may reach a verdict in. The route nonce is the
+// anti-stale authenticator, so it is validated first and its verdict is the one
+// reported; a request that is wrong in both ways is never an implementation's
+// choice between two answers. Both refusals precede the native interrupt.
+func TestCancelRoutesBeforeItRefusesTheReservedKey(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		meta  map[string]any
+		field string
+	}{
+		{
+			name:  "a stale route beside the reserved key reports the route",
+			meta:  inboundRouteMeta("stale"),
+			field: "_meta." + routeMetaKey,
+		},
+		{
+			name:  "a missing route beside the reserved key reports the route",
+			meta:  map[string]any{},
+			field: "_meta." + routeMetaKey,
+		},
+		{
+			name:  "a valid route beside the reserved key reports the key",
+			meta:  inboundRouteMeta("nonce"),
+			field: lifecycle.MetaPath,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := NewAgent()
+			client := newSpyCodexClient()
+			s := &session{
+				agent: agent, id: "s", client: client, codexThreadID: "thread",
+				turnID: "turn", turnNonce: "nonce", turnDone: make(chan struct{}),
+			}
+			agent.sessions["s"] = s
+
+			meta := tc.meta
+			meta[lifecycle.MetaKey] = map[string]any{}
+
+			var requestErr *acp.RequestError
+
+			require.ErrorAs(t, agent.Cancel(context.Background(), acp.CancelNotification{SessionId: "s", Meta: meta}),
+				&requestErr)
+
+			data, ok := requestErr.Data.(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, tc.field, data[jsonFieldField])
+			require.False(t, s.turnCancelled)
+		})
+	}
+}
+
+// TestPromptRoutesBeforeItReadsTheLifecycleValue proves the same precedence on
+// the other surface carrying both reserved objects. A prompt whose route is
+// stale and whose correlation value is malformed reports the route, and neither
+// refusal reaches a native frame.
+func TestPromptRoutesBeforeItReadsTheLifecycleValue(t *testing.T) {
+	agent := NewAgent()
+	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	client := newSpyCodexClient()
+	s := &session{agent: agent, id: "s", client: client, codexThreadID: "thread"}
+
+	meta := map[string]any{lifecycle.MetaKey: map[string]any{"version": "one"}}
+
+	var requestErr *acp.RequestError
+
+	_, err := s.Prompt(context.Background(), acp.PromptRequest{SessionId: "s", Meta: meta})
+	require.ErrorAs(t, err, &requestErr)
+
+	data, ok := requestErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "_meta."+routeMetaKey, data[jsonFieldField])
+	require.Empty(t, client.lastTurn.ThreadID, "a refused prompt writes no native frame")
+}
+
 func TestLifecycleSettlementPersistenceContainmentEdges(t *testing.T) {
 	ctx := context.Background()
 	store := &appendFuncStore{}
