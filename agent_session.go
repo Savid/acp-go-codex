@@ -175,6 +175,20 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 
 	session.fenceSession()
 
+	// The durable rung belongs to the session, not to the incarnation: the
+	// emission rungs apply only to a live stream, and this configuration's
+	// stream is prompt-scoped, so a close between prompts skips them and still
+	// owes the commit. A prefix a settlement captured and could not place is the
+	// resumable state, so a capture the store refuses fails the close rather
+	// than being dropped with the session wrapper. The commit runs on a detached
+	// context: a host that cancelled its call is not a reason to lose frames it
+	// was already shown.
+	if commitErr := session.commitResumableSnapshot(ctx); commitErr != nil {
+		a.abortSessionClose(params.SessionId, session)
+
+		return acp.CloseSessionResponse{}, commitErr
+	}
+
 	removed, retained := a.finishSessionCloseRetainingThread(params.SessionId, session)
 
 	var closeErr error

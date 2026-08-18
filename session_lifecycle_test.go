@@ -621,3 +621,171 @@ func requireJSON(t *testing.T, value any) string {
 
 	return string(raw)
 }
+
+// closeBoundaryFixture builds one negotiated session on a recording connection.
+// The close-boundary cases all need the same three things: an answer that makes
+// an incarnation possible, a connection that records every notification, and a
+// registered session the ACP close method can address.
+func closeBoundaryFixture(t *testing.T, opts ...Option) (*Agent, *session, *recordingAgentClient) {
+	t.Helper()
+
+	client := newSpyCodexClient()
+	agent := NewAgent(append(opts, withClientFactory(
+		func(context.Context, codex.Options) (codex.Client, error) { return client, nil },
+	))...)
+	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+
+	created, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	return agent, agent.activeSession(created.SessionId), conn
+}
+
+// lifecycleNotifications counts the notifications carrying the reserved envelope.
+func lifecycleNotifications(conn *recordingAgentClient) int {
+	count := 0
+
+	for _, update := range conn.updates {
+		if _, carried := update.Meta[lifecycle.MetaKey]; carried {
+			count++
+		}
+	}
+
+	return count
+}
+
+// TestCloseOnADeadStreamEmitsNothing pins the close ladder's emission rungs to a
+// live incarnation. This configuration opens one incarnation per prompt, so a
+// close between prompts has no stream at all, and a close after a cancel has one
+// the cancel already ended; either way the boundary emits nothing, because an
+// event bearing a fenced streamId is exactly what a conforming reducer refuses.
+func TestCloseOnADeadStreamEmitsNothing(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an incarnation that never opened", func(t *testing.T) {
+		agent, session, conn := closeBoundaryFixture(t)
+		require.Nil(t, session.liveIncarnation())
+
+		_, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err)
+		require.Zero(t, lifecycleNotifications(conn))
+	})
+
+	t.Run("an incarnation a cancel already ended", func(t *testing.T) {
+		agent, session, conn := closeBoundaryFixture(t)
+
+		incarnation, err := session.openIncarnation(ctx, agent.negotiatedLifecycle())
+		require.NoError(t, err)
+		require.NoError(t, incarnation.accept(ctx, lifecycle.Submission{SubmissionID: "sub", ClientNonce: "non"}))
+		require.NoError(t, incarnation.settle(ctx, acp.StopReasonCancelled, lifecycle.OutcomeCancelled))
+		session.fenceSession()
+
+		emitted := lifecycleNotifications(conn)
+		require.Positive(t, emitted)
+
+		_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err)
+		require.Equal(t, emitted, lifecycleNotifications(conn))
+
+		// The rung is skipped rather than optional: the stream itself refuses
+		// what a close that terminalized on it would have had to send.
+		require.ErrorIs(t,
+			incarnation.emit(ctx, lifecycle.TransitionEvent(lifecycle.ForegroundIdle, incarnation.cycleID, incarnation.turnID)),
+			&lifecycle.ViolationError{Kind: lifecycle.ViolationStaleStream})
+	})
+}
+
+// TestCloseCommitsTheCapturedPrefixAcrossTheFence pins the non-emission half of
+// the ladder. The durable rung belongs to the session rather than to the
+// incarnation, so a prefix a settlement captured and could not place is still
+// committed by a close that has already fenced the stream.
+func TestCloseCommitsTheCapturedPrefixAcrossTheFence(t *testing.T) {
+	var appended []SessionStoreEntry
+
+	store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
+		appended = append(appended, entries...)
+
+		return nil
+	}}
+
+	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+	captured := SessionStoreEntry(`{"type":"turn_context"}`)
+	session.unsyncedEntries = []SessionStoreEntry{captured}
+	session.unsyncedRow = 1
+
+	_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+	require.Nil(t, session.liveIncarnation(), "the stream is fenced before the commit runs")
+	require.Contains(t, appended, captured)
+	require.Empty(t, session.unsyncedEntries)
+}
+
+// TestCloseFailsWhenTheCapturedPrefixCannotBeCommitted pins the other half of the
+// same rung: durability outranks the response, so a capture the store refuses
+// fails the close instead of being dropped with the session wrapper. The session
+// stays addressable so the host can drive the boundary again.
+func TestCloseFailsWhenTheCapturedPrefixCannotBeCommitted(t *testing.T) {
+	storeFailure := errors.New("store unavailable")
+	refuse := false
+
+	store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
+		if refuse {
+			return storeFailure
+		}
+
+		return nil
+	}}
+
+	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context"}`)}
+	session.unsyncedRow = 1
+	refuse = true
+
+	_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+	require.ErrorIs(t, err, storeFailure)
+	require.Same(t, session, agent.activeSession(session.id))
+
+	session.mu.Lock()
+	require.False(t, session.closing)
+	session.mu.Unlock()
+
+	refuse = false
+	_, err = agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+	require.Empty(t, session.unsyncedEntries)
+}
+
+// TestCloseNeverRewritesALossTerminalizedFailure pins the durable branch's
+// precision. Incarnation loss terminalizes as `failed` and close as `cancelled`,
+// and the two paths never share a terminal state: an entity the loss already
+// finished stays finished the way the loss finished it. The reduced record is
+// what the next incarnation's snapshot would be built from, so a rewrite here
+// would make that snapshot lie.
+func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
+	ctx := context.Background()
+	agent, session, _ := closeBoundaryFixture(t)
+
+	incarnation, err := session.openIncarnation(ctx, agent.negotiatedLifecycle())
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(ctx, lifecycle.Submission{SubmissionID: "sub", ClientNonce: "non"}))
+	require.NoError(t, incarnation.settle(ctx, "", lifecycle.OutcomeFailed))
+
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+
+	turn, known := incarnation.stream.State().Turn(incarnation.turnID)
+	require.True(t, known)
+	require.True(t, turn.Terminal)
+	require.Equal(t, lifecycle.OutcomeFailed, turn.Outcome)
+
+	// A second settlement is the shape a close that terminalized unconditionally
+	// would take, and it changes nothing.
+	require.NoError(t, incarnation.settle(ctx, acp.StopReasonCancelled, lifecycle.OutcomeCancelled))
+
+	turn, known = incarnation.stream.State().Turn(incarnation.turnID)
+	require.True(t, known)
+	require.Equal(t, lifecycle.OutcomeFailed, turn.Outcome)
+}

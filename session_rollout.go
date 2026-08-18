@@ -422,6 +422,17 @@ func (s *session) ensureMirrorSynced(ctx context.Context) error {
 	return s.commitRolloutEntries(ctx, store, s.unsyncedEntries, s.unsyncedRow)
 }
 
+// commitResumableSnapshot places the durable state the closing session leaves
+// behind. It is the close boundary's own rung, so it runs after the containment
+// proof and after the stream fence, on a context the request's cancellation
+// cannot reach, and under the deadline the rest of the boundary works to.
+func (s *session) commitResumableSnapshot(ctx context.Context) error {
+	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+
+	return s.ensureMirrorSynced(commitCtx)
+}
+
 // fencePersistence stops every later commit for this session. It takes the
 // commit's own lock, so a settlement already inside the store finishes before
 // the fence stands and no commit can start after it.
