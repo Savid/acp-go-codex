@@ -65,7 +65,7 @@ func TestRolloutMirrorKeepsDurableCursorWhenRowsAlreadyMirrored(t *testing.T) {
 	}
 
 	events := make(chan codex.Event, 4)
-	if err := session.mirrorAndEmitRolloutWithCompletion(context.Background(), nil, events); err != nil {
+	if err := session.mirrorAndEmitRolloutLive(context.Background(), events); err != nil {
 		t.Fatalf("mirror with lagging events cursor returned error: %v", err)
 	}
 	if session.mirroredRows != 2 {
@@ -76,44 +76,13 @@ func TestRolloutMirrorKeepsDurableCursorWhenRowsAlreadyMirrored(t *testing.T) {
 	}
 }
 
-// TestRolloutCursorsAdvanceOnlyOverDeliveredRows pins the loss detector: a row
+// TestRolloutCursorAdvancesOnlyOverDeliveredRows pins the loss detector: a row
 // the prompt loop never received leaves the cursor where it was, so it is
 // re-read rather than silently skipped.
-func TestRolloutCursorsAdvanceOnlyOverDeliveredRows(t *testing.T) {
-	rolloutSession := &session{completionRows: 1, visibleRows: 1}
-	completed := make(chan struct{}, 1)
-
-	rolloutSession.emitRolloutCompletions(context.Background(), []rolloutMirrorRow{
-		{index: 0, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
-		{index: 1, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"token_count"}}`)},
-		{index: 2, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
-	}, completed)
-
-	select {
-	case <-completed:
-	default:
-		t.Fatal("task_complete row did not signal completion")
-	}
-	if rolloutSession.completionRows != 3 {
-		t.Fatalf("completion cursor = %d, want 3", rolloutSession.completionRows)
-	}
-
-	// A hand-off the consumer is no longer reading is a row this incarnation
-	// never accounted for, so the cursor stays where the last delivery left it.
+func TestRolloutCursorAdvancesOnlyOverDeliveredRows(t *testing.T) {
+	rolloutSession := &session{visibleRows: 1}
 	stopped, cancelStopped := context.WithCancel(context.Background())
 	cancelStopped()
-	rolloutSession.emitRolloutCompletions(stopped, []rolloutMirrorRow{
-		{index: 3, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
-	}, make(chan struct{}))
-
-	if rolloutSession.completionRows != 3 {
-		t.Fatalf("completion cursor advanced past an undelivered row: %d", rolloutSession.completionRows)
-	}
-
-	if !rolloutTaskComplete(SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)) ||
-		rolloutTaskComplete(SessionStoreEntry(`{"type":"response_item","payload":{"type":"message"}}`)) {
-		t.Fatal("rollout task completion detection changed")
-	}
 
 	events := make(chan codex.Event, 1)
 	rolloutSession.emitRolloutEvents(context.Background(), []rolloutMirrorRow{
@@ -152,10 +121,10 @@ func TestPrepareRolloutLiveCursors(t *testing.T) {
 	if err := os.WriteFile(rollout, []byte("\n{\"type\":\"one\"}\n{\"type\":\"two\"}\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
 	}
-	rolloutSession := &session{rolloutPath: rollout, completionRows: 1}
+	rolloutSession := &session{rolloutPath: rollout, visibleRows: 1}
 	rolloutSession.prepareRolloutLiveCursors()
-	if rolloutSession.completionRows != 2 || rolloutSession.visibleRows != 2 {
-		t.Fatalf("prepared cursors completion=%d visible=%d", rolloutSession.completionRows, rolloutSession.visibleRows)
+	if rolloutSession.visibleRows != 2 {
+		t.Fatalf("prepared visible cursor=%d", rolloutSession.visibleRows)
 	}
 	if rows, err := countRolloutRows(""); err != nil || rows != 0 {
 		t.Fatalf("empty rollout count rows=%d err=%v", rows, err)
@@ -168,10 +137,10 @@ func TestPrepareRolloutLiveCursors(t *testing.T) {
 		t.Fatal("huge rollout count succeeded")
 	}
 
-	missing := &session{rolloutPath: filepath.Join(t.TempDir(), "missing.jsonl"), completionRows: 3, visibleRows: 4}
+	missing := &session{rolloutPath: filepath.Join(t.TempDir(), "missing.jsonl"), visibleRows: 4}
 	missing.prepareRolloutLiveCursors()
-	if missing.completionRows != 3 || missing.visibleRows != 4 {
-		t.Fatalf("missing rollout changed cursors completion=%d visible=%d", missing.completionRows, missing.visibleRows)
+	if missing.visibleRows != 4 {
+		t.Fatalf("missing rollout changed visible cursor=%d", missing.visibleRows)
 	}
 }
 

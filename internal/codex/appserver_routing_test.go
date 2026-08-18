@@ -86,12 +86,12 @@ func (t *routingTransport) publish(method string, params map[string]any) {
 func startRoutedTurn(t *testing.T, client *AppServerClient, threadID string) <-chan Event {
 	t.Helper()
 
-	events, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: threadID})
+	turn, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: threadID})
 	if err != nil {
 		t.Fatalf("RunTurn(%s) returned error: %v", threadID, err)
 	}
 
-	return events
+	return turn.Events
 }
 
 func awaitEvent(t *testing.T, events <-chan Event) (Event, bool) {

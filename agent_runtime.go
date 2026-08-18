@@ -28,6 +28,10 @@ var runtimeUserHomeDir = os.UserHomeDir
 var runtimeRemoveAll = os.RemoveAll
 var runtimeProbeCodexVersion = codex.ProbeVersion
 var errNoRetainedRuntimeThread = errors.New("no retained Codex runtime thread")
+var errSharedRuntimeHasPeers = fmt.Errorf(
+	"%w: cannot fence shared Codex runtime while peer sessions still own it",
+	codex.ErrProcessContainmentIncomplete,
+)
 
 // retainedRuntimeThread is native ownership that outlives an ACP
 // session/close but not the app-server generation that still owns the thread.
@@ -628,6 +632,21 @@ func (a *Agent) markRuntimeDead(client codex.Client) {
 // completion proof. A replacement generation cannot start until cleanup has
 // completed, and every logical session remains registered for lazy resume.
 func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Client) error {
+	return a.quiesceRuntime(ctx, expected, nil)
+}
+
+// quiesceRuntimeAfterSessionClose fences a generation only when doing so cannot
+// destroy another logical session's native thread. Unsupported thread-scoped
+// containment is therefore a reported incomplete boundary while peers remain.
+func (a *Agent) quiesceRuntimeAfterSessionClose(
+	ctx context.Context,
+	expected codex.Client,
+	owner *session,
+) error {
+	return a.quiesceRuntime(ctx, expected, owner)
+}
+
+func (a *Agent) quiesceRuntime(ctx context.Context, expected codex.Client, owner *session) error {
 	a.mu.Lock()
 	if closing := a.runtimeClosing; closing != nil {
 		a.mu.Unlock()
@@ -638,6 +657,32 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 		a.mu.Unlock()
 
 		return cleanupErr
+	}
+
+	if owner != nil && expected != nil && a.runtimeClient == expected {
+		for _, candidate := range a.sessions {
+			if candidate == owner || candidate.id == owner.id {
+				continue
+			}
+
+			candidate.mu.Lock()
+			peerOwnsGeneration := candidate.client == expected
+			candidate.mu.Unlock()
+
+			if peerOwnsGeneration {
+				a.mu.Unlock()
+
+				return errSharedRuntimeHasPeers
+			}
+		}
+
+		for _, retained := range a.retainedThreads {
+			if retained.sessionID != owner.id && retained.client == expected && !retained.nativeEnded {
+				a.mu.Unlock()
+
+				return errSharedRuntimeHasPeers
+			}
+		}
 	}
 
 	if expected == nil || a.runtimeClient != expected {
@@ -679,6 +724,14 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 		session.setClientDead(true)
 
 		fenced = append(fenced, session)
+	}
+
+	if owner != nil {
+		// A retained owner is represented only for this containment call, so it
+		// is not necessarily present in a.sessions to receive the generation
+		// fence above. Its later unsubscribe must still recognize that the
+		// closed transport has already been superseded by this proof.
+		owner.setClientDead(true)
 	}
 	a.mu.Unlock()
 
@@ -751,7 +804,7 @@ func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, 
 		// Diagnostic only. It must never decide readiness.
 		_, _ = client.MCPServerStatusList(deadlineCtx, threadID)
 
-		events, runErr := client.RunTurn(deadlineCtx, codex.TurnStartRequest{
+		turn, runErr := client.RunTurn(deadlineCtx, codex.TurnStartRequest{
 			ThreadID: threadID,
 			Prompt: []codex.UserInput{{
 				jsonFieldType: jsonFieldText,
@@ -769,7 +822,7 @@ func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, 
 
 		ready := false
 
-		for event := range events {
+		for event := range turn.Events {
 			if runtimeReadyEvent(event, nonce) {
 				ready = true
 			}

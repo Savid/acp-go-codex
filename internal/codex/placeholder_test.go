@@ -21,13 +21,13 @@ func TestPlaceholderClientRunTurn(t *testing.T) {
 		t.Fatalf("thread model = %q, want default model", thread.Model)
 	}
 
-	events, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID, Prompt: []UserInput{{"type": "text", "text": "hello"}}})
+	turn, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID, Prompt: []UserInput{{"type": "text", "text": "hello"}}})
 	if err != nil {
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 
 	var got []Event
-	for event := range events {
+	for event := range turn.Events {
 		got = append(got, event)
 	}
 
@@ -208,12 +208,12 @@ func TestPlaceholderClientErrorBranches(t *testing.T) {
 		t.Fatalf("StartThread returned error: %v", err)
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
-	events, err := client.RunTurn(runCtx, TurnStartRequest{ThreadID: thread.ID})
+	turn, err := client.RunTurn(runCtx, TurnStartRequest{ThreadID: thread.ID})
 	if err != nil {
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 	runCancel()
-	for range events {
+	for range turn.Events {
 	}
 	if err := client.Close(ctx); err != nil {
 		t.Fatalf("Close returned error: %v", err)

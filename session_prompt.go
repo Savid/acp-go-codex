@@ -136,24 +136,27 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	s.settleGate.Lock()
 	defer s.settleGate.Unlock()
 
-	if err = s.ensureMirrorSynced(ctx); err != nil { //nolint:gocritic // Reuses the function's error variable.
+	turnCtx, err := s.beginPromptTurn(ctx, route.TurnNonce)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+	defer s.finishTurn()
+
+	if err = s.ensureMirrorSynced(turnCtx); err != nil { //nolint:gocritic // Reuses the function's error variable.
 		return acp.PromptResponse{}, err
 	}
 
-	input, releaseImages, err := s.preparePromptInput(ctx, params.Prompt)
+	input, releaseImages, err := s.preparePromptInput(turnCtx, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
 	defer releaseImages()
 
-	incarnation, err := s.openIncarnation(ctx, negotiated)
+	incarnation, err := s.openIncarnation(turnCtx, negotiated)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
 	defer s.clearIncarnation(incarnation)
-
-	turnCtx := s.beginTurn(ctx, route.TurnNonce)
-	defer s.finishTurn()
 
 	result := s.runPromptTurn(ctx, turnCtx, promptRun{
 		incarnation: incarnation,
@@ -209,7 +212,9 @@ func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, ru
 		},
 	}
 
-	events, err := s.client.RunTurn(turnCtx, codex.TurnStartRequest{
+	s.markTurnDispatched()
+
+	turn, err := s.client.RunTurn(turnCtx, codex.TurnStartRequest{
 		ThreadID:          snapshot.codexThreadID,
 		Prompt:            run.input,
 		Model:             model,
@@ -225,22 +230,41 @@ func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, ru
 		OutputSchema: snapshot.outputSchema,
 	})
 	if err != nil {
+		s.stageTurnID(turn.ID)
+		s.rejectTurnBinding()
+
+		if errors.Is(err, codex.ErrTurnEventOverflow) && turn.ID != "" {
+			err = errors.Join(err, s.shutdownActiveTurn(ctx, true))
+		}
+
 		result.failure = s.mapTurnFailure(err)
 
 		return result
 	}
+
+	if turn.ID == "" {
+		s.rejectTurnBinding()
+		result.failure = s.mapTurnFailure(errors.New("codex accepted a turn without naming it"))
+
+		return result
+	}
+
+	s.stageTurnID(turn.ID)
 
 	// The ack is the dispatch linearization point: the app-server has taken
 	// durable ownership of the frame and named the turn it opened.
 	if err := run.incarnation.accept(turnCtx, run.submission); err != nil {
+		s.rejectTurnBinding()
 		result.failure = s.mapTurnFailure(err)
 
 		return result
 	}
 
+	s.acceptTurnBinding()
+
 	result.accepted = true
 
-	return s.drivePromptTurn(ctx, turnCtx, events, result)
+	return s.drivePromptTurn(ctx, turnCtx, turn.Events, result)
 }
 
 // drivePromptTurn consumes the native stream until its terminal and records how
@@ -253,9 +277,8 @@ func (s *session) drivePromptTurn(
 ) promptTurnResult {
 	state := result.state
 
-	rolloutCompleted := make(chan struct{}, 1)
 	rolloutEvents := make(chan codex.Event, sessionRolloutEventBuffer)
-	stopTail, tailDone := s.startRolloutTail(turnCtx, rolloutCompleted, rolloutEvents)
+	stopTail, tailDone := s.startRolloutTail(turnCtx, rolloutEvents)
 
 	var turnDeadline <-chan time.Time
 
@@ -267,6 +290,7 @@ func (s *session) drivePromptTurn(
 	}
 
 	timedOut := false
+	overflowed := false
 	handled := error(nil)
 
 	eventsOpen := true
@@ -279,6 +303,7 @@ func (s *session) drivePromptTurn(
 				continue
 			}
 
+			overflowed = errors.Is(event.Err, codex.ErrTurnEventOverflow)
 			if handled = s.handlePromptEvent(turnCtx, event, state); handled != nil {
 				eventsOpen = false
 			}
@@ -286,14 +311,6 @@ func (s *session) drivePromptTurn(
 			if handled = s.handlePromptEvent(turnCtx, event, state); handled != nil {
 				eventsOpen = false
 			}
-		case <-rolloutCompleted:
-			// The rollout's own task-complete row is a structured native
-			// terminal for the foreground, so the turn ends there. Whatever the
-			// app-server has already delivered is still read, because those
-			// frames are in hand rather than merely expected.
-			state.completed = true
-			handled = s.drainDeliveredEvents(turnCtx, events, state)
-			eventsOpen = false
 		case <-turnCtx.Done():
 			eventsOpen = false
 		case <-turnDeadline:
@@ -305,13 +322,17 @@ func (s *session) drivePromptTurn(
 	stopTail()
 	<-tailDone
 
-	if turnCtx.Err() != nil || s.wasTurnCancelled() {
+	turnCancelled := turnCtx.Err() != nil || s.wasTurnCancelled()
+	if turnCancelled {
 		state.stopReason = acp.StopReasonCancelled
 		state.nativeFailure = false
 		handled = nil
 	}
 
 	switch {
+	case overflowed && !turnCancelled:
+		containmentErr := s.shutdownActiveTurn(ctx, true)
+		result.failure = s.mapTurnFailure(errors.Join(codex.ErrTurnEventOverflow, containmentErr))
 	case handled != nil:
 		result.failure = handled
 	case state.stopReason == acp.StopReasonCancelled:
@@ -329,30 +350,6 @@ func (s *session) drivePromptTurn(
 	}
 
 	return result
-}
-
-// drainDeliveredEvents reads the frames the app-server has already handed over.
-// It waits for nothing: an empty channel means nothing more was delivered, not
-// that nothing more will be.
-func (s *session) drainDeliveredEvents(
-	turnCtx context.Context,
-	events <-chan codex.Event,
-	state *promptEventState,
-) error {
-	for {
-		select {
-		case event, ok := <-events:
-			if !ok {
-				return nil
-			}
-
-			if err := s.handlePromptEvent(turnCtx, event, state); err != nil {
-				return err
-			}
-		default:
-			return nil
-		}
-	}
 }
 
 // failTimedOutTurn aborts the native turn a deadline expired on. A timeout is a
@@ -390,6 +387,10 @@ func (s *session) settlePrompt(
 
 	stopReason, outcome := promptSettlement(result)
 
+	if err := s.awaitTurnContainment(settleCtx); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
 	if err := s.commitForegroundPrefix(settleCtx); err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -402,10 +403,8 @@ func (s *session) settlePrompt(
 		return acp.PromptResponse{}, result.failure
 	}
 
-	// A rollout task_complete can be the terminal fence when app-server closes
-	// without forwarding turn/completed. Publish the final native pair after
-	// the durable mirror in either path, including a turn with an empty final
-	// assistant item.
+	// Publish the final native pair after the durable mirror, including a turn
+	// with an empty final assistant item.
 	if err := s.finalizePromptNativeIdentity(context.WithoutCancel(turnCtx), result.state); err != nil {
 		return acp.PromptResponse{}, err
 	}

@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 )
 
+const placeholderTurnID = "placeholder-turn"
+
 // PlaceholderClient is a deterministic in-memory client used by unit tests and
 // as an explicit fallback when the real app-server client is not requested.
 type PlaceholderClient struct {
@@ -138,12 +140,12 @@ func (c *PlaceholderClient) ListTurns(ctx context.Context, req ThreadTurnsListRe
 		return ThreadTurnsListResponse{}, ErrThreadNotFound
 	}
 
-	return ThreadTurnsListResponse{Turns: []map[string]any{{fieldID: "placeholder-turn"}}}, nil
+	return ThreadTurnsListResponse{Turns: []map[string]any{{fieldID: placeholderTurnID}}}, nil
 }
 
-func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-chan Event, error) {
+func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (Turn, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return Turn{}, err
 	}
 
 	c.mu.Lock()
@@ -152,11 +154,11 @@ func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (
 	c.mu.Unlock()
 
 	if closed {
-		return nil, errors.New("codex placeholder client is closed")
+		return Turn{}, errors.New("codex placeholder client is closed")
 	}
 
 	if !ok {
-		return nil, ErrThreadNotFound
+		return Turn{}, ErrThreadNotFound
 	}
 
 	events := make(chan Event)
@@ -168,7 +170,7 @@ func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (
 		send := func(event Event) bool {
 			event.ThreadID = req.ThreadID
 			if event.TurnID == "" {
-				event.TurnID = "placeholder-turn"
+				event.TurnID = placeholderTurnID
 			}
 
 			select {
@@ -197,7 +199,7 @@ func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (
 		send(Event{Kind: EventCompleted, StopReason: StopReasonEndTurn})
 	}()
 
-	return events, nil
+	return Turn{ID: placeholderTurnID, Events: events}, nil
 }
 
 func (c *PlaceholderClient) SteerTurn(ctx context.Context, req TurnSteerRequest) error {

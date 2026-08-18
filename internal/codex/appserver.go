@@ -111,12 +111,14 @@ var _ BackgroundTerminalClient = (*AppServerClient)(nil)
 const turnEventBuffer = 1024
 
 type turnStream struct {
+	mu       sync.Mutex
 	cancel   context.CancelFunc
-	closed   chan struct{}
 	done     <-chan struct{}
-	in       chan Event
+	failure  error
+	finished bool
 	threadID string
 	turnID   string
+	pending  []Event
 	out      chan Event
 }
 
@@ -513,12 +515,12 @@ func optionalInt64Value(value map[string]any, key string) *int64 {
 	return &result
 }
 
-func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-chan Event, error) {
+func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (Turn, error) {
 	c.ensureEventPump()
 
 	stream, err := c.registerTurn(ctx, req.ThreadID)
 	if err != nil {
-		return nil, err
+		return Turn{}, err
 	}
 
 	params := map[string]any{
@@ -538,7 +540,7 @@ func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-
 	if err := c.rpc.Call(ctx, methodTurnStart, params, &resp); err != nil {
 		c.closeTurn(stream)
 
-		return nil, normalizeThreadError(err)
+		return Turn{}, normalizeThreadError(err)
 	}
 
 	turnID := stringValue(mapValue(resp, "turn"), fieldID)
@@ -553,12 +555,10 @@ func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-
 	if turnID == "" {
 		c.closeTurn(stream)
 
-		return nil, errors.New("codex turn/start accepted a turn without naming it")
+		return Turn{}, errors.New("codex turn/start accepted a turn without naming it")
 	}
 
-	c.setTurnID(stream, turnID)
-
-	return stream.out, nil
+	return Turn{ID: turnID, Events: stream.out}, c.setTurnID(stream, turnID)
 }
 
 func (c *AppServerClient) SteerTurn(ctx context.Context, req TurnSteerRequest) error {
@@ -874,11 +874,11 @@ func (c *AppServerClient) registerTurn(ctx context.Context, threadID string) (*t
 	turnCtx, cancel := context.WithCancel(ctx)
 	stream := &turnStream{
 		cancel:   cancel,
-		closed:   make(chan struct{}),
 		done:     turnCtx.Done(),
-		in:       make(chan Event),
 		threadID: threadID,
-		out:      make(chan Event, turnEventBuffer),
+		// One reserved slot carries the fail-closed overflow event without
+		// displacing any event the queue already accepted.
+		out: make(chan Event, turnEventBuffer+1),
 	}
 
 	c.mu.Lock()
@@ -897,11 +897,6 @@ func (c *AppServerClient) registerTurn(ctx context.Context, threadID string) (*t
 	c.mu.Unlock()
 
 	go func() {
-		defer recoverCodexGoroutine(ctx, "Codex turn stream forwarder")
-
-		stream.forward()
-	}()
-	go func() {
 		defer recoverCodexGoroutine(ctx, "Codex turn context watcher")
 
 		c.closeTurnOnContext(stream)
@@ -913,12 +908,11 @@ func (c *AppServerClient) registerTurn(ctx context.Context, threadID string) (*t
 func (c *AppServerClient) closeTurnOnContext(stream *turnStream) {
 	<-stream.done
 	c.removeTurn(stream)
+	stream.stop()
 }
 
-func (c *AppServerClient) setTurnID(stream *turnStream, turnID string) {
-	c.mu.Lock()
-	stream.turnID = turnID
-	c.mu.Unlock()
+func (c *AppServerClient) setTurnID(stream *turnStream, turnID string) error {
+	return stream.bind(turnID)
 }
 
 // matchingTurns selects the turn streams one event is evidence about. Ownership
@@ -944,10 +938,6 @@ func (c *AppServerClient) matchingTurns(event Event) []*turnStream {
 		}
 
 		if event.ThreadID != stream.threadID {
-			continue
-		}
-
-		if event.TurnID != "" && stream.turnID != "" && event.TurnID != stream.turnID {
 			continue
 		}
 
@@ -994,66 +984,124 @@ func (c *AppServerClient) setAccount(account Account) {
 }
 
 func (s *turnStream) send(event Event) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.finished {
+		return false
+	}
+
 	select {
 	case <-s.done:
-		return false
-	case <-s.closed:
+		s.finishLocked()
+
 		return false
 	default:
 	}
 
-	select {
-	case s.in <- event:
-		return true
-	case <-s.done:
-		return false
-	case <-s.closed:
-		return false
-	}
-}
+	if event.Scope != EventScopeTransportLost && s.turnID == "" {
+		if len(s.pending) == turnEventBuffer {
+			s.failOverflowLocked()
 
-func (s *turnStream) forward() {
-	defer close(s.closed)
-	defer close(s.out)
-	defer s.cancel()
-
-	for {
-		select {
-		case <-s.done:
-			return
-		case event := <-s.in:
-			select {
-			case s.out <- event:
-				if event.Kind == EventCompleted || event.Kind == EventError {
-					return
-				}
-
-				continue
-			default:
-			}
-
-			select {
-			case s.out <- event:
-			case <-s.done:
-				return
-			}
-
-			if event.Kind == EventCompleted || event.Kind == EventError {
-				return
-			}
+			return false
 		}
+
+		s.pending = append(s.pending, event)
+
+		return true
 	}
+
+	if event.TurnID != "" && s.turnID != "" && event.TurnID != s.turnID {
+		return true
+	}
+
+	return s.enqueueLocked(event)
 }
 
 func (s *turnStream) stop() {
-	s.cancel()
-	<-s.closed
+	s.mu.Lock()
+	s.finishLocked()
+	s.mu.Unlock()
 }
 
 func (s *turnStream) abort() {
+	s.stop()
+}
+
+func (s *turnStream) bind(turnID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.finished {
+		if s.failure != nil {
+			return s.failure
+		}
+
+		return ErrConnectionClosed
+	}
+
+	s.turnID = turnID
+	pending := s.pending
+	s.pending = nil
+
+	for i := range pending {
+		if s.finished {
+			break
+		}
+
+		event := pending[i]
+
+		// Before the ack, same-thread traffic has no owner yet. Release only
+		// events that explicitly name the acknowledged turn; an empty or stale
+		// ID is not evidence about this stream.
+		if event.TurnID != turnID {
+			continue
+		}
+
+		s.enqueueLocked(event)
+	}
+
+	return nil
+}
+
+func (s *turnStream) enqueueLocked(event Event) bool {
+	if len(s.out) == turnEventBuffer {
+		s.failOverflowLocked()
+
+		return false
+	}
+
+	s.out <- event
+
+	if event.Kind == EventCompleted || event.Kind == EventError {
+		s.finishLocked()
+	}
+
+	return true
+}
+
+func (s *turnStream) failOverflowLocked() {
+	s.failure = ErrTurnEventOverflow
+	s.out <- Event{
+		Kind:     EventError,
+		Scope:    EventScopeThread,
+		ThreadID: s.threadID,
+		TurnID:   s.turnID,
+		Err:      ErrTurnEventOverflow,
+	}
+
+	s.finishLocked()
+}
+
+func (s *turnStream) finishLocked() {
+	if s.finished {
+		return
+	}
+
+	s.finished = true
+	s.pending = nil
 	s.cancel()
 	close(s.out)
-	close(s.closed)
 }
 
 func permissionProfile(additional []string) map[string]any {

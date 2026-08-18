@@ -54,7 +54,11 @@ type session struct {
 	turnDone         <-chan struct{}
 	turnID           string
 	turnNonce        string
+	turnReady        chan struct{}
+	turnAccepted     bool
+	turnDispatched   bool
 	turnCancelled    bool
+	turnContainment  *turnContainment
 	clientDead       bool
 	rawEmitFailures  int64
 	interactions     map[string]*sessionInteraction
@@ -63,7 +67,6 @@ type session struct {
 	imageStoreMu     sync.Mutex
 	rawEventMu       sync.Mutex
 	rawEventSequence int64
-	completionRows   int
 	visibleRows      int
 	rolloutIdentity  nativeTurnIdentity
 	permissionTools  permissionToolRegistry
@@ -92,6 +95,12 @@ type session struct {
 
 type sessionInteraction struct {
 	cancel context.CancelFunc
+}
+
+type turnContainment struct {
+	done    chan struct{}
+	err     error
+	started bool
 }
 
 type sessionSnapshot struct {
@@ -345,11 +354,33 @@ func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Conte
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.beginTurnLocked(ctx, turnNonce)
+}
+
+func (s *session) beginPromptTurn(ctx context.Context, turnNonce string) (context.Context, error) {
+	s.permissionTools.reset()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closing {
+		return nil, newSessionCloseInProgress()
+	}
+
+	return s.beginTurnLocked(ctx, turnNonce), nil
+}
+
+func (s *session) beginTurnLocked(ctx context.Context, turnNonce string) context.Context {
 	turnCtx, cancel := context.WithCancel(ctx)
 	turnCtx = withTurnRoute(turnCtx, turnNonce)
 	s.cancel = cancel
 	s.turnDone = turnCtx.Done()
+	s.turnID = ""
+	s.turnReady = make(chan struct{})
+	s.turnAccepted = false
+	s.turnDispatched = false
 	s.turnCancelled = false
+	s.turnContainment = nil
 	s.turnNonce = turnNonce
 
 	return turnCtx
@@ -359,11 +390,16 @@ func (s *session) finishTurn() {
 	s.mu.Lock()
 	cancel := s.cancel
 	interactions := s.detachInteractionsLocked()
+	s.releaseTurnBindingLocked(false)
 	s.cancel = nil
 	s.turnDone = nil
 	s.turnID = ""
 	s.turnNonce = ""
+	s.turnReady = nil
+	s.turnAccepted = false
+	s.turnDispatched = false
 	s.turnCancelled = false
+	s.turnContainment = nil
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Unlock()
 
@@ -387,7 +423,14 @@ func (s *session) activeTurnNonceForNativeTurn(nativeTurnID string) (string, boo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	active := s.turnDone != nil && s.turnNonce != "" && s.turnID != "" && s.turnID == nativeTurnID
+	active := s.turnDone != nil && s.turnAccepted && s.turnNonce != "" && s.turnID != "" && s.turnID == nativeTurnID
+	if active {
+		select {
+		case <-s.turnDone:
+			active = false
+		default:
+		}
+	}
 
 	return s.turnNonce, active
 }
@@ -399,7 +442,63 @@ func (s *session) setTurnID(turnID string) {
 
 	s.mu.Lock()
 	s.turnID = turnID
+	s.releaseTurnBindingLocked(true)
 	s.mu.Unlock()
+}
+
+func (s *session) stageTurnID(turnID string) {
+	if turnID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	s.turnID = turnID
+	s.mu.Unlock()
+}
+
+func (s *session) markTurnDispatched() {
+	s.mu.Lock()
+	s.turnDispatched = true
+	s.mu.Unlock()
+}
+
+func (s *session) acceptTurnBinding() {
+	s.mu.Lock()
+	s.releaseTurnBindingLocked(true)
+	s.mu.Unlock()
+}
+
+func (s *session) rejectTurnBinding() {
+	s.mu.Lock()
+	s.releaseTurnBindingLocked(false)
+	s.mu.Unlock()
+}
+
+func (s *session) releaseTurnBindingLocked(accepted bool) {
+	if s.turnReady == nil {
+		return
+	}
+
+	s.turnAccepted = accepted
+	close(s.turnReady)
+	s.turnReady = nil
+}
+
+func (s *session) waitForTurnBinding(ctx context.Context) error {
+	s.mu.Lock()
+	ready := s.turnReady
+	s.mu.Unlock()
+
+	if ready == nil {
+		return ctx.Err()
+	}
+
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *session) activeTurnID() string {
@@ -483,6 +582,126 @@ func (s *session) cancelTurn() {
 	}
 }
 
+func (s *session) ensureTurnContainmentLocked() *turnContainment {
+	if s.cancel == nil {
+		return nil
+	}
+
+	if s.turnContainment == nil {
+		s.turnContainment = &turnContainment{done: make(chan struct{})}
+	}
+
+	return s.turnContainment
+}
+
+func (s *session) shutdownActiveTurn(ctx context.Context, protectPeers bool) error {
+	s.mu.Lock()
+
+	boundary := s.ensureTurnContainmentLocked()
+	if boundary == nil {
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	if boundary.started {
+		done := boundary.done
+		s.mu.Unlock()
+
+		select {
+		case <-done:
+			return boundary.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	boundary.started = true
+
+	cancelTurn := s.cancel
+	if cancelTurn != nil {
+		s.turnCancelled = true
+	}
+
+	interactions := s.detachInteractionsLocked()
+	s.mu.Unlock()
+
+	// Cancellation releases prompt preparation and turn/start, but settlement
+	// cannot pass the boundary installed above. If native dispatch won the race,
+	// binding supplies the ID that must be interrupted before that boundary is
+	// completed.
+	if cancelTurn != nil {
+		cancelTurn()
+	}
+
+	for _, cancel := range interactions {
+		cancel()
+	}
+
+	bindErr := s.waitForTurnBinding(ctx)
+
+	s.mu.Lock()
+	client := s.client
+	threadID := s.codexThreadID
+	turnID := s.turnID
+	turnDispatched := s.turnDispatched
+	s.mu.Unlock()
+
+	interruptErr := bindErr
+	if interruptErr == nil && turnDispatched && turnID == "" {
+		interruptErr = errors.New("codex turn dispatch outcome is unknown without a native turn ID")
+	}
+
+	if interruptErr == nil && turnID != "" {
+		interruptCtx, cancelInterrupt := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		interruptErr = client.CancelTurn(interruptCtx, threadID, turnID)
+
+		cancelInterrupt()
+	}
+
+	containmentErr := s.containCancelledTurnWithPolicy(ctx, client, threadID, interruptErr, protectPeers)
+
+	s.mu.Lock()
+	boundary.err = containmentErr
+
+	cancelTurn = s.cancel
+	if cancelTurn != nil {
+		s.turnCancelled = true
+	}
+
+	interactions = s.detachInteractionsLocked()
+
+	close(boundary.done)
+	s.mu.Unlock()
+
+	if cancelTurn != nil {
+		cancelTurn()
+	}
+
+	for _, cancel := range interactions {
+		cancel()
+	}
+
+	return containmentErr
+}
+
+func (s *session) awaitTurnContainment(ctx context.Context) error {
+	s.mu.Lock()
+	boundary := s.turnContainment
+	s.mu.Unlock()
+
+	if boundary == nil {
+		return nil
+	}
+
+	select {
+	case <-boundary.done:
+		return boundary.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *session) wasTurnCancelled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -509,6 +728,16 @@ func (s *session) beginInteraction(parent context.Context, key string) (context.
 	base := parent
 	turnDone := s.turnDone
 	ctx, cancel := context.WithCancel(base)
+	watchTurn := false
+
+	if turnDone != nil {
+		select {
+		case <-turnDone:
+			cancel()
+		default:
+			watchTurn = true
+		}
+	}
 
 	if s.interactions == nil {
 		s.interactions = make(map[string]*sessionInteraction)
@@ -522,7 +751,7 @@ func (s *session) beginInteraction(parent context.Context, key string) (context.
 	s.interactions[key] = interaction
 	s.mu.Unlock()
 
-	if turnDone != nil {
+	if watchTurn {
 		go func() {
 			defer recoverAgentGoroutine(parent, agentLogger(s.agent), "Codex interaction watcher")
 
@@ -591,16 +820,16 @@ func (s *session) releaseMaterialized() error {
 // closes it only when the service itself closes, so this is the session's own
 // containment boundary rather than the runtime's.
 //
-// The live prompt is cancelled and its whole settlement order awaited first: a
-// close that returned while a prompt could still commit or still emit would
-// fence a stream the host has not finished reducing.
+// A live prompt's context is cancelled to stop local consumption, but native
+// interruption and containment complete before settlement may pass.
 func (s *session) Close(ctx context.Context) error {
+	shutdownErr := s.shutdownActiveTurn(ctx, true)
 	s.awaitPromptSettlement()
 
 	s.sessionOps.Lock()
 	defer s.sessionOps.Unlock()
 
-	return errors.Join(s.containSession(ctx), s.releaseMaterialized())
+	return errors.Join(shutdownErr, s.containSession(ctx), s.releaseMaterialized())
 }
 
 // awaitPromptSettlement stops the live prompt and waits for the settlement it
@@ -619,8 +848,8 @@ func (s *session) waitForSettleGate() {
 // background-terminal sweep is the only targeted containment the app-server
 // offers; when it cannot be proved — because the app-server does not carry those
 // methods, or because a terminal outlived the sweep — the shared generation is
-// fenced instead, which is the contract's answer for a multiplexed sibling that
-// cannot contain one target alone.
+// fenced only when no peer owns it. Otherwise close reports an incomplete
+// boundary without destroying a sibling session.
 func (s *session) containSession(ctx context.Context) error {
 	client, codexThreadID, clientDead := s.closeState()
 
@@ -632,7 +861,7 @@ func (s *session) containSession(ctx context.Context) error {
 	}
 
 	if clientDead {
-		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
+		return s.agent.quiesceRuntimeAfterSessionClose(closeCtx, client, s)
 	}
 
 	if err := s.containThreadOrFenceGeneration(closeCtx, client, codexThreadID); err != nil {
@@ -654,7 +883,7 @@ func (s *session) containThreadOrFenceGeneration(
 		return nil
 	}
 
-	fenceErr := s.agent.quiesceRuntimeAfterCancel(ctx, client)
+	fenceErr := s.agent.quiesceRuntimeAfterSessionClose(ctx, client, s)
 
 	// Where the app-server offers no thread-scoped containment at all, the
 	// generation fence is the boundary rather than a fallback after a failure,
@@ -662,6 +891,10 @@ func (s *session) containThreadOrFenceGeneration(
 	// not prove the thread contained is a failure in its own right, and both are
 	// reported.
 	if errors.Is(containErr, codex.ErrBackgroundTerminalsUnsupported) {
+		if fenceErr != nil {
+			return errors.Join(containErr, fenceErr)
+		}
+
 		return fenceErr
 	}
 

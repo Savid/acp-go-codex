@@ -153,6 +153,232 @@ func TestDeleteSessionTombstonesStoreAndBlocksLoadResume(t *testing.T) {
 	}
 }
 
+func TestCloseAndDeleteContainActiveTurnBeforeSettlement(t *testing.T) {
+	for _, operation := range []string{"close", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			client := &blockingInterruptClient{
+				spyCodexClient:   newSpyCodexClient(),
+				runStarted:       make(chan struct{}),
+				interruptStarted: make(chan struct{}),
+				interruptRelease: make(chan struct{}),
+			}
+			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+				return client, nil
+			}))
+			agent.setAgentClient(newRecordingAgentClient())
+
+			created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+			require.NoError(t, err)
+			active := agent.activeSession(created.SessionId)
+
+			type promptResult struct {
+				response acp.PromptResponse
+				err      error
+			}
+			promptDone := make(chan promptResult, 1)
+			go func() {
+				response, promptErr := agent.Prompt(
+					context.Background(),
+					TextPromptRequest(created.SessionId, "turn-nonce", "wait"),
+				)
+				promptDone <- promptResult{response: response, err: promptErr}
+			}()
+			<-client.runStarted
+
+			operationDone := make(chan error, 1)
+			go func() {
+				if operation == "close" {
+					_, closeErr := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: created.SessionId})
+					operationDone <- closeErr
+
+					return
+				}
+
+				_, deleteErr := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(created.SessionId))
+				operationDone <- deleteErr
+			}()
+			<-client.interruptStarted
+			interactionCtx, finishInteraction := active.beginInteraction(context.Background(), "during-containment")
+
+			select {
+			case result := <-promptDone:
+				t.Fatalf("prompt settled before native interrupt completed: %#v", result)
+			default:
+			}
+			select {
+			case err := <-operationDone:
+				t.Fatalf("%s returned before native interrupt completed: %v", operation, err)
+			default:
+			}
+			require.False(t, agent.isDeleted(created.SessionId), "delete tombstoned before containment")
+
+			close(client.interruptRelease)
+			require.Eventually(t, func() bool { return errors.Is(interactionCtx.Err(), context.Canceled) }, time.Second, time.Millisecond)
+			finishInteraction()
+
+			result := <-promptDone
+			require.NoError(t, result.err)
+			require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+			require.NoError(t, <-operationDone)
+			require.Nil(t, agent.activeSession(created.SessionId))
+			if operation == "delete" {
+				require.True(t, agent.isDeleted(created.SessionId))
+			}
+
+			require.NoError(t, agent.Close())
+		})
+	}
+}
+
+type blockingInterruptClient struct {
+	*spyCodexClient
+	runStarted       chan struct{}
+	runOnce          sync.Once
+	interruptStarted chan struct{}
+	interruptOnce    sync.Once
+	interruptRelease chan struct{}
+}
+
+func TestCloseFencesUnknownTurnDispatchOutcome(t *testing.T) {
+	client := &unknownDispatchClient{
+		spyCodexClient: newSpyCodexClient(),
+		started:        make(chan struct{}),
+	}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return client, nil
+	}))
+	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+
+	promptDone := make(chan error, 1)
+	go func() {
+		_, promptErr := agent.Prompt(
+			context.Background(),
+			TextPromptRequest(created.SessionId, "turn-nonce", "wait"),
+		)
+		promptDone <- promptErr
+	}()
+	<-client.started
+
+	_, err = agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.ErrorContains(t, err, "dispatch outcome is unknown")
+	require.ErrorContains(t, <-promptDone, "dispatch outcome is unknown")
+	client.mu.Lock()
+	require.True(t, client.closed, "unknown dispatch must fence the sole generation")
+	client.mu.Unlock()
+	require.NoError(t, agent.Close())
+}
+
+type unknownDispatchClient struct {
+	*spyCodexClient
+	started chan struct{}
+}
+
+func (c *unknownDispatchClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
+	close(c.started)
+	<-ctx.Done()
+
+	return codex.Turn{}, ctx.Err()
+}
+
+func (c *blockingInterruptClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
+	c.runOnce.Do(func() { close(c.runStarted) })
+	events := make(chan codex.Event)
+	go func() {
+		<-ctx.Done()
+		close(events)
+	}()
+
+	return codex.Turn{ID: "native-turn", Events: events}, nil
+}
+
+func (c *blockingInterruptClient) CancelTurn(context.Context, string, string) error {
+	c.interruptOnce.Do(func() { close(c.interruptStarted) })
+	<-c.interruptRelease
+
+	return nil
+}
+
+func TestDeleteAdmissionPreventsLateNativeTurn(t *testing.T) {
+	client := &blockingContainmentClient{
+		spyCodexClient: newSpyCodexClient(),
+		containStarted: make(chan struct{}),
+		containRelease: make(chan struct{}),
+	}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return client, nil
+	}))
+	agent.setAgentClient(newRecordingAgentClient())
+
+	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, deleteErr := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(created.SessionId))
+		deleteDone <- deleteErr
+	}()
+	<-client.containStarted
+
+	_, promptErr := agent.Prompt(
+		context.Background(),
+		TextPromptRequest(created.SessionId, "late-turn", "must not start"),
+	)
+	require.ErrorContains(t, promptErr, "session close in progress")
+	active := agent.activeSession(created.SessionId)
+	_, promptErr = active.Prompt(
+		context.Background(),
+		TextPromptRequest(created.SessionId, "direct-late-turn", "must not start"),
+	)
+	require.ErrorContains(t, promptErr, "session close in progress")
+	client.mu.Lock()
+	require.Empty(t, client.lastTurn.ThreadID, "prompt admitted native work after delete admission")
+	client.mu.Unlock()
+
+	close(client.containRelease)
+	require.NoError(t, <-deleteDone)
+	require.True(t, agent.isDeleted(created.SessionId))
+	require.NoError(t, agent.Close())
+}
+
+func TestDeleteStoreFailureReadmitsContainedSessionForRebind(t *testing.T) {
+	deleteErr := errors.New("store delete failed")
+	store := &configurableStore{deleteErr: deleteErr}
+	client := newSpyCodexClient()
+	agent := NewAgent(
+		WithSessionStore(store),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+
+	_, err = agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(created.SessionId))
+	require.ErrorIs(t, err, deleteErr)
+	require.Same(t, active, agent.activeSession(created.SessionId))
+	require.True(t, active.clientDead, "unsubscribed session must rebind before another prompt")
+	require.False(t, active.closing, "failed tombstone must reopen delete admission")
+	require.False(t, agent.isDeleted(created.SessionId))
+	require.NoError(t, agent.Close())
+}
+
+type blockingContainmentClient struct {
+	*spyCodexClient
+	containStarted chan struct{}
+	containOnce    sync.Once
+	containRelease chan struct{}
+}
+
+func (c *blockingContainmentClient) ListBackgroundTerminals(
+	context.Context,
+	codex.BackgroundTerminalListRequest,
+) (codex.BackgroundTerminalListResponse, error) {
+	c.containOnce.Do(func() { close(c.containStarted) })
+	<-c.containRelease
+
+	return codex.BackgroundTerminalListResponse{}, nil
+}
+
 func TestDeleteSessionSurfacesNativeCleanupErrorAfterTombstone(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
@@ -998,7 +1224,7 @@ func (c *activeRolloutPathClient) ResumeThread(ctx context.Context, req codex.Th
 	return thread, nil
 }
 
-func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	c.mu.Lock()
 	c.lastTurn = req
 	c.mu.Unlock()
@@ -1010,7 +1236,7 @@ func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnSta
 		close(events)
 	}()
 
-	return events, nil
+	return codex.Turn{ID: "turn", Events: events}, nil
 }
 
 // A steering interrupt followed by session/close removes the wrapper session
@@ -2000,6 +2226,10 @@ func TestSessionLifecycleGuardBranches(t *testing.T) {
 	require.ErrorContains(t, err, "agent is closed")
 	_, err = agent.beginSessionClose(active.id)
 	require.ErrorContains(t, err, "agent is closed")
+	_, err = agent.beginSessionDelete(active.id)
+	require.ErrorContains(t, err, "agent is closed")
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(active.id))
+	require.ErrorContains(t, err, "agent is closed")
 	agent.closed = false
 
 	active.closing = true
@@ -2008,6 +2238,8 @@ func TestSessionLifecycleGuardBranches(t *testing.T) {
 	_, err = agent.acquireSessionLifecycle(active.id)
 	require.ErrorContains(t, err, "session close in progress")
 	_, err = agent.beginSessionClose(active.id)
+	require.ErrorContains(t, err, "session close in progress")
+	_, err = agent.beginSessionDelete(active.id)
 	require.ErrorContains(t, err, "session close in progress")
 	require.ErrorContains(t, agent.validateSessionLifecycle(active.id, active), "session close in progress")
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(active.id, "/tmp/project"))

@@ -125,9 +125,9 @@ func TestRunTurnDispatchFailureClosesRegisteredStream(t *testing.T) {
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
 	t.Cleanup(func() { _ = client.Close(context.Background()) })
 
-	events, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
-	if err == nil || events != nil {
-		t.Fatalf("RunTurn dispatch failure = (%v, %v), want nil stream and error", events, err)
+	turn, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
+	if err == nil || turn.Events != nil {
+		t.Fatalf("RunTurn dispatch failure = (%v, %v), want nil stream and error", turn, err)
 	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -226,7 +226,7 @@ func TestAppServerRunTurnMapsEvents(t *testing.T) {
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
 	defer client.Close(context.Background())
 
-	events, err := client.RunTurn(context.Background(), TurnStartRequest{
+	turn, err := client.RunTurn(context.Background(), TurnStartRequest{
 		ThreadID:          "thread-1",
 		Prompt:            []UserInput{{"type": "text", "text": "hello"}},
 		Model:             "gpt-a",
@@ -245,7 +245,7 @@ func TestAppServerRunTurnMapsEvents(t *testing.T) {
 	}
 
 	var got []Event
-	for event := range events {
+	for event := range turn.Events {
 		got = append(got, event)
 	}
 	if len(got) != 6 {
@@ -268,19 +268,19 @@ func TestAppServerRunTurnEmitsConnectionError(t *testing.T) {
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
 	defer client.Close(context.Background())
 
-	events, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
+	turn, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
 	if err != nil {
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 	transport.CloseWithError(errors.New("boom"))
-	event, ok := <-events
+	event, ok := <-turn.Events
 	if !ok {
 		t.Fatal("turn stream closed without an error event")
 	}
 	if event.Kind != EventError || !errors.Is(event.Err, ErrConnectionClosed) {
 		t.Fatalf("event = %#v, want connection error", event)
 	}
-	if _, ok := <-events; ok {
+	if _, ok := <-turn.Events; ok {
 		t.Fatal("turn stream stayed open after connection error")
 	}
 }
@@ -633,7 +633,9 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registerTurn returned error: %v", err)
 	}
-	client.setTurnID(stream, "turn-1")
+	if bindErr := client.setTurnID(stream, "turn-1"); bindErr != nil {
+		t.Fatalf("setTurnID returned error: %v", bindErr)
+	}
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/agentMessage/delta", Params: mustRaw(map[string]any{"threadId": "other", "turnId": "turn-1", "delta": "skip-thread"})}
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/agentMessage/delta", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "other", "delta": "skip-turn"})}
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "unknown", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1"})}
@@ -654,7 +656,6 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	if _, runErr := client.RunTurn(ctx, TurnStartRequest{ThreadID: "thread-1"}); runErr == nil {
 		t.Fatal("RunTurn accepted canceled context")
 	}
-	client.setTurnID(stream, "")
 	nilTurnsClient := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
 	nilStream, err := nilTurnsClient.registerTurn(context.Background(), "thread-nil")
 	if err != nil {
@@ -663,112 +664,52 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	nilTurnsClient.closeTurn(nilStream)
 	_ = nilTurnsClient.Close(context.Background())
 
-	blocked, err := client.registerTurn(context.Background(), "thread-1")
-	if err != nil {
-		t.Fatalf("register blocked turn returned error: %v", err)
-	}
-	for i := 0; i < cap(blocked.out); i++ {
-		blocked.out <- Event{Kind: EventRaw}
-	}
-	backpressureDone := make(chan struct{})
-	go func() {
-		client.dispatchEvent(Event{Kind: EventRaw, ThreadID: "thread-1"})
-		client.dispatchEvent(Event{Kind: EventRaw, ThreadID: "thread-1"})
-		close(backpressureDone)
-	}()
-	select {
-	case <-backpressureDone:
-		t.Fatal("event dispatch did not apply stream backpressure")
-	case <-time.After(10 * time.Millisecond):
-	}
-	<-blocked.out
-	select {
-	case <-backpressureDone:
-	case <-time.After(time.Second):
-		t.Fatal("event dispatch did not resume after consumer read")
-	}
-	client.closeTurn(blocked)
-	if blocked.send(Event{Kind: EventRaw}) {
-		t.Fatal("closed turn stream accepted event")
-	}
-	alreadyDoneSignal := make(chan struct{})
-	close(alreadyDoneSignal)
-	alreadyDone := &turnStream{done: alreadyDoneSignal, closed: make(chan struct{}), in: make(chan Event)}
-	if alreadyDone.send(Event{Kind: EventRaw}) {
-		t.Fatal("done turn stream accepted event")
-	}
-	alreadyClosedSignal := make(chan struct{})
-	close(alreadyClosedSignal)
-	alreadyClosed := &turnStream{done: make(chan struct{}), closed: alreadyClosedSignal, in: make(chan Event)}
-	if alreadyClosed.send(Event{Kind: EventRaw}) {
-		t.Fatal("already closed turn stream accepted event")
-	}
+	assertTurnOverflow(t, client)
+
 	doneRejected := make(chan struct{})
 	close(doneRejected)
-	rejected := &turnStream{done: doneRejected, closed: make(chan struct{}), in: make(chan Event), threadID: "thread-rejected"}
+	rejected := &turnStream{
+		cancel: func() {}, done: doneRejected,
+		threadID: "thread-rejected", turnID: "turn-rejected", out: make(chan Event, turnEventBuffer+1),
+	}
 	client.mu.Lock()
 	client.turns[rejected] = struct{}{}
 	client.mu.Unlock()
-	client.dispatchEvent(Event{Kind: EventRaw, ThreadID: "thread-rejected"})
+	client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread-rejected"})
 	client.mu.Lock()
 	_, stillRegistered := client.turns[rejected]
 	client.mu.Unlock()
 	if stillRegistered {
 		t.Fatal("dispatch did not remove canceled stream")
 	}
-	blockedDoneSignal := make(chan struct{})
-	blockedDone := &turnStream{done: blockedDoneSignal, closed: make(chan struct{}), in: make(chan Event)}
-	sendResult := make(chan bool, 1)
-	go func() { sendResult <- blockedDone.send(Event{Kind: EventRaw}) }()
-	time.Sleep(10 * time.Millisecond)
-	close(blockedDoneSignal)
-	if <-sendResult {
-		t.Fatal("send succeeded after done closed while blocked")
+	if _, open := <-rejected.out; open {
+		t.Fatal("done stream stayed open")
 	}
-	blockedClosed := &turnStream{done: make(chan struct{}), closed: make(chan struct{}), in: make(chan Event)}
-	sendResult = make(chan bool, 1)
-	go func() { sendResult <- blockedClosed.send(Event{Kind: EventRaw}) }()
-	time.Sleep(10 * time.Millisecond)
-	close(blockedClosed.closed)
-	if <-sendResult {
-		t.Fatal("send succeeded after stream closed while blocked")
+
+	stopped, err := client.registerTurn(context.Background(), "thread-stopped")
+	if err != nil {
+		t.Fatalf("register stopped turn: %v", err)
 	}
-	unbufferedDone := make(chan struct{})
-	unbuffered := &turnStream{cancel: func() {}, done: unbufferedDone, closed: make(chan struct{}), in: make(chan Event), out: make(chan Event)}
-	go unbuffered.forward()
-	sent := make(chan struct{})
-	go func() {
-		unbuffered.in <- Event{Kind: EventError, Err: ErrConnectionClosed}
-		close(sent)
-	}()
-	<-sent
-	if event := <-unbuffered.out; event.Kind != EventError {
-		t.Fatalf("unbuffered forward event = %#v", event)
+	client.closeTurn(stopped)
+	if bindErr := client.setTurnID(stopped, "late"); !errors.Is(bindErr, ErrConnectionClosed) {
+		t.Fatalf("binding stopped stream error = %v", bindErr)
 	}
-	if _, ok := <-unbuffered.out; ok {
-		t.Fatal("unbuffered error stream stayed open")
+
+	terminal, err := client.registerTurn(context.Background(), "thread-terminal")
+	if err != nil {
+		t.Fatalf("register terminal turn: %v", err)
 	}
-	blockingCompleted := &turnStream{cancel: func() {}, done: make(chan struct{}), closed: make(chan struct{}), in: make(chan Event), out: make(chan Event, 1)}
-	blockingCompleted.out <- Event{Kind: EventRaw}
-	go blockingCompleted.forward()
-	sent = make(chan struct{})
-	go func() {
-		blockingCompleted.in <- Event{Kind: EventCompleted}
-		close(sent)
-	}()
-	<-sent
-	// Draining immediately would race the non-blocking send forward attempts
-	// first; the terminal event must be delivered through the blocking send so
-	// the buffered consumer path is the one under test.
-	time.Sleep(50 * time.Millisecond)
-	if event := <-blockingCompleted.out; event.Kind != EventRaw {
-		t.Fatalf("blocking completed filler event = %#v", event)
+	if bindErr := client.setTurnID(terminal, "turn-terminal"); bindErr != nil {
+		t.Fatalf("bind terminal turn: %v", bindErr)
 	}
-	if event := <-blockingCompleted.out; event.Kind != EventCompleted {
-		t.Fatalf("blocking completed event = %#v", event)
+	if !terminal.send(Event{Kind: EventCompleted, Scope: EventScopeThread, ThreadID: "thread-terminal", TurnID: "turn-terminal"}) {
+		t.Fatal("terminal event was not accepted")
 	}
-	if _, ok := <-blockingCompleted.out; ok {
-		t.Fatal("blocking completed stream stayed open")
+	if event := <-terminal.out; event.Kind != EventCompleted {
+		t.Fatalf("terminal event = %#v", event)
+	}
+	if _, open := <-terminal.out; open {
+		t.Fatal("terminal stream stayed open")
 	}
 	openStream, err := client.registerTurn(context.Background(), "thread-1")
 	if err != nil {
@@ -777,6 +718,150 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	client.closeAllTurns()
 	if _, ok := <-openStream.out; ok {
 		t.Fatal("closeAllTurns did not close stream")
+	}
+}
+
+func assertTurnOverflow(t *testing.T, client *AppServerClient) {
+	t.Helper()
+
+	blocked, err := client.registerTurn(context.Background(), "thread-1")
+	if err != nil {
+		t.Fatalf("register blocked turn returned error: %v", err)
+	}
+	if bindErr := client.setTurnID(blocked, "blocked-turn"); bindErr != nil {
+		t.Fatalf("bind blocked turn: %v", bindErr)
+	}
+	for range turnEventBuffer {
+		client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread-1", TurnID: "blocked-turn"})
+	}
+	client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread-1", TurnID: "blocked-turn"})
+	for range turnEventBuffer {
+		if event := <-blocked.out; event.Kind != EventRaw {
+			t.Fatalf("buffered event = %#v", event)
+		}
+	}
+	overflow, ok := <-blocked.out
+	if !ok || overflow.Kind != EventError || !errors.Is(overflow.Err, ErrTurnEventOverflow) {
+		t.Fatalf("overflow event = %#v open=%v", overflow, ok)
+	}
+	if _, open := <-blocked.out; open {
+		t.Fatal("overflowed stream stayed open")
+	}
+	if blocked.send(Event{Kind: EventRaw}) {
+		t.Fatal("overflowed turn stream accepted event")
+	}
+}
+
+func TestSaturatedTurnDoesNotBlockPeerTerminal(t *testing.T) {
+	client := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
+	defer client.Close(context.Background())
+
+	blocked, err := client.registerTurn(context.Background(), "thread-blocked")
+	if err != nil {
+		t.Fatalf("register blocked turn: %v", err)
+	}
+	if bindErr := client.setTurnID(blocked, "turn-blocked"); bindErr != nil {
+		t.Fatalf("bind blocked turn: %v", bindErr)
+	}
+	peer, err := client.registerTurn(context.Background(), "thread-peer")
+	if err != nil {
+		t.Fatalf("register peer turn: %v", err)
+	}
+	if bindErr := client.setTurnID(peer, "turn-peer"); bindErr != nil {
+		t.Fatalf("bind peer turn: %v", bindErr)
+	}
+
+	for range turnEventBuffer + 1 {
+		client.dispatchEvent(Event{
+			Kind: EventRaw, Scope: EventScopeThread,
+			ThreadID: "thread-blocked", TurnID: "turn-blocked",
+		})
+	}
+	client.dispatchEvent(Event{
+		Kind: EventCompleted, Scope: EventScopeThread,
+		ThreadID: "thread-peer", TurnID: "turn-peer",
+	})
+
+	if event := <-peer.out; event.Kind != EventCompleted {
+		t.Fatalf("peer terminal behind saturated turn = %#v", event)
+	}
+	if _, open := <-peer.out; open {
+		t.Fatal("peer terminal did not close its stream")
+	}
+}
+
+func TestPreAckStaleEventsDoNotReachAcknowledgedTurn(t *testing.T) {
+	client := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
+	defer client.Close(context.Background())
+
+	stream, err := client.registerTurn(context.Background(), "thread")
+	if err != nil {
+		t.Fatalf("register turn: %v", err)
+	}
+	client.dispatchEvent(Event{
+		Kind: EventCompleted, Scope: EventScopeThread,
+		ThreadID: "thread", TurnID: "stale-turn",
+	})
+	client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread"})
+	if bindErr := client.setTurnID(stream, "current-turn"); bindErr != nil {
+		t.Fatalf("bind current turn: %v", bindErr)
+	}
+
+	select {
+	case event := <-stream.out:
+		t.Fatalf("pre-ack stale event reached current turn: %#v", event)
+	default:
+	}
+
+	client.dispatchEvent(Event{
+		Kind: EventCompleted, Scope: EventScopeThread,
+		ThreadID: "thread", TurnID: "current-turn",
+	})
+	if event := <-stream.out; event.Kind != EventCompleted {
+		t.Fatalf("current terminal after stale pre-ack event = %#v", event)
+	}
+
+	terminalFirst, err := client.registerTurn(context.Background(), "thread-terminal-first")
+	if err != nil {
+		t.Fatalf("register terminal-first turn: %v", err)
+	}
+	client.dispatchEvent(Event{
+		Kind: EventCompleted, Scope: EventScopeThread,
+		ThreadID: "thread-terminal-first", TurnID: "terminal-first",
+	})
+	client.dispatchEvent(Event{
+		Kind: EventRaw, Scope: EventScopeThread,
+		ThreadID: "thread-terminal-first", TurnID: "terminal-first",
+	})
+	if bindErr := client.setTurnID(terminalFirst, "terminal-first"); bindErr != nil {
+		t.Fatalf("bind terminal-first turn: %v", bindErr)
+	}
+	if event := <-terminalFirst.out; event.Kind != EventCompleted {
+		t.Fatalf("terminal-first event = %#v", event)
+	}
+}
+
+func TestUnboundTurnOverflowFailsOnlyThatStream(t *testing.T) {
+	client := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
+	defer client.Close(context.Background())
+
+	stream, err := client.registerTurn(context.Background(), "thread")
+	if err != nil {
+		t.Fatalf("register unbound turn: %v", err)
+	}
+	for range turnEventBuffer + 1 {
+		client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread"})
+	}
+
+	overflow, open := <-stream.out
+	if !open || !errors.Is(overflow.Err, ErrTurnEventOverflow) {
+		t.Fatalf("unbound overflow event = %#v open=%v", overflow, open)
+	}
+	if _, open := <-stream.out; open {
+		t.Fatal("unbound overflow stream stayed open")
+	}
+	if bindErr := client.setTurnID(stream, "acknowledged-turn"); !errors.Is(bindErr, ErrTurnEventOverflow) {
+		t.Fatalf("binding overflowed stream error = %v", bindErr)
 	}
 }
 
@@ -1119,12 +1204,12 @@ while read line; do :; done
 		methodTurnStart: map[string]any{"turnId": "fallback-turn"},
 	}}
 	turnClient := &AppServerClient{rpc: newRPCConn(turnTransport, nil)}
-	events, err := turnClient.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread"})
+	turn, err := turnClient.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread"})
 	if err != nil {
 		t.Fatalf("RunTurn fallback returned error: %v", err)
 	}
 	turnTransport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/completed", Params: mustRaw(map[string]any{"threadId": "thread", "turnId": "fallback-turn"})}
-	if event := <-events; event.Kind != EventCompleted {
+	if event := <-turn.Events; event.Kind != EventCompleted {
 		t.Fatalf("fallback event = %#v", event)
 	}
 	_ = turnClient.Close(context.Background())
@@ -1239,7 +1324,7 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 func runLiveTurn(ctx context.Context, t *testing.T, client Client, threadID string) {
 	t.Helper()
 
-	events, err := client.RunTurn(ctx, TurnStartRequest{
+	turn, err := client.RunTurn(ctx, TurnStartRequest{
 		ThreadID: threadID,
 		Prompt: []UserInput{{
 			"type": "text",
@@ -1251,7 +1336,7 @@ func runLiveTurn(ctx context.Context, t *testing.T, client Client, threadID stri
 	}
 
 	completed := false
-	for event := range events {
+	for event := range turn.Events {
 		if event.Kind == EventError {
 			t.Fatalf("live turn event error: %v", event.Err)
 		}

@@ -30,6 +30,16 @@ func (a *Agent) handleCodexServerRequest(ctx context.Context, req codex.ServerRe
 
 		ctx, finish = session.beginInteraction(ctx, codex.ServerInteractionKey(req, params))
 		defer finish()
+		// turn/start names the authoritative native turn before RunTurn returns.
+		// Requests that race that return wait until the session has bound the ID
+		// and emitted lifecycle acceptance; stale IDs are rejected afterward.
+		if err := session.waitForTurnBinding(ctx); err != nil {
+			if cancellation, ok := codexPermissionCancellationResponse(req.Method, params); ok {
+				return cancellation, nil
+			}
+
+			return nil, err
+		}
 	}
 
 	var (

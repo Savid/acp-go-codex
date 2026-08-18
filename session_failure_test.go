@@ -376,10 +376,10 @@ type cancelAtTurnStartClient struct {
 	cancelled bool
 }
 
-func (c *cancelAtTurnStartClient) RunTurn(context.Context, codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *cancelAtTurnStartClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
 	c.session.cancelTurn()
 
-	return make(chan codex.Event), nil
+	return codex.Turn{ID: "turn", Events: make(chan codex.Event)}, nil
 }
 
 func (c *cancelAtTurnStartClient) CancelTurn(context.Context, string, string) error {
@@ -540,14 +540,14 @@ func (c *terminalCleanupErrorClient) TerminateBackgroundTerminal(
 	return false, c.err
 }
 
-func (c *recordingCancelClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *recordingCancelClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
 	out := make(chan codex.Event)
 	go func() {
 		defer close(out)
 		<-ctx.Done()
 	}()
 
-	return out, nil
+	return codex.Turn{ID: "turn", Events: out}, nil
 }
 
 func (c *recordingCancelClient) CancelTurn(context.Context, string, string) error {

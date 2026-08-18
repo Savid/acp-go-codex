@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 type imagePromptClient struct {
@@ -26,7 +28,7 @@ func (c *imagePromptClient) ModelList(context.Context) ([]codex.Model, error) {
 	return append([]codex.Model(nil), c.models...), nil
 }
 
-func (c *imagePromptClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *imagePromptClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	c.runCalls++
 	c.lastStart = req
 
@@ -609,17 +611,133 @@ type rolloutWritingRunClient struct {
 	entries []SessionStoreEntry
 }
 
+type delayedTerminalRunClient struct {
+	*spyCodexClient
+	terminal <-chan struct{}
+	started  chan<- struct{}
+}
+
+type emptyTurnIDClient struct {
+	*spyCodexClient
+}
+
+type overflowTurnClient struct {
+	*spyCodexClient
+	dispatchFailure bool
+	cancelStarted   chan [2]string
+	cancelRelease   <-chan struct{}
+}
+
+func (*emptyTurnIDClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	return codex.Turn{Events: make(chan codex.Event)}, nil
+}
+
+func (c *overflowTurnClient) RunTurn(
+	context.Context,
+	codex.TurnStartRequest,
+) (codex.Turn, error) {
+	if c.dispatchFailure {
+		return codex.Turn{ID: "overflow-turn"}, codex.ErrTurnEventOverflow
+	}
+
+	events := make(chan codex.Event, 1)
+	events <- codex.Event{
+		Kind: codex.EventError, TurnID: "overflow-turn", Err: codex.ErrTurnEventOverflow,
+	}
+	close(events)
+
+	return codex.Turn{ID: "overflow-turn", Events: events}, nil
+}
+
+func (c *overflowTurnClient) CancelTurn(_ context.Context, threadID, turnID string) error {
+	c.cancelStarted <- [2]string{threadID, turnID}
+	<-c.cancelRelease
+
+	return nil
+}
+
+func TestPromptRejectsAcceptedTurnWithoutNativeIdentity(t *testing.T) {
+	agent := NewAgent()
+	session := &session{
+		agent: agent, id: "session", cwd: "/tmp/project",
+		codexThreadID: "thread", client: &emptyTurnIDClient{spyCodexClient: newSpyCodexClient()},
+	}
+
+	_, err := session.Prompt(
+		context.Background(),
+		TextPromptRequest(session.id, "turn-nonce", "hello"),
+	)
+	require.ErrorContains(t, err, "without naming it")
+}
+
+func TestTurnOverflowContainsNativeTurnBeforePromptFailure(t *testing.T) {
+	for _, dispatchFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dispatch_failure_%t", dispatchFailure), func(t *testing.T) {
+			cancelRelease := make(chan struct{})
+			client := &overflowTurnClient{
+				spyCodexClient:  newSpyCodexClient(),
+				dispatchFailure: dispatchFailure,
+				cancelStarted:   make(chan [2]string, 1),
+				cancelRelease:   cancelRelease,
+			}
+			session := &session{
+				agent: NewAgent(), id: "session", cwd: "/tmp/project",
+				codexThreadID: "thread", client: client,
+			}
+			promptDone := make(chan error, 1)
+			go func() {
+				_, err := session.Prompt(
+					context.Background(),
+					TextPromptRequest(session.id, "turn-nonce", "hello"),
+				)
+				promptDone <- err
+			}()
+
+			require.Equal(t, [2]string{"thread", "overflow-turn"}, <-client.cancelStarted)
+			select {
+			case err := <-promptDone:
+				t.Fatalf("overflow failed prompt before native containment completed: %v", err)
+			default:
+			}
+
+			close(cancelRelease)
+			require.ErrorContains(t, <-promptDone, codex.ErrTurnEventOverflow.Error())
+		})
+	}
+}
+
+func (c *delayedTerminalRunClient) RunTurn(
+	ctx context.Context,
+	req codex.TurnStartRequest,
+) (codex.Turn, error) {
+	close(c.started)
+	events := make(chan codex.Event, 1)
+	go func() {
+		defer close(events)
+		select {
+		case <-c.terminal:
+			events <- codex.Event{
+				Kind: codex.EventCompleted, ThreadID: req.ThreadID,
+				TurnID: "fallback-turn", StopReason: codex.StopReasonEndTurn,
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	return codex.Turn{ID: "fallback-turn", Events: events}, nil
+}
+
 func (c *rolloutWritingRunClient) RunTurn(
 	ctx context.Context,
 	req codex.TurnStartRequest,
-) (<-chan codex.Event, error) {
+) (codex.Turn, error) {
 	var content strings.Builder
 	for _, entry := range c.entries {
 		content.Write(entry)
 		content.WriteByte('\n')
 	}
 	if err := os.WriteFile(c.path, []byte(content.String()), 0o600); err != nil {
-		return nil, err
+		return codex.Turn{}, err
 	}
 
 	return c.runEventsClient.RunTurn(ctx, req)
@@ -743,13 +861,13 @@ func TestSessionPromptRawRolloutTail(t *testing.T) {
 	if err := rawSession.mirrorAndEmitRollout(context.Background()); err != nil {
 		t.Fatalf("mirror blank+valid rollout returned error: %v", err)
 	}
-	stop, done := rawSession.startRolloutTail(context.Background(), nil, nil)
+	stop, done := rawSession.startRolloutTail(context.Background(), nil)
 	time.Sleep(150 * time.Millisecond)
 	stop()
 	<-done
 }
 
-func TestPromptSettlesOnTheRolloutTaskCompleteRow(t *testing.T) {
+func TestPromptWaitsForNativeTerminalAfterRolloutTaskComplete(t *testing.T) {
 	agent := NewAgent()
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -758,36 +876,53 @@ func TestPromptSettlesOnTheRolloutTaskCompleteRow(t *testing.T) {
 	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
 		t.Fatalf("write empty rollout: %v", err)
 	}
-	writeErr := make(chan error, 1)
-	time.AfterFunc(20*time.Millisecond, func() {
-		writeErr <- os.WriteFile(rollout, []byte(
-			`{"type":"event_msg","payload":{"type":"task_started","turn_id":"fallback-turn"}}`+"\n"+
-				`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"fallback-message","content":[{"type":"output_text","text":"1 + 1 = 2"}]}}`+"\n"+
-				`{"type":"event_msg","payload":{"type":"agent_message","message":"1 + 1 = 2"}}`+"\n"+
-				`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"fallback-turn"}}`+"\n",
-		), 0o600)
-	})
-	defer func() {
-		if err := <-writeErr; err != nil {
-			t.Fatalf("write rollout rows: %v", err)
-		}
-	}()
+	terminal := make(chan struct{})
+	started := make(chan struct{})
 	session := &session{
 		agent:         agent,
 		id:            "fallback",
 		cwd:           "/tmp/project",
 		codexThreadID: "thread",
 		rolloutPath:   rollout,
-		client:        &openRunEventsClient{},
+		client: &delayedTerminalRunClient{
+			spyCodexClient: newSpyCodexClient(),
+			terminal:       terminal,
+			started:        started,
+		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
-	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("task-complete prompt resp=%#v err=%v", resp, err)
+	result := make(chan promptResult, 1)
+	go func() {
+		resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
+		result <- promptResult{response: resp, err: err}
+	}()
+	<-started
+	require.NoError(t, os.WriteFile(rollout, []byte(
+		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"fallback-turn"}}`+"\n"+
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"fallback-message","content":[{"type":"output_text","text":"1 + 1 = 2"}]}}`+"\n"+
+			`{"type":"event_msg","payload":{"type":"agent_message","message":"1 + 1 = 2"}}`+"\n"+
+			`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"fallback-turn"}}`+"\n",
+	), 0o600))
+	require.Eventually(t, func() bool {
+		session.mirrorMu.Lock()
+		defer session.mirrorMu.Unlock()
+
+		return session.visibleRows == 4
+	}, time.Second, 10*time.Millisecond)
+	select {
+	case early := <-result:
+		t.Fatalf("rollout task_complete settled prompt before native terminal: %#v", early)
+	default:
 	}
-	if len(conn.updates) != 2 || conn.updates[0].Update.AgentMessageChunk == nil {
+	close(terminal)
+	completed := <-result
+	resp, err := completed.response, completed.err
+	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("native-terminal prompt resp=%#v err=%v", resp, err)
+	}
+	if len(conn.updates) != 3 || conn.updates[0].Update.AgentMessageChunk == nil {
 		t.Fatalf("task-complete updates = %#v", conn.updates)
 	}
 	wantIdentity := nativeTurnIdentity{turnID: "fallback-turn", messageID: "fallback-message"}
@@ -797,42 +932,8 @@ func TestPromptSettlesOnTheRolloutTaskCompleteRow(t *testing.T) {
 	if got := lastNotificationNativeIdentity(conn.updates); got != wantIdentity {
 		t.Fatalf("task-complete update identity = %#v, want %#v", got, wantIdentity)
 	}
-	if session.completionRows != 4 || session.visibleRows != 4 {
-		t.Fatalf("rollout cursors completion=%d visible=%d", session.completionRows, session.visibleRows)
-	}
-}
-
-func TestPromptSettlesOnASoleRolloutTaskCompleteRow(t *testing.T) {
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
-		t.Fatalf("write empty rollout: %v", err)
-	}
-	writeErr := make(chan error, 1)
-	time.AfterFunc(20*time.Millisecond, func() {
-		writeErr <- os.WriteFile(rollout, []byte(`{"type":"event_msg","payload":{"type":"task_complete"}}`+"\n"), 0o600)
-	})
-	defer func() {
-		if err := <-writeErr; err != nil {
-			t.Fatalf("write rollout rows: %v", err)
-		}
-	}()
-	session := &session{
-		agent:         NewAgent(),
-		id:            "fallback",
-		cwd:           "/tmp/project",
-		codexThreadID: "thread",
-		rolloutPath:   rollout,
-		client:        &openRunEventsClient{},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
-	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("sole task-complete prompt resp=%#v err=%v", resp, err)
-	}
-	if session.completionRows != 1 {
-		t.Fatalf("completion cursor = %d", session.completionRows)
+	if session.visibleRows != 4 {
+		t.Fatalf("rollout visible cursor=%d", session.visibleRows)
 	}
 }
 

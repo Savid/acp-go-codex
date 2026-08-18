@@ -177,6 +177,26 @@ func TestPromptIncarnationLifecycleAndActionSettlement(t *testing.T) {
 	s.fenceSession()
 }
 
+func TestPromptIncarnationResumesOnlyAfterLastForegroundBlocker(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	agent.setAgentClient(newRecordingAgentClient())
+	s := &session{agent: agent, id: "session"}
+	incarnation, err := s.openIncarnation(ctx, lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(ctx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"}))
+	require.NoError(t, incarnation.announceAction(ctx, "permission", lifecycle.ActionPermission, true))
+	require.NoError(t, incarnation.announceAction(ctx, "elicitation", lifecycle.ActionElicitation, true))
+
+	require.NoError(t, incarnation.resolveAction(ctx, "permission", lifecycle.ActionAccepted))
+	require.Equal(t, lifecycle.ForegroundRequiresAction, incarnation.stream.State().Foreground.State)
+
+	require.NoError(t, incarnation.resolveAction(ctx, "elicitation", lifecycle.ActionAccepted))
+	require.Equal(t, lifecycle.ForegroundRunning, incarnation.stream.State().Foreground.State)
+}
+
 // provenQuiescenceForTest makes the zero-value assertion readable without
 // weakening the production API around process evidence.
 func (in *promptIncarnation) provenQuiescenceForTest() lifecycle.QuiescenceFact {
@@ -311,10 +331,12 @@ func TestLifecycleNegotiationAndReservedExtensionDispatch(t *testing.T) {
 	agent := NewAgent()
 	answer, err := agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1.0}}})
 	require.NoError(t, err)
-	require.True(t, answer.Present())
-	require.Equal(t, lifecycleAdvertisement(RuntimeContainmentUnavailable).ActivityKinds, answer.ActivityKinds)
-	require.NotNil(t, lifecycleResponseMeta(answer))
+	require.False(t, answer.Present())
+	require.Nil(t, lifecycleResponseMeta(answer))
 	require.Nil(t, lifecycleResponseMeta(lifecycle.Negotiated{}))
+	require.NotNil(t, lifecycleResponseMeta(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	}))
 
 	answer, err = agent.negotiateLifecycle(nil)
 	require.NoError(t, err)
@@ -382,20 +404,12 @@ func TestLifecycleReservedKeyRejectedAcrossAgentSurfaces(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestLifecyclePromptCorrelationDrainAndSettlementBranches(t *testing.T) {
+func TestLifecyclePromptCorrelationAndSettlementBranches(t *testing.T) {
 	agent := NewAgent()
 	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
 	s := &session{agent: agent, id: "s"}
 	_, err := s.Prompt(context.Background(), acp.PromptRequest{SessionId: "s", Meta: inboundRouteMeta("turn")})
 	require.Error(t, err, "negotiated prompts require correlation before dispatch")
-
-	closed := make(chan codex.Event)
-	close(closed)
-	require.NoError(t, s.drainDeliveredEvents(context.Background(), closed, &promptEventState{}))
-	bad := make(chan codex.Event, 1)
-	bad <- codex.Event{Kind: codex.EventError, Err: errors.New("native event failed")}
-	close(bad)
-	require.Error(t, s.drainDeliveredEvents(context.Background(), bad, &promptEventState{}))
 
 	for _, tc := range []struct {
 		reason  acp.StopReason
@@ -494,8 +508,7 @@ func TestLifecycleSettlementPersistenceContainmentEdges(t *testing.T) {
 	store := &appendFuncStore{}
 	agent := NewAgent(WithSessionStore(store))
 	s := &session{agent: agent, id: "s", rolloutLiveFenced: true}
-	require.NoError(t, s.mirrorAndEmitRolloutWithCompletion(ctx, make(chan struct{}, 1), make(chan codex.Event, 1)))
-	require.False(t, rolloutTaskComplete(SessionStoreEntry(`not-json`)))
+	require.NoError(t, s.mirrorAndEmitRolloutLive(ctx, make(chan codex.Event, 1)))
 
 	s.persistenceFenced = true
 	require.NoError(t, s.commitRolloutEntries(ctx, store, []SessionStoreEntry{SessionStoreEntry(`{}`)}, 1))
@@ -513,6 +526,15 @@ func TestLifecycleSettlementPersistenceContainmentEdges(t *testing.T) {
 	err := s.containSession(ctx)
 	require.Error(t, err)
 	require.ErrorIs(t, err, containFailure)
+
+	containmentErr := errors.New("turn containment failed")
+	done := make(chan struct{})
+	close(done)
+	s.turnContainment = &turnContainment{done: done, err: containmentErr, started: true}
+	_, err = s.settlePrompt(ctx, ctx, nil, promptTurnResult{
+		state: &promptEventState{stopReason: acp.StopReasonEndTurn},
+	}, nil)
+	require.ErrorIs(t, err, containmentErr)
 }
 
 func requireJSON(t *testing.T, value any) string {

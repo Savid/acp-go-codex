@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -122,6 +123,173 @@ func TestServerRequestsNoSessionOrClientBranches(t *testing.T) {
 	}
 }
 
+func TestServerRequestWaitsForAcceptedNativeTurnBinding(t *testing.T) {
+	agent := NewAgent()
+	client := newSpyCodexClient()
+	session := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	agent.sessions[session.id] = session
+	_ = session.beginTurn(context.Background(), "turn-nonce")
+
+	conn := &bindingPermissionClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		requested:            make(chan struct{}),
+	}
+	agent.setAgentClient(conn)
+
+	type requestResult struct {
+		value any
+		err   error
+	}
+	result := make(chan requestResult, 1)
+	go func() {
+		value, err := agent.handleCodexServerRequest(context.Background(), codex.ServerRequest{
+			Method: codex.RequestCommandApproval,
+			Params: json.RawMessage(`{"threadId":"thread","turnId":"native-turn","itemId":"command","command":"echo ok"}`),
+		})
+		result <- requestResult{value: value, err: err}
+	}()
+
+	require.Eventually(t, func() bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+
+		return len(session.interactions) == 1
+	}, time.Second, time.Millisecond)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelledApproval, err := agent.handleCodexServerRequest(canceled, codex.ServerRequest{
+		Method: codex.RequestCommandApproval,
+		Params: json.RawMessage(`{"threadId":"thread","turnId":"native-turn","itemId":"cancelled-command","command":"echo no"}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "cancel", asType[map[string]any](t, cancelledApproval)["decision"])
+	_, err = agent.handleCodexServerRequest(canceled, codex.ServerRequest{
+		Method: codex.RequestToolUserInput,
+		Params: json.RawMessage(`{"threadId":"thread","turnId":"native-turn","itemId":"cancelled-input","questions":[{"id":"name"}]}`),
+	})
+	require.ErrorIs(t, err, context.Canceled)
+
+	// The start response can name the turn before lifecycle acceptance is
+	// emitted. Staging that ID alone must not release the native request.
+	session.stageTurnID("native-turn")
+	select {
+	case <-conn.requested:
+		t.Fatal("server request reached the client before turn acceptance")
+	default:
+	}
+
+	session.acceptTurnBinding()
+	select {
+	case <-conn.requested:
+	case <-time.After(time.Second):
+		t.Fatal("accepted turn did not release its early server request")
+	}
+
+	got := <-result
+	require.NoError(t, got.err)
+	require.Equal(t, "accept", asType[map[string]any](t, got.value)["decision"])
+}
+
+type bindingPermissionClient struct {
+	*recordingAgentClient
+	requested chan struct{}
+}
+
+type cancelingElicitationClient struct {
+	*recordingAgentClient
+	cancel context.CancelFunc
+}
+
+func (c *bindingPermissionClient) RequestPermission(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+) (acp.RequestPermissionResponse, error) {
+	close(c.requested)
+
+	return c.recordingAgentClient.RequestPermission(ctx, request)
+}
+
+func (c *cancelingElicitationClient) UnstableCreateElicitation(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+) (acp.UnstableCreateElicitationResponse, error) {
+	return c.CreateElicitation(ctx, request, elicitationScope{})
+}
+
+func (c *cancelingElicitationClient) CreateElicitation(
+	_ context.Context,
+	_ acp.UnstableCreateElicitationRequest,
+	_ elicitationScope,
+) (acp.UnstableCreateElicitationResponse, error) {
+	c.cancel()
+
+	return acp.NewUnstableCreateElicitationResponseCancel(), nil
+}
+
+func TestServerRequestsCancelWhenPermissionToolIsNoLongerRequestable(t *testing.T) {
+	agent, session, _ := newServerRequestSession(t)
+	agent.setAgentClient(newRecordingAgentClient())
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		params string
+		class  permissionToolClass
+		field  string
+		want   any
+	}{
+		{
+			name: "command", method: codex.RequestCommandApproval,
+			params: `,"command":"echo no"`, class: permissionToolCommand,
+			field: "decision", want: "cancel",
+		},
+		{
+			name: "permissions", method: codex.RequestPermissionsApproval,
+			params: `,"permissions":{"fs":true}`, class: permissionToolPermissions,
+			field: "scope", want: "turn",
+		},
+		{
+			name: "mcp", method: codex.RequestMCPElicitation,
+			params: `,"_meta":{"codex_approval_kind":"mcp_tool_call"}`, class: permissionToolMCP,
+			field: "action", want: "cancel",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := acp.ToolCallId(tc.method)
+			session.permissionTools.mu.Lock()
+			session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{
+				id: {id: id, class: tc.class, terminal: true},
+			}
+			session.permissionTools.aliases = map[string]acp.ToolCallId{string(id): id}
+			session.permissionTools.mu.Unlock()
+
+			response, err := agent.handleCodexServerRequest(context.Background(), codex.ServerRequest{
+				Method: tc.method,
+				Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1"` + tc.params + `}`),
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, asType[map[string]any](t, response)[tc.field])
+		})
+	}
+}
+
+func TestServerRequestReportsCancellationThatArrivesDuringNonPermissionInteraction(t *testing.T) {
+	agent, session, _ := newServerRequestSession(t)
+	enableClientElicitation(agent, true, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	agent.setAgentClient(&cancelingElicitationClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		cancel:               cancel,
+	})
+
+	_, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+		Method: codex.RequestToolUserInput,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","itemId":"question","questions":[{"id":"name","question":"Name?"}]}`),
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
@@ -224,6 +392,7 @@ func TestServerRequestLateApprovalIsDetachedOnCancel(t *testing.T) {
 	}
 	agent.setAgentClient(blocking)
 	_ = session.beginTurn(ctx, "test-turn")
+	session.setTurnID("native-turn-1")
 	resultCh := make(chan any, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -237,6 +406,16 @@ func TestServerRequestLateApprovalIsDetachedOnCancel(t *testing.T) {
 	}()
 	<-blocking.started
 	session.cancelTurn()
+	lateConn := newRecordingAgentClient()
+	agent.setAgentClient(lateConn)
+	lateResult, lateErr := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+		ID:     json.RawMessage("approval-after-cancel"),
+		Method: codex.RequestCommandApproval,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-turn-1","approvalId":"approval-after-cancel","command":"pwd"}`),
+	})
+	require.NoError(t, lateErr)
+	require.Equal(t, "cancel", asType[map[string]any](t, lateResult)["decision"])
+	require.Empty(t, lateConn.permissions, "request created after cancellation reached the host")
 	close(blocking.release)
 	result := <-resultCh
 	if decision := asType[map[string]any](t, result)["decision"]; decision != "cancel" {

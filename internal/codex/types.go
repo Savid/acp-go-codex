@@ -13,7 +13,7 @@ type Client interface {
 	ListThreads(context.Context, ThreadListRequest) ([]Thread, error)
 	ReadThread(context.Context, ThreadReadRequest) (ThreadHistory, error)
 	ListTurns(context.Context, ThreadTurnsListRequest) (ThreadTurnsListResponse, error)
-	RunTurn(context.Context, TurnStartRequest) (<-chan Event, error)
+	RunTurn(context.Context, TurnStartRequest) (Turn, error)
 	SteerTurn(context.Context, TurnSteerRequest) error
 	CancelTurn(context.Context, string, string) error
 	CompactThread(context.Context, ThreadCompactRequest) (map[string]any, error)
@@ -159,6 +159,14 @@ type TurnStartRequest struct {
 	SandboxPolicy     any
 	OutputSchema      any
 	CollaborationMode any
+}
+
+// Turn is the native identity acknowledged by turn/start and its ordered event
+// stream. The identity is available before any event is consumed, so callers can
+// bind server requests and lifecycle acceptance at the dispatch boundary.
+type Turn struct {
+	ID     string
+	Events <-chan Event
 }
 
 type TurnSteerRequest struct {

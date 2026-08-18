@@ -7,7 +7,8 @@ import (
 )
 
 var (
-	ErrConnectionClosed = errors.New("codex app-server connection closed")
+	ErrConnectionClosed  = errors.New("codex app-server connection closed")
+	ErrTurnEventOverflow = errors.New("codex turn event queue overflow")
 	// ErrBackgroundTerminalsUnsupported reports that the running app-server does
 	// not carry the thread-scoped background-terminal methods at all. It is the
 	// app-server's own method-not-found answer rather than a version guess, and

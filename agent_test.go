@@ -648,7 +648,7 @@ func (c *spyCodexClient) ListTurns(_ context.Context, req codex.ThreadTurnsListR
 	return codex.ThreadTurnsListResponse{Turns: []map[string]any{{"id": "turn-1"}}}, nil
 }
 
-func (c *spyCodexClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *spyCodexClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	c.mu.Lock()
 	c.lastTurn = req
 	c.mu.Unlock()
@@ -659,7 +659,7 @@ func (c *spyCodexClient) RunTurn(ctx context.Context, req codex.TurnStartRequest
 		out <- codex.Event{Kind: codex.EventCompleted, ThreadID: req.ThreadID, TurnID: "turn-1", StopReason: codex.StopReasonEndTurn, Usage: codex.Usage{InputTokens: 1, OutputTokens: 2}}
 	}()
 
-	return out, nil
+	return codex.Turn{ID: "turn-1", Events: out}, nil
 }
 
 func (c *spyCodexClient) SteerTurn(_ context.Context, req codex.TurnSteerRequest) error {
@@ -1555,9 +1555,9 @@ type runEventsClient struct {
 	runErr error
 }
 
-func (c *runEventsClient) RunTurn(context.Context, codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *runEventsClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
 	if c.runErr != nil {
-		return nil, c.runErr
+		return codex.Turn{}, c.runErr
 	}
 	out := make(chan codex.Event, len(c.events))
 	go func() {
@@ -1567,7 +1567,12 @@ func (c *runEventsClient) RunTurn(context.Context, codex.TurnStartRequest) (<-ch
 		}
 	}()
 
-	return out, nil
+	turnID := "turn"
+	if len(c.events) > 0 && c.events[0].TurnID != "" {
+		turnID = c.events[0].TurnID
+	}
+
+	return codex.Turn{ID: turnID, Events: out}, nil
 }
 
 func (c *runEventsClient) CancelTurn(context.Context, string, string) error { return nil }
@@ -1582,7 +1587,7 @@ type openRunEventsClient struct {
 	events []codex.Event
 }
 
-func (c *openRunEventsClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *openRunEventsClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
 	out := make(chan codex.Event, len(c.events))
 	go func() {
 		defer close(out)
@@ -1592,7 +1597,7 @@ func (c *openRunEventsClient) RunTurn(ctx context.Context, _ codex.TurnStartRequ
 		<-ctx.Done()
 	}()
 
-	return out, nil
+	return codex.Turn{ID: "turn", Events: out}, nil
 }
 
 func (c *openRunEventsClient) CancelTurn(context.Context, string, string) error { return nil }
@@ -1607,7 +1612,7 @@ type cancelDuringRunClient struct {
 	session *session
 }
 
-func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
 	out := make(chan codex.Event, 1)
 	go func() {
 		defer close(out)
@@ -1615,7 +1620,7 @@ func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest)
 		out <- codex.Event{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("canceled")}
 	}()
 
-	return out, nil
+	return codex.Turn{ID: "turn", Events: out}, nil
 }
 
 func (c *cancelDuringRunClient) CancelTurn(context.Context, string, string) error { return nil }

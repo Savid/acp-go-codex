@@ -474,36 +474,36 @@ func TestRPCDoneAndPlaceholderCancelEdges(t *testing.T) {
 		t.Fatalf("StartThread returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	events, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
+	turn, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
 	if err != nil {
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 	cancel()
 	time.Sleep(10 * time.Millisecond)
-	for range events {
+	for range turn.Events {
 	}
 
 	ctx, cancel = context.WithCancel(context.Background())
-	events, err = client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
+	turn, err = client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
 	if err != nil {
 		t.Fatalf("RunTurn third returned error: %v", err)
 	}
-	<-events
+	<-turn.Events
 	cancel()
 	time.Sleep(10 * time.Millisecond)
-	for range events {
+	for range turn.Events {
 	}
 
 	ctx, cancel = context.WithCancel(context.Background())
-	events, err = client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
+	turn, err = client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
 	if err != nil {
 		t.Fatalf("RunTurn second returned error: %v", err)
 	}
-	<-events
-	<-events
+	<-turn.Events
+	<-turn.Events
 	cancel()
 	time.Sleep(10 * time.Millisecond)
-	for range events {
+	for range turn.Events {
 	}
 }
 

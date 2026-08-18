@@ -25,6 +25,91 @@ func TestSessionActiveTurnIDTracksNativeTurn(t *testing.T) {
 
 	session.setTurnID("native-turn-2")
 	require.Equal(t, "native-turn-2", session.activeTurnID())
+	session.stageTurnID("")
+	require.Equal(t, "native-turn-2", session.activeTurnID())
+}
+
+func TestCanceledTurnIsNotAnActiveNativeRequestTarget(t *testing.T) {
+	session := &session{}
+	_ = session.beginTurn(context.Background(), "turn-nonce")
+	session.setTurnID("native-turn")
+
+	nonce, active := session.activeTurnNonceForNativeTurn("native-turn")
+	require.Equal(t, "turn-nonce", nonce)
+	require.True(t, active)
+
+	session.cancelTurn()
+	nonce, active = session.activeTurnNonceForNativeTurn("native-turn")
+	require.Equal(t, "turn-nonce", nonce)
+	require.False(t, active)
+	session.finishTurn()
+}
+
+func TestTurnContainmentWaitBranches(t *testing.T) {
+	containErr := errors.New("containment failed")
+	done := make(chan struct{})
+	close(done)
+	completed := &session{
+		cancel: func() {},
+		turnContainment: &turnContainment{
+			done: done, err: containErr, started: true,
+		},
+	}
+	require.ErrorIs(t, completed.shutdownActiveTurn(context.Background(), true), containErr)
+
+	waiting := &session{
+		cancel: func() {},
+		turnContainment: &turnContainment{
+			done: make(chan struct{}), started: true,
+		},
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, waiting.shutdownActiveTurn(canceled, true), context.Canceled)
+	require.ErrorIs(t, waiting.awaitTurnContainment(canceled), context.Canceled)
+}
+
+func TestShutdownActiveTurnCancelsInteractionStartedDuringContainment(t *testing.T) {
+	client := &blockingInterruptClient{
+		spyCodexClient:   newSpyCodexClient(),
+		runStarted:       make(chan struct{}),
+		interruptStarted: make(chan struct{}),
+		interruptRelease: make(chan struct{}),
+	}
+	session := &session{
+		agent: NewAgent(), client: client, codexThreadID: "thread",
+	}
+	_ = session.beginTurn(context.Background(), "turn-nonce")
+	session.setTurnID("native-turn")
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- session.shutdownActiveTurn(context.Background(), true)
+	}()
+	<-client.interruptStarted
+
+	interactionCtx, finishInteraction := session.beginInteraction(context.Background(), "during-containment")
+	close(client.interruptRelease)
+
+	require.NoError(t, <-shutdownDone)
+	require.ErrorIs(t, interactionCtx.Err(), context.Canceled)
+	session.mu.Lock()
+	require.Empty(t, session.interactions)
+	session.mu.Unlock()
+
+	finishInteraction()
+	session.finishTurn()
+}
+
+func TestContainDeadSessionFromRetiredGeneration(t *testing.T) {
+	client := newSpyCodexClient()
+	agent := NewAgent()
+	session := &session{
+		agent: agent, id: "session", client: client,
+		codexThreadID: "thread", clientDead: true,
+	}
+
+	require.NoError(t, session.containSession(context.Background()))
 }
 
 func TestSessionInteractionCancellationBranches(t *testing.T) {
@@ -72,8 +157,13 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 	if secondCtx.Err() == nil || !session.wasTurnCancelled() {
 		t.Fatal("cancelTurn did not cancel pending interaction")
 	}
+	lateCtx, lateFinish := session.beginInteraction(context.Background(), "after-cancel")
+	if !errors.Is(lateCtx.Err(), context.Canceled) {
+		t.Fatal("interaction created after turn cancellation started uncanceled")
+	}
 	firstFinish()
 	secondFinish()
+	lateFinish()
 	session.finishTurn()
 
 	_ = session.beginTurn(context.Background(), "test-turn")

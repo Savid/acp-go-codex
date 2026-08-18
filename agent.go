@@ -925,6 +925,8 @@ func newSessionCloseInProgress() *acp.RequestError {
 	return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session close in progress"})
 }
 
+var errNoActiveSessionForDelete = errors.New("no active session for delete")
+
 // beginSessionClose prevents new lifecycle requests from entering before the
 // native unsubscribe begins. The caller acquires session.lifecycle for the
 // native operation after this method returns.
@@ -939,6 +941,35 @@ func (a *Agent) beginSessionClose(id acp.SessionId) (*session, error) {
 	session := a.sessions[id]
 	if session == nil {
 		return nil, newUnknownSession()
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	if session.closing {
+		return nil, newSessionCloseInProgress()
+	}
+
+	session.closing = true
+
+	return session, nil
+}
+
+// beginSessionDelete closes prompt admission for an active wrapper while still
+// permitting deletion of a store-only session. Agent.mu then session.mu is the
+// same lock order used by ordinary session lookup, so prompt admission and
+// delete admission have one linearization point at session.closing.
+func (a *Agent) beginSessionDelete(id acp.SessionId) (*session, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return nil, newAgentClosedError()
+	}
+
+	session := a.sessions[id]
+	if session == nil {
+		return nil, errNoActiveSessionForDelete
 	}
 
 	session.mu.Lock()

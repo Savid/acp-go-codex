@@ -17,6 +17,16 @@ func (s *session) containCancelledTurn(
 	threadID string,
 	interruptErr error,
 ) error {
+	return s.containCancelledTurnWithPolicy(ctx, client, threadID, interruptErr, false)
+}
+
+func (s *session) containCancelledTurnWithPolicy(
+	ctx context.Context,
+	client codex.Client,
+	threadID string,
+	interruptErr error,
+	protectPeers bool,
+) error {
 	containCtx, cancelContain := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	containErr := terminateThreadBackgroundTerminals(containCtx, client, threadID)
 
@@ -30,7 +40,11 @@ func (s *session) containCancelledTurn(
 		// fenced explicitly rather than left running against a dead source; each
 		// peer recovers on a new stream when its next prompt relaunches.
 		fenceCtx, cancelFence := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-		fenceErr = s.agent.quiesceRuntimeAfterCancel(fenceCtx, client)
+		if protectPeers {
+			fenceErr = s.agent.quiesceRuntimeAfterSessionClose(fenceCtx, client, s)
+		} else {
+			fenceErr = s.agent.quiesceRuntimeAfterCancel(fenceCtx, client)
+		}
 
 		cancelFence()
 	}

@@ -134,16 +134,8 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 		return err
 	}
 
-	client, threadID, turnID := session.activeTurnTarget()
-	session.cancelTurn()
-
-	interruptCtx, cancelInterrupt := context.WithTimeout(context.Background(), closeTimeout)
-	interruptErr := client.CancelTurn(interruptCtx, threadID, turnID)
-
-	cancelInterrupt()
-
 	return codexThreadACPError(
-		session.containCancelledTurn(ctx, client, threadID, interruptErr),
+		session.shutdownActiveTurn(ctx, false),
 		session.accountMetaSnapshot(),
 	)
 }
@@ -158,9 +150,10 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
-	// Close is the session's containment boundary, so it waits for the whole
-	// settlement order the live prompt owes before it proves anything: the
-	// durable commit, the terminal lifecycle event, and the v1 result.
+	// Close interrupts and contains a live native turn before allowing its ACP
+	// settlement to terminalize. Admission is already closed, so no later prompt
+	// can enter behind this boundary.
+	shutdownErr := session.shutdownActiveTurn(ctx, true)
 	session.awaitPromptSettlement()
 
 	session.sessionOps.Lock()
@@ -170,7 +163,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		a.providerAuth.closeSession(params.SessionId)
 	}
 
-	if containErr := session.containSession(ctx); containErr != nil {
+	if containErr := errors.Join(shutdownErr, session.containSession(ctx)); containErr != nil {
 		// An incomplete boundary terminalizes nothing and commits nothing new.
 		// The stream is fenced either way, because the session it belonged to is
 		// over whether or not its descendants could be proved gone.
@@ -207,42 +200,91 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
 
-	// Delete serializes after the settlement it would otherwise race, then
-	// fences this session's writer before it tombstones. A commit that landed
-	// after the tombstone would recreate the row delete just removed, and a
-	// store outside this process is under no obligation to ignore it.
-	a.settleAndFenceForDelete(params.SessionId)
-
-	claimedRetained, err := a.claimRetainedRuntimeThreadForDelete(params.SessionId)
-	if errors.Is(err, errNoRetainedRuntimeThread) {
-		claimedRetained = nil
+	// Delete closes prompt admission before inspecting the active turn. Native
+	// interruption and containment then precede both ACP settlement and the
+	// durable tombstone, so neither can terminalize while work is still live.
+	active, err := a.beginSessionDelete(params.SessionId)
+	if errors.Is(err, errNoActiveSessionForDelete) {
+		active = nil
 	} else if err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
+
+	if active != nil {
+		shutdownErr := active.shutdownActiveTurn(ctx, true)
+		active.awaitPromptSettlement()
+		active.sessionOps.Lock()
+
+		containErr := errors.Join(shutdownErr, active.containSession(ctx))
+		if containErr != nil {
+			active.sessionOps.Unlock()
+			active.fenceSession()
+			a.abortSessionClose(params.SessionId, active)
+
+			return acp.UnstableDeleteSessionResponse{}, codexThreadACPError(containErr, active.accountMetaSnapshot())
+		}
+	}
+
+	var claimedRetained *retainedRuntimeThread
+	if active == nil {
+		claimedRetained, err = a.claimRetainedRuntimeThreadForDelete(params.SessionId)
+		if errors.Is(err, errNoRetainedRuntimeThread) {
+			claimedRetained = nil
+		} else if err != nil {
+			return acp.UnstableDeleteSessionResponse{}, err
+		}
+	}
 	defer a.releaseRetainedRuntimeThreadClaim(claimedRetained)
+
+	if claimedRetained != nil {
+		retainedSession := &session{
+			agent:         a,
+			id:            claimedRetained.sessionID,
+			client:        claimedRetained.client,
+			codexThreadID: claimedRetained.threadID,
+		}
+		if err := retainedSession.containSession(ctx); err != nil {
+			return acp.UnstableDeleteSessionResponse{}, err
+		}
+	}
 
 	storeCtx, cancel := a.sessionStoreContext(ctx)
 	defer cancel()
 
 	if err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
+		if active != nil {
+			active.setClientDead(true)
+			active.sessionOps.Unlock()
+			a.abortSessionClose(params.SessionId, active)
+		}
+
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
 
 	a.mu.Lock()
-	session := a.sessions[params.SessionId]
 
 	retained := claimedRetained
 	if retained == nil {
 		retained = a.retainedThreads[params.SessionId]
 	}
 
-	delete(a.sessions, params.SessionId)
+	removed := active != nil && a.sessions[params.SessionId] == active
+	if removed {
+		delete(a.sessions, params.SessionId)
+	}
+
 	a.deleted[params.SessionId] = struct{}{}
 	a.mu.Unlock()
 
+	if active != nil {
+		active.fenceSession()
+		active.fencePersistence()
+		active.sessionOps.Unlock()
+	}
+
 	threadID := ""
-	if session != nil {
-		threadID = session.snapshot().codexThreadID
+	if active != nil {
+		threadID = active.snapshot().codexThreadID
 	} else if retained != nil {
 		threadID = retained.threadID
 	}
@@ -254,15 +296,8 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 
-	if session != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-		err := session.Close(closeCtx)
-
-		closeCancel()
-
-		if err != nil {
-			cleanupErr = errors.Join(cleanupErr, err)
-		}
+	if removed {
+		cleanupErr = errors.Join(cleanupErr, active.releaseMaterialized())
 
 		a.observe.AddActiveSession(ctx, -1)
 	}
@@ -1451,21 +1486,4 @@ func codexThreadACPError(err error, account map[string]any) error {
 
 func newUnknownSession() *acp.RequestError {
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: "unknown session", jsonFieldField: jsonFieldSessionID})
-}
-
-// settleAndFenceForDelete stops the addressed session's live prompt, waits for
-// the settlement it owes, and fences every later commit for it. It runs before
-// the tombstone so no settlement writer can recreate the row.
-func (a *Agent) settleAndFenceForDelete(id acp.SessionId) {
-	a.mu.Lock()
-	session := a.sessions[id]
-	a.mu.Unlock()
-
-	if session == nil {
-		return
-	}
-
-	session.awaitPromptSettlement()
-	session.fenceSession()
-	session.fencePersistence()
 }

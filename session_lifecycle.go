@@ -231,6 +231,12 @@ func (in *promptIncarnation) resolveActionLocked(
 		return nil
 	}
 
+	for _, action := range in.stream.State().Actions {
+		if action.BlocksForeground && !action.State.Terminal() {
+			return nil
+		}
+	}
+
 	return in.emitLocked(ctx, lifecycle.TransitionEvent(lifecycle.ForegroundRunning, in.cycleID, in.turnID))
 }
 

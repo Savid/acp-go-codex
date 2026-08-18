@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +87,137 @@ func TestCancelFencesGenerationWhenTargetedContainmentFails(t *testing.T) {
 	client.mu.Lock()
 	require.True(t, client.closed, "failed targeted containment must fence the accepting generation")
 	client.mu.Unlock()
+}
+
+func TestCloseRefusesUnsupportedContainmentWithoutDestroyingPeer(t *testing.T) {
+	client := &unsupportedBackgroundTerminalClient{spyCodexClient: newSpyCodexClient()}
+	agent := NewAgent()
+	agent.runtimeClient = client
+	target := newSession(agent, "target", t.TempDir(), nil, codex.Thread{ID: "target-thread"}, client, sessionMeta{}, nil)
+	peer := newSession(agent, "peer", t.TempDir(), nil, codex.Thread{ID: "peer-thread"}, client, sessionMeta{}, nil)
+	agent.sessions[target.id] = target
+	agent.sessions[peer.id] = peer
+
+	targetTurn := target.beginTurn(context.Background(), "target-nonce")
+	target.setTurnID("target-turn")
+	peerTurn := peer.beginTurn(context.Background(), "peer-nonce")
+	peer.setTurnID("peer-turn")
+
+	_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: target.id})
+	require.ErrorIs(t, err, codex.ErrBackgroundTerminalsUnsupported)
+	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
+	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+	require.Same(t, client, agent.runtimeClient)
+	require.False(t, target.clientDead)
+	require.False(t, peer.clientDead)
+	require.ErrorIs(t, targetTurn.Err(), context.Canceled)
+	require.NoError(t, peerTurn.Err(), "target close must leave the peer turn alive")
+	require.Same(t, target, agent.activeSession(target.id), "failed close must retain target ownership")
+
+	client.mu.Lock()
+	require.False(t, client.closed, "failed target close must not close the shared runtime")
+	client.mu.Unlock()
+
+	target.finishTurn()
+	_, err = agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(target.id))
+	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
+	require.False(t, agent.isDeleted(target.id), "failed containment must not tombstone the target")
+
+	peer.finishTurn()
+	require.NoError(t, agent.Close())
+}
+
+func TestCloseFenceProtectsRetainedPeer(t *testing.T) {
+	client := newSpyCodexClient()
+	agent := NewAgent()
+	agent.runtimeClient = client
+	agent.retainedThreads["retained-peer"] = &retainedRuntimeThread{
+		sessionID: "retained-peer",
+		threadID:  "retained-thread",
+		client:    client,
+	}
+	owner := &session{agent: agent, id: "owner", client: client}
+
+	err := agent.quiesceRuntimeAfterSessionClose(context.Background(), client, owner)
+	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
+	require.Same(t, client, agent.runtimeClient)
+	require.NoError(t, agent.Close())
+}
+
+func TestDeleteRetainedThreadRefusesUnsupportedContainmentWithActivePeer(t *testing.T) {
+	client := &unsupportedBackgroundTerminalClient{spyCodexClient: newSpyCodexClient()}
+	agent := NewAgent()
+	agent.runtimeClient = client
+	agent.retainedThreads["target"] = &retainedRuntimeThread{
+		sessionID: "target",
+		threadID:  "target-thread",
+		client:    client,
+	}
+	peer := newSession(agent, "peer", t.TempDir(), nil, codex.Thread{ID: "peer-thread"}, client, sessionMeta{}, nil)
+	agent.sessions[peer.id] = peer
+
+	_, err := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest("target"))
+	require.ErrorIs(t, err, codex.ErrBackgroundTerminalsUnsupported)
+	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
+	require.False(t, agent.isDeleted("target"))
+	require.False(t, agent.retainedThreads["target"].claimed)
+	delete(agent.retainedThreads, "target")
+	require.NoError(t, agent.Close())
+}
+
+func TestDeleteSoleRetainedThreadFencesUnsupportedGeneration(t *testing.T) {
+	targetID := acp.SessionId("00000000-0000-4000-8000-000000000001")
+	replacement := newSpyCodexClient()
+	client := &unsupportedClosedTransportClient{
+		unsupportedBackgroundTerminalClient: &unsupportedBackgroundTerminalClient{
+			spyCodexClient: newSpyCodexClient(),
+		},
+	}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return replacement, nil
+	}))
+	agent.runtimeClient = client
+	agent.retainedThreads[targetID] = &retainedRuntimeThread{
+		sessionID: targetID,
+		threadID:  string(targetID),
+		client:    client,
+	}
+
+	_, err := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(targetID))
+	require.NoError(t, err)
+	require.True(t, agent.isDeleted(targetID))
+	require.Same(t, replacement, agent.runtimeClient)
+	require.NotContains(t, agent.retainedThreads, targetID)
+	client.mu.Lock()
+	require.True(t, client.closed)
+	client.mu.Unlock()
+	require.NoError(t, agent.Close())
+}
+
+type unsupportedBackgroundTerminalClient struct {
+	*spyCodexClient
+}
+
+type unsupportedClosedTransportClient struct {
+	*unsupportedBackgroundTerminalClient
+}
+
+func (*unsupportedBackgroundTerminalClient) ListBackgroundTerminals(
+	context.Context,
+	codex.BackgroundTerminalListRequest,
+) (codex.BackgroundTerminalListResponse, error) {
+	return codex.BackgroundTerminalListResponse{}, codex.ErrBackgroundTerminalsUnsupported
+}
+
+func (c *unsupportedClosedTransportClient) UnsubscribeThread(context.Context, string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return codex.ErrConnectionClosed
+	}
+
+	return nil
 }
 
 func TestListThreadBackgroundTerminalIDsRejectsRepeatedCursor(t *testing.T) {

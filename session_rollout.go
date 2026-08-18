@@ -36,7 +36,7 @@ type rolloutMirrorRow struct {
 }
 
 func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
-	return s.mirrorAndEmitRolloutWithCompletion(ctx, nil, nil)
+	return s.mirrorAndEmitRolloutLive(ctx, nil)
 }
 
 // prepareRolloutLiveCursors fences the live rollout cursors to the incarnation
@@ -56,10 +56,6 @@ func (s *session) prepareRolloutLiveCursors() {
 
 	s.rolloutIdentity = nativeTurnIdentity{}
 	s.rolloutLiveFenced = err != nil
-
-	if rows > s.completionRows {
-		s.completionRows = rows
-	}
 
 	if rows > s.visibleRows {
 		s.visibleRows = rows
@@ -95,9 +91,8 @@ func countRolloutRows(path string) (int, error) {
 	return rows, nil
 }
 
-func (s *session) mirrorAndEmitRolloutWithCompletion(
+func (s *session) mirrorAndEmitRolloutLive(
 	ctx context.Context,
-	completed chan<- struct{},
 	events chan<- codex.Event,
 ) error {
 	s.mirrorMu.Lock()
@@ -106,14 +101,14 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 	store := s.agent.options.SessionStore
 
 	if s.rolloutLiveFenced {
-		completed, events = nil, nil
+		events = nil
 	}
 
-	if s.rolloutPath == "" || (store == nil && completed == nil && events == nil) {
+	if s.rolloutPath == "" || (store == nil && events == nil) {
 		return nil
 	}
 
-	startRow := s.rolloutStartRow(store != nil, completed != nil, events != nil)
+	startRow := s.rolloutStartRow(store != nil, events != nil)
 
 	file, err := os.Open(s.rolloutPath)
 	if err != nil {
@@ -178,10 +173,6 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 		s.emitRolloutEvents(ctx, rows, events)
 	}
 
-	if completed != nil {
-		s.emitRolloutCompletions(ctx, rows, completed)
-	}
-
 	return nil
 }
 
@@ -218,7 +209,6 @@ func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEn
 
 func (s *session) rolloutStartRow(
 	storeEnabled bool,
-	completionEnabled bool,
 	eventsEnabled bool,
 ) int {
 	startRow := 0
@@ -229,7 +219,6 @@ func (s *session) rolloutStartRow(
 		row     int
 	}{
 		{storeEnabled, s.mirroredRows},
-		{completionEnabled, s.completionRows},
 		{eventsEnabled, s.visibleRows},
 	} {
 		if !cursor.enabled {
@@ -297,36 +286,6 @@ func (s *session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStore
 	return entries, nextRow
 }
 
-// emitRolloutCompletions hands the rollout's own task-complete row to the prompt
-// loop. The cursor advances only over rows actually delivered, so a hand-off the
-// incarnation ended before is re-read by whoever owns the rollout next rather
-// than silently skipped.
-func (s *session) emitRolloutCompletions(ctx context.Context, rows []rolloutMirrorRow, completed chan<- struct{}) {
-	for _, row := range rows {
-		if row.index < s.completionRows {
-			continue
-		}
-
-		if rolloutTaskComplete(row.entry) && !deliverRolloutSignal(ctx, completed) {
-			return
-		}
-
-		s.completionRows = row.index + 1
-	}
-}
-
-// deliverRolloutSignal reports whether the terminal signal reached the prompt.
-// The buffer holds one, so a second task-complete row for a turn already told is
-// not a loss.
-func deliverRolloutSignal(ctx context.Context, completed chan<- struct{}) bool {
-	select {
-	case completed <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
 // emitRolloutEvents hands the visible rows the app-server never forwarded to the
 // prompt loop. Delivery is backpressured rather than dropped, and the cursor
 // advances only over rows the loop actually received, so an undelivered row
@@ -384,23 +343,8 @@ func rolloutEvent(entry SessionStoreEntry) (codex.Event, bool) {
 	return codex.Event{}, false
 }
 
-func rolloutTaskComplete(entry SessionStoreEntry) bool {
-	var row struct {
-		Type    string `json:"type"`
-		Payload struct {
-			Type string `json:"type"`
-		} `json:"payload"`
-	}
-	if err := json.Unmarshal(entry, &row); err != nil {
-		return false
-	}
-
-	return row.Type == valueEventMsg && row.Payload.Type == "task_complete"
-}
-
 func (s *session) startRolloutTail(
 	ctx context.Context,
-	completed chan<- struct{},
 	events chan<- codex.Event,
 ) (context.CancelFunc, <-chan struct{}) {
 	tailCtx, cancel := context.WithCancel(ctx)
@@ -423,7 +367,7 @@ func (s *session) startRolloutTail(
 
 				return
 			case <-ticker.C:
-				_ = s.mirrorAndEmitRolloutWithCompletion(tailCtx, completed, events)
+				_ = s.mirrorAndEmitRolloutLive(tailCtx, events)
 			}
 		}
 	}()

@@ -7,50 +7,17 @@ import (
 	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
-// lifecycleAdvertisement resolves the lifecycle answer for one connection from
-// the containment mode that connection actually enforces.
-//
-// Every fact it can state is degenerate, in every configuration. A quiescence
-// class needs a boundary that proves the addressed session's own descendants
-// gone, and every proof this adapter holds is scoped to the shared app-server
-// generation that serves every logical session at once: the Linux subreaper's
-// ECHILD result and its descendant inventory prove that generation vacant, and
-// ending it to prove one session settled would end every peer with it. The
-// thread-scoped background-terminal sweep enumerates terminals rather than the
-// process tree behind them, and a poll predicate is not a proof class. So the
-// mode is the resolution path the contract requires rather than a compiled-in
-// constant, and it selects the same truthful row everywhere until some boundary
-// earns more.
-//
-// `updatesOutsidePrompt` is false for the same reason it is honest: a lifecycle
-// stream belongs to one prompt incarnation and is fenced when that prompt ends,
-// so there is no channel between prompts to deliver on. `activityKinds` is empty
-// because the app-server publishes no structured per-instance activity event at
-// all.
-func lifecycleAdvertisement(RuntimeContainmentMode) lifecycle.Negotiated {
-	return lifecycle.Negotiated{ActivityKinds: []lifecycle.ActivityKind{}}
-}
-
-// negotiateLifecycle reads the host's offer and resolves this connection's
-// answer. An absent offer means the host asked for nothing, so the key is
-// omitted from the response and no envelope, prompt correlation, or action
-// correlation exists on the connection.
+// negotiateLifecycle validates the host's reserved offer but omits an answer.
+// Codex has no registry-accepted captured-native evidence for the family
+// extension, so advertising even a degenerate intersection would claim an
+// evidence gate this adapter has not passed.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, error) {
-	offer, present, refusal := lifecycle.DecodeOffer(meta)
+	_, _, refusal := lifecycle.DecodeOffer(meta)
 	if refusal != nil {
 		return lifecycle.Negotiated{}, lifecycleInvalidParams(refusal)
 	}
 
-	if !present {
-		return lifecycle.Negotiated{}, nil
-	}
-
-	answer, common := offer.Answer(lifecycleAdvertisement(containmentMode(a.options)))
-	if !common {
-		return lifecycle.Negotiated{}, nil
-	}
-
-	return answer, nil
+	return lifecycle.Negotiated{}, nil
 }
 
 // negotiatedLifecycle reports the answer this connection settled on.
