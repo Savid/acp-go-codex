@@ -119,6 +119,7 @@ type Agent struct {
 	conn              agentClient
 	sessions          map[acp.SessionId]*session
 	deleted           map[acp.SessionId]struct{}
+	deleting          map[acp.SessionId]int
 	clientCalls       chan struct{}
 	authTokens        *ChatGPTAuthTokens
 	providerProcesses *providerProcessSnapshotTracker
@@ -217,6 +218,7 @@ func NewAgent(opts ...Option) *Agent {
 		observe:           observe,
 		sessions:          make(map[acp.SessionId]*session),
 		deleted:           make(map[acp.SessionId]struct{}),
+		deleting:          make(map[acp.SessionId]int),
 		clientCalls:       make(chan struct{}, clientCallLimit),
 		providerProcesses: providerProcesses,
 		containmentMode:   mode,
@@ -805,6 +807,12 @@ func (a *Agent) acquireSessionLifecycle(id acp.SessionId) (func(), error) {
 		return nil, newAgentClosedError()
 	}
 
+	if a.deletePendingLocked(id) {
+		a.mu.Unlock()
+
+		return nil, newUnknownSession()
+	}
+
 	session := a.sessions[id]
 	if session == nil {
 		a.mu.Unlock()
@@ -836,6 +844,7 @@ func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) err
 	a.mu.Lock()
 	closed := a.closed
 	current := a.sessions[id]
+	deleting := a.deletePendingLocked(id)
 
 	session.mu.Lock()
 	closing := session.closing
@@ -847,10 +856,51 @@ func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) err
 		return newAgentClosedError()
 	case closing:
 		return newSessionCloseInProgress()
+	case deleting:
+		return newUnknownSession()
 	case current != session:
 		return newUnknownSession()
 	default:
 		return nil
+	}
+}
+
+// deletePendingLocked reports that a delete of this id is still running. Delete
+// claims the id before it inspects the active wrapper, so a store-only delete —
+// which has no wrapper whose close flag could carry the fence — is still visible
+// to load and resume admission. Agent.mu is held by the caller.
+func (a *Agent) deletePendingLocked(id acp.SessionId) bool { return a.deleting[id] > 0 }
+
+// deleteFencedLocked reports that an id is barred from coming back at all: a
+// committed tombstone bars it forever, and a running delete bars it for the
+// duration. Agent.mu is held by the caller.
+func (a *Agent) deleteFencedLocked(id acp.SessionId) bool {
+	if _, ok := a.deleted[id]; ok {
+		return true
+	}
+
+	return a.deletePendingLocked(id)
+}
+
+// claimSessionDelete fences an id for one delete. The claim is counted because
+// two concurrent deletes of the same id are both legal and idempotent, and the
+// fence must outlive the later of them.
+func (a *Agent) claimSessionDelete(id acp.SessionId) func() {
+	a.mu.Lock()
+	a.deleting[id]++
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+
+		if a.deleting[id] <= 1 {
+			delete(a.deleting, id)
+
+			return
+		}
+
+		a.deleting[id]--
 	}
 }
 
@@ -864,6 +914,21 @@ func (a *Agent) storeStartedSession(session *session) error {
 		}
 
 		return newAgentClosedError()
+	}
+
+	// The admission check at the head of load and resume happens before the
+	// native resume it blocks in, so the tombstone is re-read here, where the
+	// wrapper would actually become reachable. A resume that raced a delete
+	// hands back a native thread nobody may address, so it is closed rather
+	// than registered.
+	if a.deleteFencedLocked(session.id) {
+		a.mu.Unlock()
+
+		if err := session.Close(context.Background()); err != nil {
+			a.log.DebugContext(context.Background(), "close deleted Codex session failed", slog.String(jsonFieldError, err.Error()))
+		}
+
+		return newUnknownSession()
 	}
 
 	previous := a.sessions[session.id]

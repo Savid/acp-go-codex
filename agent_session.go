@@ -200,6 +200,12 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
 
+	// The id is fenced before anything is inspected, because a store-only delete
+	// has no wrapper whose close flag could carry the fence. Load and resume are
+	// refused for the whole delete, so a native resume already in flight cannot
+	// register a wrapper behind the delete that already found none.
+	defer a.claimSessionDelete(params.SessionId)()
+
 	// Delete closes prompt admission before inspecting the active turn. Native
 	// interruption and containment then precede both ACP settlement and the
 	// durable tombstone, so neither can terminalize while work is still live.

@@ -153,6 +153,128 @@ func TestDeleteSessionTombstonesStoreAndBlocksLoadResume(t *testing.T) {
 	}
 }
 
+// A store-only delete has no active wrapper whose close flag could fence the id,
+// so a load already blocked inside its native resume must be refused where it
+// would become reachable rather than where it started.
+func TestDeleteRefusesLoadResumingAcrossTheTombstone(t *testing.T) {
+	ctx := context.Background()
+	id := acp.SessionId("00000000-0000-4000-8000-0000000000aa")
+	store := NewInMemorySessionStore()
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`),
+	}))
+
+	client := &blockingLifecycleCodexClient{
+		spyCodexClient: newSpyCodexClient(),
+		resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
+		resumeRelease:  make(chan struct{}),
+	}
+	agent := NewAgent(
+		WithSessionStore(store),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+	agent.setAgentClient(newRecordingAgentClient())
+
+	loadResult := make(chan error, 1)
+
+	go func() {
+		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, "/tmp/project"))
+		loadResult <- loadErr
+	}()
+	<-client.resumeStarted
+
+	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(id))
+	require.NoError(t, err)
+	require.True(t, agent.isDeleted(id))
+
+	close(client.resumeRelease)
+	requireUnknownSession(t, <-loadResult)
+	require.Nil(t, agent.activeSession(id), "a tombstoned id may not come back as a live wrapper")
+	require.Contains(t, client.unsubscribed, "thread-stored",
+		"the native thread the refused resume produced is closed rather than leaked")
+
+	_, err = agent.Prompt(ctx, TextPromptRequest(id, "turn-nonce", "hello"))
+	requireUnknownSession(t, err)
+	require.NoError(t, agent.Close())
+}
+
+// The claim covers the whole delete, so an id whose delete is still running is
+// refused at load and resume admission before any native work is dispatched.
+func TestRunningDeleteFencesLoadAndResumeAdmission(t *testing.T) {
+	ctx := context.Background()
+	store := &blockingDeleteSessionStore{
+		configurableStore: &configurableStore{
+			entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`)},
+		},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	client := &blockingLifecycleCodexClient{spyCodexClient: newSpyCodexClient()}
+	agent := NewAgent(
+		WithSessionStore(store),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+	agent.setAgentClient(newRecordingAgentClient())
+
+	deleteResult := make(chan error, 1)
+
+	go func() {
+		_, deleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest("session"))
+		deleteResult <- deleteErr
+	}()
+	<-store.started
+
+	_, err := agent.LoadSession(ctx, LoadSessionRequest("session", "/tmp/project"))
+	requireUnknownSession(t, err)
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("session", "/tmp/project"))
+	requireUnknownSession(t, err)
+	require.Zero(t, client.resumeCallCount(), "a fenced id never reaches the native harness")
+
+	close(store.release)
+	require.NoError(t, <-deleteResult)
+	require.NoError(t, agent.Close())
+}
+
+func TestDeleteFenceAdmissionBranches(t *testing.T) {
+	agent := NewAgent()
+	client := newSpyCodexClient()
+	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	agent.sessions[active.id] = active
+
+	// Two concurrent deletes are both legal, and the fence outlives the later.
+	first := agent.claimSessionDelete(active.id)
+	second := agent.claimSessionDelete(active.id)
+	requireUnknownSession(t, agent.validateSessionLifecycle(active.id, active))
+	_, err := agent.acquireSessionLifecycle(active.id)
+	requireUnknownSession(t, err)
+
+	first()
+	requireUnknownSession(t, agent.validateSessionLifecycle(active.id, active))
+	second()
+	require.NoError(t, agent.validateSessionLifecycle(active.id, active))
+
+	release, err := agent.acquireSessionLifecycle(active.id)
+	require.NoError(t, err)
+	release()
+
+	// A committed tombstone refuses registration outright and closes the native
+	// thread the caller had already resumed.
+	resumed := newSession(agent, "resumed", "/tmp/project", nil, codex.Thread{ID: "thread-resumed"}, client, sessionMeta{}, nil)
+	agent.deleted[resumed.id] = struct{}{}
+	requireUnknownSession(t, agent.storeStartedSession(resumed))
+	require.NotContains(t, agent.sessions, resumed.id)
+	require.Equal(t, []string{"thread-resumed"}, client.unsubscribed)
+
+	// A native close that itself fails changes the refusal into nothing else:
+	// the id stays unknown and the containment failure is only reported to the
+	// operator log.
+	failing := &errorCodexClient{spyCodexClient: newSpyCodexClient(), unsubscribeErr: errors.New("unsubscribe failed")}
+	orphan := newSession(agent, "orphan", "/tmp/project", nil, codex.Thread{ID: "thread-orphan"}, failing, sessionMeta{}, nil)
+	agent.deleted[orphan.id] = struct{}{}
+	requireUnknownSession(t, agent.storeStartedSession(orphan))
+	require.NotContains(t, agent.sessions, orphan.id)
+}
+
 func TestCloseAndDeleteContainActiveTurnBeforeSettlement(t *testing.T) {
 	for _, operation := range []string{"close", "delete"} {
 		t.Run(operation, func(t *testing.T) {
@@ -2199,8 +2321,11 @@ func TestRetainedRuntimeClaimSerializesResumeAndDelete(t *testing.T) {
 		}()
 		<-store.started
 
+		// The delete's own fence is reached before the retained-thread claim, so
+		// the resume is answered with the verdict the finished delete will make
+		// permanent rather than with a transient conflict.
 		_, err := agent.ResumeSession(ctx, params)
-		require.ErrorContains(t, err, "lifecycle is already in progress")
+		requireUnknownSession(t, err)
 		require.Zero(t, client.resumeCallCount())
 
 		close(store.release)
