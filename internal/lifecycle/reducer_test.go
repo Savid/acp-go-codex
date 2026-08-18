@@ -489,3 +489,55 @@ func TestResolvedActionResolvesExactlyOnce(t *testing.T) {
 	require.ErrorIs(t, reducer.Reduce(deliver(7, ActionEvent(ResolvedAction("act-1", ActionDeclined)))),
 		&ViolationError{Kind: ViolationPostTerminalMutation})
 }
+
+// TestTerminalActionAdmitsOnlyNoOpRestatement pins the member-wise basis on the
+// entity the shared battery states it for only through activities. A restatement
+// that carries no difference is suppressed and consumes its sequence; one that
+// carries any difference is refused, and a carried immutable difference is
+// refused under the terminal token because a token naming a terminal entity
+// always wins.
+func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
+	t.Parallel()
+
+	settled := func(t *testing.T) *Reducer {
+		t.Helper()
+
+		reducer := openStream(t, negotiatedForDecode())
+		require.NoError(t, reducer.Reduce(deliver(2, AcceptedEvent(Submission{SubmissionID: "s", ClientNonce: "n"}, "turn-1"))))
+		require.NoError(t, reducer.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
+		require.NoError(t, reducer.Reduce(deliver(4, ActionEvent(ActionUpdate{
+			ActionID: "act-1", Kind: ActionPermission, State: ActionPending,
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: blocking(false),
+		}))))
+		require.NoError(t, reducer.Reduce(deliver(5, ActionEvent(ResolvedAction("act-1", ActionAccepted)))))
+
+		return reducer
+	}
+
+	t.Run("a restatement carrying no difference is suppressed", func(t *testing.T) {
+		t.Parallel()
+
+		reducer := settled(t)
+		require.NoError(t, reducer.Reduce(deliver(6, ActionEvent(ActionUpdate{
+			ActionID: "act-1", Kind: ActionPermission, State: ActionAccepted,
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: blocking(false),
+		}))))
+
+		state := reducer.State()
+		require.Equal(t, uint64(6), state.ReducedThrough)
+		require.Zero(t, state.SuppressedRetransmissions)
+
+		action, known := state.Action("act-1")
+		require.True(t, known)
+		require.Equal(t, ActionAccepted, action.State)
+	})
+
+	t.Run("a restatement changing an immutable reports the terminal token", func(t *testing.T) {
+		t.Parallel()
+
+		reducer := settled(t)
+		require.ErrorIs(t, reducer.Reduce(deliver(6, ActionEvent(ActionUpdate{
+			ActionID: "act-1", Kind: ActionElicitation, State: ActionAccepted,
+		}))), &ViolationError{Kind: ViolationPostTerminalMutation})
+	})
+}

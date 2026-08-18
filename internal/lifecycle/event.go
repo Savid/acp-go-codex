@@ -207,6 +207,8 @@ type Delivery struct {
 	// carrier together. Comparing decoded values is what distinguishes an exact
 	// retransmission from a conflicting reuse of the same identity: key order and
 	// insignificant whitespace are never differences, and nothing has to retain
-	// raw bytes for the life of a session.
+	// raw bytes for the life of a session. Numbers are retained as their literals
+	// so the comparison stays exact; a decode that collapsed them to float64 would
+	// call two integers beyond double precision the same value.
 	Frame any
 }

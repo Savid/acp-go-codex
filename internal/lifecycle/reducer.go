@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"encoding/json"
 	"errors"
-	"reflect"
 )
 
 // Options configures a reducer.
@@ -213,7 +212,7 @@ func (r *Reducer) reduceFirst(delivery Delivery) error {
 }
 
 func (r *Reducer) reduceDuplicate(delivery Delivery) error {
-	if recorded, known := r.frames[delivery.Sequence]; known && reflect.DeepEqual(recorded, delivery.Frame) {
+	if recorded, known := r.frames[delivery.Sequence]; known && valueEqual(recorded, delivery.Frame) {
 		r.state.SuppressedRetransmissions++
 
 		return nil
