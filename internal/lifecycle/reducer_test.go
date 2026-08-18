@@ -179,6 +179,44 @@ func TestNextIncarnationAdoptsNothingFromTheOneItSupersedes(t *testing.T) {
 	require.Empty(t, state.Turns)
 }
 
+// TestSupersededIncarnationNeverResurrects pins the retired-identity memory the
+// family battery's snapshot-on-superseded-stream vector states: once a later
+// incarnation opens, the identity it replaced is fenced for the rest of the
+// session, so a snapshot bearing it is stale rather than the opening of a fresh
+// stream — and the refusal leaves the standing projection alone.
+func TestSupersededIncarnationNeverResurrects(t *testing.T) {
+	t.Parallel()
+
+	reducer := openStream(t, Negotiated{Versions: []int{1}})
+
+	next := Delivery{
+		StreamID: "strm-2",
+		Sequence: 1,
+		Carrier:  CarrierSessionInfo,
+		Event:    SnapshotEvent("cycle-2", QuiescenceFact{}),
+	}
+	require.NoError(t, reducer.Reduce(next))
+	require.NoError(t, reducer.Reduce(Delivery{
+		StreamID: "strm-2",
+		Sequence: 2,
+		Carrier:  CarrierSessionInfo,
+		Event:    AcceptedEvent(Submission{SubmissionID: "s", ClientNonce: "n"}, "turn-1"),
+	}))
+
+	resurrection := Delivery{
+		StreamID: "strm-1",
+		Sequence: 9,
+		Carrier:  CarrierSessionInfo,
+		Event:    SnapshotEvent("cycle-3", QuiescenceFact{}),
+	}
+	require.ErrorIs(t, reducer.Reduce(resurrection), &ViolationError{Kind: ViolationStaleStream})
+
+	state := reducer.State()
+	require.Equal(t, "strm-2", state.StreamID)
+	require.Equal(t, uint64(2), state.ReducedThrough)
+	require.Len(t, state.Turns, 1)
+}
+
 func TestTerminalTurnNeverReopens(t *testing.T) {
 	t.Parallel()
 

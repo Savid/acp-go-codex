@@ -54,11 +54,17 @@ type Reducer struct {
 	// blocker blocks the cycle current at its first sight, and that cycle may not
 	// move again until the blocker terminalizes.
 	actionCycle map[string]string
+	// retired names every stream identity a later incarnation superseded. It spans
+	// incarnations rather than being reset with the projection, because a
+	// superseded incarnation is fenced for the rest of the session: without this
+	// memory a snapshot bearing an old identity would read as the opening of a
+	// fresh stream and resurrect an incarnation the source already ended.
+	retired map[string]struct{}
 }
 
 // NewReducer builds a reducer for one session.
 func NewReducer(opts Options) *Reducer {
-	reducer := &Reducer{negotiated: opts.Negotiated}
+	reducer := &Reducer{negotiated: opts.Negotiated, retired: make(map[string]struct{})}
 	reducer.reset("")
 
 	return reducer
@@ -152,11 +158,21 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 // on a stream identity this reducer has not seen; a projection is per incarnation
 // and adopts nothing from the one it supersedes. A closed session admits no
 // incarnation at all, which is why the fence is judged before this.
+//
+// Supersession fences the incarnation it replaced exactly as close does, so a
+// snapshot bearing a retired identity is a stale event rather than a fresh
+// stream. It is refused before anything resets, which leaves the standing
+// projection — the current incarnation's — untouched.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
 	}
 
+	if _, superseded := r.retired[delivery.StreamID]; superseded {
+		return r.fail(delivery, ViolationStaleStream, "the incarnation was superseded")
+	}
+
+	r.retired[r.state.StreamID] = struct{}{}
 	r.reset(delivery.StreamID)
 
 	return r.reduceFirst(delivery)
