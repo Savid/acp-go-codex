@@ -119,6 +119,23 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	}
 }
 
+func TestRunTurnDispatchFailureClosesRegisteredStream(t *testing.T) {
+	transport := newScriptTransport()
+	transport.fail(methodTurnStart, "dispatch rejected")
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+
+	events, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
+	if err == nil || events != nil {
+		t.Fatalf("RunTurn dispatch failure = (%v, %v), want nil stream and error", events, err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.turns) != 0 {
+		t.Fatalf("dispatch failure retained turn registrations: %#v", client.turns)
+	}
+}
+
 func TestAppServerClientTurnAndDiscoveryMethods(t *testing.T) {
 	transport := newScriptTransport()
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
