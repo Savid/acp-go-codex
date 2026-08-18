@@ -43,7 +43,10 @@ type session struct {
 
 	client codex.Client
 
-	lifecycle        sync.RWMutex
+	// sessionOps serializes the session-scoped native operations — close,
+	// delete, and the runtime rebinds that stand behind them — against the
+	// ordinary requests that read the session while they run.
+	sessionOps       sync.RWMutex
 	turn             chan struct{}
 	mu               sync.Mutex
 	closing          bool
@@ -64,6 +67,27 @@ type session struct {
 	visibleRows      int
 	rolloutIdentity  nativeTurnIdentity
 	permissionTools  permissionToolRegistry
+	// incarnation is the lifecycle stream the live prompt speaks for. A session
+	// holds at most one, because this configuration opens one incarnation per
+	// prompt and fences it when that prompt ends.
+	incarnation *promptIncarnation
+	// settleGate is held for one prompt's whole settlement order, from the turn
+	// it acquired through the durable commit, the terminal lifecycle event, and
+	// the v1 result. Close and delete take it, so neither returns while a prompt
+	// can still write.
+	settleGate sync.Mutex
+	// unsyncedEntries is the exact durable prefix a failed commit did not place.
+	// It is retained rather than dropped, and the next prompt blocks loudly on
+	// it until the store holds it.
+	unsyncedEntries []SessionStoreEntry
+	unsyncedRow     int
+	// persistenceFenced stops every later commit. Delete sets it before it
+	// tombstones, so no settlement writer can recreate the row it removed.
+	persistenceFenced bool
+	// rolloutLiveFenced records that this incarnation could not establish where
+	// the shared rollout file stood when it opened, so the live tail publishes
+	// nothing rather than replaying a previous incarnation's rows.
+	rolloutLiveFenced bool
 }
 
 type sessionInteraction struct {
@@ -537,37 +561,6 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 	return cancels
 }
 
-func (s *session) unsubscribe(ctx context.Context) error {
-	s.cancelTurn()
-	client, codexThreadID, clientDead := s.closeState()
-
-	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-	defer cancel()
-
-	if client == nil || codexThreadID == "" {
-		return nil
-	}
-
-	if clientDead {
-		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
-	}
-
-	unsubscribeErr := client.UnsubscribeThread(closeCtx, codexThreadID)
-	if unsubscribeErr == nil {
-		return nil
-	}
-
-	// Cancellation may retire the generation concurrently with unsubscribe.
-	// Once that transition owns the client, its containment proof supersedes a
-	// connection-closed unsubscribe result.
-	current, _, nowDead := s.closeState()
-	if current == client && nowDead {
-		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
-	}
-
-	return unsubscribeErr
-}
-
 func (s *session) releaseMaterialized() error {
 	s.mu.Lock()
 	materializedPath := s.materializedPath
@@ -594,13 +587,106 @@ func (s *session) releaseMaterialized() error {
 	return nil
 }
 
-// Close releases one logical thread. The Agent owns the shared app-server and
-// closes it only when the service itself closes.
+// Close ends one logical session. The Agent owns the shared app-server and
+// closes it only when the service itself closes, so this is the session's own
+// containment boundary rather than the runtime's.
+//
+// The live prompt is cancelled and its whole settlement order awaited first: a
+// close that returned while a prompt could still commit or still emit would
+// fence a stream the host has not finished reducing.
 func (s *session) Close(ctx context.Context) error {
-	s.lifecycle.Lock()
-	defer s.lifecycle.Unlock()
+	s.awaitPromptSettlement()
 
-	return errors.Join(s.unsubscribe(ctx), s.releaseMaterialized())
+	s.sessionOps.Lock()
+	defer s.sessionOps.Unlock()
+
+	return errors.Join(s.containSession(ctx), s.releaseMaterialized())
+}
+
+// awaitPromptSettlement stops the live prompt and waits for the settlement it
+// owes: the durable commit, the terminal lifecycle event, and the v1 result.
+func (s *session) awaitPromptSettlement() {
+	s.cancelTurn()
+	s.waitForSettleGate()
+}
+
+func (s *session) waitForSettleGate() {
+	s.settleGate.Lock()
+	defer s.settleGate.Unlock() //nolint:gocritic // Deliberate synchronization barrier.
+}
+
+// containSession finishes this session's containment boundary. The thread-scoped
+// background-terminal sweep is the only targeted containment the app-server
+// offers; when it cannot be proved — because the app-server does not carry those
+// methods, or because a terminal outlived the sweep — the shared generation is
+// fenced instead, which is the contract's answer for a multiplexed sibling that
+// cannot contain one target alone.
+func (s *session) containSession(ctx context.Context) error {
+	client, codexThreadID, clientDead := s.closeState()
+
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+
+	if client == nil || codexThreadID == "" {
+		return nil
+	}
+
+	if clientDead {
+		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
+	}
+
+	if err := s.containThreadOrFenceGeneration(closeCtx, client, codexThreadID); err != nil {
+		return err
+	}
+
+	return s.unsubscribeContainedThread(closeCtx, client, codexThreadID)
+}
+
+// containThreadOrFenceGeneration proves this thread's background terminals gone,
+// or fences the generation they live in when it cannot.
+func (s *session) containThreadOrFenceGeneration(
+	ctx context.Context,
+	client codex.Client,
+	codexThreadID string,
+) error {
+	containErr := terminateThreadBackgroundTerminals(ctx, client, codexThreadID)
+	if containErr == nil {
+		return nil
+	}
+
+	fenceErr := s.agent.quiesceRuntimeAfterCancel(ctx, client)
+
+	// Where the app-server offers no thread-scoped containment at all, the
+	// generation fence is the boundary rather than a fallback after a failure,
+	// so its result is the boundary's result. A sweep that was offered and did
+	// not prove the thread contained is a failure in its own right, and both are
+	// reported.
+	if errors.Is(containErr, codex.ErrBackgroundTerminalsUnsupported) {
+		return fenceErr
+	}
+
+	return errors.Join(containErr, fenceErr)
+}
+
+func (s *session) unsubscribeContainedThread(
+	ctx context.Context,
+	client codex.Client,
+	codexThreadID string,
+) error {
+	unsubscribeErr := client.UnsubscribeThread(ctx, codexThreadID)
+	if unsubscribeErr == nil {
+		return nil
+	}
+
+	// Cancellation may retire the generation concurrently with unsubscribe.
+	// Once that transition owns the client, its containment proof supersedes a
+	// connection-closed unsubscribe result.
+	current, _, nowDead := s.closeState()
+	if current == client && nowDead {
+		return s.agent.quiesceRuntimeAfterCancel(ctx, client)
+	}
+
+	return unsubscribeErr
 }
 
 func (s *session) info() acp.SessionInfo {

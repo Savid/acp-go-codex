@@ -964,7 +964,7 @@ func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
 	agent.runtimeDead = true
 	active.setClientDead(true)
 
-	active.lifecycle.Lock()
+	active.sessionOps.Lock()
 	active.mu.Lock()
 	active.closing = true
 	active.mu.Unlock()
@@ -976,7 +976,7 @@ func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
 	require.Same(t, newClient, client)
 	require.Zero(t, newClient.resumeCallCount(), "an admitted close must never be rebound")
 
-	active.lifecycle.Unlock()
+	active.sessionOps.Unlock()
 	require.NoError(t, agent.Close())
 }
 

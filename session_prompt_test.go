@@ -749,9 +749,7 @@ func TestSessionPromptRawRolloutTail(t *testing.T) {
 	<-done
 }
 
-func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
-	withRolloutCompletionFallback(t, time.Millisecond)
-
+func TestPromptSettlesOnTheRolloutTaskCompleteRow(t *testing.T) {
 	agent := NewAgent()
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -787,26 +785,24 @@ func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
 	defer cancel()
 	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
 	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("fallback prompt resp=%#v err=%v", resp, err)
+		t.Fatalf("task-complete prompt resp=%#v err=%v", resp, err)
 	}
 	if len(conn.updates) != 2 || conn.updates[0].Update.AgentMessageChunk == nil {
-		t.Fatalf("fallback updates = %#v", conn.updates)
+		t.Fatalf("task-complete updates = %#v", conn.updates)
 	}
 	wantIdentity := nativeTurnIdentity{turnID: "fallback-turn", messageID: "fallback-message"}
 	if got := nativeIdentityFromMeta(resp.Meta); got != wantIdentity {
-		t.Fatalf("fallback response identity = %#v, want %#v", got, wantIdentity)
+		t.Fatalf("task-complete response identity = %#v, want %#v", got, wantIdentity)
 	}
 	if got := lastNotificationNativeIdentity(conn.updates); got != wantIdentity {
-		t.Fatalf("fallback update identity = %#v, want %#v", got, wantIdentity)
+		t.Fatalf("task-complete update identity = %#v, want %#v", got, wantIdentity)
 	}
 	if session.completionRows != 4 || session.visibleRows != 4 {
 		t.Fatalf("rollout cursors completion=%d visible=%d", session.completionRows, session.visibleRows)
 	}
 }
 
-func TestPromptUsesImmediateRolloutTaskCompleteFallback(t *testing.T) {
-	withRolloutCompletionFallback(t, 0)
-
+func TestPromptSettlesOnASoleRolloutTaskCompleteRow(t *testing.T) {
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
 		t.Fatalf("write empty rollout: %v", err)
@@ -833,7 +829,7 @@ func TestPromptUsesImmediateRolloutTaskCompleteFallback(t *testing.T) {
 	defer cancel()
 	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
 	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("immediate fallback prompt resp=%#v err=%v", resp, err)
+		t.Fatalf("sole task-complete prompt resp=%#v err=%v", resp, err)
 	}
 	if session.completionRows != 1 {
 		t.Fatalf("completion cursor = %d", session.completionRows)
@@ -877,8 +873,6 @@ func TestPromptReturnsRolloutEventUpdateError(t *testing.T) {
 }
 
 func TestPromptReturnsTerminalRolloutIdentityUpdateError(t *testing.T) {
-	withRolloutCompletionFallback(t, time.Millisecond)
-
 	updateErr := errors.New("identity update failed")
 	agent := NewAgent()
 	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
@@ -1034,8 +1028,14 @@ func TestEventUpdateEmptyAndFallbackBranches(t *testing.T) {
 	if planStatus(codex.PlanStepPending) != acp.PlanEntryStatusPending {
 		t.Fatal("pending plan status did not map")
 	}
-	if stopReasonFromCodex(codex.StopReasonCancelled) != acp.StopReasonCancelled || stopReasonFromCodex(codex.StopReasonError) != acp.StopReasonEndTurn {
-		t.Fatal("stop reason mapping changed")
+	if stop, clean := promptStopReason(codex.StopReasonCancelled); !clean || stop != acp.StopReasonCancelled {
+		t.Fatalf("cancelled stop reason = %q clean=%v", stop, clean)
+	}
+	if stop, clean := promptStopReason(codex.StopReasonError); clean || stop != "" {
+		t.Fatalf("a native failure reported stop reason %q clean=%v", stop, clean)
+	}
+	if stop, clean := promptStopReason(codex.StopReasonEndTurn); !clean || stop != acp.StopReasonEndTurn {
+		t.Fatalf("end-turn stop reason = %q clean=%v", stop, clean)
 	}
 	if usageFromCodex(codex.Usage{}) != nil {
 		t.Fatal("zero usage emitted usage")
@@ -1103,8 +1103,8 @@ func TestPromptValueHelpers(t *testing.T) {
 	if toolKind(codex.ToolEvent{Kind: "mcpToolCall"}) != acp.ToolKindOther || toolKind(codex.ToolEvent{Kind: "unknown"}) != acp.ToolKindOther {
 		t.Fatal("toolKind special cases failed")
 	}
-	if stopReasonFromCodex(codex.StopReasonCancelled) != acp.StopReasonCancelled || stopReasonFromCodex(codex.StopReasonError) != acp.StopReasonEndTurn {
-		t.Fatal("stopReasonFromCodex special cases failed")
+	if _, clean := promptStopReason(codex.StopReasonError); clean {
+		t.Fatal("a native failure was reported as a clean stop")
 	}
 }
 

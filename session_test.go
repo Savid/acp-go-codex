@@ -320,7 +320,7 @@ func (c *blockingUnsubscribeErrorClient) UnsubscribeThread(ctx context.Context, 
 	}
 }
 
-func TestUnsubscribeAcceptsConcurrentRuntimeRetirementProof(t *testing.T) {
+func TestSessionContainmentAcceptsConcurrentRuntimeRetirementProof(t *testing.T) {
 	client := &blockingUnsubscribeErrorClient{
 		errorCodexClient: &errorCodexClient{spyCodexClient: newSpyCodexClient()},
 		started:          make(chan struct{}),
@@ -334,7 +334,7 @@ func TestUnsubscribeAcceptsConcurrentRuntimeRetirementProof(t *testing.T) {
 	agent.runtimeClient = client
 
 	done := make(chan error, 1)
-	go func() { done <- active.unsubscribe(context.Background()) }()
+	go func() { done <- active.containSession(context.Background()) }()
 	<-client.started
 	active.setClientDead(true)
 	close(client.release)

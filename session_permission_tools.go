@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
 // permissionToolClass is the native operation family used when Codex sends an
@@ -138,7 +139,20 @@ func (s *session) requestPermissionForTool(
 	}
 
 	request.ToolCall.Status = &status
+
+	// The action is minted and announced before the inbound request exists, so a
+	// host can never see an action id it cannot yet answer.
+	action, correlation, err := s.beginAction(ctx, lifecycle.ActionPermission, true)
+	if err != nil {
+		return acp.RequestPermissionResponse{}, false, err
+	}
+
+	request.Meta = stampActionCorrelation(request.Meta, correlation)
+
 	response, err := conn.RequestPermission(ctx, request)
+	if resolveErr := action.resolve(ctx, permissionActionState(response, err)); resolveErr != nil {
+		return acp.RequestPermissionResponse{}, true, resolveErr
+	}
 
 	return response, true, err
 }
@@ -177,11 +191,20 @@ func (s *session) createElicitationForMCPTool(
 		return acp.UnstableCreateElicitationResponse{}, false, nil
 	}
 
+	action, correlation, err := s.beginAction(ctx, lifecycle.ActionElicitation, true)
+	if err != nil {
+		return acp.UnstableCreateElicitationResponse{}, false, err
+	}
+
 	response, err := conn.CreateElicitation(ctx, request, elicitationScope{
-		SessionID:  s.id,
-		TurnNonce:  turnNonce,
-		ToolCallID: record.id,
+		SessionID:         s.id,
+		TurnNonce:         turnNonce,
+		ToolCallID:        record.id,
+		ActionCorrelation: correlation,
 	})
+	if resolveErr := action.resolve(ctx, elicitationActionState(response, err)); resolveErr != nil {
+		return acp.UnstableCreateElicitationResponse{}, true, resolveErr
+	}
 
 	return response, true, err
 }

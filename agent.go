@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 	"github.com/savid/acp-go-codex/internal/observer"
 )
 
@@ -137,6 +138,10 @@ type Agent struct {
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
+	// lifecycle is the answer this connection settled on at initialize. An
+	// absent answer makes every envelope, prompt correlation, and action
+	// correlation illegal on the connection.
+	lifecycle lifecycle.Negotiated
 
 	rateLimitsMu   sync.Mutex
 	rateLimitsSnap *codex.RateLimitSnapshot
@@ -426,12 +431,18 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		return acp.InitializeResponse{}, err
 	}
 
+	negotiated, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
+		return acp.InitializeResponse{}, err
+	}
+
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
 	a.mu.Lock()
 	a.clientCapabilities = cloneClientCapabilities(params.ClientCapabilities)
 	a.positionEncoding = positionEncoding
+	a.lifecycle = negotiated
 	a.mu.Unlock()
 
 	codexMeta := map[string]any{
@@ -469,6 +480,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
+		Meta:            lifecycleResponseMeta(negotiated),
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
 			Title:   &title,
@@ -809,15 +821,15 @@ func (a *Agent) acquireSessionLifecycle(id acp.SessionId) (func(), error) {
 		return nil, newSessionCloseInProgress()
 	}
 
-	session.lifecycle.RLock()
+	session.sessionOps.RLock()
 
 	if err := a.validateSessionLifecycle(id, session); err != nil {
-		session.lifecycle.RUnlock()
+		session.sessionOps.RUnlock()
 
 		return nil, err
 	}
 
-	return session.lifecycle.RUnlock, nil
+	return session.sessionOps.RUnlock, nil
 }
 
 func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) error {

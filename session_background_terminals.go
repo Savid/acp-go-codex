@@ -2,7 +2,6 @@ package codexacp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -26,7 +25,8 @@ func terminateThreadBackgroundTerminals(
 ) error {
 	terminals, ok := client.(codex.BackgroundTerminalClient)
 	if !ok {
-		return errors.New("codex client does not provide required thread-scoped background terminal containment")
+		return fmt.Errorf("required thread-scoped background terminal containment: %w: this client exposes no thread-scoped containment surface",
+			codex.ErrBackgroundTerminalsUnsupported)
 	}
 
 	for {

@@ -673,10 +673,22 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 	a.runtimeDead = true
 	a.runtimeEpoch++
 
+	fenced := make([]*session, 0, len(a.sessions))
+
 	for _, session := range a.sessions {
 		session.setClientDead(true)
+
+		fenced = append(fenced, session)
 	}
 	a.mu.Unlock()
+
+	// The generation every peer's incarnation was reading is gone, so each of
+	// those incarnations is lost. Fencing them explicitly is what keeps a peer
+	// from continuing an ordered stream against a source that can no longer
+	// produce its terminal; the peer's next prompt opens a fresh incarnation.
+	for _, session := range fenced {
+		session.fenceSession()
+	}
 
 	cleanupErr := a.closeRuntimeGeneration(
 		context.WithoutCancel(ctx), client, release, scratchRoot, scratchRelease, epoch,

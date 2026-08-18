@@ -17,6 +17,10 @@ import (
 )
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 	if err := a.ensureOpen(); err != nil {
 		return acp.NewSessionResponse{}, err
@@ -113,6 +117,10 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 		return err
 	}
 
+	// The route nonce authenticates the request against the session's current
+	// turn, so it is validated first; the lifecycle literal is then refused
+	// before the native interrupt, so a rejected cancel is never applied. Being
+	// a notification, both refusals are wire-silent.
 	route, err := parseInboundRoute(params.Meta)
 	if err != nil {
 		return routeInvalidParams(err)
@@ -120,6 +128,10 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 
 	if route.TurnNonce != session.activeTurnNonce() {
 		return routeInvalidParams(fmt.Errorf("turnNonce does not identify the active turn"))
+	}
+
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return err
 	}
 
 	client, threadID, turnID := session.activeTurnTarget()
@@ -137,23 +149,38 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 }
 
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+
 	session, err := a.beginSessionClose(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
 
-	session.lifecycle.Lock()
-	defer session.lifecycle.Unlock()
+	// Close is the session's containment boundary, so it waits for the whole
+	// settlement order the live prompt owes before it proves anything: the
+	// durable commit, the terminal lifecycle event, and the v1 result.
+	session.awaitPromptSettlement()
+
+	session.sessionOps.Lock()
+	defer session.sessionOps.Unlock()
 
 	if a.providerAuth != nil {
 		a.providerAuth.closeSession(params.SessionId)
 	}
 
-	if unsubscribeErr := session.unsubscribe(ctx); unsubscribeErr != nil {
+	if containErr := session.containSession(ctx); containErr != nil {
+		// An incomplete boundary terminalizes nothing and commits nothing new.
+		// The stream is fenced either way, because the session it belonged to is
+		// over whether or not its descendants could be proved gone.
+		session.fenceSession()
 		a.abortSessionClose(params.SessionId, session)
 
-		return acp.CloseSessionResponse{}, codexThreadACPError(unsubscribeErr, session.accountMetaSnapshot())
+		return acp.CloseSessionResponse{}, codexThreadACPError(containErr, session.accountMetaSnapshot())
 	}
+
+	session.fenceSession()
 
 	removed, retained := a.finishSessionCloseRetainingThread(params.SessionId, session)
 
@@ -171,10 +198,20 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 	if params.SessionId == "" {
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
+
+	// Delete serializes after the settlement it would otherwise race, then
+	// fences this session's writer before it tombstones. A commit that landed
+	// after the tombstone would recreate the row delete just removed, and a
+	// store outside this process is under no obligation to ignore it.
+	a.settleAndFenceForDelete(params.SessionId)
 
 	claimedRetained, err := a.claimRetainedRuntimeThreadForDelete(params.SessionId)
 	if errors.Is(err, errNoRetainedRuntimeThread) {
@@ -238,6 +275,10 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 }
 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+
 	if err := a.ensureOpen(); err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
@@ -462,6 +503,10 @@ func encodeListCursor(offset int) string {
 }
 
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 	if err := a.ensureOpen(); err != nil {
 		return acp.ResumeSessionResponse{}, err
@@ -836,6 +881,10 @@ func (a *Agent) rebindActiveStoredSession(
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 	if err := a.ensureOpen(); err != nil {
 		return acp.LoadSessionResponse{}, err
@@ -1289,6 +1338,10 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 // would name a member that request never carried. A request with neither
 // variant omitted `value`, which is the member the union decodes on.
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+	if err := rejectLifecycleKey(setSessionConfigOptionMeta(params)); err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
+
 	if params.Boolean != nil {
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
 	}
@@ -1300,11 +1353,30 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	return a.setSessionConfigValue(ctx, params.ValueId)
 }
 
+// setSessionConfigOptionMeta reads the `_meta` of whichever variant the request
+// carries. The family literal is refused on the request whatever its shape, so a
+// variant this adapter goes on to reject for its own reasons still reports the
+// reserved key first.
+func setSessionConfigOptionMeta(params acp.SetSessionConfigOptionRequest) map[string]any {
+	switch {
+	case params.Boolean != nil:
+		return params.Boolean.Meta
+	case params.ValueId != nil:
+		return params.ValueId.Meta
+	default:
+		return nil
+	}
+}
+
 // SetSessionMode exists only because github.com/coder/acp-go-sdk's generated
 // Agent interface still requires it. The local ACP dispatcher intentionally
 // does not route session/set_mode; use session/set_config_option with configId
 // "mode".
-func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.SetSessionModeResponse{}, err
+	}
+
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
@@ -1379,4 +1451,21 @@ func codexThreadACPError(err error, account map[string]any) error {
 
 func newUnknownSession() *acp.RequestError {
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: "unknown session", jsonFieldField: jsonFieldSessionID})
+}
+
+// settleAndFenceForDelete stops the addressed session's live prompt, waits for
+// the settlement it owes, and fences every later commit for it. It runs before
+// the tombstone so no settlement writer can recreate the row.
+func (a *Agent) settleAndFenceForDelete(id acp.SessionId) {
+	a.mu.Lock()
+	session := a.sessions[id]
+	a.mu.Unlock()
+
+	if session == nil {
+		return
+	}
+
+	session.awaitPromptSettlement()
+	session.fenceSession()
+	session.fencePersistence()
 }

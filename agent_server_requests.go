@@ -6,6 +6,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
 // handleCodexServerRequest bridges native Codex app-server requests onto ACP
@@ -223,13 +224,24 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 		return codex.EmptyToolUserInputResponse(), nil //nolint:nilerr // A refused question is answered, not failed.
 	}
 
+	action, correlation, err := session.beginAction(ctx, lifecycle.ActionElicitation, true)
+	if err != nil {
+		return nil, err
+	}
+
 	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
 		Form: form,
 	}, elicitationScope{
-		SessionID:  session.id,
-		TurnNonce:  turnNonce,
-		ToolCallID: acp.ToolCallId(codex.ToolUserInputToolCallID(req, params)),
+		SessionID:         session.id,
+		TurnNonce:         turnNonce,
+		ToolCallID:        acp.ToolCallId(codex.ToolUserInputToolCallID(req, params)),
+		ActionCorrelation: correlation,
 	})
+
+	if resolveErr := action.resolve(ctx, elicitationActionState(resp, err)); resolveErr != nil {
+		return nil, resolveErr
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -362,11 +374,23 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 			requestID = &acp.RequestId{Str: &requestIDValue}
 		}
 
+		var action *liveAction
+
+		action, correlation, actionErr := session.beginAction(ctx, lifecycle.ActionElicitation, true)
+		if actionErr != nil {
+			return nil, actionErr
+		}
+
 		resp, err = conn.CreateElicitation(ctx, request, elicitationScope{
-			SessionID: session.id,
-			TurnNonce: turnNonce,
-			RequestID: requestID,
+			SessionID:         session.id,
+			TurnNonce:         turnNonce,
+			RequestID:         requestID,
+			ActionCorrelation: correlation,
 		})
+
+		if resolveErr := action.resolve(ctx, elicitationActionState(resp, err)); resolveErr != nil {
+			return nil, resolveErr
+		}
 	}
 
 	if err != nil {

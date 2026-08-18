@@ -620,7 +620,7 @@ func TestAppServerEventPumpBranches(t *testing.T) {
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/agentMessage/delta", Params: mustRaw(map[string]any{"threadId": "other", "turnId": "turn-1", "delta": "skip-thread"})}
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/agentMessage/delta", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "other", "delta": "skip-turn"})}
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "unknown", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1"})}
-	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/completed", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1"})}
+	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/completed", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "turn": map[string]any{"status": "completed"}})}
 	var got []Event
 	for event := range stream.out {
 		got = append(got, event)

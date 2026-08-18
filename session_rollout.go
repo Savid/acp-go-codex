@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -13,10 +15,18 @@ import (
 )
 
 var (
-	sessionRolloutAppendTimeout      = 60 * time.Second
-	sessionRolloutAppendDelays       = []time.Duration{0, 200 * time.Millisecond, 800 * time.Millisecond}
-	sessionRolloutCompletionFallback = 2 * time.Second
+	sessionRolloutAppendTimeout = 60 * time.Second
+	sessionRolloutAppendDelays  = []time.Duration{0, 200 * time.Millisecond, 800 * time.Millisecond}
 )
+
+// sessionRolloutEventBuffer bounds the live rollout tail's hand-off to the
+// prompt loop. The tail blocks on a full buffer rather than dropping, so a
+// visible frame is delivered or the incarnation ends: it is never silently lost.
+const sessionRolloutEventBuffer = 128
+
+// promptSettlementTimeout bounds the settlement a cancelled request must not
+// abort. Settlement runs on a detached context, so it needs a bound of its own.
+const promptSettlementTimeout = 2 * time.Minute
 
 const maxSessionImportLineBytes = 10 * 1024 * 1024
 
@@ -29,18 +39,23 @@ func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
 	return s.mirrorAndEmitRolloutWithCompletion(ctx, nil, nil)
 }
 
+// prepareRolloutLiveCursors fences the live rollout cursors to the incarnation
+// that is about to open. The rollout file is shared across every turn of a
+// thread, so a row a previous incarnation already accounted for must never enter
+// this one. When the fence itself cannot be read the live tail publishes nothing
+// for this incarnation: the durable mirror still runs, but nothing guesses which
+// rows are old.
 func (s *session) prepareRolloutLiveCursors() {
-	s.mirrorMu.Lock()
-	s.rolloutIdentity = nativeTurnIdentity{}
-	s.mirrorMu.Unlock()
-
 	rows, err := countRolloutRows(s.rolloutPath)
-	if err != nil {
-		return
+	if errors.Is(err, fs.ErrNotExist) {
+		rows, err = 0, nil
 	}
 
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
+
+	s.rolloutIdentity = nativeTurnIdentity{}
+	s.rolloutLiveFenced = err != nil
 
 	if rows > s.completionRows {
 		s.completionRows = rows
@@ -89,6 +104,10 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 	defer s.mirrorMu.Unlock()
 
 	store := s.agent.options.SessionStore
+
+	if s.rolloutLiveFenced {
+		completed, events = nil, nil
+	}
 
 	if s.rolloutPath == "" || (store == nil && completed == nil && events == nil) {
 		return nil
@@ -150,21 +169,17 @@ func (s *session) mirrorAndEmitRolloutWithCompletion(
 
 	if store != nil {
 		durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
-		if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, durableEntries); err != nil {
+		if err := s.commitRolloutEntries(ctx, store, durableEntries, nextMirroredRow); err != nil {
 			return err
-		}
-
-		if nextMirroredRow > s.mirroredRows {
-			s.mirroredRows = nextMirroredRow
 		}
 	}
 
 	if events != nil {
-		s.emitRolloutEvents(rows, events)
+		s.emitRolloutEvents(ctx, rows, events)
 	}
 
 	if completed != nil {
-		s.emitRolloutCompletions(rows, completed)
+		s.emitRolloutCompletions(ctx, rows, completed)
 	}
 
 	return nil
@@ -282,49 +297,56 @@ func (s *session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStore
 	return entries, nextRow
 }
 
-func (s *session) emitRolloutCompletions(rows []rolloutMirrorRow, completed chan<- struct{}) {
-	nextRow := s.completionRows
+// emitRolloutCompletions hands the rollout's own task-complete row to the prompt
+// loop. The cursor advances only over rows actually delivered, so a hand-off the
+// incarnation ended before is re-read by whoever owns the rollout next rather
+// than silently skipped.
+func (s *session) emitRolloutCompletions(ctx context.Context, rows []rolloutMirrorRow, completed chan<- struct{}) {
 	for _, row := range rows {
 		if row.index < s.completionRows {
 			continue
 		}
 
-		nextRow = row.index + 1
-		if rolloutTaskComplete(row.entry) {
-			select {
-			case completed <- struct{}{}:
-			default:
-			}
+		if rolloutTaskComplete(row.entry) && !deliverRolloutSignal(ctx, completed) {
+			return
 		}
-	}
 
-	if nextRow > s.completionRows {
-		s.completionRows = nextRow
+		s.completionRows = row.index + 1
 	}
 }
 
-func (s *session) emitRolloutEvents(rows []rolloutMirrorRow, events chan<- codex.Event) {
-	nextRow := s.visibleRows
+// deliverRolloutSignal reports whether the terminal signal reached the prompt.
+// The buffer holds one, so a second task-complete row for a turn already told is
+// not a loss.
+func deliverRolloutSignal(ctx context.Context, completed chan<- struct{}) bool {
+	select {
+	case completed <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// emitRolloutEvents hands the visible rows the app-server never forwarded to the
+// prompt loop. Delivery is backpressured rather than dropped, and the cursor
+// advances only over rows the loop actually received, so an undelivered row
+// stays unaccounted instead of disappearing.
+func (s *session) emitRolloutEvents(ctx context.Context, rows []rolloutMirrorRow, events chan<- codex.Event) {
 	for _, row := range rows {
 		if row.index < s.visibleRows {
 			continue
 		}
 
-		nextRow = row.index + 1
-
 		event, ok := rolloutEvent(row.entry)
-		if !ok {
-			continue
+		if ok {
+			select {
+			case events <- event:
+			case <-ctx.Done():
+				return
+			}
 		}
 
-		select {
-		case events <- event:
-		default:
-		}
-	}
-
-	if nextRow > s.visibleRows {
-		s.visibleRows = nextRow
+		s.visibleRows = row.index + 1
 	}
 }
 
@@ -394,7 +416,10 @@ func (s *session) startRolloutTail(
 		for {
 			select {
 			case <-tailCtx.Done():
-				_ = s.mirrorAndEmitRolloutWithCompletion(context.WithoutCancel(ctx), completed, events)
+				// The prompt loop is gone by the time the tail stops, so the
+				// final pass is durability only. Publishing into a hand-off
+				// nobody reads would block on a full buffer forever.
+				_ = s.mirrorAndEmitRollout(context.WithoutCancel(ctx))
 
 				return
 			case <-ticker.C:
@@ -404,4 +429,63 @@ func (s *session) startRolloutTail(
 	}()
 
 	return cancel, done
+}
+
+// commitRolloutEntries places one durable prefix. A failed commit retains the
+// exact entries it did not place instead of dropping them, and the next prompt
+// blocks on that retention until the store holds it: the alternative is a turn
+// whose frames a host was shown and the store never received.
+func (s *session) commitRolloutEntries(
+	ctx context.Context,
+	store SessionStore,
+	entries []SessionStoreEntry,
+	nextRow int,
+) error {
+	if s.persistenceFenced {
+		return nil
+	}
+
+	if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, entries); err != nil {
+		s.unsyncedEntries = entries
+		s.unsyncedRow = nextRow
+
+		return err
+	}
+
+	s.unsyncedEntries = nil
+	s.unsyncedRow = 0
+
+	if nextRow > s.mirroredRows {
+		s.mirroredRows = nextRow
+	}
+
+	return nil
+}
+
+// ensureMirrorSynced blocks the next prompt until the prefix a previous
+// settlement failed to commit is durable. A store outage is reported loudly
+// rather than papered over, because the alternative is a session whose durable
+// state silently skips a turn.
+func (s *session) ensureMirrorSynced(ctx context.Context) error {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	store := s.agent.options.SessionStore
+	if store == nil || len(s.unsyncedEntries) == 0 {
+		return nil
+	}
+
+	return s.commitRolloutEntries(ctx, store, s.unsyncedEntries, s.unsyncedRow)
+}
+
+// fencePersistence stops every later commit for this session. It takes the
+// commit's own lock, so a settlement already inside the store finishes before
+// the fence stands and no commit can start after it.
+func (s *session) fencePersistence() {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	s.persistenceFenced = true
+	s.unsyncedEntries = nil
+	s.unsyncedRow = 0
 }

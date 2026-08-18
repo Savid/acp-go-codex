@@ -29,6 +29,11 @@ type elicitationScope struct {
 	TurnNonce  string
 	ToolCallID acp.ToolCallId
 	RequestID  *acp.RequestId
+	// ActionCorrelation is the lifecycle identity of the action this request
+	// holds open. It coexists with the reserved route object rather than
+	// replacing it: the route object routes and authenticates the callback, and
+	// this names the same pending request on the ordered stream.
+	ActionCorrelation map[string]any
 }
 
 type localAgentConnection struct {
@@ -315,7 +320,7 @@ func scopedElicitationParams(
 		return nil, err
 	}
 
-	payload[jsonFieldMeta] = stamped
+	payload[jsonFieldMeta] = stampActionCorrelation(stamped, scope.ActionCorrelation)
 
 	return json.Marshal(payload)
 }

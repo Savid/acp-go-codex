@@ -13,6 +13,13 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 		return nil, err
 	}
 
+	// Every extension route refuses the reserved literal before its own side
+	// effects or its own refusal, fork and every provider-auth leg included, so
+	// a configured and an unconfigured leg answer the key the same way.
+	if err := rejectLifecycleKeyInParams(params); err != nil {
+		return nil, err
+	}
+
 	switch method {
 	case ForkSessionMethod:
 		var req acp.UnstableForkSessionRequest

@@ -2038,7 +2038,7 @@ func TestAcquireSessionLifecycleRevalidatesAfterWaiting(t *testing.T) {
 	// Hold both locks that follow the initial Agent lookup. Observing Agent.mu
 	// held proves the acquisition goroutine passed that lookup and is waiting
 	// on session.mu; holding lifecycle keeps it from revalidating too early.
-	active.lifecycle.Lock()
+	active.sessionOps.Lock()
 	active.mu.Lock()
 
 	result := make(chan error, 1)
@@ -2069,7 +2069,7 @@ func TestAcquireSessionLifecycleRevalidatesAfterWaiting(t *testing.T) {
 		return true
 	}, time.Second, time.Millisecond)
 
-	active.lifecycle.Unlock()
+	active.sessionOps.Unlock()
 	require.ErrorContains(t, <-result, "unknown session")
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 	"github.com/savid/acp-go-codex/internal/observer"
 )
 
@@ -109,9 +110,18 @@ func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBl
 }
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	// Route validation runs first, so a prompt never reports two rejections and
+	// the order of two failures is never implementation-defined.
 	route, err := parseInboundRoute(params.Meta)
 	if err != nil {
 		return acp.PromptResponse{}, routeInvalidParams(err)
+	}
+
+	negotiated := s.agent.negotiatedLifecycle()
+
+	submission, refusal := lifecycle.DecodePromptCorrelation(params.Meta, negotiated)
+	if refusal != nil {
+		return acp.PromptResponse{}, lifecycleInvalidParams(refusal)
 	}
 
 	releaseTurn, err := s.acquireTurn(ctx)
@@ -120,22 +130,88 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 	defer releaseTurn()
 
+	// One prompt's whole settlement order runs under this gate, so close and
+	// delete wait for the durable commit and the terminal lifecycle event rather
+	// than for the native loop alone.
+	s.settleGate.Lock()
+	defer s.settleGate.Unlock()
+
+	if err = s.ensureMirrorSynced(ctx); err != nil { //nolint:gocritic // Reuses the function's error variable.
+		return acp.PromptResponse{}, err
+	}
+
 	input, releaseImages, err := s.preparePromptInput(ctx, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
 	defer releaseImages()
 
+	incarnation, err := s.openIncarnation(ctx, negotiated)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+	defer s.clearIncarnation(incarnation)
+
 	turnCtx := s.beginTurn(ctx, route.TurnNonce)
 	defer s.finishTurn()
 
+	result := s.runPromptTurn(ctx, turnCtx, promptRun{
+		incarnation: incarnation,
+		submission:  submission,
+		input:       input,
+	})
+
+	return s.settlePrompt(ctx, turnCtx, incarnation, result, params.MessageId)
+}
+
+// promptRun is what one native turn needs to start: the incarnation that reports
+// it, the submission identity it echoes at acceptance, and the native input.
+type promptRun struct {
+	incarnation *promptIncarnation
+	submission  lifecycle.Submission
+	input       []codex.UserInput
+}
+
+// promptTurnResult is what one native turn produced. Every exit of the loop
+// returns one, so settlement happens once and on every path rather than at the
+// nine places the loop could have returned from.
+type promptTurnResult struct {
+	state    *promptEventState
+	snapshot sessionSnapshot
+	// failure is the native cause this turn ended on, already mapped onto the
+	// uniform wire error. A failure is never a stop reason.
+	failure error
+	// accepted records that the native dispatcher took durable ownership of the
+	// frame. A failure before that point creates neither submission nor turn.
+	accepted bool
+}
+
+// runPromptTurn drives one native turn to its terminal and returns what it
+// produced. It never returns a response and never commits: settlement is one
+// step, and it is the caller's.
+func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, run promptRun) promptTurnResult {
 	snapshot := s.snapshot()
 	model, effort, tier, personality, collaborationMode := s.turnSettings()
 	s.prepareRolloutLiveCursors()
 
+	var agentText strings.Builder
+
+	result := promptTurnResult{
+		snapshot: snapshot,
+		state: &promptEventState{
+			snapshot:            snapshot,
+			agentDeltaItems:     map[string]struct{}{},
+			reasoningDeltaItems: map[string]struct{}{},
+			toolContents:        make(map[acp.ToolCallId][]acp.ToolCallContent),
+			agentText:           &agentText,
+			stopReason:          acp.StopReasonEndTurn,
+			imageTools:          newImageToolState(),
+		},
+	}
+
 	events, err := s.client.RunTurn(turnCtx, codex.TurnStartRequest{
 		ThreadID:          snapshot.codexThreadID,
-		Prompt:            input,
+		Prompt:            run.input,
 		Model:             model,
 		ServiceTier:       tier,
 		ReasoningEffort:   effort,
@@ -149,47 +225,37 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		OutputSchema: snapshot.outputSchema,
 	})
 	if err != nil {
-		return acp.PromptResponse{}, s.mapTurnFailure(err)
+		result.failure = s.mapTurnFailure(err)
+
+		return result
 	}
+
+	// The ack is the dispatch linearization point: the app-server has taken
+	// durable ownership of the frame and named the turn it opened.
+	if err := run.incarnation.accept(turnCtx, run.submission); err != nil {
+		result.failure = s.mapTurnFailure(err)
+
+		return result
+	}
+
+	result.accepted = true
+
+	return s.drivePromptTurn(ctx, turnCtx, events, result)
+}
+
+// drivePromptTurn consumes the native stream until its terminal and records how
+// the turn ended.
+func (s *session) drivePromptTurn(
+	ctx context.Context,
+	turnCtx context.Context,
+	events <-chan codex.Event,
+	result promptTurnResult,
+) promptTurnResult {
+	state := result.state
 
 	rolloutCompleted := make(chan struct{}, 1)
-	rolloutEvents := make(chan codex.Event, 128)
+	rolloutEvents := make(chan codex.Event, sessionRolloutEventBuffer)
 	stopTail, tailDone := s.startRolloutTail(turnCtx, rolloutCompleted, rolloutEvents)
-
-	tailStopped := false
-	defer func() {
-		if !tailStopped {
-			stopTail()
-			<-tailDone
-		}
-	}()
-
-	var agentText strings.Builder
-
-	state := &promptEventState{
-		snapshot:            snapshot,
-		agentDeltaItems:     map[string]struct{}{},
-		reasoningDeltaItems: map[string]struct{}{},
-		toolContents:        make(map[acp.ToolCallId][]acp.ToolCallContent),
-		agentText:           &agentText,
-		stopReason:          acp.StopReasonEndTurn,
-		imageTools:          newImageToolState(),
-	}
-
-	var (
-		completionTimer    *time.Timer
-		completionFallback <-chan time.Time
-	)
-
-	defer func() {
-		if completionTimer != nil {
-			completionTimer.Stop()
-		}
-	}()
-
-	handleEvent := func(event codex.Event) error {
-		return s.handlePromptEvent(turnCtx, event, state)
-	}
 
 	var turnDeadline <-chan time.Time
 
@@ -201,6 +267,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 
 	timedOut := false
+	handled := error(nil)
 
 	eventsOpen := true
 	for eventsOpen {
@@ -212,27 +279,20 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				continue
 			}
 
-			if err := handleEvent(event); err != nil {
-				return acp.PromptResponse{}, err
+			if handled = s.handlePromptEvent(turnCtx, event, state); handled != nil {
+				eventsOpen = false
 			}
 		case event := <-rolloutEvents:
-			if err := handleEvent(event); err != nil {
-				return acp.PromptResponse{}, err
+			if handled = s.handlePromptEvent(turnCtx, event, state); handled != nil {
+				eventsOpen = false
 			}
 		case <-rolloutCompleted:
+			// The rollout's own task-complete row is a structured native
+			// terminal for the foreground, so the turn ends there. Whatever the
+			// app-server has already delivered is still read, because those
+			// frames are in hand rather than merely expected.
 			state.completed = true
-
-			if completionTimer == nil {
-				if sessionRolloutCompletionFallback <= 0 {
-					eventsOpen = false
-
-					continue
-				}
-
-				completionTimer = time.NewTimer(sessionRolloutCompletionFallback)
-				completionFallback = completionTimer.C
-			}
-		case <-completionFallback:
+			handled = s.drainDeliveredEvents(turnCtx, events, state)
 			eventsOpen = false
 		case <-turnCtx.Done():
 			eventsOpen = false
@@ -245,56 +305,157 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	stopTail()
 	<-tailDone
 
-	tailStopped = true
-
 	if turnCtx.Err() != nil || s.wasTurnCancelled() {
 		state.stopReason = acp.StopReasonCancelled
+		state.nativeFailure = false
+		handled = nil
 	}
 
-	if timedOut && state.stopReason != acp.StopReasonCancelled {
-		abortErr := s.abortTurnAfterTimeout(ctx)
-
-		message := fmt.Sprintf("codex turn exceeded %s deadline", s.agent.options.TurnTimeout)
-		if abortErr != nil {
-			message = fmt.Sprintf("%s: %v", message, abortErr)
-		}
-
-		return acp.PromptResponse{}, s.mapTurnFailure(&codex.TurnFailedError{
-			Cause:   codex.CauseTimeout,
-			Message: message,
+	switch {
+	case handled != nil:
+		result.failure = handled
+	case state.stopReason == acp.StopReasonCancelled:
+		// Cancellation wins a coincident deadline. The native interrupt was
+		// already issued by the cancel path, so timeout must not send it again.
+	case timedOut:
+		result.failure = s.failTimedOutTurn(ctx)
+	case state.nativeFailure:
+		result.failure = s.mapTurnFailure(&codex.TurnFailedError{
+			Cause:   codex.CauseProvider,
+			Message: "codex reported a turn status this adapter cannot state as a clean stop",
 		})
+	case !state.completed && state.stopReason != acp.StopReasonCancelled:
+		result.failure = s.mapTurnFailure(codex.ErrConnectionClosed)
 	}
 
-	if !state.completed && state.stopReason != acp.StopReasonCancelled {
-		return acp.PromptResponse{}, s.mapTurnFailure(codex.ErrConnectionClosed)
-	}
+	return result
+}
 
-	if err := s.mirrorAndEmitRollout(context.WithoutCancel(ctx)); err != nil {
-		var imageErr *imageOutputError
-		if errors.As(err, &imageErr) {
-			return acp.PromptResponse{}, s.mapTurnFailure(imageErr)
+// drainDeliveredEvents reads the frames the app-server has already handed over.
+// It waits for nothing: an empty channel means nothing more was delivered, not
+// that nothing more will be.
+func (s *session) drainDeliveredEvents(
+	turnCtx context.Context,
+	events <-chan codex.Event,
+	state *promptEventState,
+) error {
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return nil
+			}
+
+			if err := s.handlePromptEvent(turnCtx, event, state); err != nil {
+				return err
+			}
+		default:
+			return nil
 		}
+	}
+}
 
+// failTimedOutTurn aborts the native turn a deadline expired on. A timeout is a
+// failure rather than a cancel, so it never reports a stop reason.
+func (s *session) failTimedOutTurn(ctx context.Context) error {
+	abortErr := s.abortTurnAfterTimeout(ctx)
+
+	message := fmt.Sprintf("codex turn exceeded %s deadline", s.agent.options.TurnTimeout)
+	if abortErr != nil {
+		message = fmt.Sprintf("%s: %v", message, abortErr)
+	}
+
+	return s.mapTurnFailure(&codex.TurnFailedError{Cause: codex.CauseTimeout, Message: message})
+}
+
+// settlePrompt is the one settlement point every prompt exit reaches. The order
+// is the contract's: the native foreground terminal, then the durable
+// foreground-prefix commit, then the terminal idle that boundary earns, then the
+// v1 result.
+//
+// Store work runs on a context detached from the request, because a host that
+// cancelled its call is not a reason to leave the frames it was shown
+// uncommitted. A failed commit fails the prompt and emits no terminal idle:
+// durability outranks the terminal event, so the incarnation ends unsettled and
+// the next one opens with a truthful snapshot.
+func (s *session) settlePrompt(
+	ctx context.Context,
+	turnCtx context.Context,
+	incarnation *promptIncarnation,
+	result promptTurnResult,
+	messageID *string,
+) (acp.PromptResponse, error) {
+	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptSettlementTimeout)
+	defer cancel()
+
+	stopReason, outcome := promptSettlement(result)
+
+	if err := s.commitForegroundPrefix(settleCtx); err != nil {
 		return acp.PromptResponse{}, err
+	}
+
+	if err := incarnation.settle(settleCtx, stopReason, outcome); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	if result.failure != nil {
+		return acp.PromptResponse{}, result.failure
 	}
 
 	// A rollout task_complete can be the terminal fence when app-server closes
 	// without forwarding turn/completed. Publish the final native pair after
 	// the durable mirror in either path, including a turn with an empty final
 	// assistant item.
-	if err := s.finalizePromptNativeIdentity(context.WithoutCancel(turnCtx), state); err != nil {
+	if err := s.finalizePromptNativeIdentity(context.WithoutCancel(turnCtx), result.state); err != nil {
 		return acp.PromptResponse{}, err
 	}
 
 	return acp.PromptResponse{
-		StopReason:    state.stopReason,
-		Usage:         state.usage,
-		UserMessageId: params.MessageId,
+		StopReason:    stopReason,
+		Usage:         result.state.usage,
+		UserMessageId: messageID,
 		Meta: mergePromptResponseMeta(
-			structuredOutputMeta(agentText.String(), snapshot.outputSchema),
-			state.nativeIdentity,
+			structuredOutputMeta(result.state.agentText.String(), result.snapshot.outputSchema),
+			result.state.nativeIdentity,
 		),
 	}, nil
+}
+
+// commitForegroundPrefix places the largest prefix of this turn's native state
+// the store can hold. A failed or cancelled turn commits exactly what it
+// streamed, so the commit runs on every exit rather than on success alone.
+func (s *session) commitForegroundPrefix(ctx context.Context) error {
+	err := s.mirrorAndEmitRollout(ctx)
+	if err == nil {
+		return nil
+	}
+
+	var imageErr *imageOutputError
+	if errors.As(err, &imageErr) {
+		return s.mapTurnFailure(imageErr)
+	}
+
+	return err
+}
+
+// promptSettlement derives what the turn itself produced, before the v1 layer
+// masks anything. A failure records outcome `failed` and states no stop reason,
+// because no ACP v1 stop reason names a failure and the v1 error carries it.
+func promptSettlement(result promptTurnResult) (acp.StopReason, lifecycle.Outcome) {
+	if result.failure != nil {
+		return "", lifecycle.OutcomeFailed
+	}
+
+	switch result.state.stopReason {
+	case acp.StopReasonCancelled:
+		return acp.StopReasonCancelled, lifecycle.OutcomeCancelled
+	case acp.StopReasonRefusal:
+		return acp.StopReasonRefusal, lifecycle.OutcomeRefused
+	case acp.StopReasonMaxTokens, acp.StopReasonMaxTurnRequests:
+		return result.state.stopReason, lifecycle.OutcomeLimit
+	default:
+		return acp.StopReasonEndTurn, lifecycle.OutcomeSuccess
+	}
 }
 
 type promptEventState struct {
@@ -310,6 +471,10 @@ type promptEventState struct {
 	usage      *acp.Usage
 	stopReason acp.StopReason
 	completed  bool
+	// nativeFailure records a native completion this adapter cannot state as a
+	// clean stop. A failure is not a stop reason, so it is carried separately
+	// rather than folded into one.
+	nativeFailure bool
 
 	nativeIdentity        nativeTurnIdentity
 	emittedNativeIdentity nativeTurnIdentity
@@ -433,7 +598,12 @@ func (s *session) applyPromptUsage(event codex.Event, state *promptEventState) {
 	if event.Kind == codex.EventCompleted {
 		state.completed = true
 
-		state.stopReason = stopReasonFromCodex(event.StopReason)
+		if stop, clean := promptStopReason(event.StopReason); clean {
+			state.stopReason = stop
+		} else {
+			state.nativeFailure = true
+		}
+
 		if completedUsage := usageFromCodex(event.Usage); completedUsage != nil {
 			state.usage = completedUsage
 		}
@@ -789,12 +959,18 @@ func planStatus(status codex.PlanStepStatus) acp.PlanEntryStatus {
 	}
 }
 
-func stopReasonFromCodex(reason codex.StopReason) acp.StopReason {
+// promptStopReason maps one native completion onto the ACP v1 stop reason it
+// actually reports. A native failure is not a stop reason at all — the v1 error
+// carries it — so the second result is false and the turn fails rather than
+// reporting a clean end it did not reach.
+func promptStopReason(reason codex.StopReason) (acp.StopReason, bool) {
 	switch reason {
 	case codex.StopReasonCancelled:
-		return acp.StopReasonCancelled
+		return acp.StopReasonCancelled, true
+	case codex.StopReasonError:
+		return "", false
 	default:
-		return acp.StopReasonEndTurn
+		return acp.StopReasonEndTurn, true
 	}
 }
 

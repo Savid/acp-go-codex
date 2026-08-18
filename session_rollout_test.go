@@ -76,14 +76,17 @@ func TestRolloutMirrorKeepsDurableCursorWhenRowsAlreadyMirrored(t *testing.T) {
 	}
 }
 
-func TestRolloutCompletionCursor(t *testing.T) {
+// TestRolloutCursorsAdvanceOnlyOverDeliveredRows pins the loss detector: a row
+// the prompt loop never received leaves the cursor where it was, so it is
+// re-read rather than silently skipped.
+func TestRolloutCursorsAdvanceOnlyOverDeliveredRows(t *testing.T) {
 	rolloutSession := &session{completionRows: 1, visibleRows: 1}
 	completed := make(chan struct{}, 1)
-	rolloutSession.emitRolloutCompletions([]rolloutMirrorRow{
+
+	rolloutSession.emitRolloutCompletions(context.Background(), []rolloutMirrorRow{
 		{index: 0, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
 		{index: 1, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"token_count"}}`)},
 		{index: 2, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
-		{index: 3, entry: SessionStoreEntry(`not-json`)},
 	}, completed)
 
 	select {
@@ -91,27 +94,29 @@ func TestRolloutCompletionCursor(t *testing.T) {
 	default:
 		t.Fatal("task_complete row did not signal completion")
 	}
-	select {
-	case <-completed:
-		t.Fatal("completion signal was not coalesced")
-	default:
+	if rolloutSession.completionRows != 3 {
+		t.Fatalf("completion cursor = %d, want 3", rolloutSession.completionRows)
 	}
-	if rolloutSession.completionRows != 4 {
-		t.Fatalf("completion cursor before unbuffered signal = %d", rolloutSession.completionRows)
-	}
-	rolloutSession.emitRolloutCompletions([]rolloutMirrorRow{
-		{index: 4, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
+
+	// A hand-off the consumer is no longer reading is a row this incarnation
+	// never accounted for, so the cursor stays where the last delivery left it.
+	stopped, cancelStopped := context.WithCancel(context.Background())
+	cancelStopped()
+	rolloutSession.emitRolloutCompletions(stopped, []rolloutMirrorRow{
+		{index: 3, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)},
 	}, make(chan struct{}))
-	if rolloutSession.completionRows != 5 {
-		t.Fatalf("completion cursor = %d", rolloutSession.completionRows)
+
+	if rolloutSession.completionRows != 3 {
+		t.Fatalf("completion cursor advanced past an undelivered row: %d", rolloutSession.completionRows)
 	}
+
 	if !rolloutTaskComplete(SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete"}}`)) ||
 		rolloutTaskComplete(SessionStoreEntry(`{"type":"response_item","payload":{"type":"message"}}`)) {
 		t.Fatal("rollout task completion detection changed")
 	}
 
 	events := make(chan codex.Event, 1)
-	rolloutSession.emitRolloutEvents([]rolloutMirrorRow{
+	rolloutSession.emitRolloutEvents(context.Background(), []rolloutMirrorRow{
 		{index: 0, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"old"}}`)},
 		{index: 4, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"visible"}}`)},
 	}, events)
@@ -126,12 +131,14 @@ func TestRolloutCompletionCursor(t *testing.T) {
 	if rolloutSession.visibleRows != 5 {
 		t.Fatalf("visible cursor = %d", rolloutSession.visibleRows)
 	}
-	rolloutSession.emitRolloutEvents([]rolloutMirrorRow{
-		{index: 5, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"dropped"}}`)},
+
+	rolloutSession.emitRolloutEvents(stopped, []rolloutMirrorRow{
+		{index: 5, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"undelivered"}}`)},
 	}, make(chan codex.Event))
-	if rolloutSession.visibleRows != 6 {
-		t.Fatalf("visible cursor after unbuffered event = %d", rolloutSession.visibleRows)
+	if rolloutSession.visibleRows != 5 {
+		t.Fatalf("visible cursor advanced past an undelivered row: %d", rolloutSession.visibleRows)
 	}
+
 	if event, ok := rolloutEvent(SessionStoreEntry(`{"type":"event_msg","payload":{"type":"token_count"}}`)); ok || event.Kind != "" {
 		t.Fatalf("non-message rollout event = %#v ok=%v", event, ok)
 	}
@@ -232,15 +239,6 @@ func withRolloutAppendSettings(t *testing.T, timeout time.Duration, delays []tim
 	t.Cleanup(func() {
 		sessionRolloutAppendTimeout = originalTimeout
 		sessionRolloutAppendDelays = originalDelays
-	})
-}
-
-func withRolloutCompletionFallback(t *testing.T, delay time.Duration) {
-	t.Helper()
-	original := sessionRolloutCompletionFallback
-	sessionRolloutCompletionFallback = delay
-	t.Cleanup(func() {
-		sessionRolloutCompletionFallback = original
 	})
 }
 

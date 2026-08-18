@@ -70,9 +70,8 @@ const (
 	itemTypeImageGeneration  = "imageGeneration"
 	itemTypeImageView        = "imageView"
 
+	statusCompleted  = "completed"
 	statusDone       = "done"
-	statusFailed     = "failed"
-	statusErrored    = "errored"
 	valuePlan        = "plan"
 	valueDefault     = "default"
 	valuePlaceholder = "placeholder"
@@ -1474,15 +1473,19 @@ func contentText(value any) string {
 	}
 }
 
+// stopReasonFromTurn reads how one native turn ended. The status vocabulary is
+// closed, so a completion carrying anything else is a completion this adapter
+// cannot state as a clean stop: it reports an error rather than defaulting to
+// end_turn, and the caller attaches the native cause.
 func stopReasonFromTurn(turn map[string]any) StopReason {
 	status := strings.ToLower(firstNonEmpty(stringValue(turn, fieldStatus), stringValue(turn, "stopReason")))
 	switch status {
+	case statusCompleted, statusDone:
+		return StopReasonEndTurn
 	case "interrupted", "cancelled", "canceled":
 		return StopReasonCancelled
-	case statusFailed, statusErrored, string(EventError):
-		return StopReasonError
 	default:
-		return StopReasonEndTurn
+		return StopReasonError
 	}
 }
 

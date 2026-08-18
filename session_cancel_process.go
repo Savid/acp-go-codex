@@ -25,6 +25,10 @@ func (s *session) containCancelledTurn(
 	var fenceErr error
 
 	if interruptErr != nil || containErr != nil {
+		// Targeted containment could not be proved, so the boundary widens to
+		// the generation the target lives in. Every incarnation it serves is
+		// fenced explicitly rather than left running against a dead source; each
+		// peer recovers on a new stream when its next prompt relaunches.
 		fenceCtx, cancelFence := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 		fenceErr = s.agent.quiesceRuntimeAfterCancel(fenceCtx, client)
 
