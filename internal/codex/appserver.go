@@ -97,6 +97,13 @@ type AppServerClient struct {
 	closed  bool
 	turns   map[*turnStream]struct{}
 	account Account
+	// backgroundTerminalsKnown records that one background-terminal call has
+	// been answered, and backgroundTerminalsOK what it answered. The capability
+	// comes from the app-server's own reply rather than from a version compare,
+	// because the methods are an experimental protocol surface whose first
+	// release this adapter cannot name.
+	backgroundTerminalsKnown bool
+	backgroundTerminalsOK    bool
 }
 
 var _ Client = (*AppServerClient)(nil)
@@ -396,8 +403,10 @@ func (c *AppServerClient) ListBackgroundTerminals(
 
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodBackgroundTerminalList, params, &resp); err != nil {
-		return BackgroundTerminalListResponse{}, normalizeThreadError(err)
+		return BackgroundTerminalListResponse{}, c.backgroundTerminalError(err)
 	}
+
+	c.recordBackgroundTerminals(true)
 
 	raw := mapSlice(resp, "data")
 
@@ -441,12 +450,46 @@ func (c *AppServerClient) TerminateBackgroundTerminal(
 		fieldThreadID:  req.ThreadID,
 		fieldProcessID: req.ProcessID,
 	}, &resp); err != nil {
-		return false, normalizeThreadError(err)
+		return false, c.backgroundTerminalError(err)
 	}
+
+	c.recordBackgroundTerminals(true)
 
 	terminated, _ := resp["terminated"].(bool)
 
 	return terminated, nil
+}
+
+// backgroundTerminalError classifies one background-terminal refusal. An
+// app-server that does not implement the method is a capability fact this
+// client latches, not a containment attempt that failed: the two lead to
+// different cancel boundaries, so they are never joined into one error.
+func (c *AppServerClient) backgroundTerminalError(err error) error {
+	if !isMethodNotFound(err) {
+		return normalizeThreadError(err)
+	}
+
+	c.recordBackgroundTerminals(false)
+
+	return fmt.Errorf("%w: %w", ErrBackgroundTerminalsUnsupported, err)
+}
+
+func (c *AppServerClient) recordBackgroundTerminals(supported bool) {
+	c.mu.Lock()
+	c.backgroundTerminalsKnown = true
+	c.backgroundTerminalsOK = supported
+	c.mu.Unlock()
+}
+
+// BackgroundTerminalsSupported reports what the running app-server answered
+// about the thread-scoped background-terminal methods. The second result is
+// false until one call has actually been answered: an unprobed capability is
+// unknown rather than absent.
+func (c *AppServerClient) BackgroundTerminalsSupported() (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.backgroundTerminalsOK, c.backgroundTerminalsKnown
 }
 
 func optionalInt64Value(value map[string]any, key string) *int64 {
@@ -502,6 +545,16 @@ func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-
 	turnID := stringValue(mapValue(resp, "turn"), fieldID)
 	if turnID == "" {
 		turnID = stringValue(resp, "turnId")
+	}
+
+	// The ack is where the dispatcher takes ownership, so it is also where
+	// ownership becomes provable. An ack naming no turn would leave this stream
+	// matching every turn on its thread, which is a wildcard rather than a
+	// filter, so the turn fails closed instead.
+	if turnID == "" {
+		c.closeTurn(stream)
+
+		return nil, errors.New("codex turn/start accepted a turn without naming it")
 	}
 
 	c.setTurnID(stream, turnID)
@@ -778,7 +831,7 @@ func (c *AppServerClient) runEventPump(done chan<- struct{}) {
 	}
 
 	if err := c.rpc.closeError(); err != nil {
-		c.dispatchEvent(Event{Kind: EventError, Err: err})
+		c.dispatchEvent(Event{Kind: EventError, Scope: EventScopeTransportLost, Err: err})
 	}
 }
 
@@ -813,6 +866,10 @@ func (c *AppServerClient) dispatchEvent(event Event) {
 func (c *AppServerClient) registerTurn(ctx context.Context, threadID string) (*turnStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+
+	if threadID == "" {
+		return nil, errors.New("codex turn stream requires the thread it routes for")
 	}
 
 	turnCtx, cancel := context.WithCancel(ctx)
@@ -860,22 +917,34 @@ func (c *AppServerClient) closeTurnOnContext(stream *turnStream) {
 }
 
 func (c *AppServerClient) setTurnID(stream *turnStream, turnID string) {
-	if turnID == "" {
-		return
-	}
-
 	c.mu.Lock()
 	stream.turnID = turnID
 	c.mu.Unlock()
 }
 
+// matchingTurns selects the turn streams one event is evidence about. Ownership
+// is stated, never inferred from an absent identifier: a thread-scoped event
+// reaches the streams of exactly that thread, a generation-scoped event reaches
+// none, and only the loss of the shared transport reaches every live stream,
+// because that loss really does end every incarnation at once.
 func (c *AppServerClient) matchingTurns(event Event) []*turnStream {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if event.Scope == EventScopeGeneration {
+		return nil
+	}
+
 	streams := make([]*turnStream, 0, len(c.turns))
+
 	for stream := range c.turns {
-		if event.ThreadID != "" && stream.threadID != "" && event.ThreadID != stream.threadID {
+		if event.Scope == EventScopeTransportLost {
+			streams = append(streams, stream)
+
+			continue
+		}
+
+		if event.ThreadID != stream.threadID {
 			continue
 		}
 
@@ -1047,6 +1116,11 @@ func eventFromRPC(raw rpcEvent) Event {
 	event.ThreadID = stringValue(params, fieldThreadID)
 	event.TurnID = firstNonEmpty(stringValue(params, "turnId"), stringValue(mapValue(params, "turn"), fieldID))
 	event.ItemID = stringValue(params, "itemId")
+	event.Scope = EventScopeGeneration
+
+	if event.ThreadID != "" {
+		event.Scope = EventScopeThread
+	}
 
 	switch raw.Method {
 	case notifyItemAgentMessageDelta:

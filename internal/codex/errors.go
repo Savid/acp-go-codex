@@ -7,10 +7,15 @@ import (
 )
 
 var (
-	ErrConnectionClosed              = errors.New("codex app-server connection closed")
-	ErrThreadNotFound                = errors.New("codex thread not found")
-	ErrProcessContainmentIncomplete  = errors.New("codex process containment incomplete")
-	ErrPackageStageCleanupIncomplete = errors.New("codex package stage cleanup incomplete")
+	ErrConnectionClosed = errors.New("codex app-server connection closed")
+	// ErrBackgroundTerminalsUnsupported reports that the running app-server does
+	// not carry the thread-scoped background-terminal methods at all. It is the
+	// app-server's own method-not-found answer rather than a version guess, and
+	// it is a different fact from a containment attempt that failed.
+	ErrBackgroundTerminalsUnsupported = errors.New("codex app-server does not expose thread background terminals")
+	ErrThreadNotFound                 = errors.New("codex thread not found")
+	ErrProcessContainmentIncomplete   = errors.New("codex process containment incomplete")
+	ErrPackageStageCleanupIncomplete  = errors.New("codex package stage cleanup incomplete")
 )
 
 // ProcessExitError reports that the codex app-server process terminated. It
@@ -81,6 +86,23 @@ func (e *TurnFailedError) Error() string {
 	}
 
 	return e.Message
+}
+
+// jsonRPCMethodNotFound is the JSON-RPC code an app-server answers a method it
+// does not implement with. It is the structured capability signal: the protocol
+// says which methods exist, so nothing here reads a version number.
+const jsonRPCMethodNotFound = -32601
+
+// methodNotFoundMessage is the text that accompanies that code on both sides of
+// the connection.
+const methodNotFoundMessage = "method not found"
+
+// isMethodNotFound reports whether the app-server answered that it does not
+// implement the method.
+func isMethodNotFound(err error) bool {
+	var rpcErr *rpcError
+
+	return errors.As(err, &rpcErr) && rpcErr.Code == jsonRPCMethodNotFound
 }
 
 func normalizeThreadError(err error) error {

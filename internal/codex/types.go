@@ -270,8 +270,32 @@ const (
 	StopReasonError     StopReason = "error"
 )
 
+// EventScope names what one app-server event is evidence about. The app-server
+// is shared by every logical session, so the scope is what keeps one session's
+// event from being read as another session's turn terminal.
+type EventScope string
+
+const (
+	// EventScopeThread names an event the app-server attributed to one thread.
+	// It reaches only the turn streams that thread owns.
+	EventScopeThread EventScope = "thread"
+	// EventScopeGeneration names an event about the shared app-server
+	// generation rather than any thread. It reaches the generation event
+	// handler and no turn stream: a generation-wide fact is never one
+	// session's turn terminal.
+	EventScopeGeneration EventScope = "generation"
+	// EventScopeTransportLost names the loss of the shared transport itself.
+	// Every live incarnation ends there, because the source that would have
+	// produced their terminals is gone.
+	EventScopeTransportLost EventScope = "transport_lost"
+)
+
 type Event struct {
-	Kind       EventKind
+	Kind EventKind
+	// Scope is what the event is evidence about. The zero value is the
+	// generation scope, so an event that never states a thread never reaches
+	// one.
+	Scope      EventScope
 	ThreadID   string
 	TurnID     string
 	ItemID     string

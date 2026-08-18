@@ -466,7 +466,7 @@ func (c *rpcConn) deliverNotification(msg rpcMessage, raw string) {
 
 func (c *rpcConn) handleRequest(msg rpcMessage) {
 	if c.handler == nil {
-		_ = c.Respond(context.Background(), msg.ID, nil, &rpcError{Code: -32601, Message: "method not found"})
+		_ = c.Respond(context.Background(), msg.ID, nil, &rpcError{Code: jsonRPCMethodNotFound, Message: methodNotFoundMessage})
 
 		return
 	}
