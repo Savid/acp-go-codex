@@ -228,6 +228,20 @@ func (a *Agent) storeRetainedRuntimeSession(session *session, retained *retained
 		a.mu.Unlock()
 
 		return newAgentClosedError()
+
+	// A retained resume and a delete of the same id already exclude each other
+	// through the retained-thread claim, so this is belt-and-braces: the fence is
+	// re-read where the wrapper would become reachable, exactly as the started
+	// path does, so no future ordering can register a wrapper behind a delete.
+	case a.deleteFencedLocked(session.id):
+		committed := a.deleteCommittedLocked(session.id)
+		a.mu.Unlock()
+
+		if committed {
+			return newUnknownSession()
+		}
+
+		return newSessionDeleteInProgress()
 	case retained == nil || retained.nativeEnded || !retained.claimed || a.retainedThreads[session.id] != retained:
 		a.mu.Unlock()
 

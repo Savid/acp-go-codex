@@ -1688,6 +1688,21 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		agent.closed = true
 		require.Error(t, agent.storeRetainedRuntimeSession(candidate, retained))
 
+		// The retained-thread claim and a delete of the same id already exclude
+		// each other, so re-reading the fence here is belt-and-braces: no
+		// ordering may register a wrapper behind a delete, and the refusal
+		// carries the verdict the fence has actually reached.
+		agent, retained, candidate = fixture()
+		releaseDelete := agent.claimSessionDelete(candidate.id)
+		requireSessionDeleteInProgress(t, agent.storeRetainedRuntimeSession(candidate, retained))
+		require.NotContains(t, agent.sessions, candidate.id)
+		releaseDelete()
+
+		agent, retained, candidate = fixture()
+		agent.deleted[candidate.id] = struct{}{}
+		requireUnknownSession(t, agent.storeRetainedRuntimeSession(candidate, retained))
+		require.NotContains(t, agent.sessions, candidate.id)
+
 		agent, _, candidate = fixture()
 		require.ErrorContains(t, agent.storeRetainedRuntimeSession(candidate, nil), "ownership changed")
 

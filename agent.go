@@ -807,10 +807,14 @@ func (a *Agent) acquireSessionLifecycle(id acp.SessionId) (func(), error) {
 		return nil, newAgentClosedError()
 	}
 
+	// Only a delete still in flight is answered here, and it is answered with a
+	// retriable conflict because it may yet fail. A committed tombstone is left
+	// to the deleted-id check further in, which also retries the native cleanup
+	// a previous delete may have failed to finish.
 	if a.deletePendingLocked(id) {
 		a.mu.Unlock()
 
-		return nil, newUnknownSession()
+		return nil, newSessionDeleteInProgress()
 	}
 
 	session := a.sessions[id]
@@ -845,6 +849,7 @@ func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) err
 	closed := a.closed
 	current := a.sessions[id]
 	deleting := a.deletePendingLocked(id)
+	deleted := a.deleteCommittedLocked(id)
 
 	session.mu.Lock()
 	closing := session.closing
@@ -856,8 +861,14 @@ func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) err
 		return newAgentClosedError()
 	case closing:
 		return newSessionCloseInProgress()
-	case deleting:
+	case deleted:
 		return newUnknownSession()
+
+	// A delete that has not yet committed its tombstone may still fail, leaving
+	// the id perfectly loadable, so it earns a retriable conflict rather than the
+	// permanent unknown-session verdict a host would take as final.
+	case deleting:
+		return newSessionDeleteInProgress()
 	case current != session:
 		return newUnknownSession()
 	default:
@@ -871,15 +882,23 @@ func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) err
 // to load and resume admission. Agent.mu is held by the caller.
 func (a *Agent) deletePendingLocked(id acp.SessionId) bool { return a.deleting[id] > 0 }
 
+// deleteCommittedLocked reports that a delete of this id reached its durable
+// tombstone. Only a committed tombstone proves the id is gone; a delete that is
+// still running may still fail, in which case the id was never deleted at all.
+// Agent.mu is held by the caller.
+func (a *Agent) deleteCommittedLocked(id acp.SessionId) bool {
+	_, ok := a.deleted[id]
+
+	return ok
+}
+
 // deleteFencedLocked reports that an id is barred from coming back at all: a
 // committed tombstone bars it forever, and a running delete bars it for the
-// duration. Agent.mu is held by the caller.
+// duration. Callers that answer a host distinguish the two with
+// deleteCommittedLocked, because only the tombstone earns a terminal verdict.
+// Agent.mu is held by the caller.
 func (a *Agent) deleteFencedLocked(id acp.SessionId) bool {
-	if _, ok := a.deleted[id]; ok {
-		return true
-	}
-
-	return a.deletePendingLocked(id)
+	return a.deleteCommittedLocked(id) || a.deletePendingLocked(id)
 }
 
 // claimSessionDelete fences an id for one delete. The claim is counted because
@@ -904,40 +923,46 @@ func (a *Agent) claimSessionDelete(id acp.SessionId) func() {
 	}
 }
 
+// storeStartedSession decides whether a freshly started native thread may become
+// reachable under its id. It only decides: a refusal leaves the candidate
+// untouched for its caller to close, because the caller owns the wrapper until
+// registration succeeds and every caller already closes on error. Closing here
+// too would run one session's containment boundary twice over one native
+// thread, and the second sweep — against a thread the first one already
+// unsubscribed — can fail and escalate into the generation fence, retiring the
+// shared app-server for the sake of a thread that was already contained.
+// storeRetainedRuntimeSession refuses the same way, so both registration paths
+// have one shape.
 func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
-	if a.closed {
-		a.mu.Unlock()
 
-		if err := session.Close(context.Background()); err != nil {
-			a.log.DebugContext(context.Background(), "close rejected Codex session failed", slog.String(jsonFieldError, err.Error()))
-		}
+	switch {
+	case a.closed:
+		a.mu.Unlock()
 
 		return newAgentClosedError()
-	}
 
 	// The admission check at the head of load and resume happens before the
-	// native resume it blocks in, so the tombstone is re-read here, where the
+	// native resume it blocks in, so the fence is re-read here, where the
 	// wrapper would actually become reachable. A resume that raced a delete
-	// hands back a native thread nobody may address, so it is closed rather
-	// than registered.
-	if a.deleteFencedLocked(session.id) {
+	// hands back a native thread nobody may address, so it is refused with the
+	// verdict the fence has actually reached: a committed tombstone makes the id
+	// permanently unknown, while a delete still in flight has decided nothing
+	// yet and only conflicts.
+	case a.deleteFencedLocked(session.id):
+		committed := a.deleteCommittedLocked(session.id)
 		a.mu.Unlock()
 
-		if err := session.Close(context.Background()); err != nil {
-			a.log.DebugContext(context.Background(), "close deleted Codex session failed", slog.String(jsonFieldError, err.Error()))
+		if committed {
+			return newUnknownSession()
 		}
 
-		return newUnknownSession()
+		return newSessionDeleteInProgress()
 	}
 
 	previous := a.sessions[session.id]
 	if previous == nil && len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
 		a.mu.Unlock()
-
-		if err := session.Close(context.Background()); err != nil {
-			a.log.DebugContext(context.Background(), "close backpressured Codex session failed", slog.String(jsonFieldError, err.Error()))
-		}
 
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "active_sessions"})
 	}
@@ -988,6 +1013,14 @@ func (a *Agent) removeSession(id acp.SessionId) *session {
 
 func newSessionCloseInProgress() *acp.RequestError {
 	return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session close in progress"})
+}
+
+// newSessionDeleteInProgress refuses a lifecycle request that raced a delete
+// which has not yet committed its tombstone. The refusal is a conflict rather
+// than the unknown-session verdict because a delete can still fail, and a host
+// told an id is unknown is entitled to treat that as permanent.
+func newSessionDeleteInProgress() *acp.RequestError {
+	return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session delete lifecycle is already in progress"})
 }
 
 var errNoActiveSessionForDelete = errors.New("no active session for delete")

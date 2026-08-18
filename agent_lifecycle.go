@@ -30,21 +30,26 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 	return negotiated, nil
 }
 
-// provenLifecycleFacts states what this adapter's active configuration can
-// actually prove, read from the boundaries that enforce it rather than from a
-// compiled-in claim:
+// provenLifecycleFacts states what this adapter can prove. The answer is a
+// constant, and deliberately so: every codex configuration this adapter can be
+// built with drives one app-server generation shared by every session, so no
+// option, model, or runtime state moves any of these facts. There is nothing
+// configuration-dependent to read, and reading a boundary at answer time would
+// only dress a fixed answer up as a measurement.
 //
 //   - A session opens one incarnation per prompt and fences it at settlement,
 //     so no lifecycle envelope is ever delivered while no prompt is in flight.
 //   - Nothing here proves one logical session's descendants gone while the
-//     app-server generation they live in keeps serving every peer, so no
+//     shared app-server generation they live in keeps serving every peer, so no
 //     quiescence proof class is claimed and no source is named.
 //   - Codex activity reaches ACP as ordinary tool-call updates; this adapter
 //     reads no structured native activity registry, so it emits no
 //     activity_update and advertises no kind.
 //
 // Every one of those is a negative fact, which is the truthful answer for a
-// prompt-contained configuration rather than a gap papered over.
+// prompt-contained configuration rather than a gap papered over. The receiver
+// is unused for the same reason, and is kept so the facts stay addressable as
+// the adapter's own answer if a future configuration ever splits generations.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	return lifecycle.Negotiated{
 		UpdatesOutsidePrompt:    false,

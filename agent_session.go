@@ -369,9 +369,7 @@ func (a *Agent) isDeleted(id acp.SessionId) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	_, ok := a.deleted[id]
-
-	return ok
+	return a.deleteCommittedLocked(id)
 }
 
 type codexSessionStart struct {

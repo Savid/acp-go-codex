@@ -521,9 +521,17 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	if err := limited.storeStartedSession(first); err != nil {
 		t.Fatalf("store first session: %v", err)
 	}
-	second := newSession(limited, "second", "/tmp/project", nil, codex.Thread{ID: "second"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
+	// Backpressure refuses registration and leaves the candidate untouched. The
+	// caller owns the wrapper until registration succeeds and already closes it
+	// on every error, so containing it here as well would run one session's
+	// containment boundary twice over one native thread.
+	backpressured := newSpyCodexClient()
+	second := newSession(limited, "second", "/tmp/project", nil, codex.Thread{ID: "second"}, backpressured, sessionMeta{}, nil)
 	if err := limited.storeStartedSession(second); err == nil {
 		t.Fatal("storeStartedSession ignored active session limit")
+	}
+	if contained := backpressured.unsubscribedSnapshot(); len(contained) != 0 {
+		t.Fatalf("backpressure refusal contained a candidate its caller owns: %#v", contained)
 	}
 
 	replacing := NewAgent()
@@ -717,6 +725,13 @@ func (c *spyCodexClient) deletedThreadSnapshot() []string {
 	defer c.mu.Unlock()
 
 	return append([]string(nil), c.deletedThreads...)
+}
+
+func (c *spyCodexClient) unsubscribedSnapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]string(nil), c.unsubscribed...)
 }
 
 func (c *spyCodexClient) ModelList(context.Context) ([]codex.Model, error) {
