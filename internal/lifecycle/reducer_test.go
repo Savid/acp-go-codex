@@ -98,6 +98,21 @@ func TestSnapshotIsJudgedWholeBeforeItIsProjected(t *testing.T) {
 			kind:     ViolationMalformedEnvelope,
 		},
 		{
+			name:     "an idle foreground naming a turn",
+			snapshot: Snapshot{Foreground: Foreground{State: ForegroundIdle, CycleID: "c", TurnID: "t"}},
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
+			name:     "a foreground turn with no origin",
+			snapshot: Snapshot{Foreground: Foreground{State: ForegroundRunning, CycleID: "c", TurnID: "t"}},
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
+			name:     "a foreground origin outside the two causes",
+			snapshot: Snapshot{Foreground: Foreground{State: ForegroundRunning, CycleID: "c", TurnID: "t", Origin: "bogus"}},
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
 			name: "a terminal action in the nonterminal set",
 			snapshot: Snapshot{
 				Foreground: Foreground{State: ForegroundRunning, CycleID: "c", TurnID: "t", Origin: CauseSubmission},
