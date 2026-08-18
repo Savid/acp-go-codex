@@ -83,6 +83,10 @@ const (
 	roleAssistant            = "assistant"
 	eventUserMessage         = "user_message"
 
+	// limitSessionPrompt names the per-session prompt serialization limit a
+	// concurrent second prompt is refused under. The token is family-fixed.
+	limitSessionPrompt = "session_prompt"
+
 	jsonFieldLimit        = "limit"
 	jsonFieldValue        = "value"
 	jsonFieldContent      = "content"

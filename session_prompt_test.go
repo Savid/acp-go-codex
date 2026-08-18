@@ -277,7 +277,10 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	promptSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
 	held := promptSession.turnQueue()
 	held <- struct{}{}
-	if resp, err := promptSession.Prompt(canceledContext(), TextPromptRequest("s", "test-turn", "hi")); err != nil || resp.StopReason != acp.StopReasonCancelled {
+	// The slot was never taken, so no turn opened and there is no terminal to
+	// report: the caller's own context error is the answer, not a response.
+	if resp, err := promptSession.Prompt(canceledContext(), TextPromptRequest("s", "test-turn", "hi")); !errors.Is(err, context.Canceled) ||
+		resp.StopReason != "" {
 		t.Fatalf("canceled acquire resp=%#v err=%v", resp, err)
 	}
 	<-held
@@ -1253,4 +1256,66 @@ func TestPromptContentFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// heldTurnClient parks inside the native turn until the test releases it, so a
+// second prompt arrives while the first still holds the session's single turn
+// slot.
+type heldTurnClient struct {
+	*spyCodexClient
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *heldTurnClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	close(c.started)
+	<-c.release
+
+	return codex.Turn{}, errors.New("native turn released")
+}
+
+// Prompt turns are serialized per session, and docs/06 fixes the answer a
+// concurrent second prompt gets: the `session_prompt` backpressure invalid
+// request. It is an error and never a response, because the second prompt never
+// opened a turn and so has no terminal to report — a successful `cancelled`
+// there would invent one and hide the only signal the host can retry on.
+func TestConcurrentPromptIsRefusedWithSessionPromptBackpressure(t *testing.T) {
+	client := &heldTurnClient{
+		spyCodexClient: newSpyCodexClient(),
+		started:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return client, nil
+	}))
+	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, promptErr := agent.Prompt(
+			context.Background(),
+			TextPromptRequest(created.SessionId, "first-turn", "hold the slot"),
+		)
+		firstDone <- promptErr
+	}()
+	<-client.started
+
+	resp, err := agent.Prompt(
+		context.Background(),
+		TextPromptRequest(created.SessionId, "second-turn", "concurrent"),
+	)
+	require.Equal(t, acp.PromptResponse{}, resp, "a refused prompt returns no response at all")
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32600, reqErr.Code)
+	require.Equal(t,
+		map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: limitSessionPrompt},
+		reqErr.Data,
+	)
+
+	close(client.release)
+	require.Error(t, <-firstDone)
+	require.NoError(t, agent.Close())
 }

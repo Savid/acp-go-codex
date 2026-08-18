@@ -132,7 +132,7 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 		t.Fatalf("backpressure error = %v, want -32600 invalid request", backpressureErr)
 	}
 	backpressureData, ok := reqErr.Data.(map[string]any)
-	if !ok || backpressureData[jsonFieldError] != valueBackpressure || backpressureData[jsonFieldLimit] != "session_prompt" {
+	if !ok || backpressureData[jsonFieldError] != valueBackpressure || backpressureData[jsonFieldLimit] != limitSessionPrompt {
 		t.Fatalf("backpressure payload = %#v, want {error:backpressure, limit:session_prompt}", reqErr.Data)
 	}
 	release()

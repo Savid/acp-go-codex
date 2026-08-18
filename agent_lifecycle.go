@@ -22,7 +22,7 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 		return lifecycle.Negotiated{}, nil
 	}
 
-	negotiated, answered := offer.Answer(a.provenLifecycleFacts())
+	negotiated, answered := offer.Answer(provenLifecycleFacts(a.ContainmentMode()))
 	if !answered {
 		return lifecycle.Negotiated{}, nil
 	}
@@ -30,32 +30,60 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 	return negotiated, nil
 }
 
-// provenLifecycleFacts states what this adapter can prove. The answer is a
-// constant, and deliberately so: every codex configuration this adapter can be
-// built with drives one app-server generation shared by every session, so no
-// option, model, or runtime state moves any of these facts. There is nothing
-// configuration-dependent to read, and reading a boundary at answer time would
-// only dress a fixed answer up as a measurement.
+// lifecycleFactsByContainment is this adapter's per-configuration lifecycle
+// truth table. The answer describes the active configuration, so it is keyed on
+// the same containment mode that selects and enforces the native process
+// boundary rather than compiled in once for the package.
 //
-//   - A session opens one incarnation per prompt and fences it at settlement,
-//     so no lifecycle envelope is ever delivered while no prompt is in flight.
-//   - Nothing here proves one logical session's descendants gone while the
-//     shared app-server generation they live in keeps serving every peer, so no
-//     quiescence proof class is claimed and no source is named.
-//   - Codex activity reaches ACP as ordinary tool-call updates; this adapter
-//     reads no structured native activity registry, so it emits no
-//     activity_update and advertises no kind.
+// Every row is identical, and that is itself the finding rather than an
+// unfinished table: containment mode changes which identity the app-server runs
+// under and which vacancy the adapter can prove about it, and none of these
+// three facts turns on either. Each is negative for a reason that holds in every
+// mode:
 //
-// Every one of those is a negative fact, which is the truthful answer for a
-// prompt-contained configuration rather than a gap papered over. The receiver
-// is unused for the same reason, and is kept so the facts stay addressable as
-// the adapter's own answer if a future configuration ever splits generations.
-func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
+//   - `updatesOutsidePrompt` is false because a session opens one incarnation
+//     per prompt and fences it at settlement, so no lifecycle envelope is ever
+//     delivered while no prompt is in flight. That is a property of this
+//     adapter's stream ownership, which no containment mode touches.
+//   - `authoritativeQuiescence` is false because one logical session's
+//     descendants cannot be proved gone while the app-server generation they
+//     live in keeps serving every peer session. Even the authoritative boundary
+//     proves vacancy for the whole shared generation, never for one session
+//     inside it, so no configuration reaches a per-session proof class and none
+//     names a source.
+//   - `activityKinds` is empty because Codex activity reaches ACP as ordinary
+//     tool-call updates and this adapter reads no structured native activity
+//     registry. That is a native-surface fact, identical under every mode.
+//
+// A row is upgraded only when a deterministic fixture in this repository proves
+// both the native source it reads and the ordering it claims for that mode.
+var lifecycleFactsByContainment = map[RuntimeContainmentMode]lifecycle.Negotiated{
+	RuntimeContainmentAuthoritative:  provenFacts(),
+	RuntimeContainmentBestEffort:     provenFacts(),
+	RuntimeContainmentSharedIdentity: provenFacts(),
+	RuntimeContainmentUnavailable:    provenFacts(),
+}
+
+// provenFacts is the answer every row carries: no delivery outside a prompt, no
+// quiescence class, and no activity kind. Negotiating version 1 still obligates
+// the complete ordered foreground stream whatever these fields say.
+func provenFacts() lifecycle.Negotiated {
 	return lifecycle.Negotiated{
 		UpdatesOutsidePrompt:    false,
 		AuthoritativeQuiescence: false,
 		ActivityKinds:           []lifecycle.ActivityKind{},
 	}
+}
+
+// provenLifecycleFacts reads one configuration's row. A mode with no row proves
+// nothing, which is the same answer the unavailable boundary gives.
+func provenLifecycleFacts(mode RuntimeContainmentMode) lifecycle.Negotiated {
+	facts, known := lifecycleFactsByContainment[mode]
+	if !known {
+		return provenFacts()
+	}
+
+	return facts
 }
 
 // negotiatedLifecycle reports the answer this connection settled on.

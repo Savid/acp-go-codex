@@ -72,3 +72,54 @@ func TestLifecycleReservedKeyRejectedAcrossAgentSurfaces(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+// docs/03 fixes the negotiated answer as a fact about the **active
+// configuration** — sibling x platform x isolation/containment mode — resolved
+// from the same code path that enforces containment and never from a
+// compiled-in constant. The answer is therefore looked up in the per-mode table
+// by the agent's own containment mode. Every row is identical because no codex
+// containment mode moves any of these three facts, and the lookup is what keeps
+// a mode that ever proves more from being answered for by a mode that does not.
+func TestLifecycleFactsResolveThroughTheContainmentModeAccessor(t *testing.T) {
+	modes := []RuntimeContainmentMode{
+		RuntimeContainmentAuthoritative,
+		RuntimeContainmentBestEffort,
+		RuntimeContainmentSharedIdentity,
+		RuntimeContainmentUnavailable,
+	}
+
+	require.Len(t, lifecycleFactsByContainment, len(modes),
+		"every containment mode this adapter can select owns exactly one row")
+
+	for _, mode := range modes {
+		require.Contains(t, lifecycleFactsByContainment, mode)
+
+		facts := provenLifecycleFacts(mode)
+		require.False(t, facts.UpdatesOutsidePrompt, mode)
+		require.False(t, facts.AuthoritativeQuiescence, mode)
+		require.Empty(t, facts.QuiescenceSource, mode)
+		require.Equal(t, []lifecycle.ActivityKind{}, facts.ActivityKinds, mode)
+	}
+
+	// A mode with no row proves nothing rather than inheriting a neighbour's.
+	require.Equal(t, provenFacts(), provenLifecycleFacts(RuntimeContainmentMode("future-mode")))
+
+	// The answer this connection settles on is the row for the mode the agent
+	// actually enforces, read through the same accessor the runtime reports.
+	agent := NewAgent()
+	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
+
+	answer, err := agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1.0}}})
+	require.NoError(t, err)
+	require.True(t, answer.Present())
+
+	expected := provenLifecycleFacts(agent.ContainmentMode())
+	require.Equal(t, expected.UpdatesOutsidePrompt, answer.UpdatesOutsidePrompt)
+	require.Equal(t, expected.AuthoritativeQuiescence, answer.AuthoritativeQuiescence)
+	require.Equal(t, expected.QuiescenceSource, answer.QuiescenceSource)
+	require.Equal(t, expected.ActivityKinds, answer.ActivityKinds)
+
+	// A quiescence source is present exactly when a proof class was proven, so
+	// the negative answer omits it from the wire advertisement entirely.
+	require.NotContains(t, answer.Advertisement(), "quiescenceSource")
+}

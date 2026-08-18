@@ -124,9 +124,15 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, lifecycleInvalidParams(refusal)
 	}
 
+	// A prompt that never took the session's single turn slot opened no turn, so
+	// it has no terminal to report: the refusal is the answer. Backpressure is
+	// the fixed `session_prompt` invalid request, and a caller context that was
+	// already done is that context's own error. Answering either with a
+	// successful `cancelled` response would invent a terminal for a turn that
+	// never existed and hide the one signal a host can act on.
 	releaseTurn, err := s.acquireTurn(ctx)
 	if err != nil {
-		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+		return acp.PromptResponse{}, err
 	}
 	defer releaseTurn()
 
