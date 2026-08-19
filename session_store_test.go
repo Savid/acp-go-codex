@@ -214,9 +214,10 @@ func TestInMemorySessionStoreEdgeBranches(t *testing.T) {
 	}
 }
 
-// TestInMemorySessionStoreReplaceEmptyEntrySurvives pins the docs/04 rule that
-// a listed key whose Entries are empty stays LIVE after Replace (exactly the
-// listed keys survive), and that Delete is the tombstone path that cascades to
+// TestInMemorySessionStoreReplaceEmptyEntrySurvives pins the rule that Replace
+// keeps exactly the keys it lists: a listed key whose Entries are empty stays
+// live and merely loses its content, so emptiness is never read as removal.
+// Delete is the only tombstone path, and it is the one that cascades to
 // subpaths.
 func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {
 	ctx := context.Background()

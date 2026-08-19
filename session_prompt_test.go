@@ -1275,8 +1275,8 @@ func (c *heldTurnClient) RunTurn(context.Context, codex.TurnStartRequest) (codex
 	return codex.Turn{}, errors.New("native turn released")
 }
 
-// Prompt turns are serialized per session, and docs/06 fixes the answer a
-// concurrent second prompt gets: the `session_prompt` backpressure invalid
+// Prompt turns are serialized per session, so a second prompt arriving while one
+// is in flight is answered with the `session_prompt` backpressure invalid
 // request. It is an error and never a response, because the second prompt never
 // opened a turn and so has no terminal to report — a successful `cancelled`
 // there would invent one and hide the only signal the host can retry on.
