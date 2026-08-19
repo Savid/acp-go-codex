@@ -84,6 +84,11 @@ type session struct {
 	// it until the store holds it.
 	unsyncedEntries []SessionStoreEntry
 	unsyncedRow     int
+	// captureFailed records that a mirror pass failed before it could capture the
+	// durable prefix it was reading. Such a pass retains nothing, so this is the
+	// only thing left saying a prefix is still owed, and the close boundary reads
+	// the rollout file again exactly when it is set.
+	captureFailed bool
 	// persistenceFenced stops every later commit. Delete sets it before it
 	// tombstones, so no settlement writer can recreate the row it removed.
 	persistenceFenced bool

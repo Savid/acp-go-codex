@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -756,6 +758,135 @@ func TestCloseFailsWhenTheCapturedPrefixCannotBeCommitted(t *testing.T) {
 	_, err = agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
 	require.NoError(t, err)
 	require.Empty(t, session.unsyncedEntries)
+}
+
+// rolloutFixture points a session at a rollout file holding exactly the given
+// lines and returns the path, so a test can change what the file says between the
+// settlement pass and the close.
+func rolloutFixture(t *testing.T, session *session, lines ...string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	writeRolloutLines(t, path, lines...)
+	session.rolloutPath = path
+
+	return path
+}
+
+func writeRolloutLines(t *testing.T, path string, lines ...string) {
+	t.Helper()
+
+	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600))
+}
+
+// TestCloseRecapturesAPrefixNoSettlementCaptured pins the close rung against the
+// failure that retains nothing. A mirror pass has a capture half and a commit
+// half, and only the commit half retains what it could not place: a pass that
+// died reading the file — here on a row the harness had written only half of —
+// leaves no capture behind at all. The rung as it stood placed captures and made
+// none, so the close committed nothing and reported success owing a row.
+func TestCloseRecapturesAPrefixNoSettlementCaptured(t *testing.T) {
+	const torn = `{"type":"turn_c`
+
+	const whole = `{"type":"turn_context"}`
+
+	t.Run("the recaptured prefix is committed", func(t *testing.T) {
+		var appended []SessionStoreEntry
+
+		store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
+			appended = append(appended, entries...)
+
+			return nil
+		}}
+
+		agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+		path := rolloutFixture(t, session, torn)
+
+		require.Error(t, session.mirrorAndEmitRollout(context.Background()), "the settlement's mirror pass failed")
+		require.Empty(t, session.unsyncedEntries, "a pass that failed before its commit captured nothing")
+
+		// The harness finished the row the settlement read half of.
+		writeRolloutLines(t, path, whole)
+
+		_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err)
+		require.Equal(t, []SessionStoreEntry{SessionStoreEntry(whole)}, appended)
+		require.Empty(t, session.unsyncedEntries)
+	})
+
+	t.Run("a recapture the store refuses fails the close", func(t *testing.T) {
+		storeFailure := errors.New("store unavailable")
+
+		store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
+			return storeFailure
+		}}
+
+		agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+		path := rolloutFixture(t, session, torn)
+
+		require.Error(t, session.mirrorAndEmitRollout(context.Background()))
+		writeRolloutLines(t, path, whole)
+
+		_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+		require.ErrorIs(t, err, storeFailure, "durability outranks the response on the recaptured prefix too")
+		require.Equal(t, []SessionStoreEntry{SessionStoreEntry(whole)}, session.unsyncedEntries)
+		require.Same(t, session, agent.activeSession(session.id))
+	})
+}
+
+// TestCloseReadsNothingNewWithoutACaptureFailure pins the other side of the same
+// latch. The close boundary is not a mirror pass: it places what a settlement
+// captured and could not commit, and reads nothing off the rollout file on its
+// own. Only the failure that captured nothing sends it back to the file, and a
+// failure a later pass repaired does not.
+func TestCloseReadsNothingNewWithoutACaptureFailure(t *testing.T) {
+	const first = `{"type":"turn_context"}`
+
+	const second = `{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`
+
+	t.Run("an unmirrored row no settlement pass ever read", func(t *testing.T) {
+		var appended []SessionStoreEntry
+
+		store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
+			appended = append(appended, entries...)
+
+			return nil
+		}}
+
+		agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+		rolloutFixture(t, session, first)
+
+		_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err)
+		require.Empty(t, appended, "the close boundary read nothing off the rollout file")
+	})
+
+	t.Run("a capture failure a later pass repaired", func(t *testing.T) {
+		var appended []SessionStoreEntry
+
+		store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
+			appended = append(appended, entries...)
+
+			return nil
+		}}
+
+		agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+		path := rolloutFixture(t, session, `{"type":"turn_c`)
+
+		require.Error(t, session.mirrorAndEmitRollout(context.Background()))
+
+		writeRolloutLines(t, path, first)
+		require.NoError(t, session.mirrorAndEmitRollout(context.Background()), "a later pass captured and placed the row")
+		require.Equal(t, []SessionStoreEntry{SessionStoreEntry(first)}, appended)
+
+		// A row the harness wrote after that pass belongs to no capture at all,
+		// and the close boundary is not the thing that reads it.
+		writeRolloutLines(t, path, first, second)
+
+		_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err)
+		require.Equal(t, []SessionStoreEntry{SessionStoreEntry(first)}, appended)
+	})
 }
 
 // TestCloseNeverRewritesALossTerminalizedFailure pins the durable branch's

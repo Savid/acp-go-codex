@@ -98,6 +98,22 @@ func (s *session) mirrorAndEmitRolloutLive(
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
 
+	return s.mirrorRolloutLocked(ctx, events)
+}
+
+// mirrorRolloutLocked is one mirror pass over the rollout file. The caller holds
+// the commit lock.
+//
+// A pass has two halves, and only the second one retains anything: the capture
+// reads the rows the store has not seen, and the commit places them, retaining
+// exactly what it could not place. A pass that fails in the first half therefore
+// holds nothing afterwards to say a durable prefix is still owed, so it latches
+// that failure instead — the close boundary's rung is the only thing left that
+// can make the capture the settlement never made.
+func (s *session) mirrorRolloutLocked(
+	ctx context.Context,
+	events chan<- codex.Event,
+) error {
 	store := s.agent.options.SessionStore
 
 	if s.rolloutLiveFenced {
@@ -112,7 +128,7 @@ func (s *session) mirrorAndEmitRolloutLive(
 
 	file, err := os.Open(s.rolloutPath)
 	if err != nil {
-		return err
+		return s.latchCaptureFailure(store, err)
 	}
 	defer file.Close()
 
@@ -136,24 +152,30 @@ func (s *session) mirrorAndEmitRolloutLive(
 	}
 
 	if scanErr := scanner.Err(); scanErr != nil {
-		return scanErr
+		return s.latchCaptureFailure(store, scanErr)
 	}
 
 	if len(entries) == 0 {
+		s.captureStands(store)
+
 		return nil
 	}
 
 	clean, _, err := validateSessionImportEntries(entries)
 	if err != nil {
-		return err
+		return s.latchCaptureFailure(store, err)
 	}
 
 	if store != nil {
 		clean, err = s.prepareDurableImageRolloutEntries(ctx, clean)
 		if err != nil {
-			return err
+			return s.latchCaptureFailure(store, err)
 		}
 	}
+
+	// Everything the store is owed is in hand from here on: a commit that fails
+	// retains it, so the capture no longer needs the latch.
+	s.captureStands(store)
 
 	rows := make([]rolloutMirrorRow, len(clean))
 	for index, entry := range clean {
@@ -406,6 +428,27 @@ func (s *session) commitRolloutEntries(
 	return nil
 }
 
+// latchCaptureFailure records that a mirror pass failed before it captured the
+// durable prefix it was reading, and returns the failure unchanged. Only a pass
+// that was mirroring for a store latches: without one there is no durable prefix
+// to owe, and the live tail's own rows are accounted for by their own cursor.
+func (s *session) latchCaptureFailure(store SessionStore, err error) error {
+	if store != nil {
+		s.captureFailed = true
+	}
+
+	return err
+}
+
+// captureStands clears the latch once a pass has the durable prefix in hand. The
+// pass read from the unadvanced cursor, so what it holds covers everything an
+// earlier failed pass never read.
+func (s *session) captureStands(store SessionStore) {
+	if store != nil {
+		s.captureFailed = false
+	}
+}
+
 // ensureMirrorSynced blocks the next prompt until the prefix a previous
 // settlement failed to commit is durable. A store outage is reported loudly
 // rather than papered over, because the alternative is a session whose durable
@@ -430,7 +473,33 @@ func (s *session) commitResumableSnapshot(ctx context.Context) error {
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
 
+	if err := s.recaptureFailedMirror(commitCtx); err != nil {
+		return err
+	}
+
 	return s.ensureMirrorSynced(commitCtx)
+}
+
+// recaptureFailedMirror makes the capture a settlement's mirror pass failed to
+// make. An ordinary close reads nothing new off the rollout file: the prefix a
+// settlement captured is retained, and the rung below places it. A pass that
+// failed before its commit retained nothing at all, so the same rung would find
+// nothing to place and the close would report success owing a prefix it never
+// wrote. The latch is what separates the two: it is set only by that failure, so
+// a close no failure marked still reads nothing.
+//
+// A fenced session is skipped because no commit can follow the fence, and the
+// latch is set only while a store is configured, so a session without one never
+// reaches the read.
+func (s *session) recaptureFailedMirror(ctx context.Context) error {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	if !s.captureFailed || s.persistenceFenced {
+		return nil
+	}
+
+	return s.mirrorRolloutLocked(ctx, nil)
 }
 
 // fencePersistence stops every later commit for this session. It takes the
@@ -443,4 +512,5 @@ func (s *session) fencePersistence() {
 	s.persistenceFenced = true
 	s.unsyncedEntries = nil
 	s.unsyncedRow = 0
+	s.captureFailed = false
 }
