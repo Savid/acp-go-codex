@@ -1286,7 +1286,6 @@ type fakeCodexMode struct {
 	CancelReturned string `json:"cancelReturned"`
 	ChildSentinel  string `json:"childSentinel"`
 	RolloutPath    string `json:"rolloutPath"`
-	TailStopped    string `json:"tailStopped"`
 }
 
 func decodeFakeCodexMode(raw string) fakeCodexMode {
@@ -1344,7 +1343,6 @@ func runFakeCodexAppServer() {
 // same thread-scoped background-terminal API as Codex 0.144.4.
 func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
 	rolloutPath := mode.RolloutPath
-	tailStopped := mode.TailStopped
 
 	writeMessage := func(message map[string]any) {
 		payload, _ := json.Marshal(message)
@@ -1439,20 +1437,10 @@ func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
 				"turn":     map[string]any{"id": fakeCodexReplacementTurnID, "status": "completed"},
 			})
 		case "turn/interrupt":
-			// Intentionally acknowledge without touching the delayed child.
-			// Wait until the cancelled prompt's rollout tail has performed its
-			// final read, then append the native abort row. The adapter's
-			// post-containment mirror is the only read that can observe it.
-			deadline := time.Now().Add(5 * time.Second)
-			for tailStopped != "" && time.Now().Before(deadline) {
-				if _, err := os.Stat(tailStopped); err == nil {
-					break
-				}
-				time.Sleep(time.Millisecond)
-			}
-			if rolloutPath != "" {
-				_ = appendFakeCodexRolloutRow(rolloutPath, fakeCodexLateAbortRolloutRow)
-			}
+			// Intentionally acknowledge without touching the delayed child, and
+			// without stalling: a prompt settles behind the containment
+			// boundary, so an interrupt that waits on the cancelled prompt is a
+			// fixture that waits on itself.
 			writeReply(id, map[string]any{})
 		case "thread/backgroundTerminals/list":
 			params, _ := msg["params"].(map[string]any)
@@ -1478,6 +1466,13 @@ func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
 				_ = backgroundChild.Wait()
 				backgroundChild = nil
 				terminated = true
+			}
+			// Native cleanup finishes the rollout as the contained descendant
+			// dies. Publishing the abort row here rather than at interrupt is
+			// what makes the durable copy a proof: a mirror that read before
+			// containment cannot hold this row.
+			if terminated && rolloutPath != "" {
+				_ = appendFakeCodexRolloutRow(rolloutPath, fakeCodexLateAbortRolloutRow)
 			}
 			writeReply(id, map[string]any{"terminated": terminated})
 		default:
