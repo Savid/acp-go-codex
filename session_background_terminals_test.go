@@ -3,9 +3,11 @@ package codexacp
 import (
 	"context"
 	"errors"
+	"io"
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -58,6 +60,103 @@ func TestTerminateThreadBackgroundTerminalsRequiresScopedNativeSurface(t *testin
 	client := codex.NewPlaceholderClient(codex.Options{})
 	err := terminateThreadBackgroundTerminals(context.Background(), client, "thread")
 	require.ErrorContains(t, err, "required thread-scoped background terminal containment")
+	require.NotErrorIs(t, err, codex.ErrProcessContainmentIncomplete,
+		"an unoffered sweep selects no boundary, so the caller's fence classifies the result")
+}
+
+// soleFailedSweepAgent builds one logical session whose thread-scoped sweep is
+// offered and always fails, on a generation no peer owns. The fence therefore
+// succeeds, and the only thing left to report the boundary incomplete is the
+// sweep's own result.
+func soleFailedSweepAgent(t *testing.T, sweepFailure error) (*Agent, *failingBackgroundTerminalClient, *session) {
+	t.Helper()
+
+	client := &failingBackgroundTerminalClient{spyCodexClient: newSpyCodexClient(), err: sweepFailure}
+	agent := NewAgent()
+	agent.setAgentClient(newRecordingAgentClient())
+	agent.runtimeClient = client
+
+	target := newSession(agent, "target", t.TempDir(), nil, codex.Thread{ID: "target-thread"}, client, sessionMeta{}, nil)
+	agent.sessions[target.id] = target
+
+	return agent, client, target
+}
+
+// TestFailedSweepReportsIncompleteContainmentOnEverySurface pins the family's
+// stable discriminator to the boundary that did not complete. The offered sweep
+// failed, so this session's descendants were never proved gone — and the
+// generation fence behind it succeeding says nothing about them, because it
+// retires the source rather than the processes. session/close, Agent.Close, and
+// Serve each owe the host an error matching ErrProcessContainmentIncomplete.
+func TestFailedSweepReportsIncompleteContainmentOnEverySurface(t *testing.T) {
+	sweepFailure := errors.New("thread-scoped containment failed")
+
+	t.Run("session/close", func(t *testing.T) {
+		agent, client, target := soleFailedSweepAgent(t, sweepFailure)
+
+		_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: target.id})
+		require.ErrorIs(t, err, sweepFailure)
+		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+
+		client.mu.Lock()
+		require.True(t, client.closed, "the sole owner's generation fence completed")
+		client.mu.Unlock()
+	})
+
+	t.Run("Agent.Close", func(t *testing.T) {
+		agent, client, _ := soleFailedSweepAgent(t, sweepFailure)
+
+		err := agent.Close()
+		require.ErrorIs(t, err, sweepFailure)
+		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+
+		client.mu.Lock()
+		require.True(t, client.closed)
+		client.mu.Unlock()
+	})
+
+	t.Run("Serve", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		clientToAgentReader, clientToAgentWriter := io.Pipe()
+		agentToClientReader, agentToClientWriter := io.Pipe()
+
+		t.Cleanup(func() {
+			_ = clientToAgentReader.Close()
+			_ = clientToAgentWriter.Close()
+			_ = agentToClientReader.Close()
+			_ = agentToClientWriter.Close()
+		})
+
+		served := make(chan error, 1)
+
+		go func() {
+			served <- Serve(ctx, clientToAgentReader, agentToClientWriter,
+				withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+					return &failingBackgroundTerminalClient{spyCodexClient: newSpyCodexClient(), err: sweepFailure}, nil
+				}))
+		}()
+
+		peer := acp.NewClientSideConnection(&recordingClient{}, clientToAgentWriter, agentToClientReader)
+		_, err := peer.Initialize(ctx, acp.InitializeRequest{})
+		require.NoError(t, err)
+		_, err = peer.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
+		require.NoError(t, err)
+
+		// The loop stops on context cancellation, and the close error still wins:
+		// a host classifying the terminal result must see the boundary's verdict
+		// rather than the reason the loop ended.
+		cancel()
+
+		select {
+		case err := <-served:
+			require.ErrorIs(t, err, sweepFailure)
+			require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+		case <-time.After(30 * time.Second):
+			t.Fatal("Serve did not return after cancellation")
+		}
+	})
 }
 
 func TestCancelFencesGenerationWhenTargetedContainmentFails(t *testing.T) {
