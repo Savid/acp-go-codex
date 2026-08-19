@@ -2514,6 +2514,66 @@ func TestRetainedRuntimeClaimSerializesResumeAndDelete(t *testing.T) {
 	})
 }
 
+// TestDeleteBeatsALoadAlreadyPastItsEntryCheck races the two operations the
+// tombstone check cannot be done once for. A load of a stored session holds no
+// claim over an id nothing has made active yet, so a delete may commit while
+// that load sits inside its native resume. The load must then install nothing,
+// tear the replacement it fully prepared back down, and leave the deletion
+// marker exactly as the delete set it — no in-memory wrapper, no material on
+// disk, and no durable row.
+func TestDeleteBeatsALoadAlreadyPastItsEntryCheck(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	key := SessionKey{SessionID: "session"}
+	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"session"}}`),
+	}))
+
+	client := &blockingLifecycleCodexClient{
+		spyCodexClient: newSpyCodexClient(),
+		resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
+		resumeRelease:  make(chan struct{}),
+	}
+	agent := NewAgent(WithSessionStore(store))
+	agent.runtimeClient = client
+
+	loaded := make(chan error, 1)
+
+	go func() {
+		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest("session", t.TempDir()))
+		loaded <- loadErr
+	}()
+
+	prepared := <-client.resumeStarted
+	require.NotEmpty(t, prepared.Path, "the load materialized a rollout before its native resume")
+	require.FileExists(t, prepared.Path)
+
+	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest("session"))
+	require.NoError(t, err)
+
+	close(client.resumeRelease)
+
+	// A committed tombstone is permanent, so the load is answered with the
+	// unknown-session verdict rather than a retriable conflict.
+	loadErr := <-loaded
+	require.Error(t, loadErr)
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, loadErr, &requestErr)
+	require.Equal(t, "unknown session", asType[map[string]any](t, requestErr.Data)[jsonFieldError])
+
+	require.Nil(t, agent.activeSession("session"), "the losing load installed a wrapper anyway")
+	require.True(t, agent.isDeleted("session"), "installing cleared the deletion marker")
+	require.NoFileExists(t, prepared.Path, "the prepared replacement was never torn down")
+
+	entries, err := store.Load(ctx, key)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the losing load resurrected the durable row")
+
+	require.NoError(t, agent.Close())
+}
+
 func TestSessionLifecycleGuardBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
