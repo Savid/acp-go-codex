@@ -990,7 +990,17 @@ func (a *Agent) storeStartedSession(session *session) error {
 
 	if previous != nil {
 		if err := previous.Close(context.Background()); err != nil {
-			a.log.WarnContext(context.Background(), "close replaced Codex session failed", slog.String(jsonFieldError, err.Error()))
+			// The replaced session's close is a whole boundary, and one that does
+			// not complete still owes every rung behind the failure: the prefix a
+			// settlement captured and could not place, the materialized rollout that
+			// prefix is read back from, and the scratch reservation holding it.
+			// Installing over it would drop all three with a wrapper nothing
+			// references any more, so the id goes back to the session that still
+			// owes them and the install is refused; the caller closes its candidate,
+			// and the next load runs the boundary again.
+			a.restoreReplacedSession(session, previous)
+
+			return err
 		}
 
 		return nil
@@ -999,6 +1009,18 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil
+}
+
+// restoreReplacedSession gives a replaced session its id back when its own close
+// boundary did not complete. The agent goes on owning it, so Agent.Close still
+// sweeps it and a later load still finds the state it holds.
+func (a *Agent) restoreReplacedSession(candidate *session, previous *session) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.sessions[candidate.id] == candidate {
+		a.sessions[candidate.id] = previous
+	}
 }
 
 // closeSessionProviderAuth cancels every pending provider-auth flow the

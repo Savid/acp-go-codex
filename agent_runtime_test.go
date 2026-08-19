@@ -1520,11 +1520,11 @@ func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {
 			target.agent.sessions[target.id] = &session{agent: target.agent, id: target.id, materializedPath: "old"}
 		}
 		candidate := &session{agent: target.agent, id: target.id, materializedPath: "candidate"}
-		storeErr := target.agent.storeStartedSession(candidate)
+		require.Error(t, target.agent.storeStartedSession(candidate))
+
 		if target.current {
-			require.NoError(t, storeErr)
-		} else {
-			require.Error(t, storeErr)
+			require.NotSame(t, candidate, target.agent.activeSession(target.id),
+				"an incomplete close keeps the id it still owes state under")
 		}
 	}
 

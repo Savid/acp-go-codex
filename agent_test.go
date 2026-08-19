@@ -545,6 +545,36 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	}
 }
 
+// TestSameIdInstallRefusesOverAnUnsettledSession pins what a same-id install
+// does with the instance it replaces. That instance's close is a whole boundary
+// — containment, the durable commit it still owes, and the material that commit
+// is read back from — so a close that does not complete leaves all three owed by
+// a wrapper the install would leave unreferenced. The install is refused and the
+// replaced session keeps its id, so the next attempt runs the boundary again.
+func TestSameIdInstallRefusesOverAnUnsettledSession(t *testing.T) {
+	agent := NewAgent()
+
+	unsettledDir := t.TempDir()
+	child := filepath.Join(unsettledDir, "child")
+	require.NoError(t, os.WriteFile(child, []byte("x"), 0o600))
+
+	unsettled := newSession(agent, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, newSpyCodexClient(), sessionMeta{}, nil)
+	unsettled.materializedPath = unsettledDir
+	require.NoError(t, agent.storeStartedSession(unsettled))
+
+	refused := newSession(agent, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
+	require.Error(t, agent.storeStartedSession(refused))
+	require.Same(t, unsettled, agent.activeSession("same"),
+		"an incomplete boundary keeps its id, and everything it still owes with it")
+
+	// The material can be released now, so the same install runs the boundary
+	// again and this time it completes.
+	require.NoError(t, os.Remove(child))
+	require.NoError(t, agent.storeStartedSession(refused))
+	require.Same(t, refused, agent.activeSession("same"))
+	require.NoError(t, agent.Close())
+}
+
 type spyCodexClient struct {
 	mu sync.Mutex
 
