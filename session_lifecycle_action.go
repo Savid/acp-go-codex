@@ -52,12 +52,32 @@ func (s *session) beginAction(
 // resolve terminalizes the action with the state its answer reached. It is safe
 // to call for an action that never existed, which is what an unnegotiated
 // connection has.
+//
+// A teardown answers the pending request by cancelling the context it was issued
+// on, and two things follow from that. A cancel or close teardown terminalizes
+// `cancelled`: incarnation loss is the path that terminalizes `failed`, and the
+// two never share a terminal state, so a host can tell a contained end from a
+// lost one. And the terminal patch is emitted on a context that outlives the
+// teardown, because the sequence it claims is spent whether or not the
+// notification is delivered — an undelivered resolution leaves the host holding
+// a gap and an action with no terminal at all.
 func (a *liveAction) resolve(ctx context.Context, state lifecycle.ActionState) error {
 	if a == nil {
 		return nil
 	}
 
-	return a.incarnation.resolveAction(ctx, a.id, state)
+	if ctx.Err() == nil {
+		return a.incarnation.resolveAction(ctx, a.id, state)
+	}
+
+	if state == lifecycle.ActionFailed && a.incarnation.session.wasTurnCancelled() {
+		state = lifecycle.ActionCancelled
+	}
+
+	emitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptSettlementTimeout)
+	defer cancel()
+
+	return a.incarnation.resolveAction(emitCtx, a.id, state)
 }
 
 // permissionActionState reads the standard ACP permission outcome. The outcome

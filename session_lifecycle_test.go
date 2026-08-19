@@ -108,6 +108,140 @@ func TestLifecycleServerElicitationActionFailureBoundaries(t *testing.T) {
 	}
 }
 
+// blockingPermissionClient holds the inbound permission open until its context
+// ends, which is exactly what a teardown does to a pending request: the answer
+// is a context failure, never an outcome.
+type blockingPermissionClient struct {
+	*recordingAgentClient
+
+	entered chan struct{}
+}
+
+func (c *blockingPermissionClient) RequestPermission(
+	ctx context.Context,
+	_ acp.RequestPermissionRequest,
+) (acp.RequestPermissionResponse, error) {
+	close(c.entered)
+	<-ctx.Done()
+
+	return acp.RequestPermissionResponse{}, ctx.Err()
+}
+
+// SessionUpdate refuses a notification offered on a dead context, exactly as the
+// pinned SDK's own send does. A terminal patch emitted on the context a cancel
+// just ended is never written to the peer.
+func (c *blockingPermissionClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if err := ctx.Err(); err != nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+// resolvedActionStates reads every terminal action patch the host was actually
+// sent, in order. A state the stream reduced but never delivered is not a
+// terminal the host has: its sequence is spent either way.
+func resolvedActionStates(conn *recordingAgentClient, actionID string) []string {
+	states := make([]string, 0)
+
+	for _, update := range conn.updates {
+		envelope, carried := update.Meta[lifecycle.MetaKey].(map[string]any)
+		if !carried {
+			continue
+		}
+
+		event, _ := envelope["event"].(map[string]any)
+		if event == nil || event["type"] != "action_update" {
+			continue
+		}
+
+		action, _ := event["action"].(map[string]any)
+		if action == nil || action["actionId"] != actionID {
+			continue
+		}
+
+		if state, ok := action["state"].(string); ok && state != string(lifecycle.ActionPending) {
+			states = append(states, state)
+		}
+	}
+
+	return states
+}
+
+// TestValidatedCancelTerminalizesAPendingActionAsCancelled pins both halves of
+// what a cancel owes a pending permission. Incarnation loss terminalizes
+// `failed` and cancel terminalizes `cancelled` — the two paths never share a
+// terminal state, and the teardown's own context cancellation is what the
+// pending request answers with, so the state must be read from the cause rather
+// than from the error. And the terminal patch must reach the host: emitting it
+// on the context the cancel just ended spends the sequence and delivers nothing,
+// leaving a gap where a terminal should be.
+func TestValidatedCancelTerminalizesAPendingActionAsCancelled(t *testing.T) {
+	agent, s, _, turnCtx := newStrictPermissionSession(t)
+
+	// A cancel whose targeted sweep proves the thread contained leaves the
+	// generation and every peer's stream alone, which is the ordinary path a
+	// pending action resolves on.
+	sweep := &threadScopedTerminalClient{
+		spyCodexClient: newSpyCodexClient(),
+		terminals:      map[string]map[string]struct{}{},
+	}
+
+	s.mu.Lock()
+	s.client = sweep
+	s.mu.Unlock()
+
+	conn := &blockingPermissionClient{recordingAgentClient: newRecordingAgentClient(), entered: make(chan struct{})}
+	agent.setAgentClient(conn)
+
+	incarnation, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}})
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(turnCtx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
+	emitNativePermissionToolEvent(t, s, turnCtx, codex.Event{
+		Kind: codex.EventToolStarted,
+		Tool: codex.ToolEvent{
+			ID:   lifecycleTestToolID,
+			Kind: toolKindMcpToolCall,
+			Raw:  map[string]any{"server": "wagie", "tool": "execute"},
+		},
+	})
+
+	interactionCtx, finish := s.beginInteraction(turnCtx, "codex-permission")
+	defer finish()
+
+	var permissionErr error
+
+	answered := make(chan struct{})
+
+	go func() {
+		defer close(answered)
+
+		_, _, permissionErr = s.requestPermissionForTool(interactionCtx, conn, acp.RequestPermissionRequest{
+			ToolCall: acp.ToolCallUpdate{
+				ToolCallId: lifecycleTestToolID,
+				RawInput: map[string]any{
+					"turnId": "native-permission-turn", "serverName": "wagie",
+					"_meta": map[string]any{"tool_name": "execute"},
+				},
+			},
+		}, permissionToolMCP)
+	}()
+
+	<-conn.entered
+
+	require.NoError(t, agent.Cancel(context.Background(), CancelRequest(s.id, "permission-turn")))
+	<-answered
+	require.Error(t, permissionErr, "a cancelled permission answers with the context failure")
+
+	actions := incarnation.stream.State().Actions
+	require.Len(t, actions, 1)
+	require.Equal(t, lifecycle.ActionCancelled, actions[0].State,
+		"a cancel-caused teardown terminalizes cancelled, never failed")
+	require.Equal(t, []string{string(lifecycle.ActionCancelled)},
+		resolvedActionStates(conn.recordingAgentClient, actions[0].ActionID),
+		"the terminal patch was delivered on a context the cancel could not end")
+}
+
 type failingBackgroundTerminalClient struct {
 	*spyCodexClient
 	err error
