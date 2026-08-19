@@ -1086,17 +1086,36 @@ func (a *Agent) beginSessionDelete(id acp.SessionId) (*session, error) {
 	return session, nil
 }
 
+// abortSessionClose gives an incomplete boundary its session back. The close
+// swept the provider-auth flows before it began, so a session it then re-admits
+// is answered by the lifecycle surface and refused as unknown by every auth leg
+// until some later load happened to readmit it; the sweep is undone here with
+// the admission that caused it. The flows the sweep cancelled stay cancelled —
+// they belonged to a session the host asked to close, and the retry is what
+// decides that session's fate, not the legs it had in flight.
 func (a *Agent) abortSessionClose(id acp.SessionId, session *session) {
+	if !a.clearSessionClosing(id, session) {
+		return
+	}
+
+	a.readmitProviderAuth(id)
+}
+
+// clearSessionClosing reopens admission for a session the agent still holds, and
+// reports whether it did. The broker's own lock is taken outside this one.
+func (a *Agent) clearSessionClosing(id acp.SessionId, session *session) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.sessions[id] != session {
-		return
+		return false
 	}
 
 	session.mu.Lock()
 	session.closing = false
 	session.mu.Unlock()
+
+	return true
 }
 
 // finishSessionCloseRetainingThread publishes native-thread ownership only

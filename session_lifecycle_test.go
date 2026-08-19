@@ -760,6 +760,50 @@ func TestCloseFailsWhenTheCapturedPrefixCannotBeCommitted(t *testing.T) {
 	require.Empty(t, session.unsyncedEntries)
 }
 
+// TestAnAbortedCloseReadmitsTheProviderAuthSurface pins the two surfaces of a
+// re-admitted session against each other. Close sweeps the provider-auth flows
+// and marks the id closed before it interrupts anything, so a boundary that then
+// fails and hands the session back leaves it half-alive: the lifecycle surface
+// answers for it while every auth leg naming it is refused as an unknown session.
+// The admission that gives the session back is what undoes the mark.
+func TestAnAbortedCloseReadmitsTheProviderAuthSurface(t *testing.T) {
+	storeFailure := errors.New("store unavailable")
+	refuse := true
+
+	store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
+		if refuse {
+			return storeFailure
+		}
+
+		return nil
+	}}
+
+	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store), WithProviderAuthRoot(t.TempDir()))
+	require.NotNil(t, agent.providerAuth, "the broker is built from the configured ledger root")
+	require.False(t, agent.providerAuth.sessionClosed(session.id))
+
+	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context"}`)}
+	session.unsyncedRow = 1
+
+	_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+	require.ErrorIs(t, err, storeFailure)
+	require.Same(t, session, agent.activeSession(session.id))
+
+	require.False(t, agent.providerAuth.sessionClosed(session.id), "the auth surface answers for the session again")
+
+	addressed, err := agent.providerAuth.authSession(string(session.id))
+	require.NoError(t, err)
+	require.Same(t, session, addressed)
+
+	// A boundary that completes leaves the mark standing: the session is over,
+	// and every later leg naming it is refused.
+	refuse = false
+
+	_, err = agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+	require.True(t, agent.providerAuth.sessionClosed(session.id))
+}
+
 // rolloutFixture points a session at a rollout file holding exactly the given
 // lines and returns the path, so a test can change what the file says between the
 // settlement pass and the close.
