@@ -72,6 +72,25 @@ func TestDecodeOfferReadsWhatTheHostAsked(t *testing.T) {
 			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{"1"}}},
 			field: MetaPath + ".versions",
 		},
+		// 1e300 is integral in the only sense a float64 can be — it has no
+		// fractional part — and it still names no integer: the value is nowhere
+		// near representable, so accepting it would negotiate a version number the
+		// host never wrote.
+		{
+			name:  "a version too large to name an integer exactly",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{1e300}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a version past the exact integer range",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{float64(1 << 54)}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a negative version past the exact integer range",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{-float64(1 << 54)}}},
+			field: MetaPath + ".versions",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -188,6 +207,15 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 			name:       "an unsupported version",
 			negotiated: negotiated,
 			meta:       map[string]any{MetaKey: map[string]any{"version": float64(2), "submission": map[string]any{}}},
+			field:      MetaPath + ".version",
+		},
+		// The correlation surface refuses this twice over: the value names no
+		// integer, and no integer it could be truncated into is negotiated. The
+		// case pins the verdict rather than either rule on its own.
+		{
+			name:       "a version too large to name an integer exactly",
+			negotiated: negotiated,
+			meta:       map[string]any{MetaKey: map[string]any{"version": 1e300, "submission": map[string]any{}}},
 			field:      MetaPath + ".version",
 		},
 		{

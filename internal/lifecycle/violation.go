@@ -45,8 +45,10 @@ const (
 	// ViolationStaleStream refuses an event from an incarnation already fenced or
 	// superseded, and every event for a session whose close containment completed.
 	ViolationStaleStream ViolationKind = "stale_stream"
-	// ViolationPostTerminalMutation refuses a state change on an activity,
-	// action, or turn already terminal.
+	// ViolationPostTerminalMutation refuses any carried difference from the
+	// reduced terminal record of an activity, action, or turn. A restatement that
+	// carries no difference is not a mutation and is suppressed rather than
+	// refused; a changed state is only the most obvious difference, not the rule.
 	ViolationPostTerminalMutation ViolationKind = "post_terminal_mutation"
 	// ViolationImmutableIdentityChange refuses an update that changes an immutable
 	// identity field, a first sight missing one, and an acceptance reusing a turn

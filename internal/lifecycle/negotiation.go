@@ -178,13 +178,27 @@ func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) *Para
 	return nil
 }
 
+// integerExactBound is the largest magnitude a float64 states as one exact
+// integer. Above it consecutive integers share a representation, so a value there
+// names no particular integer at all — and a value far above it, like 1e300, names
+// no integer this adapter could hold.
+const integerExactBound = 1 << 53
+
 // integerValue reads one JSON integer. A decoded wire value arrives as a float64 and
 // an embedding Go host writes an int, so both are the same integer; a fractional
-// value is neither.
+// value is neither. Integrality alone is not enough: the value must also name an
+// integer exactly, so a float64 that is integral only because it is too large to be
+// anything else is refused rather than truncated into a number the host never sent.
 func integerValue(raw any) (int, bool) {
 	switch value := raw.(type) {
 	case float64:
-		return int(value), value == math.Trunc(value)
+		if value != math.Trunc(value) || value > integerExactBound || value < -integerExactBound {
+			return 0, false
+		}
+
+		converted := int(value)
+
+		return converted, float64(converted) == value
 	case int:
 		return value, true
 	case json.Number:

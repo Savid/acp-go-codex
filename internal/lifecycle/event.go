@@ -149,8 +149,11 @@ type ActivityUpdate struct {
 	OriginTurnID string
 	RunID        string
 	// Progress is the one member whose interior this contract does not fix: an
-	// opaque object a host renders and never reduces. It still takes part in the
-	// duplicate comparison, which the whole-frame decoded value covers.
+	// opaque object a host renders and never reduces. It is still compared in two
+	// places: the duplicate comparison, which the whole-frame decoded value
+	// covers, and the member-wise terminal-restatement comparison, where progress
+	// carried at other than the reduced terminal value is a post-terminal
+	// difference like any other.
 	Progress json.RawMessage
 }
 
