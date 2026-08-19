@@ -141,6 +141,32 @@ func TestDecodeEnvelopeStrictness(t *testing.T) {
 			envelope: `{"version":1,"streamId":1,"sequence":1,"event":` + accepted + `}`,
 			kind:     ViolationMalformedEnvelope,
 		},
+		// The integer-typed members are lexically integral, not merely
+		// integer-valued: the number equality that reads 1 and 1.0 as one value
+		// inside an opaque progress object stops at the members this contract
+		// types as integers, because an ordering identity with a fraction part
+		// has no integral spelling to be contiguous against.
+		{
+			name:     "a fractional version",
+			envelope: `{"version":1.0,"streamId":"strm-1","sequence":1,"event":` + accepted + `}`,
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
+			name:     "an exponent version",
+			envelope: `{"version":1e0,"streamId":"strm-1","sequence":1,"event":` + accepted + `}`,
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
+			name:     "a fractional sequence",
+			envelope: `{"version":1,"streamId":"strm-1","sequence":2.0,"event":` + accepted + `}`,
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
+			name: "a fractional watermark",
+			envelope: `{"version":1,"streamId":"strm-1","sequence":3,"event":` +
+				`{"type":"quiescence_update","quiescent":true,"source":"process-containment","watermark":2.0}}`,
+			kind: ViolationMalformedEnvelope,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
