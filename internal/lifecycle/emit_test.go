@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -166,6 +167,53 @@ func TestEmittedEndingIdleRecordsHowItSettled(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+		})
+	}
+}
+
+// TestEmitValidatesTheRenderedNotification pins where the emitter's
+// self-validation runs. "Emitted envelopes are well formed" is a claim about
+// bytes, so the emitter renders the notification, decodes it, and reduces the
+// decoded value — the exact path a consumer takes. Each event below reduces
+// perfectly well as an in-process value and is refused the moment it is read
+// back the way a host would read it, which is precisely the class of encoder
+// infidelity struct-basis validation cannot see.
+func TestEmitValidatesTheRenderedNotification(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		event Event
+	}{
+		{
+			name: "an identifier past the bound",
+			event: AcceptedEvent(Submission{
+				SubmissionID: strings.Repeat("s", IdentifierBound+1),
+				ClientNonce:  "non-1",
+			}, "turn-1"),
+		},
+		{
+			name:  "a required identifier rendered empty",
+			event: AcceptedEvent(Submission{ClientNonce: "non-1"}, "turn-1"),
+		},
+		{
+			name:  "a positive quiescence fact with no proof class",
+			event: QuiescenceEvent(QuiescenceFact{Quiescent: true, Watermark: 1}),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stream := NewStream("strm-1", provenNegotiation())
+			_, err := stream.Emit(SnapshotEvent("cycle-1", QuiescenceFact{}))
+			require.NoError(t, err)
+
+			_, err = stream.Emit(tc.event)
+			require.ErrorIs(t, err, &ViolationError{Kind: ViolationMalformedEnvelope})
+
+			// The refusal happens at emission, so nothing reaches the projection
+			// and the sequence it claimed stays consumed as a detectable gap.
+			require.Equal(t, uint64(1), stream.State().ReducedThrough)
 		})
 	}
 }

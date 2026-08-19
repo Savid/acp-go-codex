@@ -1,5 +1,7 @@
 package lifecycle
 
+import "encoding/json"
+
 // Stream is one incarnation's ordered emitter. It claims a sequence before delivery
 // is attempted, so a lost or refused event leaves a detectable gap rather than a
 // silently contiguous stream, and it reduces every event through the same reducer
@@ -36,9 +38,16 @@ func (s *Stream) Fence() { s.fenced = true }
 // Fenced reports whether the incarnation has ended.
 func (s *Stream) Fenced() bool { return s.fenced }
 
-// Emit claims the next sequence, reduces the event, and renders the envelope for the
-// notification's `_meta`. A refused event is never rendered and its sequence stays
-// consumed, which is exactly the detectable gap the ordering rule wants.
+// Emit claims the next sequence, validates and reduces the notification the
+// envelope will ride, and returns the envelope for that notification's `_meta`.
+// A refused event is never handed back and its sequence stays consumed, which is
+// exactly the detectable gap the ordering rule wants.
+//
+// The validation runs on the rendered bytes rather than on the event value: the
+// claim being made is that what this adapter puts on the wire is well formed, and
+// only the consumer's own path — render, decode, reduce — can prove it. Reducing
+// the in-process struct proves the struct and says nothing about the encoder
+// standing between the two.
 func (s *Stream) Emit(event Event) (map[string]any, error) {
 	s.sequence++
 
@@ -46,22 +55,31 @@ func (s *Stream) Emit(event Event) (map[string]any, error) {
 		return nil, violation(ViolationStaleStream, s.id, s.sequence, "the incarnation is fenced")
 	}
 
-	err := s.reducer.Reduce(Delivery{
-		StreamID: s.id,
-		Sequence: s.sequence,
-		Carrier:  CarrierSessionInfo,
-		Event:    event,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return map[string]any{
+	envelope := map[string]any{
 		fieldVersion:  Version,
 		fieldStreamID: s.id,
 		fieldSequence: s.sequence,
 		fieldEvent:    encodeEvent(event),
-	}, nil
+	}
+
+	// A rendered envelope holds only JSON-safe values, so a payload this step
+	// could not produce fails the decode below as a malformed envelope rather
+	// than escaping as an untyped error.
+	params, _ := json.Marshal(map[string]any{
+		metaField:   map[string]any{MetaKey: envelope},
+		updateField: map[string]any{sessionUpdateField: string(CarrierSessionInfo)},
+	})
+
+	delivery, err := DecodeSessionUpdate(params, s.reducer.Negotiated())
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.reducer.Reduce(delivery); err != nil {
+		return nil, err
+	}
+
+	return envelope, nil
 }
 
 // SnapshotEvent opens a stream from the whole state this adapter can state
