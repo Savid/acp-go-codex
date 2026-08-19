@@ -396,14 +396,15 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	if len(promptSession.accountMeta) != 0 {
 		t.Fatal("empty account meta was stored")
 	}
-	if err := (&session{materializedPath: filepath.Join(t.TempDir(), "missing")}).Close(context.Background()); err != nil {
+	missingMaterial := &session{agent: NewAgent(), materializedPath: filepath.Join(t.TempDir(), "missing")}
+	if err := missingMaterial.Close(context.Background()); err != nil {
 		t.Fatalf("close missing materialized path returned error: %v", err)
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "child"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write child: %v", err)
 	}
-	if err := (&session{materializedPath: dir}).Close(context.Background()); err == nil {
+	if err := (&session{agent: NewAgent(), materializedPath: dir}).Close(context.Background()); err == nil {
 		t.Fatal("close ignored materialized remove error")
 	}
 	if update := eventUpdates(codex.Event{Kind: codex.EventWarning, Text: "warn"}); len(update) != 1 || update[0].AgentThoughtChunk == nil {

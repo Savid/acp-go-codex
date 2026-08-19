@@ -229,6 +229,7 @@ func TestSessionCloseJoinsClientAndMaterializedErrors(t *testing.T) {
 	}
 
 	session := &session{
+		agent:            NewAgent(),
 		client:           &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")},
 		materializedPath: "/tmp/rollout.jsonl",
 	}

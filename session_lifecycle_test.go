@@ -859,6 +859,55 @@ func TestCloseCommitsTheCapturedPrefixAcrossTheFence(t *testing.T) {
 	require.Empty(t, session.unsyncedEntries)
 }
 
+// TestAgentCloseCommitsTheDurableRungAWireCloseOwes pins the ladder travelling
+// with the boundary. An embedded host shuts its agent down instead of sending
+// session/close, and the prefix a settlement captured and could not place is
+// the same resumable state either way: dropping it with the wrapper loses a
+// turn the host was already shown.
+func TestAgentCloseCommitsTheDurableRungAWireCloseOwes(t *testing.T) {
+	var appended []SessionStoreEntry
+
+	store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
+		appended = append(appended, entries...)
+
+		return nil
+	}}
+
+	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+	captured := SessionStoreEntry(`{"type":"turn_context"}`)
+	session.unsyncedEntries = []SessionStoreEntry{captured}
+	session.unsyncedRow = 1
+
+	require.NoError(t, agent.Close())
+	require.Contains(t, appended, captured)
+	require.Empty(t, session.unsyncedEntries)
+}
+
+// TestAgentCloseKeepsTheMaterialWhileTheCommitIsOwed pins the other half. The
+// materialized rollout is the only remaining copy of what the commit must
+// place, so a store that refuses fails the close and leaves the material where
+// it stands; releasing it would destroy the state and the evidence together.
+func TestAgentCloseKeepsTheMaterialWhileTheCommitIsOwed(t *testing.T) {
+	storeFailure := errors.New("store unavailable")
+
+	store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
+		return storeFailure
+	}}
+
+	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+
+	material := filepath.Join(t.TempDir(), "rollout.jsonl")
+	writeRolloutLines(t, material, `{"type":"turn_context"}`)
+
+	session.materializedPath = material
+	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context"}`)}
+	session.unsyncedRow = 1
+
+	require.ErrorIs(t, agent.Close(), storeFailure)
+	require.FileExists(t, material, "the material a still-owed commit needs was destroyed")
+	require.NotEmpty(t, session.unsyncedEntries, "the refused prefix is retained, not dropped")
+}
+
 // TestCloseFailsWhenTheCapturedPrefixCannotBeCommitted pins the other half of the
 // same rung: durability outranks the response, so a capture the store refuses
 // fails the close instead of being dropped with the session wrapper. The session

@@ -827,6 +827,13 @@ func (s *session) releaseMaterialized() error {
 //
 // A live prompt's context is cancelled to stop local consumption, but native
 // interruption and containment complete before settlement may pass.
+//
+// The ladder travels with the boundary, so this path owes every rung a wire
+// close owes — including the durable one. An embedded shutdown that dropped the
+// prefix a settlement captured and could not place would lose a turn the host
+// was already shown, and this session's materialized rollout is the only
+// remaining copy of it: the material is released after the commit lands, never
+// while the commit is still owed.
 func (s *session) Close(ctx context.Context) error {
 	shutdownErr := s.shutdownActiveTurn(ctx, true)
 	s.awaitPromptSettlement()
@@ -834,7 +841,22 @@ func (s *session) Close(ctx context.Context) error {
 	s.sessionOps.Lock()
 	defer s.sessionOps.Unlock()
 
-	return errors.Join(shutdownErr, s.containSession(ctx), s.releaseMaterialized())
+	if containErr := errors.Join(shutdownErr, s.containSession(ctx)); containErr != nil {
+		// An incomplete boundary terminalizes nothing and commits nothing new.
+		// The stream ends either way, because the session it belonged to is over
+		// whether or not its descendants could be proved gone.
+		s.fenceSession()
+
+		return containErr
+	}
+
+	s.fenceSession()
+
+	if commitErr := s.commitResumableSnapshot(ctx); commitErr != nil {
+		return commitErr
+	}
+
+	return s.releaseMaterialized()
 }
 
 // awaitPromptSettlement stops the live prompt and waits for the settlement it
