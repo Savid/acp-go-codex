@@ -14,7 +14,6 @@ type Stream struct {
 	id       string
 	reducer  *Reducer
 	sequence uint64
-	fenced   bool
 }
 
 // NewStream opens an incarnation identified by id. The identity names one native
@@ -30,13 +29,16 @@ func (s *Stream) ID() string { return s.id }
 // State returns the projection the emitted stream proves.
 func (s *Stream) State() State { return s.reducer.State() }
 
-// Fence ends the incarnation. A fenced stream is terminal: nothing more may be
-// emitted on it, and later conversation reuse opens a new incarnation with a new
-// identity and a fresh snapshot.
-func (s *Stream) Fence() { s.fenced = true }
+// Fence ends the incarnation by recording its close on the reducer that judges
+// every emission. A fenced stream is terminal: nothing more may be emitted on
+// it, and later conversation reuse opens a new incarnation with a new identity
+// and a fresh snapshot. The fence lives on the reducer rather than beside it so
+// the emitter refuses a post-fence event by the same rule, and with the same
+// verdict, a consumer of these bytes would.
+func (s *Stream) Fence() { s.reducer.Close() }
 
 // Fenced reports whether the incarnation has ended.
-func (s *Stream) Fenced() bool { return s.fenced }
+func (s *Stream) Fenced() bool { return s.reducer.State().Closed }
 
 // Emit claims the next sequence, validates and reduces the notification the
 // envelope will ride, and returns the envelope for that notification's `_meta`.
@@ -50,10 +52,6 @@ func (s *Stream) Fenced() bool { return s.fenced }
 // standing between the two.
 func (s *Stream) Emit(event Event) (map[string]any, error) {
 	s.sequence++
-
-	if s.fenced {
-		return nil, violation(ViolationStaleStream, s.id, s.sequence, "the incarnation is fenced")
-	}
 
 	envelope := map[string]any{
 		fieldVersion:  Version,

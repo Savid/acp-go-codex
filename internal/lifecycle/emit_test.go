@@ -45,6 +45,10 @@ func TestStreamRefusesAnEventItCannotState(t *testing.T) {
 	require.ErrorIs(t, err, &ViolationError{Kind: ViolationDeltaBeforeSnapshot})
 }
 
+// The fence is the reducer's, so the emitter refuses a post-fence event by the
+// same rule and with the same verdict a consumer reducing these bytes would
+// reach. The refused event still burns its sequence: the loss stays a detectable
+// gap rather than a silently contiguous stream.
 func TestFencedStreamEmitsNothingFurther(t *testing.T) {
 	t.Parallel()
 
@@ -55,8 +59,18 @@ func TestFencedStreamEmitsNothingFurther(t *testing.T) {
 	require.False(t, stream.Fenced())
 	stream.Fence()
 	require.True(t, stream.Fenced())
+	require.True(t, stream.State().Closed)
 
 	_, err = stream.Emit(AcceptedEvent(Submission{SubmissionID: "s", ClientNonce: "n"}, "turn-1"))
+	require.ErrorIs(t, err, &ViolationError{Kind: ViolationStaleStream})
+
+	var refusal *ViolationError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, "strm-1", refusal.StreamID)
+	require.Equal(t, uint64(2), refusal.Sequence)
+
+	// The refusal latched, so the fence holds for every later event too.
+	_, err = stream.Emit(SnapshotEvent("cycle-2", QuiescenceFact{}))
 	require.ErrorIs(t, err, &ViolationError{Kind: ViolationStaleStream})
 }
 

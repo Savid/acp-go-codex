@@ -828,9 +828,12 @@ func TestCloseOnADeadStreamEmitsNothing(t *testing.T) {
 		require.Equal(t, emitted, lifecycleNotifications(conn))
 
 		// The rung is skipped rather than optional: the stream itself refuses
-		// what a close that terminalized on it would have had to send.
+		// what a close that terminalized on it would have had to send. The event
+		// offered here is the well-formed one that close would send, so the
+		// refusal is the fence's and not the payload's.
 		require.ErrorIs(t,
-			incarnation.emit(ctx, lifecycle.TransitionEvent(lifecycle.ForegroundIdle, incarnation.cycleID, incarnation.turnID)),
+			incarnation.emit(ctx, lifecycle.IdleEvent(incarnation.cycleID, incarnation.turnID,
+				lifecycle.StopReasonCancelled, lifecycle.OutcomeCancelled)),
 			&lifecycle.ViolationError{Kind: lifecycle.ViolationStaleStream})
 	})
 }
