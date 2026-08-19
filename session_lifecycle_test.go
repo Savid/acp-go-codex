@@ -889,32 +889,53 @@ func TestCloseReadsNothingNewWithoutACaptureFailure(t *testing.T) {
 	})
 }
 
-// TestCloseNeverRewritesALossTerminalizedFailure pins the durable branch's
-// precision. Incarnation loss terminalizes as `failed` and close as `cancelled`,
-// and the two paths never share a terminal state: an entity the loss already
-// finished stays finished the way the loss finished it. The reduced record is
-// what the next incarnation's snapshot would be built from, so a rewrite here
-// would make that snapshot lie.
-func TestCloseNeverRewritesALossTerminalizedFailure(t *testing.T) {
+// TestLatchAndReducerRefuseToRestateALossTerminalizedFailure pins what actually
+// holds a loss-terminalized turn in place. Incarnation loss terminalizes as
+// `failed` and close as `cancelled`, and an entity the loss already finished
+// stays finished the way the loss finished it — but nothing at the close boundary
+// is what enforces that. This configuration's close emits nothing on a stream a
+// settlement already ended, and this adapter holds no durable lifecycle entity
+// state at all, so there is no record for a later boundary to rewrite.
+//
+// Two things enforce the outcome, and both are asserted here: the incarnation's
+// settled latch, which makes a second settlement a no-op, and the shared reducer,
+// which refuses any idle naming a terminal turn under post_terminal_mutation
+// whether or not the latch was passed. Beside them is the one fact the boundary
+// itself owns: close adds no event to the stream.
+func TestLatchAndReducerRefuseToRestateALossTerminalizedFailure(t *testing.T) {
 	ctx := context.Background()
-	agent, session, _ := closeBoundaryFixture(t)
+	agent, session, conn := closeBoundaryFixture(t)
 
 	incarnation, err := session.openIncarnation(ctx, agent.negotiatedLifecycle())
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(ctx, lifecycle.Submission{SubmissionID: "sub", ClientNonce: "non"}))
 	require.NoError(t, incarnation.settle(ctx, "", lifecycle.OutcomeFailed))
 
-	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
-	require.NoError(t, err)
+	settled := lifecycleNotifications(conn)
+
+	// The latch, on the live stream: a second settlement is the shape a close that
+	// terminalized unconditionally would take, and it neither emits nor reduces.
+	require.NoError(t, incarnation.settle(ctx, acp.StopReasonCancelled, lifecycle.OutcomeCancelled))
+	require.Equal(t, settled, lifecycleNotifications(conn), "the settled latch emitted nothing")
 
 	turn, known := incarnation.stream.State().Turn(incarnation.turnID)
 	require.True(t, known)
 	require.True(t, turn.Terminal)
 	require.Equal(t, lifecycle.OutcomeFailed, turn.Outcome)
 
-	// A second settlement is the shape a close that terminalized unconditionally
-	// would take, and it changes nothing.
-	require.NoError(t, incarnation.settle(ctx, acp.StopReasonCancelled, lifecycle.OutcomeCancelled))
+	// The reducer, reached past the latch: a cancelled idle naming the same turn
+	// is not a weaker restatement, it is a post-terminal mutation, and the
+	// sequence it consumed stays consumed.
+	_, err = incarnation.stream.Emit(
+		lifecycle.IdleEvent(incarnation.cycleID, incarnation.turnID, string(acp.StopReasonCancelled), lifecycle.OutcomeCancelled),
+	)
+	require.ErrorIs(t, err, &lifecycle.ViolationError{Kind: lifecycle.ViolationPostTerminalMutation})
+
+	// The boundary's own fact: close ends the stream and states nothing on it.
+	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+	require.Equal(t, settled, lifecycleNotifications(conn), "the close boundary emitted nothing")
+	require.Nil(t, session.liveIncarnation(), "the close boundary fenced the stream")
 
 	turn, known = incarnation.stream.State().Turn(incarnation.turnID)
 	require.True(t, known)
