@@ -237,20 +237,22 @@ reaches the session store.
 
 ### Bounds and validation
 
-Native presentation text crosses on four fields only, and each is NFC-normalised
+Native presentation text crosses on two fields only, and each is NFC-normalised
 before it is measured, checked, relayed, and stored:
 
 | Field | Bound |
 | --- | --- |
 | `url` | at most 2048 bytes, scheme exactly `https`, no userinfo, no fragment |
-| `message` | at most 2048 bytes |
 | `userCode` | at most 64 bytes, fully matching `[A-Za-z0-9-]+` |
-| `label` | at most 256 bytes |
 
-`message` and `label` are additionally restricted to Unicode categories L, N, P,
-S, and Zs. A field violating its bound is dropped rather than truncated: on a
-flow leg the call then fails closed, while on `methods` only the offending
-catalog entry is omitted.
+The catalog's `label` is adapter-owned rather than native, and it is measured on
+the same terms: at most 256 bytes, restricted to Unicode categories L, N, P, S,
+and Zs. The authorize presentation's `message` is that same label, so it carries
+the label's bound and no native message ever reaches it.
+
+A field violating its bound is dropped rather than truncated: on a flow leg the
+call then fails closed, while on `methods` only the offending catalog entry is
+omitted.
 
 No advertised method carries a prompt, so `authorize.inputs` must be absent or
 empty; an answer for a prompt nobody published is invalid params. The API key a

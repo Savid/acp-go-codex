@@ -32,9 +32,15 @@ const (
 
 // Display-field bounds. A value violating its bound is dropped, never
 // truncated.
+//
+// There is no separate `message` bound because codex publishes no native
+// message: the authorize presentation's `message` is the pinned catalog label,
+// already NFC-normalised, category-restricted, and bounded here at catalog
+// build. Native presentation text reaches the wire on the url and userCode
+// fields alone, and a bound is declared only where a native value is measured
+// against it.
 const (
 	authMaxURLBytes      = 2048
-	authMaxMessageBytes  = 2048
 	authMaxUserCodeBytes = 64
 	authMaxLabelBytes    = 256
 )
