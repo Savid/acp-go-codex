@@ -398,11 +398,11 @@ func (s *session) settlePrompt(
 	}
 
 	if err := s.commitForegroundPrefix(settleCtx); err != nil {
-		return acp.PromptResponse{}, err
+		return acp.PromptResponse{}, settlementFailure(result.failure, err)
 	}
 
 	if err := incarnation.settle(settleCtx, stopReason, outcome); err != nil {
-		return acp.PromptResponse{}, err
+		return acp.PromptResponse{}, settlementFailure(result.failure, err)
 	}
 
 	if result.failure != nil {
@@ -424,6 +424,23 @@ func (s *session) settlePrompt(
 			result.state.nativeIdentity,
 		),
 	}, nil
+}
+
+// settlementFailure keeps a failed native turn's own cause on the wire when the
+// settlement behind it fails too. The turn-failure envelope names the cause the
+// host has to classify and decide a retry against, and an adapter's own
+// settlement fault renames nothing about the turn that already failed; reporting
+// the settlement instead would tell a host its store broke when what broke was
+// the provider. The settlement failure is not lost by staying off the wire — it
+// keeps the effect it always had, which is the terminal idle this exit no longer
+// emits, and a capture the store refused stays latched for the close boundary to
+// place.
+func settlementFailure(nativeFailure error, settlementErr error) error {
+	if nativeFailure != nil {
+		return nativeFailure
+	}
+
+	return settlementErr
 }
 
 // commitForegroundPrefix places the largest prefix of this turn's native state

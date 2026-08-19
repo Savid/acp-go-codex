@@ -1320,3 +1320,44 @@ func TestConcurrentPromptIsRefusedWithSessionPromptBackpressure(t *testing.T) {
 	require.Error(t, <-firstDone)
 	require.NoError(t, agent.Close())
 }
+
+// TestPromptSettlementKeepsTheNativeCauseWhenTheCommitAlsoFails pins the wire
+// answer to a double fault. The native turn failed and the durable
+// foreground-prefix commit failed behind it: the host is owed the turn's own
+// cause, because a store fault belongs to the adapter and names nothing a host
+// can classify or decide a retry against.
+func TestPromptSettlementKeepsTheNativeCauseWhenTheCommitAlsoFails(t *testing.T) {
+	ctx := context.Background()
+	promptSession := &session{
+		agent: NewAgent(WithSessionStore(appendErrorStore{})),
+		id:    "s",
+		cwd:   "/tmp/project",
+	}
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(rollout, []byte(`{"type":"event_msg"}`+"\n"), 0o600))
+	promptSession.rolloutPath = rollout
+
+	withRolloutAppendSettings(t, time.Second, []time.Duration{0})
+
+	nativeFailure := promptSession.mapTurnFailure(&codex.TurnFailedError{
+		Cause:   codex.CauseProvider,
+		Message: "provider refused the turn",
+	})
+
+	_, err := promptSession.settlePrompt(ctx, ctx, nil, promptTurnResult{
+		state:    &promptEventState{},
+		failure:  nativeFailure,
+		accepted: true,
+	}, nil)
+	require.ErrorIs(t, err, nativeFailure)
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+
+	data := asType[map[string]any](t, requestErr.Data)
+	require.Equal(t, valueTurnFailed, data[jsonFieldError])
+	require.Equal(t, codex.CauseProvider, data[jsonFieldCause])
+	require.Equal(t, "provider refused the turn", data[jsonFieldMessage])
+}
