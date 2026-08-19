@@ -201,6 +201,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		return fmt.Errorf("replacements must include the main key exactly once")
 	}
 
+	// A tombstone this write did not create is final. The store enforces that
+	// itself rather than trusting an adapter-level deletion marker: a
+	// replacement landing after a delete would answer for a session the host has
+	// already been told is gone, and it would answer with a whole generation.
+	if s.isTombstonedLocked(main) {
+		return nil
+	}
+
 	for candidate := range s.entries {
 		if candidate.SessionID == main.SessionID {
 			delete(s.entries, candidate)

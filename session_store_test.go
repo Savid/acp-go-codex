@@ -67,6 +67,67 @@ func TestInMemorySessionStoreContract(t *testing.T) {
 	}
 }
 
+// TestInMemorySessionStoreTombstoneIsFinal pins tombstone finality where it has
+// to live: in the store. An adapter-level deletion marker is not a substitute,
+// because the store is what a second writer, a late tail, or a restarted
+// adapter reaches. Both writing verbs are covered — a whole replacement
+// generation resurrects strictly more than an append does.
+func TestInMemorySessionStoreTombstoneIsFinal(t *testing.T) {
+	ctx := context.Background()
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "a"}
+
+	for _, test := range []struct {
+		name  string
+		write func(*InMemorySessionStore) error
+	}{
+		{"append", func(store *InMemorySessionStore) error {
+			return store.Append(ctx, main, []SessionStoreEntry{SessionStoreEntry(`{"late":true}`)})
+		}},
+		{"replace", func(store *InMemorySessionStore) error {
+			return store.Replace(ctx, main, []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"late":true}`)}},
+				{Key: sub, Entries: []SessionStoreEntry{SessionStoreEntry(`{"late":"sub"}`)}},
+			})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			if err := store.Append(ctx, main, []SessionStoreEntry{SessionStoreEntry(`{"one":1}`)}); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+
+			if err := store.Delete(ctx, main); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+
+			// The deleted state is already the caller's answer, so the refusal is
+			// silent rather than an error.
+			if err := test.write(store); err != nil {
+				t.Fatalf("write over tombstone: %v", err)
+			}
+
+			if got, _ := store.Load(ctx, main); len(got) != 0 {
+				t.Fatalf("write resurrected the tombstoned main key: %q", got)
+			}
+
+			if got, _ := store.Load(ctx, sub); len(got) != 0 {
+				t.Fatalf("write resurrected a subpath under the tombstoned session: %q", got)
+			}
+
+			summaries, err := store.ListSessions(ctx)
+			if err != nil || len(summaries) != 0 {
+				t.Fatalf("ListSessions = %#v err=%v", summaries, err)
+			}
+
+			subkeys, err := store.ListSubkeys(ctx, main)
+			if err != nil || len(subkeys) != 0 {
+				t.Fatalf("ListSubkeys = %#v err=%v", subkeys, err)
+			}
+		})
+	}
+}
+
 func TestInMemorySessionStoreReplaceValidation(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
