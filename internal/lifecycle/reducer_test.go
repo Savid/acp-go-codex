@@ -232,6 +232,42 @@ func TestSupersededIncarnationNeverResurrects(t *testing.T) {
 	require.Len(t, state.Turns, 1)
 }
 
+// TestEndingIdleRecordsHowTheTurnSettled pins the reducer's own ending-idle
+// rule. The decoder refuses these shapes before they can be reduced from the
+// wire, and the emitter now goes through that decoder too — but Reduce takes a
+// value directly, and a projection that accepted an ending idle with no outcome
+// would hold a terminal turn nobody can say the fate of.
+func TestEndingIdleRecordsHowTheTurnSettled(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		stopReason string
+		outcome    Outcome
+	}{
+		{name: "no outcome at all", stopReason: StopReasonEndTurn},
+		{name: "a failure that states a stop reason", stopReason: StopReasonEndTurn, outcome: OutcomeFailed},
+		{name: "a settled turn with no stop reason", outcome: OutcomeSuccess},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reducer := openStream(t, Negotiated{Versions: []int{1}})
+			submission := Submission{SubmissionID: "s", ClientNonce: "n"}
+			require.NoError(t, reducer.Reduce(deliver(2, AcceptedEvent(submission, "turn-1"))))
+			require.NoError(t, reducer.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
+
+			require.ErrorIs(t,
+				reducer.Reduce(deliver(4, IdleEvent("cycle-1", "turn-1", tc.stopReason, tc.outcome))),
+				&ViolationError{Kind: ViolationMalformedEnvelope})
+
+			turn, known := reducer.State().Turn("turn-1")
+			require.True(t, known)
+			require.False(t, turn.Terminal, "a refused idle terminalized the turn anyway")
+		})
+	}
+}
+
 func TestTerminalTurnNeverReopens(t *testing.T) {
 	t.Parallel()
 
