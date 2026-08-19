@@ -509,7 +509,10 @@ func TestCloseAndDeleteContainActiveTurnBeforeSettlement(t *testing.T) {
 				t.Fatalf("%s returned before native interrupt completed: %v", operation, err)
 			default:
 			}
-			require.False(t, agent.isDeleted(created.SessionId), "delete tombstoned before containment")
+			if operation == "delete" {
+				require.True(t, agent.isDeleted(created.SessionId),
+					"the tombstone is the delete's first act, so the id is already hidden while containment runs")
+			}
 
 			close(client.interruptRelease)
 			require.Eventually(t, func() bool { return errors.Is(interactionCtx.Err(), context.Canceled) }, time.Second, time.Millisecond)
@@ -619,11 +622,15 @@ func TestDeleteAdmissionPreventsLateNativeTurn(t *testing.T) {
 	}()
 	<-client.containStarted
 
+	// The tombstone is already durable, so the wire answer is the uniform
+	// unknown-session verdict a host may treat as final; the wrapper behind it is
+	// still owned, and refuses on its own closed mark.
 	_, promptErr := agent.Prompt(
 		context.Background(),
 		TextPromptRequest(created.SessionId, "late-turn", "must not start"),
 	)
-	require.ErrorContains(t, promptErr, "session close in progress")
+	requireUnknownSession(t, promptErr)
+
 	active := agent.activeSession(created.SessionId)
 	_, promptErr = active.Prompt(
 		context.Background(),
@@ -640,7 +647,11 @@ func TestDeleteAdmissionPreventsLateNativeTurn(t *testing.T) {
 	require.NoError(t, agent.Close())
 }
 
-func TestDeleteStoreFailureReadmitsContainedSessionForRebind(t *testing.T) {
+// TestDeleteStoreFailureLeavesTheSessionUntouched pins the tombstone as the
+// delete's first act. A delete the store refuses has torn nothing down, so the
+// session it addressed is exactly as the host left it: not hidden, not closed to
+// prompts, and still holding its live native thread.
+func TestDeleteStoreFailureLeavesTheSessionUntouched(t *testing.T) {
 	deleteErr := errors.New("store delete failed")
 	store := &configurableStore{deleteErr: deleteErr}
 	client := newSpyCodexClient()
@@ -655,9 +666,15 @@ func TestDeleteStoreFailureReadmitsContainedSessionForRebind(t *testing.T) {
 	_, err = agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(created.SessionId))
 	require.ErrorIs(t, err, deleteErr)
 	require.Same(t, active, agent.activeSession(created.SessionId))
-	require.True(t, active.clientDead, "unsubscribed session must rebind before another prompt")
-	require.False(t, active.closing, "failed tombstone must reopen delete admission")
+	require.False(t, active.clientDead, "a refused tombstone must not have unsubscribed the thread")
+	require.False(t, active.closing, "a refused tombstone must leave prompt admission open")
 	require.False(t, agent.isDeleted(created.SessionId))
+
+	listed, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{})
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, created.SessionId, listed.Sessions[0].SessionId)
+
 	require.NoError(t, agent.Close())
 }
 
@@ -714,6 +731,122 @@ func TestDeleteSessionSurfacesNativeCleanupErrorAfterTombstone(t *testing.T) {
 	} else {
 		requireUnknownSession(t, err)
 	}
+}
+
+// TestDeleteHidesTheIdBeforeAFailedTeardownAndRetriesIt pins the delete's
+// tombstone-first order. The durable tombstone is written before any teardown
+// runs, so a boundary that cannot prove containment surfaces its error with the
+// id already hidden from list, load, resume, and prompt — while the agent goes
+// on owning the native scope, and the next delete runs the same ladder again.
+func TestDeleteHidesTheIdBeforeAFailedTeardownAndRetriesIt(t *testing.T) {
+	ctx := context.Background()
+	sweepFailure := errors.New("thread-scoped containment failed")
+	client := &recoverableBackgroundTerminalClient{
+		spyCodexClient: newSpyCodexClient(),
+		err:            sweepFailure,
+	}
+	agent := NewAgent(
+		WithSessionStore(NewInMemorySessionStore()),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+	agent.setAgentClient(newRecordingAgentClient())
+
+	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	require.NotNil(t, active)
+
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(created.SessionId))
+	require.ErrorIs(t, err, sweepFailure, "an unproved boundary fails the delete")
+	require.True(t, agent.isDeleted(created.SessionId), "the tombstone lands ahead of the teardown that failed")
+	require.Same(t, active, agent.activeSession(created.SessionId),
+		"a hidden session keeps its native scope so the retry can reach it")
+
+	_, promptErr := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "late", "must not start"))
+	requireUnknownSession(t, promptErr)
+
+	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(created.SessionId, "/tmp/project"))
+	requireUnknownSession(t, loadErr)
+
+	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	requireUnknownSession(t, resumeErr)
+
+	_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
+	requireUnknownSession(t, closeErr)
+
+	listed, err := agent.ListSessions(ctx, acp.ListSessionsRequest{})
+	require.NoError(t, err)
+	require.Empty(t, listed.Sessions, "a tombstoned id is hidden even while its wrapper is retained")
+
+	// The sweep now answers, so the second delete completes the teardown the
+	// first one left owed.
+	client.recover()
+
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(created.SessionId))
+	require.NoError(t, err)
+	require.Nil(t, agent.activeSession(created.SessionId))
+	require.NoError(t, agent.Close())
+}
+
+// TestDeleteRacingACloseHidesTheIdAndDefersTheLadder pins the delete that finds
+// the close boundary already taken. The tombstone is written before the ladder
+// is even attempted, so the id is hidden and the conflict is what the delete
+// reports; the teardown is the next delete's, once the boundary is free.
+func TestDeleteRacingACloseHidesTheIdAndDefersTheLadder(t *testing.T) {
+	ctx := context.Background()
+	client := newSpyCodexClient()
+	agent := NewAgent(
+		WithSessionStore(NewInMemorySessionStore()),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+	)
+
+	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	require.NotNil(t, active)
+
+	active.mu.Lock()
+	active.closing = true
+	active.mu.Unlock()
+
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(created.SessionId))
+	require.ErrorContains(t, err, "session close in progress")
+	require.True(t, agent.isDeleted(created.SessionId), "the tombstone lands before the ladder it could not run")
+
+	active.mu.Lock()
+	active.closing = false
+	active.mu.Unlock()
+
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(created.SessionId))
+	require.NoError(t, err)
+	require.Nil(t, agent.activeSession(created.SessionId))
+	require.NoError(t, agent.Close())
+}
+
+// recoverableBackgroundTerminalClient fails the thread-scoped sweep until it is
+// told to stop, so one agent can observe a failed containment boundary and the
+// delete that retries it.
+type recoverableBackgroundTerminalClient struct {
+	*spyCodexClient
+	sweepMu sync.Mutex
+	err     error
+}
+
+func (c *recoverableBackgroundTerminalClient) recover() {
+	c.sweepMu.Lock()
+	defer c.sweepMu.Unlock()
+
+	c.err = nil
+}
+
+func (c *recoverableBackgroundTerminalClient) ListBackgroundTerminals(
+	context.Context,
+	codex.BackgroundTerminalListRequest,
+) (codex.BackgroundTerminalListResponse, error) {
+	c.sweepMu.Lock()
+	defer c.sweepMu.Unlock()
+
+	return codex.BackgroundTerminalListResponse{}, c.err
 }
 
 func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing.T) {
@@ -2471,13 +2604,19 @@ func TestRetainedRuntimeClaimSerializesResumeAndDelete(t *testing.T) {
 
 		_, err := agent.ResumeSession(ctx, params)
 		require.ErrorContains(t, err, "lifecycle is already in progress")
+
+		// The delete tombstones before it reaches the retained-thread claim, so it
+		// reports the claim conflict with the id already retired. The resume that
+		// holds the claim therefore has nowhere to register its thread: it wins the
+		// claim and still loses the id.
 		_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest("session"))
 		require.ErrorContains(t, err, "lifecycle is already in progress")
+		require.True(t, agent.isDeleted("session"))
 		require.Equal(t, 1, client.resumeCallCount())
 		require.Empty(t, client.deletedThreadSnapshot())
 
 		close(client.resumeRelease)
-		require.NoError(t, <-firstResult)
+		requireUnknownSession(t, <-firstResult)
 		require.Equal(t, 1, client.resumeCallCount())
 		require.NoError(t, agent.Close())
 	})

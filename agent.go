@@ -788,6 +788,14 @@ func (a *Agent) session(id acp.SessionId) (*session, error) {
 		return nil, newAgentClosedError()
 	}
 
+	// A committed tombstone answers before the active map is even consulted. The
+	// agent keeps owning a wrapper whose teardown has not finished, so the map
+	// can still hold one; the id is nonetheless wire-indistinguishable from one
+	// that never existed, on this method and every other session-scoped request.
+	if a.deleteCommittedLocked(id) {
+		return nil, newUnknownSession()
+	}
+
 	session, ok := a.sessions[id]
 	if !ok {
 		return nil, newUnknownSession()
@@ -1056,6 +1064,13 @@ func (a *Agent) beginSessionClose(id acp.SessionId) (*session, error) {
 
 	if a.closed {
 		return nil, newAgentClosedError()
+	}
+
+	// Close is a session-scoped request method, so a committed tombstone answers
+	// it as unknown rather than handing back the wrapper the delete's own
+	// teardown still owns.
+	if a.deleteCommittedLocked(id) {
+		return nil, newUnknownSession()
 	}
 
 	session := a.sessions[id]

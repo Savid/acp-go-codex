@@ -220,7 +220,10 @@ func TestCloseRefusesUnsupportedContainmentWithoutDestroyingPeer(t *testing.T) {
 	target.finishTurn()
 	_, err = agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(target.id))
 	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
-	require.False(t, agent.isDeleted(target.id), "failed containment must not tombstone the target")
+	require.True(t, agent.isDeleted(target.id),
+		"the tombstone precedes teardown, so a failed containment reports with the id already hidden")
+	require.Same(t, target, agent.activeSession(target.id),
+		"a hidden id keeps its native scope so a later delete can finish the teardown")
 
 	peer.finishTurn()
 	require.NoError(t, agent.Close())
@@ -258,7 +261,8 @@ func TestDeleteRetainedThreadRefusesUnsupportedContainmentWithActivePeer(t *test
 	_, err := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest("target"))
 	require.ErrorIs(t, err, codex.ErrBackgroundTerminalsUnsupported)
 	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
-	require.False(t, agent.isDeleted("target"))
+	require.True(t, agent.isDeleted("target"),
+		"the tombstone precedes teardown, so a failed containment reports with the id already hidden")
 	require.False(t, agent.retainedThreads["target"].claimed)
 	delete(agent.retainedThreads, "target")
 	require.NoError(t, agent.Close())

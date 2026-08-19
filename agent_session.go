@@ -215,27 +215,59 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
 
+	if err := a.ensureOpen(); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+
 	// The id is fenced before anything is inspected, because a store-only delete
 	// has no wrapper whose close flag could carry the fence. Load and resume are
 	// refused for the whole delete, so a native resume already in flight cannot
 	// register a wrapper behind the delete that already found none.
 	defer a.claimSessionDelete(params.SessionId)()
 
-	// Delete closes prompt admission before inspecting the active turn. Native
-	// interruption and containment then precede both ACP settlement and the
-	// durable tombstone, so neither can terminalize while work is still live.
-	active, err := a.beginSessionDelete(params.SessionId)
+	// The durable tombstone is the delete's first act, and it is bounded by the
+	// caller's own context. Nothing is torn down ahead of it, so a delete that
+	// cannot tombstone has changed nothing and the id stays entirely the host's;
+	// once it is written the id is gone from the wire whatever the teardown
+	// behind it goes on to do.
+	storeCtx, cancel := a.sessionStoreContext(ctx)
+	tombstoneErr := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)})
+
+	cancel()
+
+	if tombstoneErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, tombstoneErr
+	}
+
+	// Hiding follows the tombstone immediately and never waits on teardown: from
+	// here the id answers every session-scoped request method as unknown and
+	// appears in no listing, while the agent goes on owning whatever native scope
+	// the teardown has not yet released, so a later delete and Agent.Close can
+	// still reach it.
+	a.mu.Lock()
+	a.deleted[params.SessionId] = struct{}{}
+	a.mu.Unlock()
+
+	return acp.UnstableDeleteSessionResponse{}, a.tearDownDeletedSession(ctx, params.SessionId)
+}
+
+// tearDownDeletedSession runs the shutdown ladder behind a committed tombstone.
+// The id is already hidden, so every rung answers only for native scope the
+// agent still owns: a rung that fails surfaces its error with the session hidden
+// and retained, and the next delete runs the ladder again.
+func (a *Agent) tearDownDeletedSession(ctx context.Context, id acp.SessionId) error {
+	active, err := a.beginSessionDelete(id)
 	if errors.Is(err, errNoActiveSessionForDelete) {
 		active = nil
 	} else if err != nil {
-		return acp.UnstableDeleteSessionResponse{}, err
+		return err
 	}
 
 	// The ladder's fourth rung runs on delete exactly as it does on close, and
 	// it runs whether or not a wrapper is still active: the id is being retired
 	// for good, and a flow left armed against it would hold a nonterminal record
 	// for a session nothing can readmit.
-	a.closeSessionProviderAuth(params.SessionId)
+	a.closeSessionProviderAuth(id)
 
 	if active != nil {
 		shutdownErr := active.shutdownActiveTurn(ctx, true)
@@ -246,19 +278,24 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		if containErr != nil {
 			active.sessionOps.Unlock()
 			active.fenceSession()
-			a.abortSessionClose(params.SessionId, active)
 
-			return acp.UnstableDeleteSessionResponse{}, codexThreadACPError(containErr, active.accountMetaSnapshot())
+			// Only the closed mark this rung set is undone, and only so the delete
+			// that retries this teardown can take it again. Nothing is re-admitted
+			// by that: the tombstone is what hides the id now, and the flows the
+			// fourth rung cancelled belong to a session nothing can readmit.
+			a.clearSessionClosing(id, active)
+
+			return codexThreadACPError(containErr, active.accountMetaSnapshot())
 		}
 	}
 
 	var claimedRetained *retainedRuntimeThread
 	if active == nil {
-		claimedRetained, err = a.claimRetainedRuntimeThreadForDelete(params.SessionId)
+		claimedRetained, err = a.claimRetainedRuntimeThreadForDelete(id)
 		if errors.Is(err, errNoRetainedRuntimeThread) {
 			claimedRetained = nil
 		} else if err != nil {
-			return acp.UnstableDeleteSessionResponse{}, err
+			return err
 		}
 	}
 	defer a.releaseRetainedRuntimeThreadClaim(claimedRetained)
@@ -271,45 +308,27 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 			codexThreadID: claimedRetained.threadID,
 		}
 		if err := retainedSession.containSession(ctx); err != nil {
-			return acp.UnstableDeleteSessionResponse{}, err
+			return err
 		}
-	}
-
-	storeCtx, cancel := a.sessionStoreContext(ctx)
-	defer cancel()
-
-	if err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
-		if active != nil {
-			active.setClientDead(true)
-			active.sessionOps.Unlock()
-			a.abortSessionClose(params.SessionId, active)
-		}
-
-		return acp.UnstableDeleteSessionResponse{}, err
 	}
 
 	a.mu.Lock()
 
 	retained := claimedRetained
 	if retained == nil {
-		retained = a.retainedThreads[params.SessionId]
+		retained = a.retainedThreads[id]
 	}
 
-	removed := active != nil && a.sessions[params.SessionId] == active
+	removed := active != nil && a.sessions[id] == active
 	if removed {
-		delete(a.sessions, params.SessionId)
+		delete(a.sessions, id)
 	}
-
-	a.deleted[params.SessionId] = struct{}{}
 	a.mu.Unlock()
 
-	// The persistence fence stands after the tombstone rather than before it, and
-	// what makes that safe is the pair of things this delete already holds: the
-	// session's own sessionOps lock, which every commit rung takes, and closed
-	// prompt admission, which is what stops a new capture from starting. No
-	// commit can therefore run in the window between the tombstone and the
-	// fence, so the fence has nothing to race and the store never sees a write
-	// that the delete did not already refuse.
+	// The persistence fence stands well behind the tombstone, and what makes the
+	// gap harmless is store tombstone finality: a settlement that commits in it
+	// writes nothing, because the store refuses every write addressed to a key it
+	// has tombstoned. The fence is still taken here so the wrapper stops trying.
 	if active != nil {
 		active.fenceSession()
 		active.fencePersistence()
@@ -324,7 +343,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	}
 
 	var cleanupErr error
-	if err := a.deleteNativeCodexSession(ctx, params.SessionId, threadID); err != nil {
+	if err := a.deleteNativeCodexSession(ctx, id, threadID); err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
 	} else if err := a.endRetainedRuntimeThread(retained); err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
@@ -336,11 +355,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
-	if cleanupErr != nil {
-		return acp.UnstableDeleteSessionResponse{}, cleanupErr
-	}
-
-	return acp.UnstableDeleteSessionResponse{}, nil
+	return cleanupErr
 }
 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
@@ -360,6 +375,13 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	active := make([]*session, 0, len(a.sessions))
 
 	for _, session := range a.sessions {
+		// A wrapper the agent still owns for a tombstoned id is teardown state,
+		// never a listable session: hiding is a wire fact and does not wait for
+		// the native scope to be released.
+		if a.deleteCommittedLocked(session.id) {
+			continue
+		}
+
 		if params.Cwd != nil && session.cwd != *params.Cwd {
 			continue
 		}
@@ -583,17 +605,20 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	releaseLifecycle, err := a.acquireSessionLifecycle(params.SessionId)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, err
-	}
-	defer releaseLifecycle()
-
+	// The tombstone is read before lifecycle admission, because a delete whose
+	// teardown failed keeps its wrapper — and that wrapper's closed mark would
+	// otherwise answer a retriable conflict for an id that is permanently gone.
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
 		return acp.ResumeSessionResponse{}, newUnknownSession()
 	}
+
+	releaseLifecycle, err := a.acquireSessionLifecycle(params.SessionId)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	defer releaseLifecycle()
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
@@ -961,17 +986,20 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 
-	releaseLifecycle, err := a.acquireSessionLifecycle(params.SessionId)
-	if err != nil {
-		return acp.LoadSessionResponse{}, err
-	}
-	defer releaseLifecycle()
-
+	// The tombstone is read before lifecycle admission, because a delete whose
+	// teardown failed keeps its wrapper — and that wrapper's closed mark would
+	// otherwise answer a retriable conflict for an id that is permanently gone.
 	if a.isDeleted(params.SessionId) {
 		a.retryDeleteNativeCodexSession(ctx, params.SessionId, "")
 
 		return acp.LoadSessionResponse{}, newUnknownSession()
 	}
+
+	releaseLifecycle, err := a.acquireSessionLifecycle(params.SessionId)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	defer releaseLifecycle()
 
 	meta, err := a.sessionMetaForLifecycle(params.Meta)
 	if err != nil {
@@ -1247,14 +1275,25 @@ func (a *Agent) retryDeletedNativeCodexSessions(ctx context.Context) {
 	}
 }
 
+// retryDeleteNativeCodexSession finishes the native cleanup a delete could not.
+// It answers only for ids nothing owns: a tombstoned id whose wrapper the agent
+// still holds is torn down by that wrapper's own boundary — another delete, or
+// Agent.Close — and removing its thread here would make that boundary fail on a
+// thread this retry took away.
 func (a *Agent) retryDeleteNativeCodexSession(ctx context.Context, sessionID acp.SessionId, threadID string) {
 	a.mu.Lock()
 
+	owned := a.sessions[sessionID] != nil
 	retained := a.retainedThreads[sessionID]
+
 	if threadID == "" && retained != nil {
 		threadID = retained.threadID
 	}
 	a.mu.Unlock()
+
+	if owned {
+		return
+	}
 
 	if err := a.deleteNativeCodexSession(ctx, sessionID, threadID); err != nil {
 		a.log.DebugContext(ctx, "retry delete native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
