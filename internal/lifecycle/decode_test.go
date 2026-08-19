@@ -232,6 +232,12 @@ func TestDecodeEventStrictness(t *testing.T) {
 			kind: ViolationMalformedEnvelope,
 		},
 		{
+			name: "a running foreground naming no turn",
+			event: `{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c"},` +
+				`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`,
+			kind: ViolationMalformedEnvelope,
+		},
+		{
 			name: "a foreground origin naming a session cause",
 			event: `{"type":"lifecycle_snapshot","foreground":{"state":"running","cycleId":"c","turnId":"t","origin":"session"},` +
 				`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`,
@@ -256,6 +262,11 @@ func TestDecodeEventStrictness(t *testing.T) {
 		{
 			name:  "a submission transition naming no turn",
 			event: `{"type":"state_update","state":"running","cycleId":"c","cause":"submission"}`,
+			kind:  ViolationMalformedEnvelope,
+		},
+		{
+			name:  "a session transition to a live state naming no turn",
+			event: `{"type":"state_update","state":"requires_action","cycleId":"c","cause":"session"}`,
 			kind:  ViolationMalformedEnvelope,
 		},
 		{

@@ -103,6 +103,11 @@ func TestSnapshotIsJudgedWholeBeforeItIsProjected(t *testing.T) {
 			kind:     ViolationMalformedEnvelope,
 		},
 		{
+			name:     "a live foreground naming no turn",
+			snapshot: Snapshot{Foreground: Foreground{State: ForegroundRunning, CycleID: "c"}},
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
 			name:     "a foreground turn with no origin",
 			snapshot: Snapshot{Foreground: Foreground{State: ForegroundRunning, CycleID: "c", TurnID: "t"}},
 			kind:     ViolationMalformedEnvelope,
@@ -313,6 +318,37 @@ func TestSessionCausedIdleEndsNoTurn(t *testing.T) {
 	require.NoError(t, reducer.Reduce(deliver(2, idle)))
 	require.Equal(t, "cycle-2", reducer.State().Foreground.CycleID)
 	require.Empty(t, reducer.State().Turns)
+}
+
+// TestSessionCausedLiveTransitionNamesItsTurn proves the turn a live foreground
+// requires is judged structurally, above every rule that would otherwise answer
+// first. The running case carries a name nothing could resolve, and reports the
+// structural defect rather than an unresolvable reference; the requires-action
+// case runs on a properly blocked cycle, so the blocked-cycle rule has nothing to
+// object to and the structural defect is still the whole answer.
+func TestSessionCausedLiveTransitionNamesItsTurn(t *testing.T) {
+	t.Parallel()
+
+	turnless := func(state ForegroundState) Event {
+		return Event{Type: EventStateUpdate, State: &StateTransition{
+			State:   state,
+			CycleID: "cycle-1",
+			Cause:   CauseSession,
+		}}
+	}
+
+	running := openStream(t, negotiatedForDecode())
+	require.ErrorIs(t, running.Reduce(deliver(2, turnless(ForegroundRunning))),
+		&ViolationError{Kind: ViolationMalformedEnvelope})
+
+	blocked := openStream(t, negotiatedForDecode())
+	require.NoError(t, blocked.Reduce(deliver(2, AcceptedEvent(Submission{SubmissionID: "s", ClientNonce: "n"}, "turn-1"))))
+	require.NoError(t, blocked.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
+	require.NoError(t, blocked.Reduce(deliver(4, ActionEvent(
+		PendingAction("act-1", ActionPermission, Owner{Type: OwnerTurn, ID: "turn-1"}, true)))))
+	require.NoError(t, blocked.Reduce(deliver(5, TransitionEvent(ForegroundRequiresAction, "cycle-1", "turn-1"))))
+	require.ErrorIs(t, blocked.Reduce(deliver(6, turnless(ForegroundRequiresAction))),
+		&ViolationError{Kind: ViolationMalformedEnvelope})
 }
 
 func TestActivityIdentityIsFixedOnFirstSight(t *testing.T) {

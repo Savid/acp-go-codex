@@ -112,6 +112,34 @@ type StateTransition struct {
 	Outcome    Outcome
 }
 
+// namelessTurnDefect reports why a transition names no turn where one is
+// required, or the empty string when the omission is legal. Exactly one
+// transition may omit it: a session-caused idle. A submission- or
+// activity-caused transition names a turn by construction, and a transition to a
+// live foreground state names one whatever its cause, because a running
+// foreground is a turn running and a blocked one is owned work blocked, so
+// neither may be asserted with no turn to own it.
+//
+// The defect is structural, which fixes where it is judged: above entity
+// resolution, so an event carrying no name never reports an unresolvable one,
+// and above the blocked-cycle rule, so an event omitting a member its state
+// requires says nothing about a cycle for that rule to judge.
+//
+// Both the decoder and the reducer consult it, so an event this adapter emits is
+// held to the same rule as one it reads.
+func namelessTurnDefect(transition StateTransition) string {
+	switch {
+	case transition.TurnID != "":
+		return ""
+	case transition.Cause != CauseSession:
+		return "a " + string(transition.Cause) + "-caused transition names its turn"
+	case transition.State != ForegroundIdle:
+		return "a transition to " + string(transition.State) + " names the turn it reports live"
+	default:
+		return ""
+	}
+}
+
 // endingIdleDefect reports why an idle transition that settles a turn is
 // structurally incomplete, or the empty string when it is not. An idle naming a
 // turn ends it, so the outcome is always required; the stop reason is required
