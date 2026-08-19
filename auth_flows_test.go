@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1687,6 +1688,160 @@ func TestAuthDisconnectFailurePaths(t *testing.T) {
 
 		requireAuthCause(t, err, authCauseProcess)
 	})
+}
+
+// ladderProbeClient answers one question at the moment the native interrupt
+// reaches the app-server: was the session's provider-auth flow still live? The
+// shutdown ladder fixes flow cancellation at step 4 and the native interrupt at
+// step 5, so every observation this records must be false.
+type ladderProbeClient struct {
+	*authSpyClient
+
+	live func() bool
+
+	probeMu  sync.Mutex
+	observed []bool
+}
+
+func (c *ladderProbeClient) CancelTurn(context.Context, string, string) error {
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+
+	c.observed = append(c.observed, c.live())
+
+	return nil
+}
+
+func (c *ladderProbeClient) observations() []bool {
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+
+	return append([]bool(nil), c.observed...)
+}
+
+// TestShutdownLadderCancelsProviderAuthBeforeTheNativeInterrupt pins step 4's
+// fixed position on all three teardown surfaces. A flow cancelled after the
+// interrupt has already been abandoned to a process being torn down: its
+// completer stays armed and its record stays nonterminal for a session nothing
+// will readmit.
+func TestShutdownLadderCancelsProviderAuthBeforeTheNativeInterrupt(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		teardown func(*providerAuthFixture)
+	}{
+		{"session/close", func(f *providerAuthFixture) {
+			_, _ = f.agent.CloseSession(context.Background(), acp.CloseSessionRequest{
+				SessionId: acp.SessionId(f.sessionID),
+			})
+		}},
+		{"session/delete", func(f *providerAuthFixture) {
+			_, _ = f.agent.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{
+				SessionId: acp.SessionId(f.sessionID),
+			})
+		}},
+		{"Agent.Close", func(f *providerAuthFixture) { _ = f.agent.Close() }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newProviderAuthFixture(t)
+			flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+			session := fixture.agent.activeSession(acp.SessionId(fixture.sessionID))
+			if session == nil {
+				t.Fatal("the fixture session is not addressable")
+			}
+
+			probe := &ladderProbeClient{authSpyClient: fixture.client, live: func() bool {
+				fixture.broker.mu.Lock()
+				defer fixture.broker.mu.Unlock()
+
+				return fixture.broker.byID[flow.FlowID] != nil
+			}}
+
+			session.mu.Lock()
+			session.client = probe
+			session.mu.Unlock()
+
+			session.beginTurn(context.Background(), "ladder-nonce")
+			session.setTurnID("native-ladder-turn")
+
+			test.teardown(fixture)
+
+			observed := probe.observations()
+			if len(observed) == 0 {
+				t.Fatal("the teardown issued no native interrupt to order step 4 against")
+			}
+
+			for index, live := range observed {
+				if live {
+					t.Fatalf("native interrupt %d ran while the provider-auth flow was still armed", index)
+				}
+			}
+
+			fixture.broker.mu.Lock()
+			survivor := fixture.broker.byID[flow.FlowID]
+			fixture.broker.mu.Unlock()
+
+			if survivor != nil {
+				t.Fatal("the teardown left the flow addressable")
+			}
+		})
+	}
+}
+
+// TestAuthDeleteSessionTerminalizesPendingFlows pins the ladder's fourth rung on
+// session/delete. Delete retires an id for good — readmission is keyed by that
+// same id, so nothing later can undo a mark or resolve a flow left armed against
+// it. A pending flow that survived a delete would hold a nonterminal record and
+// an armed completer for a session that no longer exists.
+func TestAuthDeleteSessionTerminalizesPendingFlows(t *testing.T) {
+	fixture := newProviderAuthFixture(t)
+	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
+
+	other := fixture.authorizeOtherSession(t)
+
+	fixture.broker.mu.Lock()
+	record := fixture.broker.byID[flow.FlowID]
+	fixture.broker.mu.Unlock()
+
+	if record == nil {
+		t.Fatal("the authorized flow is not addressable")
+	}
+
+	// The fixture names its thread `thread-1` rather than a native uuid, so the
+	// last rung — native thread cleanup — refuses. The tombstone and the rung
+	// under test both stand before it, and that is what is asserted.
+	_, _ = fixture.agent.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{
+		SessionId: acp.SessionId(fixture.sessionID),
+	})
+
+	if !fixture.agent.isDeleted(acp.SessionId(fixture.sessionID)) {
+		t.Fatal("the delete never committed its tombstone")
+	}
+
+	fixture.broker.mu.Lock()
+	addressable := fixture.broker.byID[flow.FlowID]
+	survivor := fixture.broker.byID[other]
+	state := record.state
+	reason := record.reason
+	fixture.broker.mu.Unlock()
+
+	if addressable != nil {
+		t.Fatal("a deleted session left its flow addressable")
+	}
+
+	if state != authStateCancelled || reason != authReasonSessionClosed {
+		t.Fatalf("flow terminalized as %q/%q, want %q/%q", state, reason, authStateCancelled, authReasonSessionClosed)
+	}
+
+	select {
+	case <-record.disarm:
+	default:
+		t.Fatal("a deleted session left its completer armed")
+	}
+
+	if survivor == nil {
+		t.Fatal("deleting one session cancelled a peer's flow")
+	}
 }
 
 func TestAuthCloseSessionCancelsPendingFlows(t *testing.T) {

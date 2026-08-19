@@ -351,10 +351,6 @@ func (a *Agent) Close() error {
 	closeDone := make(chan struct{})
 	a.closeDone = closeDone
 
-	if a.providerAuth != nil {
-		defer a.providerAuth.closeAll()
-	}
-
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
@@ -364,6 +360,14 @@ func (a *Agent) Close() error {
 	a.closed = true
 	a.conn = nil
 	a.mu.Unlock()
+
+	// The ladder's fourth rung, for every session at once: no completer may
+	// outlive the process that armed it, and cancelling the flows after the
+	// native interrupts below would leave each one armed against a tree already
+	// being torn down.
+	if a.providerAuth != nil {
+		a.providerAuth.closeAll()
+	}
 
 	var err error
 
@@ -987,6 +991,20 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil
+}
+
+// closeSessionProviderAuth cancels every pending provider-auth flow the
+// addressed session owns: armed completers are disarmed and each record
+// terminalizes as cancelled/session_closed. It is the shutdown ladder's fourth
+// rung, and it runs identically on session close, session/delete, and
+// Agent.Close — always before the native interrupt, so no flow is abandoned to
+// a process that is already being torn down.
+func (a *Agent) closeSessionProviderAuth(id acp.SessionId) {
+	if a.providerAuth == nil {
+		return
+	}
+
+	a.providerAuth.closeSession(id)
 }
 
 // readmitProviderAuth tells the provider-auth broker that a session id is live

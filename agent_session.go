@@ -150,6 +150,11 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
+	// Pending provider-auth flows are cancelled before anything native is torn
+	// down, because a flow abandoned to a process already being interrupted has
+	// nobody left to cancel it.
+	a.closeSessionProviderAuth(params.SessionId)
+
 	// Close interrupts and contains a live native turn before allowing its ACP
 	// settlement to terminalize. Admission is already closed, so no later prompt
 	// can enter behind this boundary.
@@ -158,10 +163,6 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 
 	session.sessionOps.Lock()
 	defer session.sessionOps.Unlock()
-
-	if a.providerAuth != nil {
-		a.providerAuth.closeSession(params.SessionId)
-	}
 
 	if containErr := errors.Join(shutdownErr, session.containSession(ctx)); containErr != nil {
 		// An incomplete boundary terminalizes nothing and commits nothing new.
@@ -229,6 +230,12 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	} else if err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
+
+	// The ladder's fourth rung runs on delete exactly as it does on close, and
+	// it runs whether or not a wrapper is still active: the id is being retired
+	// for good, and a flow left armed against it would hold a nonterminal record
+	// for a session nothing can readmit.
+	a.closeSessionProviderAuth(params.SessionId)
 
 	if active != nil {
 		shutdownErr := active.shutdownActiveTurn(ctx, true)
