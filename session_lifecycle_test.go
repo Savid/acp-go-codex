@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -906,6 +907,82 @@ func TestAgentCloseKeepsTheMaterialWhileTheCommitIsOwed(t *testing.T) {
 	require.ErrorIs(t, agent.Close(), storeFailure)
 	require.FileExists(t, material, "the material a still-owed commit needs was destroyed")
 	require.NotEmpty(t, session.unsyncedEntries, "the refused prefix is retained, not dropped")
+}
+
+// attemptCountingStore answers with real tombstone semantics and counts every
+// write the adapter offers it. Counting attempts rather than effects is the
+// point: a store that swallows a post-delete write still proves the adapter
+// tried to make one.
+type attemptCountingStore struct {
+	*InMemorySessionStore
+
+	mu      sync.Mutex
+	appends int
+	refuse  error
+}
+
+func (s *attemptCountingStore) Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
+	s.mu.Lock()
+	s.appends++
+	refuse := s.refuse
+	s.mu.Unlock()
+
+	if refuse != nil {
+		return refuse
+	}
+
+	return s.InMemorySessionStore.Append(ctx, key, entries)
+}
+
+func (s *attemptCountingStore) attempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.appends
+}
+
+// TestDeleteFencesEveryLaterCommit pins the post-delete persistence fence on the
+// paths that actually reach the store. A delete is final, and the session
+// wrapper it retires can outlive it by a beat: the rollout tail is still
+// running, a close rung can still be entered, and the harness can still be
+// appending rows to the file behind both. Every one of those paths must write
+// nothing, and no write may recreate the row the delete removed.
+func TestDeleteFencesEveryLaterCommit(t *testing.T) {
+	ctx := context.Background()
+	storeFailure := errors.New("store unavailable")
+	store := &attemptCountingStore{InMemorySessionStore: NewInMemorySessionStore(), refuse: storeFailure}
+
+	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
+	path := rolloutFixture(t, session, `{"type":"turn_context"}`)
+
+	// A settlement pass that captured a prefix and could not place it: the
+	// commit this delete must never make is now owed.
+	require.Error(t, session.mirrorAndEmitRollout(ctx))
+	require.NotEmpty(t, session.unsyncedEntries)
+
+	store.mu.Lock()
+	store.refuse = nil
+	store.mu.Unlock()
+
+	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id))
+	require.NoError(t, err)
+
+	// The harness finished a row behind the delete, so a late tail pass has
+	// something new to place and is refused by the fence rather than by an
+	// empty read.
+	writeRolloutLines(t, path, `{"type":"turn_context"}`, `{"type":"event_msg","payload":{"type":"agent_message","message":"late"}}`)
+
+	fenced := store.attempts()
+
+	require.NoError(t, session.mirrorAndEmitRolloutLive(ctx, nil), "a late tail pass writes nothing")
+	require.NoError(t, session.ensureMirrorSynced(ctx), "the owed prefix went with the delete")
+	require.NoError(t, session.commitResumableSnapshot(ctx), "a late close rung writes nothing")
+
+	require.Equal(t, fenced, store.attempts(), "a fenced session offered the store a write")
+
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(session.id)})
+	require.NoError(t, err)
+	require.Empty(t, entries, "a post-delete write recreated the row")
 }
 
 // TestCloseFailsWhenTheCapturedPrefixCannotBeCommitted pins the other half of the

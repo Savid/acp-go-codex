@@ -303,6 +303,13 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	a.deleted[params.SessionId] = struct{}{}
 	a.mu.Unlock()
 
+	// The persistence fence stands after the tombstone rather than before it, and
+	// what makes that safe is the pair of things this delete already holds: the
+	// session's own sessionOps lock, which every commit rung takes, and closed
+	// prompt admission, which is what stops a new capture from starting. No
+	// commit can therefore run in the window between the tombstone and the
+	// fence, so the fence has nothing to race and the store never sees a write
+	// that the delete did not already refuse.
 	if active != nil {
 		active.fenceSession()
 		active.fencePersistence()
