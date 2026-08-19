@@ -160,8 +160,14 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 //
 // Supersession fences the incarnation it replaced exactly as close does, so a
 // snapshot bearing a retired identity is a stale event rather than a fresh
-// stream. It is refused before anything resets, which leaves the standing
-// projection — the current incarnation's — untouched.
+// stream.
+//
+// The replacement is judged whole on a projection of its own and swapped in only
+// once it proves out, so a snapshot that fails its own validation supersedes
+// nothing: the standing projection stays exactly as it stood at the moment of
+// refusal, its turns and its invalidated quiescence included. Fail-closed
+// handling terminalizes what the reducer holds, and an emptied projection has
+// nothing to terminalize.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
@@ -171,10 +177,20 @@ func (r *Reducer) reduceForeign(delivery Delivery) error {
 		return r.fail(delivery, ViolationStaleStream, "the incarnation was superseded")
 	}
 
-	r.retired[r.state.StreamID] = struct{}{}
-	r.reset(delivery.StreamID)
+	next := &Reducer{negotiated: r.negotiated, retired: r.retired}
+	next.reset(delivery.StreamID)
 
-	return r.reduceFirst(delivery)
+	if err := next.reduceFirst(delivery); err != nil {
+		r.failed = next.failed
+
+		return err
+	}
+
+	next.state.Closed = r.state.Closed
+	next.retired[r.state.StreamID] = struct{}{}
+	*r = *next
+
+	return nil
 }
 
 func (r *Reducer) reset(streamID string) {
