@@ -13,6 +13,12 @@ const (
 	LivenessFileName = "acp-go-codex-runtime.liveness.lock"
 )
 
+// ErrRuntimeLockUnsupported reports that this platform carries no writable-home
+// lock primitive. Exclusivity is load-bearing rather than advisory — it is what
+// keeps two runtimes off one home — so a platform that cannot take the lock
+// fails construction with this rather than launching unprotected.
+var ErrRuntimeLockUnsupported = errors.New("codex runtime home lock is unsupported on this platform")
+
 var (
 	mkdirAll       = os.MkdirAll
 	openFile       = os.OpenFile
@@ -20,6 +26,7 @@ var (
 	statFile       = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
 	chmodFile      = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
 	sameFile       = os.SameFile
+	requireLock    = requireLockPrimitive
 	platformLock   = lockFile
 	platformUnlock = unlockFile
 	validateFS     = validateLockFilesystem
@@ -63,6 +70,13 @@ func AcquireLiveness(home string) (*Lock, error) {
 }
 
 func acquire(home string, name string, action string) (*Lock, error) {
+	// The refusal comes before anything is created: a platform with no lock
+	// primitive fails construction rather than leaving a home directory and an
+	// unlockable lock file behind to suggest a claim nobody holds.
+	if err := requireLock(); err != nil {
+		return nil, err
+	}
+
 	if home == "" {
 		return nil, errors.New("codex writable home is required for runtime exclusivity")
 	}

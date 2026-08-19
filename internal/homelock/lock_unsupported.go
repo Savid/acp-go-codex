@@ -8,8 +8,15 @@ import (
 	"runtime"
 )
 
+// requireLockPrimitive refuses construction on a platform with no lock
+// primitive. The refusal carries ErrRuntimeLockUnsupported so a host classifies
+// it the same way on every such platform.
+func requireLockPrimitive() error {
+	return fmt.Errorf("%w: %s", ErrRuntimeLockUnsupported, runtime.GOOS)
+}
+
 func lockFile(*os.File) error {
-	return fmt.Errorf("codex writable-home locking is unsupported on %s", runtime.GOOS)
+	return requireLockPrimitive()
 }
 
 func unlockFile(*os.File) error { return nil }
