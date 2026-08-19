@@ -187,10 +187,22 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 
 	mainCount := 0
 
+	// Two replacements naming one key are refused before anything is written,
+	// rather than resolved by letting the later one win: a set that names a key
+	// twice states two different truths about it, and picking one would commit a
+	// generation neither the caller nor any other store would agree on.
+	seen := make(map[SessionKey]struct{}, len(replacements))
+
 	for _, replacement := range replacements {
 		if replacement.Key.SessionID != main.SessionID {
 			return fmt.Errorf("replacement key does not match main session")
 		}
+
+		if _, duplicate := seen[replacement.Key]; duplicate {
+			return fmt.Errorf("duplicate replacement key %q", replacement.Key.Subpath)
+		}
+
+		seen[replacement.Key] = struct{}{}
 
 		if replacement.Key.Subpath == SessionStoreMainSubpath {
 			mainCount++

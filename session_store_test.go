@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestInMemorySessionStoreContract(t *testing.T) {
@@ -149,6 +151,38 @@ func TestInMemorySessionStoreReplaceValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInMemorySessionStoreReplaceRefusesDuplicateKeys pins the reference store's
+// answer to a set that names one key twice. Such a set states two truths about
+// the same key, so it is refused by name and before any key is written — never
+// resolved by letting the later entry win.
+func TestInMemorySessionStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s"}
+	artifact := SessionKey{SessionID: "s", Subpath: "images/1"}
+
+	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":0}`)}},
+		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"first"}`)}},
+	}))
+
+	err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":1}`)}},
+		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"second"}`)}},
+		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"third"}`)}},
+	})
+	require.ErrorContains(t, err, "images/1")
+
+	entries, err := store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"row":0}`)}, entries,
+		"a refused set writes nothing at all")
+
+	artifactEntries, err := store.Load(ctx, artifact)
+	require.NoError(t, err)
+	require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"artifact":"first"}`)}, artifactEntries)
 }
 
 func TestInMemorySessionStoreEdgeBranches(t *testing.T) {
