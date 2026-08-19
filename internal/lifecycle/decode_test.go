@@ -162,9 +162,20 @@ func TestDecodeEnvelopeStrictness(t *testing.T) {
 			kind:     ViolationMalformedEnvelope,
 		},
 		{
+			name:     "an exponent sequence",
+			envelope: `{"version":1,"streamId":"strm-1","sequence":2e0,"event":` + accepted + `}`,
+			kind:     ViolationMalformedEnvelope,
+		},
+		{
 			name: "a fractional watermark",
 			envelope: `{"version":1,"streamId":"strm-1","sequence":3,"event":` +
 				`{"type":"quiescence_update","quiescent":true,"source":"process-containment","watermark":2.0}}`,
+			kind: ViolationMalformedEnvelope,
+		},
+		{
+			name: "an exponent watermark",
+			envelope: `{"version":1,"streamId":"strm-1","sequence":3,"event":` +
+				`{"type":"quiescence_update","quiescent":true,"source":"process-containment","watermark":1e0}}`,
 			kind: ViolationMalformedEnvelope,
 		},
 	} {

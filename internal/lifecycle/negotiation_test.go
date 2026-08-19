@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -72,23 +73,62 @@ func TestDecodeOfferReadsWhatTheHostAsked(t *testing.T) {
 			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{"1"}}},
 			field: MetaPath + ".versions",
 		},
-		// 1e300 is integral in the only sense a float64 can be — it has no
-		// fractional part — and it still names no integer: the value is nowhere
-		// near representable, so accepting it would negotiate a version number the
-		// host never wrote.
+		// The test is what the value lost, not how large it is. 2^54 is one
+		// float64 and one int64 naming the same integer exactly, so it decodes as
+		// that integer and is then simply a version this package does not speak.
 		{
-			name:  "a version too large to name an integer exactly",
+			name:     "a large version that is still exactly this integer",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{float64(1 << 54)}}},
+			present:  true,
+			versions: []int{1 << 54},
+		},
+		{
+			name:     "a negative version that is still exactly this integer",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{-float64(1 << 54)}}},
+			present:  true,
+			versions: []int{-(1 << 54)},
+		},
+		{
+			name:     "the most negative integer this platform holds",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{float64(math.MinInt)}}},
+			present:  true,
+			versions: []int{math.MinInt},
+		},
+		// 1e300 is integral in the only sense a float64 can be — it has no
+		// fractional part — and it still names no integer: the magnitude is past
+		// everything this platform can hold, so accepting it would negotiate a
+		// version number the host never wrote.
+		{
+			name:  "a version too large to name an integer at all",
 			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{1e300}}},
 			field: MetaPath + ".versions",
 		},
 		{
-			name:  "a version past the exact integer range",
-			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{float64(1 << 54)}}},
+			name:  "a version one past the integer range",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{-float64(math.MinInt)}}},
 			field: MetaPath + ".versions",
 		},
 		{
-			name:  "a negative version past the exact integer range",
-			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{-float64(1 << 54)}}},
+			name:  "a positive infinity",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{math.Inf(1)}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a negative infinity",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{math.Inf(-1)}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a NaN",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{math.NaN()}}},
+			field: MetaPath + ".versions",
+		},
+		// A json.Number offer is refused whole on this surface: the pinned SDK
+		// pre-decodes `_meta`, so a number that reached here as a lexeme did not
+		// come off the wire this decoder answers for.
+		{
+			name:  "a json number past the integer range",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{json.Number("9223372036854775808")}}},
 			field: MetaPath + ".versions",
 		},
 	} {

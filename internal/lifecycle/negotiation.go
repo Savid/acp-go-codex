@@ -178,27 +178,35 @@ func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) *Para
 	return nil
 }
 
-// integerExactBound is the largest magnitude a float64 states as one exact
-// integer. Above it consecutive integers share a representation, so a value there
-// names no particular integer at all — and a value far above it, like 1e300, names
-// no integer this adapter could hold.
-const integerExactBound = 1 << 53
+// minIntFloat and overMaxIntFloat bound the float64 values that are this
+// platform's integers. MinInt is a power of two and therefore exact, and its
+// negation is the first value one past MaxInt, so the half-open range holds
+// exactly the float64 values an int can carry — MaxInt itself is not
+// representable as a float64 on a 64-bit platform, and no bound may be spelled
+// as a value the conversion would have to round.
+const (
+	minIntFloat     = float64(math.MinInt)
+	overMaxIntFloat = -minIntFloat
+)
 
 // integerValue reads one JSON integer. A decoded wire value arrives as a float64 and
 // an embedding Go host writes an int, so both are the same integer; a fractional
-// value is neither. Integrality alone is not enough: the value must also name an
-// integer exactly, so a float64 that is integral only because it is too large to be
-// anything else is refused rather than truncated into a number the host never sent.
+// value is neither.
+//
+// The pinned SDK pre-decodes `_meta` to map[string]any, so no lexeme survives for
+// this surface to apply the lexical rule to: integrality is judged on the value. A
+// float64 is this integer only when it is integral and exactly representable as
+// one — the test is what was lost, not what is merely large, so a magnitude past
+// the int range, an infinity, and a NaN each name no integer at all, whatever the
+// truncation says about them.
 func integerValue(raw any) (int, bool) {
 	switch value := raw.(type) {
 	case float64:
-		if value != math.Trunc(value) || value > integerExactBound || value < -integerExactBound {
+		if value != math.Trunc(value) || value < minIntFloat || value >= overMaxIntFloat {
 			return 0, false
 		}
 
-		converted := int(value)
-
-		return converted, float64(converted) == value
+		return int(value), true
 	case int:
 		return value, true
 	case json.Number:
