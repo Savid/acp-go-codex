@@ -73,39 +73,36 @@ func TestLifecycleReservedKeyRejectedAcrossAgentSurfaces(t *testing.T) {
 	require.Error(t, err)
 }
 
-// docs/03 fixes the negotiated answer as a fact about the **active
-// configuration** — sibling x platform x isolation/containment mode — resolved
-// from the same code path that enforces containment and never from a
-// compiled-in constant. The answer is therefore looked up in the per-mode table
-// by the agent's own containment mode. Every row is identical because no codex
-// containment mode moves any of these three facts, and the lookup is what keeps
-// a mode that ever proves more from being answered for by a mode that does not.
-func TestLifecycleFactsResolveThroughTheContainmentModeAccessor(t *testing.T) {
+// The negotiated answer is a fact about the active configuration — this adapter
+// on this platform under this containment mode — resolved on the agent that
+// enforces containment rather than from a compiled-in constant. Every mode this
+// adapter can select answers the same three negatives, so the answer is stated
+// once instead of tabulated; this pins that the statement really is mode
+// independent, so a mode that ever proves more cannot be answered for silently
+// by one that does not.
+func TestLifecycleFactsAreNegativeUnderEveryContainmentMode(t *testing.T) {
 	modes := []RuntimeContainmentMode{
 		RuntimeContainmentAuthoritative,
 		RuntimeContainmentBestEffort,
 		RuntimeContainmentSharedIdentity,
 		RuntimeContainmentUnavailable,
+		RuntimeContainmentMode("future-mode"),
 	}
 
-	require.Len(t, lifecycleFactsByContainment, len(modes),
-		"every containment mode this adapter can select owns exactly one row")
-
 	for _, mode := range modes {
-		require.Contains(t, lifecycleFactsByContainment, mode)
+		agent := NewAgent()
+		agent.containmentMode = mode
+		require.Equal(t, mode, agent.ContainmentMode())
 
-		facts := provenLifecycleFacts(mode)
+		facts := agent.provenLifecycleFacts()
 		require.False(t, facts.UpdatesOutsidePrompt, mode)
 		require.False(t, facts.AuthoritativeQuiescence, mode)
 		require.Empty(t, facts.QuiescenceSource, mode)
 		require.Equal(t, []lifecycle.ActivityKind{}, facts.ActivityKinds, mode)
 	}
 
-	// A mode with no row proves nothing rather than inheriting a neighbour's.
-	require.Equal(t, provenFacts(), provenLifecycleFacts(RuntimeContainmentMode("future-mode")))
-
-	// The answer this connection settles on is the row for the mode the agent
-	// actually enforces, read through the same accessor the runtime reports.
+	// The answer this connection settles on is the one the agent proves, and the
+	// mode it enforces is the one the runtime reports.
 	agent := NewAgent()
 	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
 
@@ -113,7 +110,7 @@ func TestLifecycleFactsResolveThroughTheContainmentModeAccessor(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, answer.Present())
 
-	expected := provenLifecycleFacts(agent.ContainmentMode())
+	expected := agent.provenLifecycleFacts()
 	require.Equal(t, expected.UpdatesOutsidePrompt, answer.UpdatesOutsidePrompt)
 	require.Equal(t, expected.AuthoritativeQuiescence, answer.AuthoritativeQuiescence)
 	require.Equal(t, expected.QuiescenceSource, answer.QuiescenceSource)
