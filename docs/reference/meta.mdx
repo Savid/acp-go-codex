@@ -49,8 +49,12 @@ static launch environment remain authoritative.
 compare them with its advertised config-option menus: it carries them through
 new, load, resume, and fork metadata and sends them on the native surface that
 uses them. A native `thread/start` or `turn/start` rejection is returned to the
-host unchanged by any local value-list verdict. The permission and sandbox
-fields remain safety boundaries rather than menu-valued passthroughs.
+host unchanged by any local value-list verdict. The two are not checked alike:
+`personality` is refused at both doors it reaches when Codex does not recognise
+it, while `effort` reaches only `turn/start`, which accepts every string. Metadata
+naming an effort Codex does not know still starts the turn and still reads back
+exactly as it was sent. The permission and sandbox fields remain safety
+boundaries rather than menu-valued passthroughs.
 
 Session `extraPathDirs` is the only session search-path authority. It is an
 array whose elements must each be a string, nonempty, absolute, and free of the

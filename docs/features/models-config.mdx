@@ -43,6 +43,15 @@ Codex. Codex remains the authority that accepts the value, rejects it, or
 applies its own fallback; that native result surfaces when the relevant thread
 or turn starts.
 
+The three do not fail alike. Codex checks `mode` and `personality` against its
+own variant set when the request carrying them starts — `personality` at thread
+start, both at turn start — and refuses an unrecognised value there, so the
+native rejection text reaches the host as that session or turn failure. `effort`
+is checked at neither door: Codex accepts any effort string and starts the turn.
+The `effort` current value a host reads back is therefore the value the host
+sent rather than a value Codex has confirmed, and a rejection of it surfaces
+during the turn if it surfaces at all.
+
 Lifecycle metadata can establish `effort` and `personality`. Change any of the
 three values after session start with `session/set_config_option`; `mode` has no
 lifecycle-metadata key and is established through that method. Wrong-typed and
