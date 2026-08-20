@@ -530,6 +530,93 @@ func TestLifecycleAdvertisementAnswersOfferAndOpensForegroundStream(t *testing.T
 	require.Len(t, streams, 1, "one prompt opens exactly one incarnation")
 }
 
+// A host's real `session/new` is not a string map. The mandatory `mcpServers`
+// array and an object-valued `_meta` sit beside the string members, and any
+// reader that decodes the whole params blob into a narrower shape fails on
+// exactly those two — silently, on every real request, while a suite that only
+// ever builds minimal params keeps passing. So the wire bytes are driven through
+// the connection's own decoder on a negotiated connection, and the prompt that
+// follows still has to open its stream with the snapshot first.
+func TestLifecycleOpensForegroundStreamForFullWireSessionParams(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return newSpyCodexClient(), nil
+	}))
+	recorder := newRecordingAgentClient()
+	agent.setAgentClient(recorder)
+	conn := &localAgentConnection{agent: agent}
+
+	initializeResult, reqErr := conn.handle(ctx, acp.AgentMethodInitialize, json.RawMessage(
+		`{"protocolVersion":1,"_meta":{"acp-go.dev/lifecycle":{"versions":[1]}}}`,
+	))
+	require.Nil(t, reqErr)
+
+	initialized, ok := initializeResult.(acp.InitializeResponse)
+	require.True(t, ok)
+	require.Contains(t, initialized.Meta, lifecycle.MetaKey, "version 1 is negotiated for this connection")
+
+	createdResult, reqErr := conn.handle(ctx, acp.AgentMethodSessionNew, json.RawMessage(`{
+		"cwd": "/tmp/project",
+		"mcpServers": [
+			{
+				"name": "fixture",
+				"command": "/usr/bin/true",
+				"args": ["--serve"],
+				"env": [{"name": "FIXTURE_TOKEN", "value": "token"}]
+			}
+		],
+		"_meta": {"example.test/host": {"nested": {"depth": 2}, "enabled": true}}
+	}`))
+	require.Nil(t, reqErr)
+
+	created, ok := createdResult.(acp.NewSessionResponse)
+	require.True(t, ok)
+
+	// The non-string members reached the session rather than being dropped or
+	// refused, which is what makes the stream below an answer about real params.
+	servers := agent.sessionMust(created.SessionId).mcpServers
+	require.Len(t, servers, 1)
+	require.NotNil(t, servers[0].Stdio)
+	require.Equal(t, "fixture", servers[0].Stdio.Name)
+	require.Equal(t, []string{"--serve"}, servers[0].Stdio.Args)
+
+	promptResult, reqErr := conn.handle(ctx, acp.AgentMethodSessionPrompt, json.RawMessage(`{
+		"sessionId": "`+string(created.SessionId)+`",
+		"prompt": [{"type": "text", "text": "hello"}],
+		"_meta": {
+			"acp-go.dev/route": {"version": 1, "turnNonce": "turn-nonce"},
+			"acp-go.dev/lifecycle": {
+				"version": 1,
+				"submission": {"submissionId": "submission", "clientNonce": "nonce"}
+			}
+		}
+	}`))
+	require.Nil(t, reqErr)
+
+	prompted, ok := promptResult.(acp.PromptResponse)
+	require.True(t, ok)
+	require.Equal(t, acp.StopReasonEndTurn, prompted.StopReason)
+
+	var events []string
+
+	for _, update := range recorder.updates {
+		envelope, carried := update.Meta[lifecycle.MetaKey].(map[string]any)
+		if !carried {
+			continue
+		}
+
+		event, isEvent := envelope["event"].(map[string]any)
+		require.True(t, isEvent)
+
+		eventType, named := event["type"].(string)
+		require.True(t, named)
+
+		events = append(events, eventType)
+	}
+
+	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update", "state_update"}, events)
+}
+
 func TestLifecycleFailedOutcomeOmitsStopReason(t *testing.T) {
 	agent := NewAgent()
 	recorder := newRecordingAgentClient()
