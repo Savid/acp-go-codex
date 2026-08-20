@@ -45,6 +45,13 @@ are adapter-private process-management names, `CODEX_HOME`, `HOME`, and the XDG
 cache, config, data, runtime, and state roots. `WithHome` and the app-server's
 static launch environment remain authoritative.
 
+`effort` and `personality` are nonempty native values. The adapter does not
+compare them with its advertised config-option menus: it carries them through
+new, load, resume, and fork metadata and sends them on the native surface that
+uses them. A native `thread/start` or `turn/start` rejection is returned to the
+host unchanged by any local value-list verdict. The permission and sandbox
+fields remain safety boundaries rather than menu-valued passthroughs.
+
 Session `extraPathDirs` is the only session search-path authority. It is an
 array whose elements must each be a string, nonempty, absolute, and free of the
 platform path-list separator. A rejected element names its exact field, such as

@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
@@ -82,12 +83,223 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 	}
 }
 
+func TestLifecycleConfigValuesPassThroughToNative(t *testing.T) {
+	const unknown = "registry-unknown"
+
+	for _, test := range []struct {
+		name     string
+		id       acp.SessionConfigId
+		options  CodexOptions
+		asserted func(*testing.T, *spyCodexClient)
+	}{
+		{
+			name:    "effort",
+			id:      configEffort,
+			options: CodexOptions{Effort: unknown},
+			asserted: func(t *testing.T, client *spyCodexClient) {
+				t.Helper()
+				require.Equal(t, unknown, client.lastTurn.ReasoningEffort)
+			},
+		},
+		{
+			name:    "personality",
+			id:      configPersonality,
+			options: CodexOptions{Personality: unknown},
+			asserted: func(t *testing.T, client *spyCodexClient) {
+				t.Helper()
+				require.Equal(t, unknown, client.start.Personality)
+				require.Equal(t, unknown, client.lastTurn.Personality)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newSpyCodexClient()
+			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+				return client, nil
+			}))
+			agent.setAgentClient(newRecordingAgentClient())
+
+			resp, err := agent.NewSession(context.Background(), NewSessionRequest(
+				"/tmp/project",
+				WithSessionCodexOptions(test.options),
+			))
+			require.NoError(t, err)
+			requireConfigCurrentValue(t, resp.ConfigOptions, test.id, unknown)
+
+			_, err = agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "hello"))
+			require.NoError(t, err)
+
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			test.asserted(t, client)
+		})
+	}
+}
+
+func TestSetSessionConfigValuesPassThroughToNative(t *testing.T) {
+	const unknown = "registry-unknown"
+
+	for _, id := range []acp.SessionConfigId{configMode, configEffort, configPersonality} {
+		t.Run(string(id), func(t *testing.T) {
+			client := newSpyCodexClient()
+			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+				return client, nil
+			}))
+			agent.setAgentClient(newRecordingAgentClient())
+
+			resp, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+			require.NoError(t, err)
+
+			updated, err := agent.SetSessionConfigOption(
+				context.Background(),
+				SetConfigOptionRequest(resp.SessionId, id, unknown),
+			)
+			require.NoError(t, err)
+			requireConfigCurrentValue(t, updated.ConfigOptions, id, unknown)
+
+			_, err = agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "hello"))
+			require.NoError(t, err)
+
+			client.mu.Lock()
+			defer client.mu.Unlock()
+
+			switch id {
+			case configMode:
+				mode := asType[map[string]any](t, client.lastTurn.CollaborationMode)
+				require.Equal(t, unknown, mode[jsonFieldMode])
+			case configEffort:
+				require.Equal(t, unknown, client.lastTurn.ReasoningEffort)
+			case configPersonality:
+				require.Equal(t, unknown, client.lastTurn.Personality)
+			}
+		})
+	}
+}
+
+func TestMeasuredNativeConfigRefusalsPropagate(t *testing.T) {
+	const unknown = "registry-unknown"
+	const personalityMessage = "Invalid request: unknown variant `registry-unknown`, expected one of `none`, `friendly`, `pragmatic`"
+
+	t.Run("personality during establishment", func(t *testing.T) {
+		client := &nativeStartRefusalClient{
+			spyCodexClient: newSpyCodexClient(),
+			failure:        errors.New(personalityMessage),
+		}
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+			return client, nil
+		}))
+
+		_, err := agent.NewSession(context.Background(), NewSessionRequest(
+			"/tmp/project",
+			WithSessionCodexOptions(CodexOptions{Personality: unknown}),
+		))
+		require.EqualError(t, err, personalityMessage)
+
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		require.Equal(t, unknown, client.start.Personality)
+	})
+
+	for _, test := range []struct {
+		name    string
+		id      acp.SessionConfigId
+		message string
+	}{
+		{
+			name:    "mode",
+			id:      configMode,
+			message: "Invalid request: unknown variant `registry-unknown`, expected one of `plan`, `code`, `custom`, `default`, `execute`, `pair_programming`",
+		},
+		{
+			name:    "personality",
+			id:      configPersonality,
+			message: personalityMessage,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &nativeConfigRefusalClient{
+				spyCodexClient: newSpyCodexClient(),
+				failure:        errors.New(test.message),
+			}
+			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+				return client, nil
+			}))
+			agent.setAgentClient(newRecordingAgentClient())
+
+			resp, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+			require.NoError(t, err)
+			_, err = agent.SetSessionConfigOption(
+				context.Background(),
+				SetConfigOptionRequest(resp.SessionId, test.id, unknown),
+			)
+			require.NoError(t, err)
+
+			_, err = agent.Prompt(context.Background(), TextPromptRequest(resp.SessionId, "test-turn", "hello"))
+			var requestErr *acp.RequestError
+			require.ErrorAs(t, err, &requestErr)
+			require.Equal(t, -32603, requestErr.Code)
+			data := asType[map[string]any](t, requestErr.Data)
+			require.Equal(t, valueTurnFailed, data[jsonFieldError])
+			require.Equal(t, codex.CauseProvider, data[jsonFieldCause])
+			require.Equal(t, test.message, data[jsonFieldMessage])
+		})
+	}
+}
+
+type nativeStartRefusalClient struct {
+	*spyCodexClient
+	failure error
+}
+
+func (c *nativeStartRefusalClient) StartThread(
+	_ context.Context,
+	request codex.ThreadStartRequest,
+) (codex.Thread, error) {
+	c.mu.Lock()
+	c.start = request
+	c.mu.Unlock()
+
+	return codex.Thread{}, c.failure
+}
+
+type nativeConfigRefusalClient struct {
+	*spyCodexClient
+	failure error
+}
+
+func (c *nativeConfigRefusalClient) RunTurn(_ context.Context, request codex.TurnStartRequest) (codex.Turn, error) {
+	c.mu.Lock()
+	c.lastTurn = request
+	c.mu.Unlock()
+
+	return codex.Turn{}, c.failure
+}
+
+func requireConfigCurrentValue(
+	t *testing.T,
+	options []acp.SessionConfigOption,
+	id acp.SessionConfigId,
+	want acp.SessionConfigValueId,
+) {
+	t.Helper()
+
+	for _, option := range options {
+		if option.Select != nil && option.Select.Id == id {
+			require.Equal(t, want, option.Select.CurrentValue)
+
+			return
+		}
+	}
+
+	require.Failf(t, "missing config option", "config option %q is absent from %#v", id, options)
+}
+
 // TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape pins
 // session/set_config_option to the uniform unsupported-field error and to the
 // request member each rejection actually faults. Every advertised option is a
 // select, so a boolean payload faults the `type` discriminator that selected
-// the boolean variant, an unadvertised or absent value faults `value`, and only
-// an unrecognised configId names configId.
+// the boolean variant, an empty or absent value faults `value`, and only an
+// unrecognised configId names configId.
 func TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
@@ -101,16 +313,16 @@ func TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape(t *test
 		params acp.SetSessionConfigOptionRequest
 		field  string
 	}{
-		"mode value is not advertised": {
-			params: SetConfigOptionRequest(resp.SessionId, configMode, "bad"),
+		"empty mode value": {
+			params: SetConfigOptionRequest(resp.SessionId, configMode, ""),
 			field:  jsonFieldValue,
 		},
-		"effort value is not advertised": {
-			params: SetConfigOptionRequest(resp.SessionId, configEffort, "bad"),
+		"empty effort value": {
+			params: SetConfigOptionRequest(resp.SessionId, configEffort, ""),
 			field:  jsonFieldValue,
 		},
-		"personality value is not advertised": {
-			params: SetConfigOptionRequest(resp.SessionId, configPersonality, "bad"),
+		"empty personality value": {
+			params: SetConfigOptionRequest(resp.SessionId, configPersonality, ""),
 			field:  jsonFieldValue,
 		},
 		"config id is not advertised": {

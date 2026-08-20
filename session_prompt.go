@@ -688,9 +688,9 @@ func (s *session) turnSettings() (model string, effort string, serviceTier strin
 		personality = personalityValue
 	}
 
-	if mode == modePlan {
+	if mode != modeDefault {
 		collaborationMode = map[string]any{
-			jsonFieldMode: string(modePlan),
+			jsonFieldMode: string(mode),
 			"settings": map[string]any{
 				metaModelKey:             firstNonEmpty(model, valueDefault),
 				"developer_instructions": nil,

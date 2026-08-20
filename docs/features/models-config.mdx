@@ -36,7 +36,19 @@ ACP config categories are:
 | `serviceTier` | `model_config` |
 | `personality` | `model_config` |
 
-Change mode after session start with `session/set_config_option`.
+The values in each select option are a host-facing menu, not the set of values
+the adapter accepts. A nonempty `mode`, `effort`, or `personality` value outside
+that menu is retained, reported as the option's current value, and sent to
+Codex. Codex remains the authority that accepts the value, rejects it, or
+applies its own fallback; that native result surfaces when the relevant thread
+or turn starts.
+
+Lifecycle metadata can establish `effort` and `personality`. Change any of the
+three values after session start with `session/set_config_option`; `mode` has no
+lifecycle-metadata key and is established through that method. Wrong-typed and
+explicitly empty values remain invalid input, as does an unknown `configId`.
+Approval and sandbox options are separate safety authorities and are not value
+menus.
 
 Prompt-image admission uses the currently selected model on every turn. When
 Codex model discovery supplies `inputModalities`, a list containing `image`

@@ -9,6 +9,8 @@ import (
 )
 
 var (
+	// These values are host-facing menus, not adapter allowlists. A non-empty
+	// selection outside a menu still travels to Codex, which owns resolution.
 	codexEffortValues = []string{effortValueNone, "minimal", effortValueLow, effortValueMedium, effortValueHigh, "xhigh"}
 	codexTierValues   = []string{tierValueAuto, valueDefault, tierValueFlex, tierValuePriority}
 	codexPersonality  = []string{effortValueNone, personalityFriendly, personalityPragmatic}
@@ -287,7 +289,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.mu.Unlock()
 	case configMode:
 		mode := acp.SessionModeId(params.Value)
-		if mode != modeDefault && mode != modePlan {
+		if mode == "" {
 			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
@@ -296,7 +298,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.updatedAt = nowRFC3339()
 		session.mu.Unlock()
 	case configEffort:
-		if !validReasoningEffort(string(params.Value)) {
+		if params.Value == "" {
 			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
@@ -310,7 +312,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 		session.updatedAt = nowRFC3339()
 		session.mu.Unlock()
 	case configPersonality:
-		if !validPersonality(string(params.Value)) {
+		if params.Value == "" {
 			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 

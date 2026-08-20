@@ -21,6 +21,12 @@ The adapter routes the standard ACP method set and adds namespaced
 | `session/delete` | implemented |
 | `session/set_config_option` | implemented |
 
+For `mode`, `effort`, and `personality`, select-option lists are rendering
+menus rather than local allowlists. Any nonempty value is stored as the current
+value and reaches the next native turn; Codex's acceptance, rejection, or
+fallback is authoritative. Empty values, the boolean variant, and unknown
+`configId` values are still rejected as input-shape errors.
+
 `session/prompt` and active-turn `session/cancel` require the exact version-1
 `acp-go.dev/route` metadata described in [Sessions](/docs/core/sessions#turn-route-identity).
 Missing and stale turn nonces are invalid params; there is no unstamped path.
