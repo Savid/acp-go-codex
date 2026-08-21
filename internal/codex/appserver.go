@@ -63,6 +63,7 @@ const (
 	notifyTurnCompleted         = "turn/completed"
 	notifyAccountUpdated        = "account/updated"
 	notifyRateLimitsUpdated     = "account/rateLimits/updated"
+	notifyGuardianWarning       = "guardianWarning"
 
 	itemTypeAgentMessage     = "agentMessage"
 	itemTypeUserMessage      = "userMessage"
@@ -1264,7 +1265,7 @@ func (c *AppServerClient) dispatchThreadEvent(event Event) {
 				context.Background(),
 				"dropped a codex thread notification for a thread this client does not hold",
 				slog.String("method", event.RawMethod),
-				slog.String("threadId", event.ThreadID),
+				slog.String("thread_id", event.ThreadID),
 			)
 		}
 
@@ -1647,7 +1648,7 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Kind = EventRateLimitsUpdated
 		snapshot := rateLimitSnapshotFromMap(mapValue(params, "rateLimits"))
 		event.RateLimits = &snapshot
-	case "warning", "guardianWarning", "deprecationNotice", "configWarning":
+	case "warning", notifyGuardianWarning, "deprecationNotice", "configWarning":
 		event.Kind = EventWarning
 		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"))
 	case string(EventError):

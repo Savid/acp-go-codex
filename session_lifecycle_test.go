@@ -1844,9 +1844,9 @@ func TestServerRequestTurnClaimExemptsOnlyTurnlessElicitations(t *testing.T) {
 		codex.RequestToolUserInput,
 	} {
 		t.Run(method, func(t *testing.T) {
-			s := newRequestSession(t)
-			_, err := s.claimServerRequestTurn(t.Context(), method, map[string]any{"threadId": "thread"})
-			require.ErrorContains(t, err, "omitted its native turn identity")
+			turnBound := newRequestSession(t)
+			_, claimErr := turnBound.claimServerRequestTurn(t.Context(), method, map[string]any{"threadId": "thread"})
+			require.ErrorContains(t, claimErr, "omitted its native turn identity")
 		})
 	}
 

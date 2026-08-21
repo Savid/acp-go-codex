@@ -648,12 +648,12 @@ func TestUnheldThreadNotificationIsDroppedObservably(t *testing.T) {
 		threads: map[string]*threadStream{},
 	}
 	client.dispatchThreadEvent(eventFromRPC(rpcEvent{
-		Method: "guardianWarning",
+		Method: notifyGuardianWarning,
 		Params: mustRaw(map[string]any{"message": message, "threadId": "unheld"}),
 	}))
 
 	logged := logBuffer.String()
-	require.Contains(t, logged, "guardianWarning")
+	require.Contains(t, logged, notifyGuardianWarning)
 	require.Contains(t, logged, "unheld")
 	require.NotContains(t, logged, message)
 	require.NoError(t, client.routingFailure)

@@ -489,7 +489,7 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 		{"turn/completed", map[string]any{"turn": map[string]any{"status": "interrupted"}}, EventCompleted},
 		{"account/updated", map[string]any{"account": map[string]any{"chatgptAccountId": "acct", "email": "u@example.com", "chatgptPlanType": "plus"}}, EventAccountUpdated},
 		{"warning", map[string]any{"message": "warn"}, EventWarning},
-		{"guardianWarning", map[string]any{"message": "guardian held a command", "threadId": "thread"}, EventWarning},
+		{notifyGuardianWarning, map[string]any{"message": "guardian held a command", "threadId": "thread"}, EventWarning},
 		{"thread/status/changed", map[string]any{"status": map[string]any{"type": "idle"}, "threadId": "thread"}, EventRaw},
 		{"error", map[string]any{"error": "boom"}, EventError},
 		{"rawResponseItem/completed", map[string]any{}, EventRaw},
@@ -509,7 +509,7 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 		}
 	}
 	guardian := eventFromRPC(rpcEvent{
-		Method: "guardianWarning",
+		Method: notifyGuardianWarning,
 		Params: mustRaw(map[string]any{"message": "guardian held a command", "threadId": "thread"}),
 	})
 	if guardian.Text != "guardian held a command" || guardian.ThreadID != "thread" || guardian.Scope != EventScopeThread {
