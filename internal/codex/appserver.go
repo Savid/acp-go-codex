@@ -1254,11 +1254,10 @@ func (c *AppServerClient) dispatchThreadEvent(event Event) {
 		c.pendingEventCount++
 	}
 
+	// The app-server broadcasts thread notices for every thread it holds,
+	// including ones this client never subscribed to and ones it has already
+	// deleted. An event with no stream to reach names no live session.
 	if stream == nil {
-		if event.ThreadID != "" {
-			c.failRoutingLocked(errors.New("codex received an event for an unknown native thread"))
-		}
-
 		return
 	}
 
@@ -1642,11 +1641,18 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Kind = EventWarning
 		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"))
 	case string(EventError):
-		event.Kind = EventError
-		event.Text = appServerErrorText
-		event.Err = ErrAppServerEvent
+		// An error notification the app-server will retry leaves its turn live,
+		// and the turn's only terminal is `turn/completed`. The body is dropped
+		// either way so no error payload reaches a log or a raw-event journal.
+		event.Kind = EventRaw
 		event.RawParams = nil
 		event.RawJSON = ""
+
+		if willRetry, _ := params["willRetry"].(bool); !willRetry {
+			event.Kind = EventError
+			event.Text = appServerErrorText
+			event.Err = ErrAppServerEvent
+		}
 	case "rawResponseItem/completed":
 		event.Kind = EventRaw
 	default:

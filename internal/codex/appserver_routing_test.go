@@ -333,19 +333,35 @@ func TestFailedThreadRegistrationContainsLateNativeEvents(t *testing.T) { //noli
 	}
 }
 
-func TestUnknownNativeThreadEventFailsRouting(t *testing.T) {
-	client := &AppServerClient{}
-	client.dispatchEvent(Event{
-		Kind: EventRaw, Scope: EventScopeThread, ThreadID: "unknown-thread", TurnID: "turn",
+func TestUnknownNativeThreadEventIsDroppedAndPeersKeepRouting(t *testing.T) {
+	transport := newRoutingTransport(map[string]string{"thread-a": "turn-a"})
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	defer client.Close(context.Background())
+	live := claimRoutedThread(t, client, "thread-a")
+
+	// The app-server broadcasts a thread's own lifecycle to every client, so a
+	// thread this one never subscribed to and a thread it already deleted both
+	// arrive here after the stream that would have carried them is gone.
+	transport.publish("thread/deleted", map[string]any{"threadId": "deleted-thread"})
+	transport.publish("thread/status/changed", map[string]any{
+		"threadId": "foreign-thread", "status": map[string]any{"type": "idle"},
 	})
+	synchronizeRouting(t, client)
+
 	client.mu.Lock()
 	failure := client.routingFailure
 	client.mu.Unlock()
-	if failure == nil {
-		t.Fatal("unknown native thread event was dropped")
+	if failure != nil {
+		t.Fatalf("foreign thread broadcast fenced routing: %v", failure)
 	}
-	if err := client.beginPendingThread(); !errors.Is(err, failure) {
-		t.Fatalf("unknown-thread routing failure did not fence later admission: got %v want %v", err, failure)
+	requireNoRoutedEvent(t, live.Events)
+
+	transport.publish(notifyItemAgentMessageDelta, map[string]any{
+		"threadId": "thread-a", "turnId": "turn-a", "delta": "still routed",
+	})
+	delta, open := awaitEvent(t, live.Events)
+	if !open || delta.Kind != EventAgentMessageDelta || delta.Text != "still routed" {
+		t.Fatalf("live stream after foreign broadcast = %#v open=%v", delta, open)
 	}
 }
 

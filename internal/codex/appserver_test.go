@@ -533,6 +533,39 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 	}
 }
 
+func TestRetryableErrorNotificationIsNotATurnTerminal(t *testing.T) {
+	notification := func(willRetry bool) rpcEvent {
+		params := map[string]any{
+			"threadId":  "thread",
+			"turnId":    "turn",
+			"willRetry": willRetry,
+			"error": map[string]any{
+				"message":           "stream disconnected before completion",
+				"additionalDetails": nil,
+				"codexErrorInfo":    nil,
+			},
+		}
+
+		return rpcEvent{Method: "error", Params: mustRaw(params), Raw: `{"method":"error"}`}
+	}
+
+	retried := eventFromRPC(notification(true))
+	if retried.Kind != EventRaw || retried.Err != nil {
+		t.Fatalf("retryable error terminalized its turn: %#v", retried)
+	}
+	if retried.TurnID != "turn" || retried.Scope != EventScopeThread {
+		t.Fatalf("retryable error lost its native identity: %#v", retried)
+	}
+	if len(retried.RawParams) != 0 || retried.RawJSON != "" {
+		t.Fatalf("retryable error kept its native body: %#v", retried)
+	}
+
+	final := eventFromRPC(notification(false))
+	if final.Kind != EventError || !errors.Is(final.Err, ErrAppServerEvent) {
+		t.Fatalf("final error did not terminalize its turn: %#v", final)
+	}
+}
+
 type stringerForCodexTest string
 
 func (s stringerForCodexTest) String() string { return string(s) }
