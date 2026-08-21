@@ -857,6 +857,10 @@ func (s *session) liveIncarnation() *promptIncarnation {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 
+	return s.liveIncarnationLocked()
+}
+
+func (s *session) liveIncarnationLocked() *promptIncarnation {
 	if s.incarnation != nil {
 		return s.incarnation
 	}
@@ -1273,7 +1277,7 @@ func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event)
 	}
 
 	if event.TurnID == "" {
-		return s.applyTurnlessThreadEventLocked(event)
+		return s.applyTurnlessThreadEventLocked(ctx, event)
 	}
 
 	if canary := s.nativeCanary; canary != nil {
@@ -1355,17 +1359,41 @@ func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event)
 // attributed to no turn. Thread-scoped notices — guardian warnings, status,
 // name, queue, and goal changes — carry a thread and nothing else, so only a
 // kind that is itself turn evidence has to name the turn it belongs to.
-func (s *session) applyTurnlessThreadEventLocked(event codex.Event) error {
+func (s *session) applyTurnlessThreadEventLocked(ctx context.Context, event codex.Event) error {
 	switch event.Kind {
 	case codex.EventAccountUpdated:
 		s.setAccount(redactedAccountMeta(event.Account))
 
 		return nil
-	case codex.EventRaw, codex.EventWarning:
+	case codex.EventWarning:
+		return s.deliverTurnlessWarningLocked(ctx, event)
+	case codex.EventRaw:
 		return nil
 	default:
 		return errors.New("codex thread event omitted its native turn identity")
 	}
+}
+
+// deliverTurnlessWarningLocked shows a guardian warning that named no turn on
+// the session's live foreground turn. The warning is a security signal about
+// this exact thread and is meant for the user, so it reaches the user on the
+// only stream the user is watching; without a live foreground turn there is no
+// stream to show it on and the warning is dropped.
+func (s *session) deliverTurnlessWarningLocked(ctx context.Context, event codex.Event) error {
+	updates := eventUpdates(event)
+
+	in := s.liveIncarnationLocked()
+	if len(updates) == 0 || in == nil || in.settled {
+		return nil
+	}
+
+	ctx = withTurnRoute(ctx, in.turnNonce)
+
+	s.lifecycleMu.Unlock()
+	err := s.emitUpdates(ctx, updates...)
+	s.lifecycleMu.Lock()
+
+	return err
 }
 
 func (s *session) enqueuePromptEventLocked(in *promptIncarnation, event codex.Event) bool {
@@ -1633,7 +1661,9 @@ func (s *session) openAutonomousTurnLocked(ctx context.Context, nativeTurnID str
 // names, returning the routing context the answer is delivered under. An MCP
 // elicitation is the one request whose turn identity is optional: an MCP server
 // can elicit outside any turn, and such a request belongs to no turn rather
-// than to a missing one.
+// than to a missing one. Belonging to no turn, it has no turn stream to carry
+// the question or the answer, so it is answered with a typed cancel — never a
+// refusal the user did not make, and never a failed session.
 func (s *session) claimServerRequestTurn(
 	ctx context.Context,
 	method string,

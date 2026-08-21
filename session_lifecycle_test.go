@@ -1549,6 +1549,59 @@ func TestTurnlessThreadNotificationsAreToleratedInEveryWindow(t *testing.T) {
 	}
 }
 
+// TestTurnlessGuardianWarningReachesTheUserOnALiveTurn covers the one turnless
+// notice that is not just bookkeeping. A guardian warning is a security signal
+// meant for the user, so it is shown on the live foreground turn and dropped
+// only when there is no turn to show it on. The event shape is the one
+// `guardianWarning` decodes to — see the app-server mapping table in
+// internal/codex, which pins the kind and the empty turn identity.
+func TestTurnlessGuardianWarningReachesTheUserOnALiveTurn(t *testing.T) {
+	const message = "guardian held a command"
+
+	warning := codex.Event{
+		Kind: codex.EventWarning, Scope: codex.EventScopeThread, ThreadID: "thread",
+		RawMethod: "guardianWarning", Text: message,
+	}
+
+	t.Run("live turn", func(t *testing.T) {
+		agent := NewAgent()
+		client := newRecordingAgentClient()
+		agent.setAgentClient(client)
+		s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
+		in := &promptIncarnation{
+			session: s, accepted: true, nativeTurnID: "turn", turnNonce: "turn-nonce",
+			events: make(chan codex.Event, sessionNativeEventBuffer),
+		}
+		s.incarnation = in
+
+		require.NoError(t, s.routeNativeEvent(warning))
+		require.Empty(t, in.events)
+		require.Len(t, client.updates, 1)
+		require.Equal(t, inboundRouteMeta("turn-nonce"), client.updates[0].Meta)
+		require.Equal(t, acp.UpdateAgentThoughtText(message), client.updates[0].Update)
+	})
+
+	t.Run("no live turn", func(t *testing.T) {
+		agent := NewAgent()
+		client := newRecordingAgentClient()
+		agent.setAgentClient(client)
+		s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
+
+		require.NoError(t, s.routeNativeEvent(warning))
+		require.Empty(t, client.updates)
+
+		s.agentIncarnation = &promptIncarnation{session: s, nativeTurnID: "turn", settled: true}
+		require.NoError(t, s.routeNativeEvent(warning))
+		require.Empty(t, client.updates)
+
+		textless := warning
+		textless.Text = ""
+		s.agentIncarnation = &promptIncarnation{session: s, nativeTurnID: "turn"}
+		require.NoError(t, s.routeNativeEvent(textless))
+		require.Empty(t, client.updates)
+	})
+}
+
 // TestSettledNativeTurnTrailingEventsAreDropped covers what the app-server
 // keeps emitting after a turn's terminal: a token-usage flush, a completed item
 // racing the terminal, and a raw response item.

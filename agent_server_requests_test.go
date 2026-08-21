@@ -463,11 +463,14 @@ func TestServerRequestPendingApprovalIsAnsweredCancelledOnShutdown(t *testing.T)
 	}
 }
 
-// TestTurnlessMCPElicitationIsAnsweredNotRefused covers the one native request
-// whose turn identity is optional. MCP models elicitation as a standalone
+// TestTurnlessMCPElicitationIsCancelled covers the one native request whose
+// turn identity is optional. MCP models elicitation as a standalone
 // server-to-client request, so app-server sends `turnId: null` whenever it
 // cannot correlate a turn, and every other request kind still has to name one.
-func TestTurnlessMCPElicitationIsAnsweredNotRefused(t *testing.T) {
+// A turnless one names no turn to ask the question on, so it is answered with
+// the native cancel action: the host is never asked, nothing is refused on the
+// user's behalf, and the session stays alive.
+func TestTurnlessMCPElicitationIsCancelled(t *testing.T) {
 	const schema = `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`
 
 	for name, params := range map[string]string{
@@ -478,7 +481,8 @@ func TestTurnlessMCPElicitationIsAnsweredNotRefused(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			agent, session, ctx := newServerRequestSession(t)
 			enableClientElicitation(agent, true, false)
-			agent.setAgentClient(newRecordingAgentClient())
+			client := newRecordingAgentClient()
+			agent.setAgentClient(client)
 
 			response, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
 				Method: codex.RequestMCPElicitation,
@@ -487,7 +491,9 @@ func TestTurnlessMCPElicitationIsAnsweredNotRefused(t *testing.T) {
 				),
 			})
 			require.NoError(t, err)
-			require.NotNil(t, response)
+			require.Equal(t, codex.ElicitationCancelResponse(), response)
+			require.Empty(t, client.elicitations)
+			require.Empty(t, client.permissions)
 			session.mu.Lock()
 			require.False(t, session.clientDead)
 			session.mu.Unlock()

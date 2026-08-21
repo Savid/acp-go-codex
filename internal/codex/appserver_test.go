@@ -489,19 +489,31 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 		{"turn/completed", map[string]any{"turn": map[string]any{"status": "interrupted"}}, EventCompleted},
 		{"account/updated", map[string]any{"account": map[string]any{"chatgptAccountId": "acct", "email": "u@example.com", "chatgptPlanType": "plus"}}, EventAccountUpdated},
 		{"warning", map[string]any{"message": "warn"}, EventWarning},
+		{"guardianWarning", map[string]any{"message": "guardian held a command", "threadId": "thread"}, EventWarning},
+		{"thread/status/changed", map[string]any{"status": map[string]any{"type": "idle"}, "threadId": "thread"}, EventRaw},
 		{"error", map[string]any{"error": "boom"}, EventError},
 		{"rawResponseItem/completed", map[string]any{}, EventRaw},
 		{"unknown", map[string]any{}, EventRaw},
 	}
+	// None of these notifications names a turn: a thread notice is evidence
+	// about the thread, never about a turn, so an empty TurnID is part of the
+	// mapping the adapter routes on.
 	for _, tc := range cases {
 		event := eventFromRPC(rpcEvent{Method: tc.method, Params: mustRaw(tc.params), Raw: "raw"})
 		wantRaw := "raw"
 		if tc.kind == EventError {
 			wantRaw = ""
 		}
-		if event.Kind != tc.kind || event.RawMethod != tc.method || event.RawJSON != wantRaw {
+		if event.Kind != tc.kind || event.RawMethod != tc.method || event.RawJSON != wantRaw || event.TurnID != "" {
 			t.Fatalf("%s mapped to %#v", tc.method, event)
 		}
+	}
+	guardian := eventFromRPC(rpcEvent{
+		Method: "guardianWarning",
+		Params: mustRaw(map[string]any{"message": "guardian held a command", "threadId": "thread"}),
+	})
+	if guardian.Text != "guardian held a command" || guardian.ThreadID != "thread" || guardian.Scope != EventScopeThread {
+		t.Fatalf("guardian warning mapped to %#v", guardian)
 	}
 	if eventFromRPC(rpcEvent{Method: "error", Params: mustRaw(map[string]any{"message": "boom"})}).Err == nil {
 		t.Fatal("error event did not include error")

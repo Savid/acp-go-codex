@@ -1,10 +1,12 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -630,4 +632,29 @@ func TestThreadRouterBoundsPendingStreamsAndClosesAllOwners(t *testing.T) {
 	client.threads["thread"].stop()
 	require.NoError(t, client.registerThread("thread"))
 	require.ErrorContains(t, client.requireClaimedThread("thread"), "live claimed")
+}
+
+// TestUnheldThreadNotificationIsDroppedObservably pins the one broadcast the
+// router discards without failing anything: the app-server sends thread
+// notices for every thread it holds, and a client that holds none of them has
+// to leave a trace of what it dropped without logging the notice body.
+func TestUnheldThreadNotificationIsDroppedObservably(t *testing.T) {
+	const message = "guardian held a command"
+
+	var logBuffer bytes.Buffer
+
+	client := &AppServerClient{
+		options: Options{Logger: slog.New(slog.NewTextHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))},
+		threads: map[string]*threadStream{},
+	}
+	client.dispatchThreadEvent(eventFromRPC(rpcEvent{
+		Method: "guardianWarning",
+		Params: mustRaw(map[string]any{"message": message, "threadId": "unheld"}),
+	}))
+
+	logged := logBuffer.String()
+	require.Contains(t, logged, "guardianWarning")
+	require.Contains(t, logged, "unheld")
+	require.NotContains(t, logged, message)
+	require.NoError(t, client.routingFailure)
 }

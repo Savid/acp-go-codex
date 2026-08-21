@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -1258,6 +1259,15 @@ func (c *AppServerClient) dispatchThreadEvent(event Event) {
 	// including ones this client never subscribed to and ones it has already
 	// deleted. An event with no stream to reach names no live session.
 	if stream == nil {
+		if c.options.Logger != nil {
+			c.options.Logger.DebugContext(
+				context.Background(),
+				"dropped a codex thread notification for a thread this client does not hold",
+				slog.String("method", event.RawMethod),
+				slog.String("threadId", event.ThreadID),
+			)
+		}
+
 		return
 	}
 
