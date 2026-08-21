@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
@@ -135,8 +134,7 @@ func launchAppServer(
 		)
 	}
 
-	stderr := codexStderrWriter(options.Logger)
-	cmd.Stderr = stderr
+	cmd.Stderr = io.Discard
 
 	spawnStarted := time.Now()
 
@@ -173,7 +171,6 @@ func launchAppServer(
 		cmd:              cmd,
 		stdin:            stdin,
 		stdout:           stdout,
-		stderr:           stderr,
 		supervisor:       supervisor,
 		processWaiter:    waiter,
 		observeProcess:   options.ObserveProcess,
@@ -206,60 +203,6 @@ func appServerArgs(options Options) []string {
 	}
 
 	return append(args, options.ExtraArgs...)
-}
-
-// stderrTailLimit bounds the retained app-server stderr so a mid-turn crash can
-// surface the tail of the process diagnostics without unbounded buffering.
-const stderrTailLimit = 4096
-
-// stderrTail logs every app-server stderr chunk and retains a bounded tail so a
-// process-death failure can name the real cause instead of a bare transport EOF.
-type stderrTail struct {
-	logger *slog.Logger
-
-	mu  sync.Mutex
-	buf []byte
-}
-
-func codexStderrWriter(logger *slog.Logger) *stderrTail {
-	if logger == nil {
-		logger = slog.Default()
-	}
-
-	return &stderrTail{logger: logger}
-}
-
-func (w *stderrTail) Write(p []byte) (int, error) {
-	text := strings.TrimSpace(string(p))
-	if text != "" {
-		w.logger.DebugContext(
-			context.Background(),
-			"Codex app-server stderr",
-			slog.String("stderr", strings.TrimRight(string(p), "\r\n")),
-		)
-	}
-
-	w.mu.Lock()
-	w.buf = append(w.buf, p...)
-
-	if len(w.buf) > stderrTailLimit {
-		w.buf = append([]byte(nil), w.buf[len(w.buf)-stderrTailLimit:]...)
-	}
-	w.mu.Unlock()
-
-	return len(p), nil
-}
-
-// tail returns the retained stderr tail with surrounding whitespace trimmed.
-func (w *stderrTail) tail() string {
-	if w == nil {
-		return ""
-	}
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	return strings.TrimSpace(string(w.buf))
 }
 
 func resolveCodexPath(path string, env []string, isolation *ProcessIsolation) (string, error) {
@@ -394,14 +337,11 @@ func shellValue(value any) string {
 // there is no shared mutable grace state.
 const processExitGrace = 2 * time.Second
 
-// process owns the codex app-server child process: its stdio, its bounded
-// stderr tail, and the single cmd.Wait reaper shared by the transport
-// process-death detection and the deliberate Close escalation.
+// process owns the codex app-server child process and its single cmd.Wait reaper.
 type process struct {
 	cmd              *exec.Cmd
 	stdin            io.WriteCloser
 	stdout           io.ReadCloser
-	stderr           *stderrTail
 	supervisor       *supervisorProof
 	processWaiter    *supervisorWaiter
 	packageStageRoot string
@@ -529,17 +469,15 @@ func observeCodexStartupStage(ctx context.Context, options Options, lifecycle, s
 	}
 }
 
-// exited reports the process exit status and its stderr tail when the process
-// terminates within grace. It returns ok=false while the process is still
-// running, so a live transport fault is not misattributed to a process exit.
-func (p *process) exited(grace time.Duration) (status string, stderrTail string, ok bool) {
+// exited reports whether the process terminates within grace.
+func (p *process) exited(grace time.Duration) bool {
 	p.beginWait()
 
 	select {
 	case <-p.waitDone:
-		return exitStatus(p.waitErr), p.stderr.tail(), true
+		return true
 	case <-time.After(grace):
-		return "", "", false
+		return false
 	}
 }
 

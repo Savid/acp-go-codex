@@ -2,6 +2,8 @@ package codexacp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -23,12 +25,15 @@ const (
 	permissionToolFileChange  permissionToolClass = "file_change"
 	permissionToolPermissions permissionToolClass = "permissions"
 	permissionToolMCP         permissionToolClass = "mcp"
+	permissionToolLimit                           = 1024
+	permissionAliasLimit                          = permissionToolLimit * 3
 )
 
 type permissionToolRegistry struct {
 	mu      sync.Mutex
 	tools   map[acp.ToolCallId]*permissionToolRecord
 	aliases map[string]acp.ToolCallId
+	failure error
 }
 
 type permissionToolRecord struct {
@@ -37,6 +42,11 @@ type permissionToolRecord struct {
 	fingerprint        permissionToolFingerprint
 	pendingNativeStart bool
 	terminal           bool
+	leases             int
+	startDone          chan struct{}
+	startSettled       bool
+	startErr           error
+	leaseDone          chan struct{}
 }
 
 type permissionToolFingerprint struct {
@@ -47,12 +57,34 @@ type permissionToolFingerprint struct {
 
 func (r *permissionToolRegistry) reset() {
 	r.mu.Lock()
+	for _, record := range r.tools {
+		if record == nil {
+			continue
+		}
+
+		if !record.startSettled && record.startDone != nil {
+			record.startSettled = true
+			record.startErr = codex.ErrConnectionClosed
+			close(record.startDone)
+		}
+
+		if record.leaseDone != nil {
+			close(record.leaseDone)
+			record.leaseDone = nil
+		}
+	}
+
 	r.tools = nil
 	r.aliases = nil
+	r.failure = nil
 	r.mu.Unlock()
 }
 
-func (r *permissionToolRegistry) ensure() {
+func (r *permissionToolRegistry) ensure() error {
+	if r.failure != nil {
+		return r.failure
+	}
+
 	if r.tools == nil {
 		r.tools = make(map[acp.ToolCallId]*permissionToolRecord)
 	}
@@ -60,46 +92,218 @@ func (r *permissionToolRegistry) ensure() {
 	if r.aliases == nil {
 		r.aliases = make(map[string]acp.ToolCallId)
 	}
+
+	return nil
+}
+
+func (r *permissionToolRegistry) fail(err error) error {
+	if err != nil && r.failure == nil {
+		r.failure = err
+	}
+
+	return err
+}
+
+func (r *permissionToolRegistry) addTool(record *permissionToolRecord) error {
+	if record == nil || record.id == "" {
+		return r.fail(errors.New("codex permission tool omitted its ACP identity"))
+	}
+
+	if _, ok := r.tools[record.id]; !ok && len(r.tools) == permissionToolLimit {
+		return r.fail(fmt.Errorf("%w: permission tool registry", codex.ErrTurnEventOverflow))
+	}
+
+	r.tools[record.id] = record
+
+	return nil
+}
+
+func (r *permissionToolRegistry) addAlias(alias string, id acp.ToolCallId) error {
+	if alias == "" {
+		return nil
+	}
+
+	if _, ok := r.aliases[alias]; !ok && len(r.aliases) == permissionAliasLimit {
+		return r.fail(fmt.Errorf("%w: permission tool alias registry", codex.ErrTurnEventOverflow))
+	}
+
+	r.aliases[alias] = id
+
+	return nil
+}
+
+func (r *permissionToolRegistry) release(record *permissionToolRecord) {
+	r.mu.Lock()
+	if record != nil && record.leases > 0 {
+		record.leases--
+		if record.leases == 0 && record.leaseDone != nil {
+			close(record.leaseDone)
+			record.leaseDone = nil
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *permissionToolRegistry) acquire(record *permissionToolRecord) {
+	if record.leases == 0 {
+		record.leaseDone = make(chan struct{})
+	}
+
+	record.leases++
+}
+
+func (r *permissionToolRegistry) waitForLeases(ctx context.Context, record *permissionToolRecord) error {
+	r.mu.Lock()
+	if record == nil || record.leases == 0 || record.leaseDone == nil {
+		r.mu.Unlock()
+
+		return nil
+	}
+
+	done := record.leaseDone
+	r.mu.Unlock()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func newPermissionToolRecord(id acp.ToolCallId, class permissionToolClass, fingerprint permissionToolFingerprint) *permissionToolRecord {
+	return &permissionToolRecord{
+		id: id, class: class, fingerprint: fingerprint, startDone: make(chan struct{}),
+	}
+}
+
+func (r *permissionToolRegistry) completeStart(record *permissionToolRecord, err error) {
+	if record == nil {
+		return
+	}
+
+	r.mu.Lock()
+	if !record.startSettled {
+		record.startSettled = true
+
+		record.startErr = err
+		if err != nil {
+			delete(r.tools, record.id)
+
+			for alias, id := range r.aliases {
+				if id == record.id {
+					delete(r.aliases, alias)
+				}
+			}
+		}
+
+		if record.startDone != nil {
+			close(record.startDone)
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *permissionToolRegistry) waitForStart(ctx context.Context, record *permissionToolRecord) error {
+	r.mu.Lock()
+	if record == nil || record.startDone == nil || record.startSettled {
+		var err error
+		if record != nil {
+			err = record.startErr
+		}
+		r.mu.Unlock()
+
+		return err
+	}
+
+	done := record.startDone
+	r.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	r.mu.Lock()
+	err := record.startErr
+	r.mu.Unlock()
+
+	return err
 }
 
 // requestPermissionForTool publishes a pending tool call before invoking the
 // ACP permission callback when Codex has not published item/started yet. When
 // item/started won the race, the callback reuses that exact nonterminal ACP ID.
-// The registry lock spans both publication and callback so a completion cannot
-// make the selected ID terminal between those two client calls.
+// Selection takes a lease and releases the registry before lifecycle or host
+// calls, so a native completion can advance without changing the selected ID.
 func (s *session) requestPermissionForTool(
 	ctx context.Context,
 	conn agentClient,
 	request acp.RequestPermissionRequest,
 	class permissionToolClass,
 ) (acp.RequestPermissionResponse, bool, error) {
-	registry := &s.permissionTools
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-
 	params, _ := request.ToolCall.RawInput.(map[string]any)
-	turnNonce, active := s.activeTurnNonceForNativeTurn(codex.RequestTurnID(params))
 
+	turnNonce, active := s.activeTurnNonceForNativeTurn(codex.RequestTurnID(params))
 	if !active || ctx.Err() != nil {
 		return acp.RequestPermissionResponse{}, false, nil
 	}
 
-	registry.ensure()
+	registry := &s.permissionTools
+	registry.mu.Lock()
+	if err := registry.ensure(); err != nil {
+		registry.mu.Unlock()
+
+		return acp.RequestPermissionResponse{}, true, err
+	}
 
 	fingerprint := permissionFingerprint(request.ToolCall.Title, request.ToolCall.RawInput, class)
 
 	record, valid := registry.matchPermissionTool(request.ToolCall.ToolCallId, class, fingerprint)
 	if !valid {
+		registry.mu.Unlock()
+
 		return acp.RequestPermissionResponse{}, false, nil
 	}
+
+	created := false
 
 	if record == nil {
 		id := request.ToolCall.ToolCallId
 		if id == "" {
+			registry.mu.Unlock()
+
 			return acp.RequestPermissionResponse{}, false, nil
 		}
 
-		title := string(id)
+		record = newPermissionToolRecord(id, class, fingerprint)
+
+		record.pendingNativeStart = true
+		if err := registry.addTool(record); err != nil {
+			registry.mu.Unlock()
+
+			return acp.RequestPermissionResponse{}, true, err
+		}
+
+		if err := registry.addAlias(string(id), id); err != nil {
+			registry.mu.Unlock()
+
+			return acp.RequestPermissionResponse{}, true, err
+		}
+
+		created = true
+	}
+
+	registry.acquire(record)
+	pendingNativeStart := record.pendingNativeStart
+	registry.mu.Unlock()
+
+	releaseLease := sync.OnceFunc(func() { registry.release(record) })
+	defer releaseLease()
+
+	if created {
+		title := string(record.id)
 		if request.ToolCall.Title != nil && *request.ToolCall.Title != "" {
 			title = *request.ToolCall.Title
 		}
@@ -110,38 +314,33 @@ func (s *session) requestPermissionForTool(
 		}
 
 		start := acp.StartToolCall(
-			id,
-			title,
+			record.id, title,
 			acp.WithStartKind(kind),
 			acp.WithStartStatus(acp.ToolCallStatusPending),
 			acp.WithStartContent(request.ToolCall.Content),
 			acp.WithStartRawInput(request.ToolCall.RawInput),
 		)
-		if err := s.emitUpdates(withTurnRoute(ctx, turnNonce), start); err != nil {
+		err := s.emitUpdates(withTurnRoute(ctx, turnNonce), start)
+		registry.completeStart(record, err)
+
+		if err != nil {
 			return acp.RequestPermissionResponse{}, false, err
 		}
-
-		record = &permissionToolRecord{
-			id:                 id,
-			class:              class,
-			fingerprint:        fingerprint,
-			pendingNativeStart: true,
-		}
-		registry.tools[id] = record
-		registry.aliases[string(id)] = id
+	} else if err := registry.waitForStart(ctx, record); err != nil {
+		return acp.RequestPermissionResponse{}, true, err
 	}
 
 	request.ToolCall.ToolCallId = record.id
 
 	status := acp.ToolCallStatusInProgress
-	if record.pendingNativeStart {
+	if pendingNativeStart {
 		status = acp.ToolCallStatusPending
 	}
 
 	request.ToolCall.Status = &status
 
-	// The action is minted and announced before the inbound request exists, so a
-	// host can never see an action id it cannot yet answer.
+	// Mint correlation first; publication waits for the connection's exact
+	// host-request registration barrier.
 	action, correlation, err := s.beginAction(ctx, lifecycle.ActionPermission, true)
 	if err != nil {
 		return acp.RequestPermissionResponse{}, false, err
@@ -149,7 +348,11 @@ func (s *session) requestPermissionForTool(
 
 	request.Meta = stampActionCorrelation(request.Meta, correlation)
 
-	response, err := conn.RequestPermission(ctx, request)
+	response, err := requestPermissionWithAction(ctx, conn, request, action, releaseLease)
+	if err != nil && action != nil && !action.registered {
+		return acp.RequestPermissionResponse{}, false, err
+	}
+
 	if resolveErr := action.resolve(ctx, permissionActionState(response, err)); resolveErr != nil {
 		return acp.RequestPermissionResponse{}, true, resolveErr
 	}
@@ -158,9 +361,8 @@ func (s *session) requestPermissionForTool(
 }
 
 // createElicitationForMCPTool resolves a native MCP item/tool association to
-// the exact published ACP tool ID. The registry stays locked until the client
-// call returns so item/completed cannot make that ID terminal between
-// correlation and request establishment.
+// the exact published ACP tool ID. A lease keeps the selection stable while the
+// registry is released before lifecycle and host calls.
 func (s *session) createElicitationForMCPTool(
 	ctx context.Context,
 	conn agentClient,
@@ -168,27 +370,36 @@ func (s *session) createElicitationForMCPTool(
 	nativeToolID string,
 	params map[string]any,
 ) (acp.UnstableCreateElicitationResponse, bool, error) {
-	registry := &s.permissionTools
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-
-	s.mu.Lock()
-	turnNonce := s.turnNonce
-	turnID := s.turnID
-	active := s.turnDone != nil && turnNonce != "" && turnID != "" && turnID == codex.RequestTurnID(params)
-	s.mu.Unlock()
-
+	turnNonce, active := s.activeTurnNonceForNativeTurn(codex.RequestTurnID(params))
 	if !active || ctx.Err() != nil {
 		return acp.UnstableCreateElicitationResponse{}, false, nil
 	}
 
-	registry.ensure()
+	registry := &s.permissionTools
+	registry.mu.Lock()
+	if err := registry.ensure(); err != nil {
+		registry.mu.Unlock()
+
+		return acp.UnstableCreateElicitationResponse{}, true, err
+	}
 
 	fingerprint := permissionFingerprint(nil, params, permissionToolMCP)
 
 	record, valid := registry.matchPermissionTool(acp.ToolCallId(nativeToolID), permissionToolMCP, fingerprint)
 	if !valid || record == nil {
+		registry.mu.Unlock()
+
 		return acp.UnstableCreateElicitationResponse{}, false, nil
+	}
+
+	registry.acquire(record)
+	registry.mu.Unlock()
+
+	releaseLease := sync.OnceFunc(func() { registry.release(record) })
+	defer releaseLease()
+
+	if err := registry.waitForStart(ctx, record); err != nil {
+		return acp.UnstableCreateElicitationResponse{}, true, err
 	}
 
 	action, correlation, err := s.beginAction(ctx, lifecycle.ActionElicitation, true)
@@ -196,12 +407,16 @@ func (s *session) createElicitationForMCPTool(
 		return acp.UnstableCreateElicitationResponse{}, false, err
 	}
 
-	response, err := conn.CreateElicitation(ctx, request, elicitationScope{
+	response, err := createElicitationWithAction(ctx, conn, request, elicitationScope{
 		SessionID:         s.id,
 		TurnNonce:         turnNonce,
 		ToolCallID:        record.id,
 		ActionCorrelation: correlation,
-	})
+	}, action, releaseLease)
+	if err != nil && action != nil && !action.registered {
+		return acp.UnstableCreateElicitationResponse{}, false, err
+	}
+
 	if resolveErr := action.resolve(ctx, elicitationActionState(response, err)); resolveErr != nil {
 		return acp.UnstableCreateElicitationResponse{}, true, resolveErr
 	}
@@ -234,30 +449,21 @@ func (r *permissionToolRegistry) matchPermissionTool(
 }
 
 type permissionToolEventPublication struct {
-	registry   *permissionToolRegistry
-	event      codex.Event
-	record     *permissionToolRecord
-	originalID string
-	transition bool
-	locked     bool
+	event          codex.Event
+	record         *permissionToolRecord
+	transition     bool
+	prependStart   bool
+	publishesStart bool
 }
 
-func (s *session) preparePermissionToolEvent(event codex.Event) permissionToolEventPublication {
-	publication := permissionToolEventPublication{event: event}
-	if event.Kind != codex.EventToolStarted && event.Kind != codex.EventToolDelta && event.Kind != codex.EventToolCompleted {
-		return publication
-	}
+func (r *permissionToolRegistry) recordForEvent(
+	event codex.Event,
+) (string, permissionToolClass, permissionToolFingerprint, *permissionToolRecord) {
+	originalID := firstNonEmpty(event.Tool.ID, "codex-tool")
 
-	registry := &s.permissionTools
-	registry.mu.Lock()
-	registry.ensure()
-
-	publication.registry = registry
-	publication.locked = true
-	publication.originalID = firstNonEmpty(event.Tool.ID, "codex-tool")
-
-	if canonical, ok := registry.aliases[publication.originalID]; ok {
-		publication.record = registry.tools[canonical]
+	var record *permissionToolRecord
+	if canonical, ok := r.aliases[originalID]; ok {
+		record = r.tools[canonical]
 	}
 
 	class := permissionClassForToolEvent(event.Tool)
@@ -267,66 +473,163 @@ func (s *session) preparePermissionToolEvent(event codex.Event) permissionToolEv
 		fingerprint.title = normalizePermissionToolValue(event.Tool.Title)
 	}
 
-	if publication.record == nil && (event.Kind == codex.EventToolStarted || event.Kind == codex.EventToolCompleted) {
-		publication.record, _ = bestPermissionTool(registry.tools, class, fingerprint, true)
+	if record == nil && (event.Kind == codex.EventToolStarted || event.Kind == codex.EventToolCompleted) {
+		record, _ = bestPermissionTool(r.tools, class, fingerprint, true)
 	}
 
-	if publication.record != nil {
-		publication.event.Tool.ID = string(publication.record.id)
-		publication.transition = event.Kind == codex.EventToolStarted && publication.record.pendingNativeStart
-	}
-
-	return publication
+	return originalID, class, fingerprint, record
 }
 
-func (p *permissionToolEventPublication) finish(published bool) {
-	if !p.locked {
-		return
-	}
-	defer p.registry.mu.Unlock()
-
-	if !published {
-		return
+func (s *session) preparePermissionToolEvent(ctx context.Context, event codex.Event) (permissionToolEventPublication, error) {
+	publication := permissionToolEventPublication{event: event}
+	if event.Kind != codex.EventToolStarted && event.Kind != codex.EventToolDelta && event.Kind != codex.EventToolCompleted {
+		return publication, nil
 	}
 
-	class := permissionClassForToolEvent(p.event.Tool)
+	registry := &s.permissionTools
+	registry.mu.Lock()
 
-	fingerprint := permissionFingerprint(nil, p.event.Tool.Raw, class)
-	if fingerprint.title == "" {
-		fingerprint.title = normalizePermissionToolValue(p.event.Tool.Title)
+	if err := registry.ensure(); err != nil {
+		registry.mu.Unlock()
+
+		return publication, err
 	}
 
-	record := p.record
-	switch p.event.Kind {
+	originalID, class, fingerprint, record := registry.recordForEvent(event)
+
+	if record != nil {
+		if event.Kind != codex.EventToolStarted && record.startDone != nil && !record.startSettled {
+			registry.mu.Unlock()
+
+			if err := registry.waitForStart(ctx, record); err != nil {
+				return publication, err
+			}
+
+			return s.preparePermissionToolEvent(ctx, event)
+		}
+
+		if event.Kind == codex.EventToolCompleted && record.leases > 0 {
+			registry.mu.Unlock()
+
+			if err := registry.waitForLeases(ctx, record); err != nil {
+				return publication, err
+			}
+
+			return s.preparePermissionToolEvent(ctx, event)
+		}
+
+		if record.startErr != nil {
+			registry.mu.Unlock()
+
+			return publication, record.startErr
+		}
+
+		publication.event.Tool.ID = string(record.id)
+		publication.transition = event.Kind == codex.EventToolStarted && record.pendingNativeStart
+	}
+
+	switch publication.event.Kind {
 	case codex.EventToolStarted:
 		if record == nil {
-			id := acp.ToolCallId(firstNonEmpty(p.event.Tool.ID, "codex-tool"))
-			record = &permissionToolRecord{id: id, class: class, fingerprint: fingerprint}
-			p.registry.tools[id] = record
+			id := acp.ToolCallId(firstNonEmpty(publication.event.Tool.ID, "codex-tool"))
+
+			record = newPermissionToolRecord(id, class, fingerprint)
+			if err := registry.addTool(record); err != nil {
+				registry.mu.Unlock()
+
+				return publication, err
+			}
+
+			publication.publishesStart = true
 		}
 
 		record.pendingNativeStart = false
+
 		record.fingerprint = mergePermissionFingerprint(record.fingerprint, fingerprint)
-		p.registry.aliases[p.originalID] = record.id
-		p.registry.aliases[string(record.id)] = record.id
+		if err := registry.addAlias(originalID, record.id); err != nil {
+			registry.mu.Unlock()
+
+			return publication, err
+		}
+
+		if err := registry.addAlias(string(record.id), record.id); err != nil {
+			registry.mu.Unlock()
+
+			return publication, err
+		}
+	case codex.EventToolDelta:
+		if record == nil {
+			id := acp.ToolCallId(firstNonEmpty(publication.event.Tool.ID, "codex-tool"))
+
+			record = newPermissionToolRecord(id, class, fingerprint)
+			if err := registry.addTool(record); err != nil {
+				registry.mu.Unlock()
+
+				return publication, err
+			}
+
+			publication.prependStart = true
+			publication.publishesStart = true
+		}
+
+		if err := registry.addAlias(originalID, record.id); err != nil {
+			registry.mu.Unlock()
+
+			return publication, err
+		}
 	case codex.EventToolCompleted:
 		if record == nil {
-			id := acp.ToolCallId(firstNonEmpty(p.event.Tool.ID, "codex-tool"))
-			record = &permissionToolRecord{id: id, class: class, fingerprint: fingerprint}
-			p.registry.tools[id] = record
+			id := acp.ToolCallId(firstNonEmpty(publication.event.Tool.ID, "codex-tool"))
+
+			record = newPermissionToolRecord(id, class, fingerprint)
+			if err := registry.addTool(record); err != nil {
+				registry.mu.Unlock()
+
+				return publication, err
+			}
+
+			publication.prependStart = true
+			publication.publishesStart = true
 		}
 
 		record.pendingNativeStart = false
 		record.terminal = true
+
 		record.fingerprint = mergePermissionFingerprint(record.fingerprint, fingerprint)
-		p.registry.aliases[p.originalID] = record.id
-		p.registry.aliases[string(record.id)] = record.id
+		if err := registry.addAlias(originalID, record.id); err != nil {
+			registry.mu.Unlock()
+
+			return publication, err
+		}
+
+		if err := registry.addAlias(string(record.id), record.id); err != nil {
+			registry.mu.Unlock()
+
+			return publication, err
+		}
 	}
+
+	publication.record = record
+	registry.mu.Unlock()
+
+	return publication, nil
 }
 
 func (p permissionToolEventPublication) updates(snapshots map[acp.ToolCallId][]acp.ToolCallContent) []acp.SessionUpdate {
+	updates := make([]acp.SessionUpdate, 0, 2)
+
+	if p.prependStart {
+		tool := p.event.Tool
+		updates = append(updates, acp.StartToolCall(
+			acp.ToolCallId(tool.ID), firstNonEmpty(tool.Title, tool.ID),
+			acp.WithStartKind(toolKind(tool)),
+			acp.WithStartStatus(acp.ToolCallStatusInProgress),
+			acp.WithStartRawInput(tool.Raw),
+		))
+	}
+
 	if !p.transition {
-		return eventUpdatesWithToolSnapshots(p.event, snapshots)
+		return append(updates, eventUpdatesWithToolSnapshots(p.event, snapshots)...)
 	}
 
 	tool := p.event.Tool
@@ -341,7 +644,13 @@ func (p permissionToolEventPublication) updates(snapshots map[acp.ToolCallId][]a
 		opts = append(opts, acp.WithUpdateTitle(tool.Title))
 	}
 
-	return []acp.SessionUpdate{acp.UpdateToolCall(id, opts...)}
+	return append(updates, acp.UpdateToolCall(id, opts...))
+}
+
+func (p permissionToolEventPublication) finish(session *session, err error) {
+	if p.publishesStart {
+		session.permissionTools.completeStart(p.record, err)
+	}
 }
 
 func permissionClassForToolEvent(tool codex.ToolEvent) permissionToolClass {

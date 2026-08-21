@@ -28,6 +28,8 @@ const (
 	closeTimeout                    = 5 * time.Second
 
 	jsonFieldError      = "error"
+	jsonFieldCode       = "code"
+	jsonFieldData       = "data"
 	jsonFieldMessage    = "message"
 	jsonFieldCwd        = "cwd"
 	jsonFieldEntries    = "entries"
@@ -38,26 +40,28 @@ const (
 	validationDuplicate = "duplicate"
 	errValueUnsupported = "unsupported"
 
-	jsonFieldSource        = "source"
-	jsonFieldSequence      = "sequence"
-	jsonFieldEvent         = "event"
-	jsonFieldScope         = "scope"
-	jsonFieldName          = "name"
-	jsonFieldServer        = "server"
-	jsonFieldPrompt        = "prompt"
-	jsonFieldText          = "text"
-	jsonFieldType          = "type"
-	jsonFieldURL           = "url"
-	jsonFieldMode          = "mode"
-	jsonFieldTitle         = "title"
-	jsonFieldMeta          = "_meta"
-	jsonFieldAction        = "action"
-	jsonFieldReason        = "reason"
-	jsonFieldPath          = "path"
-	jsonFieldConfigID      = "configId"
-	jsonFieldAccessToken   = "accessToken"
-	jsonFieldNetworkAccess = "networkAccess"
-	jsonFieldResult        = "result"
+	jsonFieldSource          = "source"
+	jsonFieldSequence        = "sequence"
+	jsonFieldEvent           = "event"
+	jsonFieldScope           = "scope"
+	jsonFieldName            = "name"
+	jsonFieldServer          = "server"
+	jsonFieldPrompt          = "prompt"
+	jsonFieldText            = "text"
+	jsonFieldUnstable        = "unstable"
+	jsonFieldType            = "type"
+	jsonFieldURL             = "url"
+	jsonFieldMode            = "mode"
+	jsonFieldTitle           = "title"
+	jsonFieldMeta            = "_meta"
+	jsonFieldAction          = "action"
+	jsonFieldReason          = "reason"
+	jsonFieldPath            = "path"
+	jsonFieldConfigID        = "configId"
+	jsonFieldAccessToken     = "accessToken"
+	jsonFieldNetworkAccess   = "networkAccess"
+	jsonFieldRequestedSchema = "requestedSchema"
+	jsonFieldResult          = "result"
 
 	valueBackpressure        = "backpressure"
 	valueSession             = "session"
@@ -94,7 +98,8 @@ const (
 	jsonFieldStatusCode   = "statusCode"
 	jsonFieldProviderCode = "providerCode"
 
-	valueTurnFailed = "codex_turn_failed"
+	valueTurnFailed      = "codex_turn_failed"
+	valueInternalFailure = "codex_internal_failure"
 
 	modeDefault acp.SessionModeId = "default"
 	modePlan    acp.SessionModeId = "plan"
@@ -125,6 +130,7 @@ type Agent struct {
 	deleted           map[acp.SessionId]struct{}
 	deleting          map[acp.SessionId]int
 	clientCalls       chan struct{}
+	lifecycleCalls    chan struct{}
 	authTokens        *ChatGPTAuthTokens
 	providerProcesses *providerProcessSnapshotTracker
 	containmentMode   RuntimeContainmentMode
@@ -147,9 +153,6 @@ type Agent struct {
 	// absent answer makes every envelope, prompt correlation, and action
 	// correlation illegal on the connection.
 	lifecycle lifecycle.Negotiated
-
-	rateLimitsMu   sync.Mutex
-	rateLimitsSnap *codex.RateLimitSnapshot
 }
 
 type codexClientEventSink struct {
@@ -159,7 +162,10 @@ type codexClientEventSink struct {
 	mu      sync.Mutex
 	client  codex.Client
 	pending []codex.Event
+	failure error
 }
+
+const startupClientEventLimit = 1024
 
 var (
 	_ acp.Agent                  = (*Agent)(nil)
@@ -224,6 +230,7 @@ func NewAgent(opts ...Option) *Agent {
 		deleted:           make(map[acp.SessionId]struct{}),
 		deleting:          make(map[acp.SessionId]int),
 		clientCalls:       make(chan struct{}, clientCallLimit),
+		lifecycleCalls:    make(chan struct{}, 1),
 		providerProcesses: providerProcesses,
 		containmentMode:   mode,
 		retainedThreads:   make(map[acp.SessionId]*retainedRuntimeThread),
@@ -318,7 +325,8 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	agent := NewAgent(opts...)
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
-			agent.log.DebugContext(context.Background(), "close Codex ACP agent failed", slog.String("error", closeErr.Error()))
+			agent.log.DebugContext(context.Background(), "close Codex ACP agent failed")
+
 			serveErr = closeErr
 		}
 	}()
@@ -356,10 +364,13 @@ func (a *Agent) Close() error {
 		sessions = append(sessions, session)
 	}
 
+	conn := a.conn
 	a.sessions = make(map[acp.SessionId]*session)
 	a.closed = true
 	a.conn = nil
 	a.mu.Unlock()
+
+	closeCtx := context.Background()
 
 	// The ladder's fourth rung, for every session at once: no completer may
 	// outlive the process that armed it, and cancelling the flows after the
@@ -369,19 +380,57 @@ func (a *Agent) Close() error {
 		a.providerAuth.closeAll()
 	}
 
-	var err error
+	results := make(chan error, len(sessions))
+	for _, ownedSession := range sessions {
+		go func(target *session) {
+			var sessionErr error
 
-	for _, session := range sessions {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = errors.Join(err, session.Close(ctx))
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					handleAgentGoroutinePanic(closeCtx, a.log, "Codex session close", nil, recovered)
 
-		cancel()
+					sessionErr = errors.New("codex session close panicked")
+				}
+
+				results <- sessionErr
+			}()
+
+			sessionErr = target.Close(closeCtx)
+		}(ownedSession)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-	err = errors.Join(err, a.closeSharedRuntime(ctx))
+	runtimeResult := make(chan error, 1)
 
-	cancel()
+	go func() {
+		var runtimeErr error
+
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				handleAgentGoroutinePanic(closeCtx, a.log, "Codex runtime close", nil, recovered)
+
+				runtimeErr = errors.New("codex runtime close panicked")
+			}
+
+			runtimeResult <- runtimeErr
+		}()
+
+		runtimeErr = a.closeSharedRuntime(closeCtx)
+	}()
+
+	// Closing the owned ACP transport is the cancellation path for stalled
+	// writers and host requests. Every worker is still joined below; interrupt
+	// never substitutes for joining it.
+	if interrupter, ok := conn.(transportInterrupter); ok {
+		_ = interrupter.InterruptTransport()
+	}
+
+	var err error
+
+	for range sessions {
+		err = errors.Join(err, <-results)
+	}
+
+	err = errors.Join(err, <-runtimeResult)
 
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 
@@ -425,14 +474,14 @@ func (a *Agent) externalAuthTokens() (ChatGPTAuthTokens, bool) {
 // this and not just initialize: an embedded host can open a session and prompt
 // without ever handshaking. The code is internal error rather than invalid
 // params because the caller's params are fine — what is broken is the agent
-// the embedding host built. The joined Go text is the whole payload because
-// there is no wire field to name, and the prose is all the operator has.
+// the embedding host built. The wire classification is closed; the original
+// error remains available to the embedding caller through optionsErr.
 func (a *Agent) optionsError() error {
 	if a.optionsErr == nil {
 		return nil
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: a.optionsErr.Error()})
+	return acp.NewInternalError(map[string]any{jsonFieldError: valueInternalFailure})
 }
 
 // Initialize implements ACP initialize.
@@ -457,15 +506,20 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 	codexMeta := map[string]any{
 		"fork": map[string]any{
-			"unstable":      true,
-			jsonFieldMethod: ForkSessionMethod,
-			"request":       "acp.UnstableForkSessionRequest JSON payload only",
-			"response":      "acp.UnstableForkSessionResponse JSON payload only",
+			jsonFieldUnstable: true,
+			jsonFieldMethod:   ForkSessionMethod,
+			"request":         "acp.UnstableForkSessionRequest JSON payload only",
+			"response":        "acp.UnstableForkSessionResponse JSON payload only",
+		},
+		"steer": map[string]any{
+			jsonFieldUnstable: true,
+			jsonFieldMethod:   SteerTurnMethod,
+			"request":         "acp.PromptRequest JSON payload with exact turn route",
 		},
 		"elicitation": map[string]any{
-			"unstable":     true,
-			jsonFieldScope: valueSession,
-			"tracks":       "ACP v1 elicitation",
+			jsonFieldUnstable: true,
+			jsonFieldScope:    valueSession,
+			"tracks":          "ACP v1 elicitation",
 		},
 		rawEventCapabilityKey: map[string]any{
 			jsonFieldMethod:  RawEventMethod,
@@ -594,7 +648,14 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 		return nil, err
 	}
 
-	eventSink.SetClient(client)
+	if sinkErr := eventSink.SetClient(client); sinkErr != nil {
+		closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		closeErr := client.Close(closeCtx)
+
+		cancelClose()
+
+		return nil, errors.Join(sinkErr, closeErr)
+	}
 
 	if tokens, ok := a.externalAuthTokens(); ok {
 		if err := client.LoginWithChatGPTTokens(ctx, toCodexAuthTokens(tokens)); err != nil {
@@ -638,7 +699,7 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	}
 
 	switch event.Kind {
-	case codex.EventAccountUpdated, codex.EventLoginCompleted, codex.EventRateLimitsUpdated, codex.EventError:
+	case codex.EventAccountUpdated, codex.EventLoginCompleted, codex.EventError:
 	default:
 		return
 	}
@@ -647,6 +708,20 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 
 	client := s.client
 	if client == nil {
+		if s.failure != nil {
+			s.mu.Unlock()
+
+			return
+		}
+
+		if len(s.pending) == startupClientEventLimit {
+			s.pending = nil
+			s.failure = fmt.Errorf("%w: startup client event router", codex.ErrTurnEventOverflow)
+			s.mu.Unlock()
+
+			return
+		}
+
 		s.pending = append(s.pending, event)
 		s.mu.Unlock()
 
@@ -657,8 +732,17 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	s.agent.applyCodexClientEvent(context.Background(), client, event)
 }
 
-func (s *codexClientEventSink) SetClient(client codex.Client) {
+func (s *codexClientEventSink) SetClient(client codex.Client) error {
 	s.mu.Lock()
+
+	failure := s.failure
+	if failure != nil {
+		s.pending = nil
+		s.mu.Unlock()
+
+		return errors.Join(codex.ErrConnectionClosed, failure)
+	}
+
 	s.client = client
 	pending := append([]codex.Event(nil), s.pending...)
 	s.pending = nil
@@ -667,6 +751,8 @@ func (s *codexClientEventSink) SetClient(client codex.Client) {
 	for i := range pending {
 		s.agent.applyCodexClientEvent(context.Background(), client, pending[i])
 	}
+
+	return nil
 }
 
 func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, event codex.Event) {
@@ -676,10 +762,6 @@ func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, 
 	case codex.EventLoginCompleted:
 		if a.providerAuth != nil {
 			a.providerAuth.loginCompleted(ctx, event.Login)
-		}
-	case codex.EventRateLimitsUpdated:
-		if event.RateLimits != nil {
-			a.cacheRateLimits(*event.RateLimits)
 		}
 	case codex.EventError:
 		// Native error notifications also carry ordinary turn failures such as
@@ -701,32 +783,6 @@ func codexRuntimeDied(err error) bool {
 	var processExit *codex.ProcessExitError
 
 	return errors.Is(err, codex.ErrConnectionClosed) || errors.As(err, &processExit)
-}
-
-// cacheRateLimits records the latest harness-reported rate-limit snapshot.
-// The cache is agent-level and latest-wins across every session: any newer
-// snapshot from any client replaces the previous one.
-func (a *Agent) cacheRateLimits(snapshot codex.RateLimitSnapshot) {
-	if !snapshot.HasData() {
-		return
-	}
-
-	a.rateLimitsMu.Lock()
-	defer a.rateLimitsMu.Unlock()
-
-	a.rateLimitsSnap = &snapshot
-}
-
-// cachedRateLimits returns the latest cached snapshot, if any.
-func (a *Agent) cachedRateLimits() (codex.RateLimitSnapshot, bool) {
-	a.rateLimitsMu.Lock()
-	defer a.rateLimitsMu.Unlock()
-
-	if a.rateLimitsSnap == nil {
-		return codex.RateLimitSnapshot{}, false
-	}
-
-	return *a.rateLimitsSnap, true
 }
 
 func (a *Agent) updateAccountForClient(client codex.Client, threadID string, account codex.Account) {
@@ -777,6 +833,19 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 		return func() { <-a.clientCalls }, nil
 	default:
 		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "client_calls"})
+	}
+}
+
+func (a *Agent) acquireLifecycleCall(ctx context.Context) (func(), error) {
+	if a.lifecycleCalls == nil {
+		return func() {}, nil
+	}
+
+	select {
+	case a.lifecycleCalls <- struct{}{}:
+		return func() { <-a.lifecycleCalls }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -855,6 +924,15 @@ func (a *Agent) acquireSessionLifecycle(id acp.SessionId) (func(), error) {
 		session.sessionOps.RUnlock()
 
 		return nil, err
+	}
+
+	if session.lifecycleEstablishmentPending() {
+		session.sessionOps.RUnlock()
+
+		return nil, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex session establishment response is still outstanding",
+			jsonFieldLimit: limitSessionPrompt,
+		})
 	}
 
 	return session.sessionOps.RUnlock, nil
@@ -950,6 +1028,12 @@ func (a *Agent) claimSessionDelete(id acp.SessionId) func() {
 // storeRetainedRuntimeSession refuses the same way, so both registration paths
 // have one shape.
 func (a *Agent) storeStartedSession(session *session) error {
+	if a.negotiatedLifecycle().Present() {
+		if err := session.attachNativeEvents(); err != nil {
+			return err
+		}
+	}
+
 	a.mu.Lock()
 
 	switch {
@@ -1104,6 +1188,13 @@ func (a *Agent) beginSessionClose(id acp.SessionId) (*session, error) {
 	defer session.mu.Unlock()
 
 	if session.closing {
+		if session.closeContained && (session.closeCommitPending || session.closeRemovalPending) {
+			session.closeCommitPending = false
+			session.closeRemovalPending = false
+
+			return session, nil
+		}
+
 		return nil, newSessionCloseInProgress()
 	}
 
@@ -1168,6 +1259,10 @@ func (a *Agent) clearSessionClosing(id acp.SessionId, session *session) bool {
 
 	session.mu.Lock()
 	session.closing = false
+	session.closeContained = false
+	session.closeCommitPending = false
+	session.closeCommitDone = false
+	session.closeRemovalPending = false
 	session.mu.Unlock()
 
 	return true
@@ -1176,26 +1271,35 @@ func (a *Agent) clearSessionClosing(id acp.SessionId, session *session) bool {
 // finishSessionCloseRetainingThread publishes native-thread ownership only
 // after unsubscribe succeeded. Materialized rollout cleanup moves with that
 // ownership so the canonical path remains valid until rebind or runtime end.
-func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *session) (bool, bool) {
+func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *session) (bool, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.sessions[id] != session {
-		return false, false
+		return false, false, nil
 	}
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
-	delete(a.sessions, id)
-
 	if a.runtimeClient != session.client || a.runtimeDead || session.clientDead || session.codexThreadID == "" {
-		return true, false
+		delete(a.sessions, id)
+
+		return true, false, nil
 	}
 
 	if a.retainedThreads == nil {
 		a.retainedThreads = make(map[acp.SessionId]*retainedRuntimeThread)
 	}
+
+	if a.retainedThreads[id] == nil && len(a.retainedThreads) == retainedRuntimeThreadLimit {
+		return false, false, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex retained thread registry is full",
+			jsonFieldLimit: "retained_threads",
+		})
+	}
+
+	delete(a.sessions, id)
 
 	a.retainedThreads[id] = &retainedRuntimeThread{
 		sessionID:           id,
@@ -1209,7 +1313,7 @@ func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *ses
 	session.materializedPath = ""
 	session.materializedRelease = nil
 
-	return true, true
+	return true, true, nil
 }
 
 func (a *Agent) connection() agentClient {

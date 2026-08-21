@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,6 +178,9 @@ func TestACPConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	clientConn := acp.NewClientSideConnection(client, c2aW, a2cR)
 
 	agent := newPlaceholderAgent()
+	t.Cleanup(func() {
+		require.NoError(t, agent.Close())
+	})
 	agentConn := newLocalAgentConnection(agent, a2cW, c2aR)
 	agent.setAgentClient(agentConn)
 
@@ -402,7 +406,7 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 		ThreadID: "thread-1",
 		Account:  codex.Account{ID: "acct", Email: "user@example.com", PlanType: "plus"},
 	})
-	sink.SetClient(client)
+	require.NoError(t, sink.SetClient(client))
 	if matching.accountMeta["id"] != "acct" {
 		t.Fatalf("matching account meta = %#v", matching.accountMeta)
 	}
@@ -420,6 +424,53 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	}
 	agent.updateAccountForClient(client, "", codex.Account{})
 	agent.applyCodexClientEvent(context.Background(), client, codex.Event{Kind: codex.EventRaw})
+}
+
+func TestCodexClientEventSinkStartupRetentionIsBoundedAndFailsClosed(t *testing.T) {
+	agent := NewAgent()
+	client := newSpyCodexClient()
+	agent.runtimeClient = client
+	sink := &codexClientEventSink{agent: agent}
+	for index := 0; index <= startupClientEventLimit; index++ {
+		sink.Handle(context.Background(), codex.Event{Kind: codex.EventAccountUpdated})
+	}
+	sink.Handle(context.Background(), codex.Event{Kind: codex.EventAccountUpdated})
+	sink.mu.Lock()
+	require.Empty(t, sink.pending)
+	require.ErrorIs(t, sink.failure, codex.ErrTurnEventOverflow)
+	sink.mu.Unlock()
+	require.ErrorIs(t, sink.SetClient(client), codex.ErrTurnEventOverflow)
+	require.False(t, agent.runtimeDead)
+}
+
+type countingCloseCodexClient struct {
+	*spyCodexClient
+	closeCount atomic.Int64
+}
+
+func (c *countingCloseCodexClient) Close(context.Context) error {
+	c.closeCount.Add(1)
+
+	return nil
+}
+
+func TestRuntimeLaunchRejectsOverflowBeforePublishingClient(t *testing.T) {
+	client := &countingCloseCodexClient{spyCodexClient: newSpyCodexClient()}
+	agent := NewAgent(withClientFactory(func(ctx context.Context, options codex.Options) (codex.Client, error) {
+		for range startupClientEventLimit + 1 {
+			options.EventHandler(ctx, codex.Event{Kind: codex.EventAccountUpdated})
+		}
+
+		return client, nil
+	}))
+
+	launched, err := agent.launchRuntimeClient(t.Context(), 0, t.TempDir(), minSupportedCodexVersion)
+	require.Nil(t, launched)
+	require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+	require.Equal(t, int64(1), client.closeCount.Load())
+	agent.mu.Lock()
+	require.Nil(t, agent.runtimeClient)
+	agent.mu.Unlock()
 }
 
 func TestAgentCoreBranchEdges(t *testing.T) {
@@ -593,11 +644,11 @@ type spyCodexClient struct {
 	login          codex.ChatGPTAuthTokens
 	unsubscribed   []string
 	deletedThreads []string
+	feeds          map[string]chan codex.Event
 
-	rateLimitsSupported bool
-	rateLimits          codex.RateLimitSnapshot
-	rateLimitsErr       error
-	rateLimitsReads     int
+	rateLimits      codex.RateLimitSnapshot
+	rateLimitsErr   error
+	rateLimitsReads int
 }
 
 func (c *spyCodexClient) ListBackgroundTerminals(
@@ -616,6 +667,7 @@ func (c *spyCodexClient) TerminateBackgroundTerminal(
 
 func newSpyCodexClient() *spyCodexClient {
 	return &spyCodexClient{
+		feeds: make(map[string]chan codex.Event),
 		thread: codex.Thread{
 			ID:        "thread-1",
 			SessionID: "thread-1",
@@ -690,14 +742,65 @@ func (c *spyCodexClient) RunTurn(ctx context.Context, req codex.TurnStartRequest
 	c.mu.Lock()
 	c.lastTurn = req
 	c.mu.Unlock()
-	out := make(chan codex.Event, 2)
-	go func() {
-		defer close(out)
-		out <- codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: req.ThreadID, TurnID: "turn-1", Text: `{"ok":true}`}
-		out <- codex.Event{Kind: codex.EventCompleted, ThreadID: req.ThreadID, TurnID: "turn-1", StopReason: codex.StopReasonEndTurn, Usage: codex.Usage{InputTokens: 1, OutputTokens: 2}}
-	}()
+	if err := c.publishTurn(req.ThreadID, "turn-1", []codex.Event{
+		{Kind: codex.EventAgentMessageDelta, Text: `{"ok":true}`},
+		{Kind: codex.EventCompleted, StopReason: codex.StopReasonEndTurn, Usage: codex.Usage{InputTokens: 1, OutputTokens: 2}},
+	}); err != nil {
+		return codex.Turn{}, err
+	}
 
-	return codex.Turn{ID: "turn-1", Events: out}, nil
+	return codex.Turn{ID: "turn-1"}, nil
+}
+
+func (c *spyCodexClient) SubscribeThread(ctx context.Context, threadID string) (codex.ThreadEventStream, error) {
+	if err := ctx.Err(); err != nil {
+		return codex.ThreadEventStream{}, err
+	}
+	c.mu.Lock()
+	if c.feeds == nil {
+		c.feeds = make(map[string]chan codex.Event)
+	}
+	if c.feeds[threadID] != nil {
+		c.mu.Unlock()
+
+		return codex.ThreadEventStream{}, errors.New("thread feed already claimed")
+	}
+	events := make(chan codex.Event, sessionNativeEventBuffer+1)
+	c.feeds[threadID] = events
+	c.mu.Unlock()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			c.mu.Lock()
+			if c.feeds[threadID] == events {
+				delete(c.feeds, threadID)
+				close(events)
+			}
+			c.mu.Unlock()
+		})
+	}
+
+	return codex.ThreadEventStream{Events: events, Release: release}, nil
+}
+
+func (c *spyCodexClient) publishTurn(threadID string, turnID string, events []codex.Event) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	feed := c.feeds[threadID]
+	if feed == nil {
+		return errors.New("turn requires claimed thread feed")
+	}
+	for _, event := range events {
+		event.Scope = codex.EventScopeThread
+		event.ThreadID = threadID
+		if event.TurnID == "" {
+			event.TurnID = turnID
+		}
+		feed <- event
+	}
+
+	return nil
 }
 
 func (c *spyCodexClient) SteerTurn(_ context.Context, req codex.TurnSteerRequest) error {
@@ -772,13 +875,6 @@ func (c *spyCodexClient) AccountRead(context.Context) (codex.Account, error) {
 	return codex.Account{ID: "acct", Email: "user@example.com", PlanType: "plus", Raw: map[string]any{"accessToken": "secret"}}, nil
 }
 
-func (c *spyCodexClient) RateLimitsSupported() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.rateLimitsSupported
-}
-
 func (c *spyCodexClient) ReadRateLimits(context.Context) (codex.RateLimitSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -846,6 +942,20 @@ func (c *recordingAgentClient) CreateElicitation(_ context.Context, request acp.
 	return acp.NewUnstableCreateElicitationResponseCancel(), nil
 }
 
+func (c *recordingAgentClient) CreateElicitationRegistered(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+	_ string,
+	registered func() error,
+) (acp.UnstableCreateElicitationResponse, error) {
+	if err := registered(); err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	return c.CreateElicitation(ctx, request, scope)
+}
+
 func (c *recordingAgentClient) UnstableConnectMcp(context.Context, acp.UnstableConnectMcpRequest) (acp.UnstableConnectMcpResponse, error) {
 	return acp.UnstableConnectMcpResponse{ConnectionId: "mcp-1"}, nil
 }
@@ -858,6 +968,19 @@ func (c *recordingAgentClient) RequestPermission(_ context.Context, request acp.
 	c.permissions = append(c.permissions, request)
 
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(c.permission)}, nil
+}
+
+func (c *recordingAgentClient) RequestPermissionRegistered(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+	_ string,
+	registered func() error,
+) (acp.RequestPermissionResponse, error) {
+	if err := registered(); err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+
+	return c.RequestPermission(ctx, request)
 }
 
 func (c *recordingAgentClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
@@ -1226,6 +1349,19 @@ func (c *blockingPermissionAgentClient) RequestPermission(context.Context, acp.R
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("accept")}, nil
 }
 
+func (c *blockingPermissionAgentClient) RequestPermissionRegistered(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+	_ string,
+	registered func() error,
+) (acp.RequestPermissionResponse, error) {
+	if err := registered(); err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+
+	return c.RequestPermission(ctx, request)
+}
+
 func TestMain(m *testing.M) {
 	fakeMode := decodeFakeCodexMode(os.Getenv(fakeCodexModeEnv))
 
@@ -1591,28 +1727,47 @@ func (c *acceptElicitationClient) CreateElicitation(_ context.Context, request a
 
 type runEventsClient struct {
 	*spyCodexClient
-	events []codex.Event
-	runErr error
+	events    []codex.Event
+	runErr    error
+	closeFeed bool
 }
 
-func (c *runEventsClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+func (c *runEventsClient) ensureSpy() *spyCodexClient {
+	if c.spyCodexClient == nil {
+		c.spyCodexClient = newSpyCodexClient()
+	}
+
+	return c.spyCodexClient
+}
+
+func (c *runEventsClient) SubscribeThread(ctx context.Context, threadID string) (codex.ThreadEventStream, error) {
+	return c.ensureSpy().SubscribeThread(ctx, threadID)
+}
+
+func (c *runEventsClient) RunTurn(_ context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	if c.runErr != nil {
 		return codex.Turn{}, c.runErr
 	}
-	out := make(chan codex.Event, len(c.events))
-	go func() {
-		defer close(out)
-		for _, event := range c.events {
-			out <- event
-		}
-	}()
-
 	turnID := "turn"
 	if len(c.events) > 0 && c.events[0].TurnID != "" {
 		turnID = c.events[0].TurnID
 	}
 
-	return codex.Turn{ID: turnID, Events: out}, nil
+	if err := c.ensureSpy().publishTurn(req.ThreadID, turnID, c.events); err != nil {
+		return codex.Turn{}, err
+	}
+	if c.closeFeed {
+		spy := c.ensureSpy()
+		spy.mu.Lock()
+		feed := spy.feeds[req.ThreadID]
+		delete(spy.feeds, req.ThreadID)
+		if feed != nil {
+			close(feed)
+		}
+		spy.mu.Unlock()
+	}
+
+	return codex.Turn{ID: turnID}, nil
 }
 
 func (c *runEventsClient) CancelTurn(context.Context, string, string) error { return nil }
@@ -1622,45 +1777,30 @@ func (c *runEventsClient) DeleteThread(context.Context, codex.ThreadDeleteReques
 }
 func (c *runEventsClient) Close(context.Context) error { return nil }
 
-type openRunEventsClient struct {
-	*spyCodexClient
-	events []codex.Event
-}
-
-func (c *openRunEventsClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
-	out := make(chan codex.Event, len(c.events))
-	go func() {
-		defer close(out)
-		for _, event := range c.events {
-			out <- event
-		}
-		<-ctx.Done()
-	}()
-
-	return codex.Turn{ID: "turn", Events: out}, nil
-}
-
-func (c *openRunEventsClient) CancelTurn(context.Context, string, string) error { return nil }
-func (c *openRunEventsClient) UnsubscribeThread(context.Context, string) error  { return nil }
-func (c *openRunEventsClient) DeleteThread(context.Context, codex.ThreadDeleteRequest) error {
-	return nil
-}
-func (c *openRunEventsClient) Close(context.Context) error { return nil }
-
 type cancelDuringRunClient struct {
 	*spyCodexClient
 	session *session
 }
 
-func (c *cancelDuringRunClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
-	out := make(chan codex.Event, 1)
-	go func() {
-		defer close(out)
-		c.session.cancelTurn()
-		out <- codex.Event{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("canceled")}
-	}()
+func (c *cancelDuringRunClient) ensureSpy() *spyCodexClient {
+	if c.spyCodexClient == nil {
+		c.spyCodexClient = newSpyCodexClient()
+	}
 
-	return codex.Turn{ID: "turn", Events: out}, nil
+	return c.spyCodexClient
+}
+
+func (c *cancelDuringRunClient) SubscribeThread(ctx context.Context, threadID string) (codex.ThreadEventStream, error) {
+	return c.ensureSpy().SubscribeThread(ctx, threadID)
+}
+
+func (c *cancelDuringRunClient) RunTurn(_ context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
+	c.session.cancelTurn()
+	if err := c.ensureSpy().publishTurn(req.ThreadID, "turn", []codex.Event{{Kind: codex.EventError, Err: errors.New("canceled")}}); err != nil {
+		return codex.Turn{}, err
+	}
+
+	return codex.Turn{ID: "turn"}, nil
 }
 
 func (c *cancelDuringRunClient) CancelTurn(context.Context, string, string) error { return nil }
@@ -1726,7 +1866,7 @@ func TestInitializeRejectsGlobalShellEnvironmentPolicyOverrides(t *testing.T) {
 		if !ok {
 			t.Fatalf("Initialize accepted process-global shell environment override %q: %T %v", key, err, err)
 		}
-		if !strings.Contains(fmt.Sprint(reqErr.Data), "thread-owned shell environment") {
+		if fmt.Sprint(reqErr.Data) != "map[error:"+valueInternalFailure+"]" {
 			t.Fatalf("shell environment override %q data = %#v", key, reqErr.Data)
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -78,6 +79,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	}
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
+		_ = session.Close(context.TODO())
+
+		return acp.NewSessionResponse{}, err
+	}
+
 	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
 
@@ -127,17 +134,24 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 	}
 
 	if route.TurnNonce != session.activeTurnNonce() {
-		return routeInvalidParams(fmt.Errorf("turnNonce does not identify the active turn"))
+		return routeInvalidParams(errTurnRouteMismatch)
 	}
 
-	if err := rejectLifecycleKey(params.Meta); err != nil {
-		return err
+	if lifecycleErr := rejectLifecycleKey(params.Meta); lifecycleErr != nil {
+		return lifecycleErr
 	}
 
-	return codexThreadACPError(
-		session.shutdownActiveTurn(ctx, false),
-		session.accountMetaSnapshot(),
-	)
+	err = session.shutdownActiveTurnForNonce(ctx, false, route.TurnNonce)
+
+	return cancelACPError(err, session.accountMetaSnapshot())
+}
+
+func cancelACPError(err error, account map[string]any) error {
+	if errors.Is(err, errTurnRouteMismatch) {
+		return routeInvalidParams(err)
+	}
+
+	return codexThreadACPError(err, account)
 }
 
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
@@ -150,6 +164,16 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
+	session.mu.Lock()
+	retryCommit := session.closeContained
+	commitDone := session.closeCommitDone
+	session.mu.Unlock()
+
+	var gateErr error
+	if !retryCommit {
+		gateErr = session.beginLifecycleClose(ctx)
+	}
+
 	// Pending provider-auth flows are cancelled before anything native is torn
 	// down, because a flow abandoned to a process already being interrupted has
 	// nobody left to cancel it.
@@ -158,39 +182,64 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	// Close interrupts and contains a live native turn before allowing its ACP
 	// settlement to terminalize. Admission is already closed, so no later prompt
 	// can enter behind this boundary.
-	shutdownErr := session.shutdownActiveTurn(ctx, true)
-	session.awaitPromptSettlement()
+	var shutdownErr error
+	if !retryCommit {
+		shutdownErr = errors.Join(gateErr, session.shutdownActiveTurn(ctx, true))
+		session.awaitPromptSettlement()
+	}
 
 	session.sessionOps.Lock()
 	defer session.sessionOps.Unlock()
 
-	if containErr := errors.Join(shutdownErr, session.containSession(ctx)); containErr != nil {
-		// An incomplete boundary terminalizes nothing and commits nothing new.
-		// The stream is fenced either way, because the session it belonged to is
-		// over whether or not its descendants could be proved gone.
-		session.fenceSession()
-		a.abortSessionClose(params.SessionId, session)
+	if !retryCommit {
+		if containErr := errors.Join(shutdownErr, session.containSession(ctx)); containErr != nil {
+			// An incomplete boundary terminalizes nothing and commits nothing new.
+			// The stream is fenced either way, because the session it belonged to is
+			// over whether or not its descendants could be proved gone.
+			session.fenceSession()
+			a.abortSessionClose(params.SessionId, session)
 
-		return acp.CloseSessionResponse{}, codexThreadACPError(containErr, session.accountMetaSnapshot())
+			return acp.CloseSessionResponse{}, codexThreadACPError(containErr, session.accountMetaSnapshot())
+		}
+
+		session.mu.Lock()
+		session.closeContained = true
+		session.mu.Unlock()
 	}
 
-	session.fenceSession()
-
 	// The durable rung belongs to the session, not to the incarnation: the
-	// emission rungs apply only to a live stream, and this configuration's
-	// stream is prompt-scoped, so a close between prompts skips them and still
-	// owes the commit. A prefix a settlement captured and could not place is the
+	// emission rungs apply only to a live incarnation on the persistent thread
+	// stream, so a close between foreground turns still owes the commit. A prefix
+	// a settlement captured and could not place is the
 	// resumable state, so a capture the store refuses fails the close rather
 	// than being dropped with the session wrapper. The commit runs on a detached
 	// context: a host that cancelled its call is not a reason to lose frames it
 	// was already shown.
-	if commitErr := session.commitResumableSnapshot(ctx); commitErr != nil {
-		a.abortSessionClose(params.SessionId, session)
+	if !commitDone {
+		if commitErr := session.commitResumableSnapshot(ctx); commitErr != nil {
+			session.mu.Lock()
+			session.closeCommitPending = true
+			session.mu.Unlock()
+			session.fenceSession()
 
-		return acp.CloseSessionResponse{}, commitErr
+			return acp.CloseSessionResponse{}, commitErr
+		}
+
+		session.mu.Lock()
+		session.closeCommitDone = true
+		session.mu.Unlock()
 	}
 
-	removed, retained := a.finishSessionCloseRetainingThread(params.SessionId, session)
+	session.fenceSession()
+
+	removed, retained, removeErr := a.finishSessionCloseRetainingThread(params.SessionId, session)
+	if removeErr != nil {
+		session.mu.Lock()
+		session.closeRemovalPending = true
+		session.mu.Unlock()
+
+		return acp.CloseSessionResponse{}, removeErr
+	}
 
 	var closeErr error
 
@@ -270,7 +319,8 @@ func (a *Agent) tearDownDeletedSession(ctx context.Context, id acp.SessionId) er
 	a.closeSessionProviderAuth(id)
 
 	if active != nil {
-		shutdownErr := active.shutdownActiveTurn(ctx, true)
+		gateErr := active.beginLifecycleClose(ctx)
+		shutdownErr := errors.Join(gateErr, active.shutdownActiveTurn(ctx, true))
 		active.awaitPromptSettlement()
 		active.sessionOps.Lock()
 
@@ -591,7 +641,7 @@ func encodeListCursor(offset int) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }
 
-func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (response acp.ResumeSessionResponse, resultErr error) {
 	if err := rejectLifecycleKey(params.Meta); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -633,6 +683,12 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		ResumeID:              string(params.SessionId),
 	}
 	if session := a.activeSessionForStart(params.SessionId, start); session != nil {
+		finish, admissionErr := a.beginActiveLifecycleAdmission(ctx, session)
+		if admissionErr != nil {
+			return acp.ResumeSessionResponse{}, admissionErr
+		}
+		defer func() { resultErr = finish(resultErr) }()
+
 		models := modelList(ctx, session.client)
 		snapshot := session.snapshot()
 
@@ -669,7 +725,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	}
 
 	if active := a.activeSession(params.SessionId); active != nil {
-		return a.rebindActiveStoredSession(ctx, params, entries, meta, active)
+		return a.rebindActiveStoredSession(ctx, params, entries, meta, active, nil)
 	}
 
 	retained, err := a.claimRetainedRuntimeThreadForStore(params.SessionId, rolloutNativeThreadID(entries))
@@ -729,7 +785,14 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	}
 
 	id := params.SessionId
+
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
+		_ = session.Close(context.TODO())
+
+		return acp.ResumeSessionResponse{}, err
+	}
+
 	session.materializedPath = path
 	session.materializedRelease = scratchRelease
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
@@ -795,9 +858,19 @@ func (a *Agent) resumeRetainedRuntimeSession(
 		return acp.ResumeSessionResponse{}, nil, codexThreadACPError(err, nil)
 	}
 
+	var session *session
+
 	rollback := func(cause error) error {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 		defer cancel()
+
+		if session != nil {
+			session.abandonLifecycleEstablishment()
+
+			if rebindErr := session.prepareNativeEventRebind(); rebindErr != nil {
+				cause = errors.Join(cause, rebindErr)
+			}
+		}
 
 		threadID := firstNonEmpty(thread.ID, retained.threadID)
 		if unsubscribeErr := retained.client.UnsubscribeThread(closeCtx, threadID); unsubscribeErr != nil {
@@ -827,7 +900,11 @@ func (a *Agent) resumeRetainedRuntimeSession(
 		return acp.ResumeSessionResponse{}, nil, rollback(cause)
 	}
 
-	session := newSession(a, params.SessionId, params.Cwd, params.AdditionalDirectories, thread, retained.client, meta, mcpServers)
+	session = newSession(a, params.SessionId, params.Cwd, params.AdditionalDirectories, thread, retained.client, meta, mcpServers)
+	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
+		return acp.ResumeSessionResponse{}, nil, rollback(err)
+	}
+
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -864,12 +941,13 @@ func (a *Agent) rebindActiveStoredSession(
 	entries []SessionStoreEntry,
 	meta sessionMeta,
 	active *session,
-) (acp.ResumeSessionResponse, error) {
-	releaseTurn, err := active.acquireTurn(ctx)
+	afterRebind ...func() error,
+) (response acp.ResumeSessionResponse, err error) {
+	finish, err := a.beginActiveLifecycleAdmission(ctx, active)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
-	defer releaseTurn()
+	defer func() { err = finish(err) }()
 
 	if liveErr := active.ensureLiveClient(ctx); liveErr != nil {
 		return acp.ResumeSessionResponse{}, codexThreadACPError(liveErr, active.accountMetaSnapshot())
@@ -896,10 +974,6 @@ func (a *Agent) rebindActiveStoredSession(
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
-	if unsubscribeErr := client.UnsubscribeThread(ctx, ownedThreadID); unsubscribeErr != nil {
-		return acp.ResumeSessionResponse{}, codexThreadACPError(unsubscribeErr, active.accountMetaSnapshot())
-	}
-
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      ownedThreadID,
 		Path:          ownedPath,
@@ -913,6 +987,8 @@ func (a *Agent) rebindActiveStoredSession(
 	}
 
 	if thread.ID != ownedThreadID {
+		active.setClientDead(true)
+
 		return acp.ResumeSessionResponse{}, acp.NewInvalidRequest(map[string]any{
 			jsonFieldError: "Codex resumed a different native thread",
 		})
@@ -921,13 +997,14 @@ func (a *Agent) rebindActiveStoredSession(
 	if thread.Path == "" {
 		thread.Path = ownedPath
 	} else if ownedPath != "" && thread.Path != ownedPath {
+		active.setClientDead(true)
+
 		return acp.ResumeSessionResponse{}, acp.NewInvalidRequest(map[string]any{
 			jsonFieldError: "Codex resumed the active thread at a different rollout path",
 		})
 	}
 
-	candidate := newSession(a, params.SessionId, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
-	if err := a.runtimeReadyCanary(ctx, client, candidate); err != nil {
+	if err := a.runtimeReadyCanaryWithConfig(ctx, client, active, config); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
 
@@ -963,6 +1040,12 @@ func (a *Agent) rebindActiveStoredSession(
 		})
 	}
 
+	if len(afterRebind) != 0 && afterRebind[0] != nil {
+		if err := afterRebind[0](); err != nil {
+			return acp.ResumeSessionResponse{}, err
+		}
+	}
+
 	models := modelList(ctx, client)
 	snapshot := active.snapshot()
 
@@ -972,7 +1055,56 @@ func (a *Agent) rebindActiveStoredSession(
 	}, nil
 }
 
-func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+// beginActiveLifecycleAdmission is the single ownership gate for every active
+// Resume and Load path. It excludes foreground and agent-origin turns before
+// establishment is armed, and keeps native broker handoff and replay exclusive
+// until either the direct call finishes or the registered response settles the
+// establishment obligation.
+func (a *Agent) beginActiveLifecycleAdmission(
+	ctx context.Context,
+	active *session,
+) (func(error) error, error) {
+	releaseTurn, err := active.acquireTurn(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := active.beginActiveNativeRebind(ctx); err != nil {
+		releaseTurn()
+
+		return nil, err
+	}
+
+	obligation := establishmentFromContext(ctx)
+	if err := active.armLifecycleEstablishment(obligation); err != nil {
+		finishErr := active.completeActiveNativeRebind(ctx)
+
+		releaseTurn()
+
+		return nil, errors.Join(err, finishErr)
+	}
+
+	responseBound := obligation != nil && a.negotiatedLifecycle().Present()
+
+	var (
+		once      sync.Once
+		finishErr error
+	)
+
+	return func(operationErr error) error {
+		once.Do(func() {
+			if !responseBound {
+				finishErr = active.completeActiveNativeRebind(ctx)
+			}
+
+			releaseTurn()
+		})
+
+		return errors.Join(operationErr, finishErr)
+	}, nil
+}
+
+func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (response acp.LoadSessionResponse, resultErr error) {
 	if err := rejectLifecycleKey(params.Meta); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
@@ -1014,6 +1146,12 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		ResumeID:              string(params.SessionId),
 	}
 	if existing := a.activeSessionForStart(params.SessionId, start); existing != nil {
+		finish, admissionErr := a.beginActiveLifecycleAdmission(ctx, existing)
+		if admissionErr != nil {
+			return acp.LoadSessionResponse{}, admissionErr
+		}
+		defer func() { resultErr = finish(resultErr) }()
+
 		storeEntries, loadErr := a.loadStoredSession(ctx, params.SessionId)
 		if loadErr != nil {
 			return acp.LoadSessionResponse{}, loadErr
@@ -1134,13 +1272,11 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	}
 
 	if active := a.activeSession(params.SessionId); active != nil {
-		resp, rebindErr := a.rebindActiveStoredSession(ctx, acp.ResumeSessionRequest(params), entries, meta, active)
+		resp, rebindErr := a.rebindActiveStoredSession(ctx, acp.ResumeSessionRequest(params), entries, meta, active, func() error {
+			return active.replayRollout(ctx, entries)
+		})
 		if rebindErr != nil {
 			return acp.LoadSessionResponse{}, rebindErr
-		}
-
-		if replayErr := active.replayRollout(ctx, entries); replayErr != nil {
-			return acp.LoadSessionResponse{}, replayErr
 		}
 
 		return acp.LoadSessionResponse(resp), nil
@@ -1210,7 +1346,14 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	}
 
 	id := params.SessionId
+
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
+		_ = session.Close(context.TODO())
+
+		return acp.LoadSessionResponse{}, err
+	}
+
 	session.materializedPath = path
 	session.materializedRelease = scratchRelease
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
@@ -1296,9 +1439,9 @@ func (a *Agent) retryDeleteNativeCodexSession(ctx context.Context, sessionID acp
 	}
 
 	if err := a.deleteNativeCodexSession(ctx, sessionID, threadID); err != nil {
-		a.log.DebugContext(ctx, "retry delete native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "retry delete native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)))
 	} else if err := a.endRetainedRuntimeThread(retained); err != nil {
-		a.log.DebugContext(ctx, "release deleted native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "release deleted native Codex session failed", slog.String(jsonFieldSessionID, string(sessionID)))
 	}
 }
 
@@ -1347,12 +1490,22 @@ func (a *Agent) deleteNativeCodexSession(ctx context.Context, sessionID acp.Sess
 	return cleanupErr
 }
 
-func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (
+	response acp.UnstableForkSessionResponse,
+	returnErr error,
+) {
 	ctx = a.observe.Extract(ctx, params.Meta)
 
 	parent, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
+	}
+
+	if parent.lifecycleEstablishmentPending() {
+		return acp.UnstableForkSessionResponse{}, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex parent session establishment response is still outstanding",
+			jsonFieldLimit: limitSessionPrompt,
+		})
 	}
 
 	if pathErr := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); pathErr != nil {
@@ -1395,8 +1548,29 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)
 	}
 
+	if thread.ID == "" {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		defer cancel()
+
+		return acp.UnstableForkSessionResponse{}, errors.Join(
+			errors.New("codex fork acknowledgement omitted its child thread identity"),
+			a.quiesceRuntimeAfterCancel(cleanupCtx, client),
+		)
+	}
+
+	childThreadID := thread.ID
+	childOwned := true
+
+	var childSession *session
+
+	defer func() {
+		if childOwned {
+			returnErr = errors.Join(returnErr, a.cleanupUnregisteredFork(ctx, client, childThreadID, childSession))
+		}
+	}()
+
 	thread, err = client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID:      thread.ID,
+		ThreadID:      childThreadID,
 		Cwd:           params.Cwd,
 		Config:        cloneAnyMap(config),
 		Environment:   cloneStringMap(meta.Env),
@@ -1406,7 +1580,26 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, codexThreadACPError(err, parentSnapshot.accountMeta)
 	}
 
+	if thread.ID != childThreadID {
+		cleanupErr := a.cleanupUnregisteredFork(ctx, client, childThreadID, nil)
+		childOwned = false
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		fenceErr := a.quiesceRuntimeAfterCancel(cleanupCtx, client)
+
+		cancel()
+
+		return acp.UnstableForkSessionResponse{}, errors.Join(
+			errors.New("codex resumed a different child thread after fork"), cleanupErr, fenceErr,
+		)
+	}
+
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+
+	childSession = session
+	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1417,16 +1610,14 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	session.setAccount(clientAccountMeta(ctx, client))
 
 	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
-		_ = session.Close(context.Background())
-
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
 	if err := a.storeStartedSession(session); err != nil {
-		_ = session.Close(context.Background())
-
 		return acp.UnstableForkSessionResponse{}, err
 	}
+
+	childOwned = false
 
 	models := modelList(ctx, client)
 	snapshot := session.snapshot()
@@ -1436,6 +1627,35 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		Meta:          sessionResponseMeta(snapshot),
 		ConfigOptions: sessionUnstableConfigOptions(session, models),
 	}, nil
+}
+
+func (a *Agent) cleanupUnregisteredFork(
+	parent context.Context,
+	client codex.Client,
+	threadID string,
+	session *session,
+) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), closeTimeout)
+	defer cancel()
+
+	var cleanupErr error
+	if session != nil {
+		cleanupErr = session.beginLifecycleClose(cleanupCtx)
+		cleanupErr = errors.Join(cleanupErr, session.stopNativeEventsContext(cleanupCtx))
+	}
+
+	deleteErr := client.DeleteThread(cleanupCtx, codex.ThreadDeleteRequest{ThreadID: threadID})
+	if errors.Is(deleteErr, codex.ErrThreadNotFound) {
+		deleteErr = nil
+	}
+
+	cleanupErr = errors.Join(cleanupErr, deleteErr)
+
+	if deleteErr != nil {
+		cleanupErr = errors.Join(cleanupErr, a.quiesceRuntimeAfterCancel(cleanupCtx, client))
+	}
+
+	return cleanupErr
 }
 
 // SetSessionConfigOption accepts only the value-id variant, and the two ways to

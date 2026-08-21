@@ -386,9 +386,12 @@ func runFakeWagieAppServer() int {
 			if request.Method == methodThreadStart || request.Method == methodThreadFork {
 				threadID = fmt.Sprintf("thread-%d", sequence)
 			}
-			response.Result = mustRaw(map[string]any{"thread": map[string]any{
-				fieldID: threadID, fieldTitle: strings.TrimSpace(string(output)), "cwd": params["cwd"],
-			}})
+			response.Result = mustRaw(map[string]any{
+				"thread": map[string]any{
+					fieldID: threadID, "sessionId": threadID, fieldName: strings.TrimSpace(string(output)),
+				},
+				"cwd": params["cwd"],
+			})
 		default:
 			response.Error = &rpcError{Code: -32601, Message: "method not found"}
 		}

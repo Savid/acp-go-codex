@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	runtimeReadyAttempts      = 5
-	runtimeReadyApprovalNever = "never"
+	runtimeReadyAttempts       = 5
+	runtimeReadyApprovalNever  = "never"
+	retainedRuntimeThreadLimit = 1024
 )
 
 var runtimeReadyDeadline = 2 * time.Minute
@@ -221,6 +222,12 @@ func (a *Agent) claimRetainedRuntimeThreadForStore(
 }
 
 func (a *Agent) storeRetainedRuntimeSession(session *session, retained *retainedRuntimeThread) error {
+	if a.negotiatedLifecycle().Present() {
+		if err := session.attachNativeEvents(); err != nil {
+			return err
+		}
+	}
+
 	a.mu.Lock()
 
 	switch {
@@ -790,17 +797,33 @@ func (a *Agent) resumeRuntimeSession(ctx context.Context, client codex.Client, s
 		})
 	}
 
-	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
-		return codex.Thread{}, err
-	}
-
 	return thread, nil
 }
 
 func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, session *session) error {
-	config := session.threadConfig()
+	return a.runtimeReadyCanaryWithConfig(parent, client, session, session.threadConfig())
+}
+
+func (a *Agent) runtimeReadyCanaryWithConfig(
+	parent context.Context,
+	client codex.Client,
+	session *session,
+	config map[string]any,
+) error {
 	if len(config) == 0 {
 		return nil
+	}
+
+	session.lifecycleMu.Lock()
+	brokerAlreadyAttached := session.nativeEventSource && !session.nativeEventStopping
+	session.lifecycleMu.Unlock()
+
+	if err := session.attachNativeEvents(); err != nil {
+		return fmt.Errorf("attach runtime_ready thread broker: %w", err)
+	}
+
+	if !brokerAlreadyAttached && !a.negotiatedLifecycle().Present() {
+		defer func() { _ = session.prepareNativeEventRebind() }()
 	}
 
 	var nonceBytes [16]byte
@@ -818,6 +841,11 @@ func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, 
 		// Diagnostic only. It must never decide readiness.
 		_, _ = client.MCPServerStatusList(deadlineCtx, threadID)
 
+		canary, canaryErr := session.beginNativeCanary()
+		if canaryErr != nil {
+			return fmt.Errorf("begin runtime_ready turn: %w", canaryErr)
+		}
+
 		turn, runErr := client.RunTurn(deadlineCtx, codex.TurnStartRequest{
 			ThreadID: threadID,
 			Prompt: []codex.UserInput{{
@@ -827,26 +855,65 @@ func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, 
 			ApprovalPolicy: runtimeReadyApprovalNever,
 		})
 		if runErr != nil {
+			turnID, rejected := session.rejectNativeCanaryAck(canary, runErr)
+			if turnID != "" {
+				interruptCtx, interruptCancel := context.WithTimeout(context.WithoutCancel(parent), closeTimeout)
+				rejected = errors.Join(rejected, client.CancelTurn(interruptCtx, threadID, turnID))
+
+				interruptCancel()
+			}
+
+			session.endNativeCanary(canary)
+
 			if deadlineCtx.Err() != nil {
 				break
+			}
+
+			if turnID != "" {
+				return fmt.Errorf("codex thread %s failed runtime_ready acknowledgement: %w", threadID, rejected)
 			}
 
 			continue
 		}
 
+		if bindErr := session.bindNativeCanary(canary, turn.ID); bindErr != nil {
+			session.endNativeCanary(canary)
+
+			return fmt.Errorf("bind runtime_ready turn: %w", bindErr)
+		}
+
 		ready := false
+		terminal := false
+		completed := false
 
-		for event := range turn.Events {
-			if runtimeReadyEvent(event, nonce) {
-				ready = true
-			}
+		for !terminal {
+			select {
+			case event, open := <-canary.events:
+				if !open {
+					terminal = true
 
-			if event.Kind == codex.EventCompleted || event.Kind == codex.EventError {
-				break
+					continue
+				}
+
+				if runtimeReadyEvent(event, nonce) {
+					ready = true
+				}
+
+				completed = event.Kind == codex.EventCompleted && event.StopReason == codex.StopReasonEndTurn
+				terminal = event.Kind == codex.EventCompleted || event.Kind == codex.EventError
+			case <-deadlineCtx.Done():
+				interruptCtx, interruptCancel := context.WithTimeout(context.WithoutCancel(parent), closeTimeout)
+				_ = client.CancelTurn(interruptCtx, threadID, turn.ID)
+
+				interruptCancel()
+
+				terminal = true
 			}
 		}
 
-		if ready {
+		session.endNativeCanary(canary)
+
+		if ready && completed {
 			return nil
 		}
 

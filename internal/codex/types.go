@@ -13,6 +13,7 @@ type Client interface {
 	ListThreads(context.Context, ThreadListRequest) ([]Thread, error)
 	ReadThread(context.Context, ThreadReadRequest) (ThreadHistory, error)
 	ListTurns(context.Context, ThreadTurnsListRequest) (ThreadTurnsListResponse, error)
+	SubscribeThread(context.Context, string) (ThreadEventStream, error)
 	RunTurn(context.Context, TurnStartRequest) (Turn, error)
 	SteerTurn(context.Context, TurnSteerRequest) error
 	CancelTurn(context.Context, string, string) error
@@ -24,7 +25,6 @@ type Client interface {
 	UnsubscribeThread(context.Context, string) error
 	ModelList(context.Context) ([]Model, error)
 	AccountRead(context.Context) (Account, error)
-	RateLimitsSupported() bool
 	ReadRateLimits(context.Context) (RateLimitSnapshot, error)
 	LoginWithChatGPTTokens(context.Context, ChatGPTAuthTokens) error
 	Logout(context.Context) error
@@ -37,6 +37,11 @@ type Client interface {
 type BackgroundTerminalClient interface {
 	ListBackgroundTerminals(context.Context, BackgroundTerminalListRequest) (BackgroundTerminalListResponse, error)
 	TerminateBackgroundTerminal(context.Context, BackgroundTerminalTerminateRequest) (bool, error)
+}
+
+type ThreadEventStream struct {
+	Events  <-chan Event
+	Release func()
 }
 
 type RequestHandler func(context.Context, ServerRequest) (any, error)
@@ -161,12 +166,10 @@ type TurnStartRequest struct {
 	CollaborationMode any
 }
 
-// Turn is the native identity acknowledged by turn/start and its ordered event
-// stream. The identity is available before any event is consumed, so callers can
-// bind server requests and lifecycle acceptance at the dispatch boundary.
+// Turn is the native identity acknowledged by turn/start. Its events arrive on
+// the thread-owned feed established before dispatch.
 type Turn struct {
-	ID     string
-	Events <-chan Event
+	ID string
 }
 
 type TurnSteerRequest struct {

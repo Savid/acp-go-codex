@@ -10,11 +10,29 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 type failThenRecordRawClient struct {
 	*recordingAgentClient
 	failures int
+}
+
+type rawFailureContainmentClient struct {
+	*runEventsClient
+	cancelStarted chan [2]string
+	cancelRelease chan struct{}
+}
+
+func (c *rawFailureContainmentClient) CancelTurn(_ context.Context, threadID, turnID string) error {
+	c.cancelStarted <- [2]string{threadID, turnID}
+	<-c.cancelRelease
+
+	return nil
+}
+
+func (c *rawFailureContainmentClient) ListBackgroundTerminals(context.Context, codex.BackgroundTerminalListRequest) (codex.BackgroundTerminalListResponse, error) {
+	return codex.BackgroundTerminalListResponse{}, nil
 }
 
 func (c *failThenRecordRawClient) NotifyExtension(ctx context.Context, method string, params any) error {
@@ -318,29 +336,40 @@ func TestRawEventsValidJSONInvariant(t *testing.T) {
 	}
 }
 
-// Case 5 — a raw-event emit failure is recorded but does not fail the turn.
-func TestRawEventsEmitFailureDoesNotFailTurn(t *testing.T) {
+// Case 5 — raw delivery is mandatory after native acceptance and therefore
+// contains the exact turn before the failed prompt settles.
+func TestRawEventsEmitFailureContainsExactTurn(t *testing.T) {
 	agent := NewAgent()
 	agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
+	client := &rawFailureContainmentClient{
+		runEventsClient: &runEventsClient{spyCodexClient: newSpyCodexClient(), events: []codex.Event{
+			{Kind: codex.EventRaw, ThreadID: "thread", TurnID: "turn", RawMethod: "raw", RawParams: json.RawMessage(`{"type":"response_item"}`)},
+			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn", StopReason: codex.StopReasonEndTurn},
+		}},
+		cancelStarted: make(chan [2]string, 1), cancelRelease: make(chan struct{}),
+	}
 	session := &session{
 		agent:         agent,
 		id:            "emit-fail",
 		cwd:           "/tmp/project",
 		codexThreadID: "thread",
 		rawMessages:   rawMessageConfig{enabled: true},
-		client: &runEventsClient{spyCodexClient: newSpyCodexClient(), events: []codex.Event{
-			{Kind: codex.EventRaw, ThreadID: "thread", TurnID: "turn", RawMethod: "raw", RawParams: json.RawMessage(`{"type":"response_item"}`)},
-			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn", StopReason: codex.StopReasonEndTurn},
-		}},
+		client:        client,
 	}
 
-	resp, err := session.Prompt(context.Background(), TextPromptRequest("emit-fail", "test-turn", "hi"))
-	if err != nil {
-		t.Fatalf("raw emit failure aborted the turn: %v", err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.Prompt(t.Context(), TextPromptRequest("emit-fail", "test-turn", "hi"))
+		done <- err
+	}()
+	require.Equal(t, [2]string{"thread", "turn"}, <-client.cancelStarted)
+	select {
+	case err := <-done:
+		t.Fatalf("raw delivery failure returned before containment: %v", err)
+	default:
 	}
-	if resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("stop reason = %v, want end_turn", resp.StopReason)
-	}
+	close(client.cancelRelease)
+	require.Error(t, <-done)
 	if session.rawEmitFailures == 0 {
 		t.Fatal("raw emit failure was not recorded on the observer hook")
 	}

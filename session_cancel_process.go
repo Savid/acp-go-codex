@@ -49,7 +49,7 @@ func (s *session) containCancelledTurnWithPolicy(
 		cancelFence()
 	}
 
-	// Native cleanup can finish the rollout after the live tail stopped. Read it
+	// Native cleanup can finish the rollout after the event terminal. Read it
 	// only after targeted containment or its generation-wide fallback so no
 	// process can append behind the durable mirror.
 	mirrorErr := s.mirrorAndEmitRollout(context.WithoutCancel(ctx))

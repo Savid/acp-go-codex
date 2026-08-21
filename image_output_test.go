@@ -760,17 +760,6 @@ func TestDurableRolloutImageExtractionHydrationAndReplay(t *testing.T) {
 	require.Equal(t, "direct.png", direct.Raw["savedPath"])
 	emptyPath := rolloutImageEvent(map[string]any{"id": "empty-path", "savedPath": ""})
 	require.NotContains(t, emptyPath.Raw, "savedPath")
-
-	withReference, ok := rolloutEvent(
-		json.RawMessage(`{"type":"response_item","payload":{"type":"image_generation_call","id":"reference","status":"completed","result":{"artifactSubpath":"images/ref"}}}`),
-	)
-	require.True(t, ok)
-	require.Equal(t, imageArtifactStorePrefix+"ref", withReference.Image.ArtifactRef)
-	withoutReference, ok := rolloutEvent(
-		json.RawMessage(`{"type":"response_item","payload":{"type":"image_generation_call","id":"inline","status":"failed"}}`),
-	)
-	require.True(t, ok)
-	require.Empty(t, withoutReference.Image.ArtifactRef)
 }
 
 func (a *Agent) setAgentClientForTest() error {

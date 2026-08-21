@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -990,4 +991,25 @@ func TestElicitationAdmitsFormsWithoutSecretMarkers(t *testing.T) {
 	require.Len(t, conn.elicitations, 1)
 	require.NotNil(t, conn.elicitations[0].Form)
 	require.Contains(t, conn.elicitations[0].Form.RequestedSchema.Properties, "branch")
+}
+
+func TestDirectServerElicitationRequiresExactLifecycleTurnOwner(t *testing.T) {
+	agent, session, _, _ := newStrictPermissionSession(t)
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	enableClientElicitation(agent, true, true)
+	require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{lifecycle.Version}}))
+
+	_, err := agent.handleCodexToolUserInput(t.Context(), codex.ServerRequest{
+		ID: json.RawMessage(`1`), Params: json.RawMessage(`{"threadId":"` + session.codexThreadID +
+			`","turnId":"native-permission-turn","itemId":"ask","questions":[{"id":"name","question":"Name?"}]}`),
+	})
+	require.ErrorContains(t, err, "exact native turn")
+
+	params := map[string]any{
+		"threadId": session.codexThreadID, "turnId": "native-permission-turn", "mode": "form", "message": "Name?",
+		"requestedSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+	_, err = agent.handleCodexMCPUserElicitation(t.Context(), codex.ServerRequest{ID: json.RawMessage(`2`)}, params)
+	require.ErrorContains(t, err, "exact native turn")
 }

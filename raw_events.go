@@ -7,6 +7,7 @@ import (
 
 const (
 	ForkSessionMethod = "_codex/session/fork"
+	SteerTurnMethod   = "_codex/turn/steer"
 	RawEventMethod    = "_codex/rawEvent"
 
 	codexMetaKey                  = "codex"

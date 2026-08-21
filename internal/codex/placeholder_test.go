@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestPlaceholderClientRunTurn(t *testing.T) {
 	client := NewPlaceholderClient(Options{DefaultModel: "gpt-5.5"})
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
 	ctx := context.Background()
 
 	thread, err := client.StartThread(ctx, ThreadStartRequest{Cwd: "/tmp/project"})
@@ -20,15 +22,19 @@ func TestPlaceholderClientRunTurn(t *testing.T) {
 	if thread.Model != "gpt-5.5" {
 		t.Fatalf("thread model = %q, want default model", thread.Model)
 	}
+	feed, err := client.SubscribeThread(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("SubscribeThread returned error: %v", err)
+	}
 
-	turn, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID, Prompt: []UserInput{{"type": "text", "text": "hello"}}})
+	_, err = client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID, Prompt: []UserInput{{"type": "text", "text": "hello"}}})
 	if err != nil {
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 
 	var got []Event
-	for event := range turn.Events {
-		got = append(got, event)
+	for len(got) < 4 {
+		got = append(got, <-feed.Events)
 	}
 
 	if len(got) != 4 {
@@ -207,13 +213,18 @@ func TestPlaceholderClientErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartThread returned error: %v", err)
 	}
+	feed, err := client.SubscribeThread(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("SubscribeThread returned error: %v", err)
+	}
 	runCtx, runCancel := context.WithCancel(ctx)
-	turn, err := client.RunTurn(runCtx, TurnStartRequest{ThreadID: thread.ID})
+	_, err = client.RunTurn(runCtx, TurnStartRequest{ThreadID: thread.ID})
 	if err != nil {
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 	runCancel()
-	for range turn.Events {
+	feed.Release()
+	for range feed.Events {
 	}
 	if err := client.Close(ctx); err != nil {
 		t.Fatalf("Close returned error: %v", err)
@@ -221,7 +232,84 @@ func TestPlaceholderClientErrorBranches(t *testing.T) {
 	if _, err := client.ResumeThread(ctx, ThreadResumeRequest{}); err == nil {
 		t.Fatal("ResumeThread after close succeeded")
 	}
-	if _, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID}); err == nil {
+	if _, runErr := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID}); runErr == nil {
 		t.Fatal("RunTurn after close succeeded")
+	}
+}
+
+func TestPlaceholderClientZeroValueAndStreamFailureBoundaries(t *testing.T) {
+	ctx := context.Background()
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := (&PlaceholderClient{}).SubscribeThread(cancelled, "thread"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled SubscribeThread error = %v", err)
+	}
+	if _, err := (&PlaceholderClient{}).SubscribeThread(ctx, "missing"); err == nil {
+		t.Fatal("SubscribeThread accepted a missing stream")
+	}
+	zeroStart := &PlaceholderClient{}
+	started, err := zeroStart.StartThread(ctx, ThreadStartRequest{})
+	if err != nil || zeroStart.threads == nil || zeroStart.streams == nil {
+		t.Fatalf("zero StartThread = %#v maps=%v/%v err=%v", started, zeroStart.threads != nil, zeroStart.streams != nil, err)
+	}
+	zeroResume := &PlaceholderClient{}
+	resumed, err := zeroResume.ResumeThread(ctx, ThreadResumeRequest{})
+	if err != nil || zeroResume.threads == nil || zeroResume.streams == nil {
+		t.Fatalf("zero ResumeThread = %#v maps=%v/%v err=%v", resumed, zeroResume.threads != nil, zeroResume.streams != nil, err)
+	}
+
+	client := NewPlaceholderClient(Options{})
+	thread, err := client.StartThread(ctx, ThreadStartRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, runErr := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID}); runErr == nil {
+		t.Fatal("RunTurn without a claimed stream succeeded")
+	}
+
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	feed, err := client.SubscribeThread(watchCtx, thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watchedStream := client.streams[thread.ID]
+	cancelWatch()
+	<-watchedStream.done
+	feed.Release()
+
+	deleteClient := NewPlaceholderClient(Options{})
+	deleteThread, err := deleteClient.StartThread(ctx, ThreadStartRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := deleteClient.streams[deleteThread.ID]
+	if err := deleteClient.DeleteThread(ctx, ThreadDeleteRequest{ThreadID: deleteThread.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if stream.live() {
+		t.Fatal("DeleteThread left its stream live")
+	}
+}
+
+func TestPlaceholderTurnStopsAtEachStreamBackpressureBoundary(t *testing.T) {
+	for _, queued := range []int{threadEventBuffer, threadEventBuffer - 1, threadEventBuffer - 2} {
+		client := NewPlaceholderClient(Options{})
+		thread, err := client.StartThread(context.Background(), ThreadStartRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream := client.streams[thread.ID]
+		stream.claimed = true
+		for range queued {
+			stream.out <- Event{Kind: EventRaw}
+		}
+		if _, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: thread.ID}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-stream.done:
+		case <-time.After(time.Second):
+			t.Fatal("placeholder turn did not stop at stream backpressure")
+		}
 	}
 }

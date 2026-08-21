@@ -1,23 +1,19 @@
 package codex
 
 import (
-	"bytes"
 	"errors"
 	"io"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 )
 
 // TestLineTransportCapturesProcessExit drives a real app-server process to death
-// mid-stream and asserts the transport surfaces the exit status and stderr tail
-// as a *ProcessExitError instead of a bare EOF.
+// and proves its raw stderr never enters the classified error.
 func TestLineTransportCapturesProcessExit(t *testing.T) {
-	cmd := exec.Command("/bin/sh", "-c", "printf 'fatal: out of memory\\n' >&2; exit 7")
-
-	stderr := codexStderrWriter(nil)
-	cmd.Stderr = stderr
+	const secret = "native-stderr-secret"
+	cmd := exec.Command("/bin/sh", "-c", "printf '"+secret+"\\n' >&2; exit 7")
+	cmd.Stderr = io.Discard
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -34,7 +30,7 @@ func TestLineTransportCapturesProcessExit(t *testing.T) {
 		t.Fatalf("start process: %v", err)
 	}
 
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, processWaiter: waiter}
+	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, processWaiter: waiter}
 	transport := newLineTransport(stdout, stdin, proc)
 	t.Cleanup(func() { _ = transport.Close() })
 
@@ -44,19 +40,8 @@ func TestLineTransportCapturesProcessExit(t *testing.T) {
 	if !errors.As(recvErr, &pe) {
 		t.Fatalf("Recv error = %v, want *ProcessExitError", recvErr)
 	}
-	if !strings.Contains(pe.Status, "exit status 7") {
-		t.Fatalf("exit status = %q, want exit status 7", pe.Status)
-	}
-	if !strings.Contains(pe.StderrTail, "out of memory") {
-		t.Fatalf("stderr tail = %q, want stderr detail", pe.StderrTail)
-	}
-
-	msg := pe.Error()
-	if !strings.Contains(msg, "exit status 7") || !strings.Contains(msg, "out of memory") {
-		t.Fatalf("error message = %q, want exit/stderr detail", msg)
-	}
-	if msg == "EOF" {
-		t.Fatal("process-exit message is a bare EOF")
+	if pe.Error() != processExitText {
+		t.Fatalf("process-exit classification = %q", pe.Error())
 	}
 	if !errors.Is(recvErr, io.EOF) {
 		t.Fatalf("process-exit error does not unwrap to the underlying read error: %v", recvErr)
@@ -69,8 +54,7 @@ func TestLineTransportCapturesProcessExit(t *testing.T) {
 func TestLineTransportReadErrorProcessAlive(t *testing.T) {
 	cmd := sleepCommand(t, "10")
 
-	stderr := codexStderrWriter(nil)
-	cmd.Stderr = stderr
+	cmd.Stderr = io.Discard
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -87,7 +71,7 @@ func TestLineTransportReadErrorProcessAlive(t *testing.T) {
 		t.Fatalf("start process: %v", err)
 	}
 
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, processWaiter: waiter}
+	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, processWaiter: waiter}
 	transport := newLineTransport(stdout, stdin, proc)
 	// Shrink this transport instance's exit grace so the alive-process
 	// classification path does not stall the test. The field is written before
@@ -118,9 +102,8 @@ func TestLineTransportReadErrorProcessAlive(t *testing.T) {
 func TestProcessBeginWaitNoProcess(t *testing.T) {
 	p := &process{}
 
-	status, tail, ok := p.exited(time.Second)
-	if !ok || status != exitStatusZero || tail != "" {
-		t.Fatalf("exited() = (%q, %q, %v), want (%s, \"\", true)", status, tail, ok, exitStatusZero)
+	if !p.exited(time.Second) {
+		t.Fatal("process without a command was not classified as exited")
 	}
 }
 
@@ -133,18 +116,8 @@ func TestProcessExitErrorFormatting(t *testing.T) {
 	}
 
 	base := (&ProcessExitError{}).Error()
-	if base != "codex app-server process exited" {
+	if base != processExitText {
 		t.Fatalf("bare error = %q", base)
-	}
-
-	withStatus := (&ProcessExitError{Status: exitStatusZero}).Error()
-	if withStatus != "codex app-server process exited ("+exitStatusZero+")" {
-		t.Fatalf("status error = %q", withStatus)
-	}
-
-	withStderr := (&ProcessExitError{StderrTail: "boom"}).Error()
-	if withStderr != "codex app-server process exited: boom" {
-		t.Fatalf("stderr error = %q", withStderr)
 	}
 
 	underlying := errors.New("boom")
@@ -157,26 +130,5 @@ func TestProcessExitErrorFormatting(t *testing.T) {
 	}
 	if exitStatus(errors.New("signal: killed")) != "signal: killed" {
 		t.Fatalf("exitStatus(err) mismatch")
-	}
-}
-
-func TestStderrTailBounded(t *testing.T) {
-	if got := (*stderrTail)(nil).tail(); got != "" {
-		t.Fatalf("nil stderrTail.tail() = %q, want empty", got)
-	}
-
-	w := codexStderrWriter(nil)
-
-	oversize := bytes.Repeat([]byte("a"), stderrTailLimit+512)
-	if n, err := w.Write(oversize); n != len(oversize) || err != nil {
-		t.Fatalf("Write oversize = (%d, %v)", n, err)
-	}
-
-	tail := w.tail()
-	if len(tail) > stderrTailLimit {
-		t.Fatalf("retained tail = %d bytes, want <= %d", len(tail), stderrTailLimit)
-	}
-	if tail == "" {
-		t.Fatal("retained tail is empty")
 	}
 }

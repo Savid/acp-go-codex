@@ -88,11 +88,11 @@ no usage. Each window `id` is codex-native (`primary` or `secondary`),
 instant included only when the harness supplies one. `planType` is included only
 when reported.
 
-The adapter resolves the view from harness data in order: a fresh
-`account/rateLimits/read` query against a live session whose native codex version
-supports it (0.142.0 or newer); otherwise the latest snapshot seen on the
-app-server rate-limit update stream (cached agent-level, latest-wins); otherwise
-an empty window set. Absence is never an error.
+The adapter queries `account/rateLimits/read` through a live session on every
+request. The supported Codex CLI floor includes this app-server method, so
+there is no version capability gate or cached snapshot path. With no live
+session, including placeholder-only use, the response contains an empty window
+set. A native read failure fails the extension request.
 
 ## Slash commands
 

@@ -121,9 +121,6 @@ func TestCommandHelpers(t *testing.T) {
 	if shellValue("x y") != `"x y"` || shellValue(true) != "true" || shellValue(false) != "false" || shellValue(7) != "7" {
 		t.Fatalf("shellValue returned unexpected values")
 	}
-	if n, err := codexStderrWriter(nil).Write(nil); n != 0 || err != nil {
-		t.Fatalf("empty stderr write returned n=%d err=%v", n, err)
-	}
 	if parseCodexVersion("codex-cli 0.129.0") != "0.129.0" || parseCodexVersion("codex 1.2.3-beta") != "1.2.3" || parseCodexVersion("none") != "" {
 		t.Fatal("parseCodexVersion failed")
 	}
@@ -335,8 +332,8 @@ while read line; do :; done
 	if !strings.Contains(args, "-c feature.enabled=true") || !strings.Contains(args, "-c name=\"x y\"") || !strings.Contains(args, "--extra") {
 		t.Fatalf("args = %q", args)
 	}
-	if !strings.Contains(logBuffer.String(), "app-server-stderr") {
-		t.Fatalf("stderr log = %q", logBuffer.String())
+	if strings.Contains(logBuffer.String(), "app-server-stderr") {
+		t.Fatalf("raw native stderr reached the logger: %q", logBuffer.String())
 	}
 }
 

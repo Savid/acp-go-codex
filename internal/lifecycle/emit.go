@@ -8,8 +8,8 @@ import "encoding/json"
 // the fixture battery drives, so a stream this adapter could not support fails at
 // the point of emission instead of at its consumers.
 //
-// A Stream is not safe for concurrent use; a prompt owns its incarnation and emits
-// from one goroutine.
+// A Stream is not safe for concurrent use; its session owns and serializes all
+// prompt- and activity-caused emissions for the native source incarnation.
 type Stream struct {
 	id       string
 	reducer  *Reducer
@@ -31,7 +31,7 @@ func (s *Stream) State() State { return s.reducer.State() }
 
 // Fence ends the incarnation by recording its close on the reducer that judges
 // every emission. A fenced stream is terminal: nothing more may be emitted on
-// it, and later conversation reuse opens a new incarnation with a new identity
+// it, and native source replacement opens a new incarnation with a new identity
 // and a fresh snapshot. The fence lives on the reducer rather than beside it so
 // the emitter refuses a post-fence event by the same rule, and with the same
 // verdict, a consumer of these bytes would.
@@ -81,9 +81,9 @@ func (s *Stream) Emit(event Event) (map[string]any, error) {
 }
 
 // SnapshotEvent opens a stream from the whole state this adapter can state
-// truthfully. A prompt-scoped incarnation opens with nothing live, so the nonterminal
-// sets are empty and the quiescence fact is whatever the configuration's proof class
-// actually established before the prompt.
+// truthfully. The native source is idle when claimed, so the nonterminal sets
+// are empty and the quiescence fact is whatever the configuration's proof class
+// actually established at that boundary.
 func SnapshotEvent(cycleID string, quiescence QuiescenceFact) Event {
 	return Event{Type: EventSnapshot, Snapshot: &Snapshot{
 		Foreground: Foreground{State: ForegroundIdle, CycleID: cycleID},
@@ -105,22 +105,34 @@ func AcceptedEvent(submission Submission, turnID string) Event {
 
 // TransitionEvent reports one foreground transition that begins or resumes work.
 func TransitionEvent(state ForegroundState, cycleID, turnID string) Event {
+	return TransitionEventWithCause(state, cycleID, turnID, CauseSubmission)
+}
+
+// TransitionEventWithCause reports a foreground transition from the exact
+// structured native cause that opened it.
+func TransitionEventWithCause(state ForegroundState, cycleID, turnID string, cause Cause) Event {
 	return Event{Type: EventStateUpdate, State: &StateTransition{
 		State:   state,
 		CycleID: cycleID,
 		TurnID:  turnID,
-		Cause:   CauseSubmission,
+		Cause:   cause,
 	}}
 }
 
 // IdleEvent ends the cycle a submission caused, carrying the turn's truthful outcome
 // and the stop reason that outcome admits.
 func IdleEvent(cycleID, turnID, stopReason string, outcome Outcome) Event {
+	return IdleEventWithCause(cycleID, turnID, CauseSubmission, stopReason, outcome)
+}
+
+// IdleEventWithCause ends a prompt- or agent-origin cycle without changing the
+// origin established when that cycle opened.
+func IdleEventWithCause(cycleID, turnID string, cause Cause, stopReason string, outcome Outcome) Event {
 	return Event{Type: EventStateUpdate, State: &StateTransition{
 		State:      ForegroundIdle,
 		CycleID:    cycleID,
 		TurnID:     turnID,
-		Cause:      CauseSubmission,
+		Cause:      cause,
 		StopReason: stopReason,
 		Outcome:    outcome,
 	}}

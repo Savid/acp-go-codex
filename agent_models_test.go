@@ -118,6 +118,7 @@ func TestLifecycleConfigValuesPassThroughToNative(t *testing.T) {
 			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 				return client, nil
 			}))
+			t.Cleanup(func() { require.NoError(t, agent.Close()) })
 			agent.setAgentClient(newRecordingAgentClient())
 
 			resp, err := agent.NewSession(context.Background(), NewSessionRequest(
@@ -266,7 +267,8 @@ func TestMeasuredNativeConfigRefusalsPropagate(t *testing.T) {
 			data := asType[map[string]any](t, requestErr.Data)
 			require.Equal(t, valueTurnFailed, data[jsonFieldError])
 			require.Equal(t, codex.CauseProvider, data[jsonFieldCause])
-			require.Equal(t, test.message, data[jsonFieldMessage])
+			require.Equal(t, "Codex provider turn failed", data[jsonFieldMessage])
+			require.NotContains(t, err.Error(), test.message)
 		})
 	}
 }
@@ -341,7 +343,8 @@ func TestMeasuredNativeEffortIsAcceptedAtTheDoor(t *testing.T) {
 		var requestErr *acp.RequestError
 		require.ErrorAs(t, err, &requestErr)
 		data := asType[map[string]any](t, requestErr.Data)
-		require.Equal(t, nativePersonalityRefusal, data[jsonFieldMessage])
+		require.Equal(t, "Codex provider turn failed", data[jsonFieldMessage])
+		require.NotContains(t, err.Error(), nativePersonalityRefusal)
 	})
 }
 

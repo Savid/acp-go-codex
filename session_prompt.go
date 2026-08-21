@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -110,14 +109,37 @@ func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBl
 }
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	negotiated := s.agent.negotiatedLifecycle()
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+
+	if closing {
+		return acp.PromptResponse{}, newSessionCloseInProgress()
+	}
+
+	if err := s.awaitLifecycleEstablishment(ctx); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	if err := s.attachNativeEvents(); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	if !negotiated.Present() {
+		defer func() {
+			if err := s.prepareNativeEventRebind(); err != nil {
+				s.fenceSession()
+			}
+		}()
+	}
+
 	// Route validation runs first, so a prompt never reports two rejections and
 	// the order of two failures is never implementation-defined.
 	route, err := parseInboundRoute(params.Meta)
 	if err != nil {
 		return acp.PromptResponse{}, routeInvalidParams(err)
 	}
-
-	negotiated := s.agent.negotiatedLifecycle()
 
 	submission, refusal := lifecycle.DecodePromptCorrelation(params.Meta, negotiated)
 	if refusal != nil {
@@ -201,7 +223,6 @@ type promptTurnResult struct {
 func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, run promptRun) promptTurnResult {
 	snapshot := s.snapshot()
 	model, effort, tier, personality, collaborationMode := s.turnSettings()
-	s.prepareRolloutLiveCursors()
 
 	var agentText strings.Builder
 
@@ -235,42 +256,67 @@ func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, ru
 		),
 		OutputSchema: snapshot.outputSchema,
 	})
-	if err != nil {
-		s.stageTurnID(turn.ID)
-		s.rejectTurnBinding()
-
-		if errors.Is(err, codex.ErrTurnEventOverflow) && turn.ID != "" {
-			err = errors.Join(err, s.shutdownActiveTurn(ctx, true))
-		}
-
-		result.failure = s.mapTurnFailure(err)
-
-		return result
+	if err == nil && turn.ID == "" {
+		err = errors.New("codex accepted a turn without naming it")
 	}
 
-	if turn.ID == "" {
-		s.rejectTurnBinding()
-		result.failure = s.mapTurnFailure(errors.New("codex accepted a turn without naming it"))
+	if err != nil {
+		nativeID, buffered, nativeIDs, bindErr := run.incarnation.acceptBufferedNative(turnCtx, run.submission)
+		if nativeID != "" {
+			s.stageTurnID(nativeID)
+			s.acceptTurnBinding()
+
+			result.accepted = true
+
+			for index := range buffered {
+				event := buffered[index]
+				if eventErr := s.handlePromptEvent(turnCtx, event, result.state); eventErr != nil {
+					bindErr = errors.Join(bindErr, eventErr)
+				}
+			}
+
+			bindErr = errors.Join(bindErr, s.shutdownActiveTurn(ctx, true))
+		} else {
+			s.stageTurnID(turn.ID)
+			s.rejectTurnBinding()
+
+			for _, turnID := range nativeIDs {
+				interruptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+				bindErr = errors.Join(bindErr, s.client.CancelTurn(interruptCtx, snapshot.codexThreadID, turnID))
+
+				cancel()
+			}
+
+			if len(nativeIDs) > 0 {
+				s.failNativeIncarnation(bindErr)
+			}
+		}
+
+		if errors.Is(err, codex.ErrTurnEventOverflow) && turn.ID != "" {
+			bindErr = errors.Join(bindErr, s.shutdownActiveTurn(ctx, true))
+		}
+
+		result.failure = s.mapTurnFailure(errors.Join(err, bindErr))
 
 		return result
 	}
 
 	s.stageTurnID(turn.ID)
+	s.acceptTurnBinding()
 
 	// The ack is the dispatch linearization point: the app-server has taken
 	// durable ownership of the frame and named the turn it opened.
-	if err := run.incarnation.accept(turnCtx, run.submission); err != nil {
-		s.rejectTurnBinding()
-		result.failure = s.mapTurnFailure(err)
+	if err := run.incarnation.acceptNative(turnCtx, run.submission, turn.ID); err != nil {
+		result.accepted = true
+		containmentErr := s.shutdownActiveTurn(ctx, true)
+		result.failure = s.mapTurnFailure(errors.Join(err, containmentErr))
 
 		return result
 	}
 
-	s.acceptTurnBinding()
-
 	result.accepted = true
 
-	return s.drivePromptTurn(ctx, turnCtx, turn.Events, result)
+	return s.drivePromptTurn(ctx, turnCtx, s.nativePromptEvents(run.incarnation), result)
 }
 
 // drivePromptTurn consumes the native stream until its terminal and records how
@@ -282,9 +328,6 @@ func (s *session) drivePromptTurn(
 	result promptTurnResult,
 ) promptTurnResult {
 	state := result.state
-
-	rolloutEvents := make(chan codex.Event, sessionRolloutEventBuffer)
-	stopTail, tailDone := s.startRolloutTail(turnCtx, rolloutEvents)
 
 	var turnDeadline <-chan time.Time
 
@@ -313,10 +356,6 @@ func (s *session) drivePromptTurn(
 			if handled = s.handlePromptEvent(turnCtx, event, state); handled != nil {
 				eventsOpen = false
 			}
-		case event := <-rolloutEvents:
-			if handled = s.handlePromptEvent(turnCtx, event, state); handled != nil {
-				eventsOpen = false
-			}
 		case <-turnCtx.Done():
 			eventsOpen = false
 		case <-turnDeadline:
@@ -324,9 +363,6 @@ func (s *session) drivePromptTurn(
 			eventsOpen = false
 		}
 	}
-
-	stopTail()
-	<-tailDone
 
 	turnCancelled := turnCtx.Err() != nil || s.wasTurnCancelled()
 	if turnCancelled {
@@ -340,7 +376,19 @@ func (s *session) drivePromptTurn(
 		containmentErr := s.shutdownActiveTurn(ctx, true)
 		result.failure = s.mapTurnFailure(errors.Join(codex.ErrTurnEventOverflow, containmentErr))
 	case handled != nil:
-		result.failure = handled
+		var deliveryFailure *hostDeliveryError
+
+		var nativeFailure *acp.RequestError
+		switch {
+		case errors.As(handled, &deliveryFailure):
+			containmentErr := s.shutdownActiveTurn(ctx, true)
+			result.failure = errors.Join(handled, containmentErr)
+		case errors.As(handled, &nativeFailure):
+			result.failure = handled
+		default:
+			containmentErr := s.shutdownActiveTurn(ctx, true)
+			result.failure = s.mapTurnFailure(errors.Join(handled, containmentErr))
+		}
 	case state.stopReason == acp.StopReasonCancelled:
 		// Cancellation wins a coincident deadline. The native interrupt was
 		// already issued by the cancel path, so timeout must not send it again.
@@ -391,13 +439,22 @@ func (s *session) settlePrompt(
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptSettlementTimeout)
 	defer cancel()
 
-	stopReason, outcome := promptSettlement(result)
+	// The terminal identity update is still mandatory delivery. If it fails,
+	// contain the exact accepted native turn before durability or idle can move.
+	if deliveryErr := s.finalizePromptNativeIdentity(context.WithoutCancel(turnCtx), result.state); deliveryErr != nil {
+		containmentErr := s.shutdownActiveTurn(ctx, true)
+		result.failure = errors.Join(deliveryErr, containmentErr, result.failure)
+	}
 
 	if err := s.awaitTurnContainment(settleCtx); err != nil {
 		return acp.PromptResponse{}, err
 	}
 
+	stopReason, outcome := promptSettlement(result)
+
 	if err := s.commitForegroundPrefix(settleCtx); err != nil {
+		s.poisonForegroundSettlement(incarnation, err)
+
 		return acp.PromptResponse{}, settlementFailure(result.failure, err)
 	}
 
@@ -409,12 +466,6 @@ func (s *session) settlePrompt(
 		return acp.PromptResponse{}, result.failure
 	}
 
-	// Publish the final native pair after the durable mirror, including a turn
-	// with an empty final assistant item.
-	if err := s.finalizePromptNativeIdentity(context.WithoutCancel(turnCtx), result.state); err != nil {
-		return acp.PromptResponse{}, err
-	}
-
 	return acp.PromptResponse{
 		StopReason:    stopReason,
 		Usage:         result.state.usage,
@@ -424,6 +475,17 @@ func (s *session) settlePrompt(
 			result.state.nativeIdentity,
 		),
 	}, nil
+}
+
+func (s *session) poisonForegroundSettlement(incarnation *promptIncarnation, cause error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	if s.incarnation != incarnation || incarnation == nil || incarnation.settled {
+		return
+	}
+
+	_ = s.latchLifecycleFailureLocked(errors.Join(errors.New("codex foreground settlement has a pending durable commit"), cause))
 }
 
 // settlementFailure keeps a failed native turn's own cause on the wire when the
@@ -517,6 +579,8 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 
 	if err := s.emitRawCodexEvent(turnCtx, event); err != nil {
 		s.recordRawEmitFailure(turnCtx, err)
+
+		return err
 	}
 
 	visibleEvent := dedupeCompletedTextEvent(event, state.agentDeltaItems, state.reasoningDeltaItems)
@@ -565,7 +629,7 @@ func (s *session) recordRawEmitFailure(ctx context.Context, err error) {
 	s.mu.Unlock()
 
 	if logger := agentLogger(s.agent); logger != nil {
-		logger.WarnContext(ctx, "codex raw event emit failed", slog.String(jsonFieldError, err.Error()))
+		logger.WarnContext(ctx, "codex raw event delivery failed")
 	}
 }
 
@@ -583,8 +647,11 @@ func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, 
 		return s.emitUpdates(turnCtx, updates...)
 	}
 
-	toolPublication := s.preparePermissionToolEvent(visibleEvent)
-	defer func() { toolPublication.finish(err == nil) }()
+	toolPublication, err := s.preparePermissionToolEvent(turnCtx, visibleEvent)
+	if err != nil {
+		return err
+	}
+	defer func() { toolPublication.finish(s, err) }()
 
 	updates := toolPublication.updates(state.toolContents)
 	updates = append(updates, usageUpdatesForEvent(event, &state.streamedUsage, &state.streamedThreadUsage, &state.streamedUsageContextWindow)...)
@@ -717,7 +784,7 @@ func (s *session) emitUpdates(ctx context.Context, updates ...acp.SessionUpdate)
 
 	for _, update := range updates {
 		if err := s.agent.emitUpdate(ctx, s.id, update); err != nil {
-			return err
+			return wrapHostDeliveryError(err)
 		}
 	}
 

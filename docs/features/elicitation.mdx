@@ -21,12 +21,12 @@ when the session runs in plan collaboration mode; in the default mode the tool
 is unavailable, so no clarifying question is raised (`TestCodexCLIClarifyingQuestionElicitation`
 runs a plan-mode session to elicit one).
 
-Codex also uses `mcpServer/elicitation/request` for MCP tool approval. The
-hard-cutover native shape marks those requests with
-`_meta.codex_approval_kind = "mcp_tool_call"` directly in the flattened `_meta`
-object. They are permission requests, not user elicitations, and correlate
-through the active tool ledger to the exact published nonterminal ACP tool-call
-ID. Nested metadata shapes are rejected. Both approval and user
+Codex also uses `mcpServer/elicitation/request` for MCP tool approval. These
+requests carry `_meta.codex_approval_kind = "mcp_tool_call"` directly in the
+flattened native `_meta` object. They are permission requests, not user
+elicitations, and correlate through the active tool ledger to the exact
+published nonterminal ACP tool-call ID. Nested metadata shapes are rejected.
+Both approval and user
 elicitation requests MUST carry the non-empty native `turnId` of the currently
 active ACP turn. Missing, stale, or post-turn requests are cancelled locally
 before any host callback or tool-ledger match.

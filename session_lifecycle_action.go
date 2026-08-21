@@ -2,31 +2,54 @@ package codexacp
 
 import (
 	"context"
+	"errors"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
-// liveAction is one pending permission or elicitation held open on the lifecycle
-// stream. It is minted and announced before the inbound request is issued, so a
-// host can never see an action id it cannot yet answer, and it resolves exactly
-// once.
+type lifecycleActionTurnKey struct{}
+
+// liveAction is one permission or elicitation held open on the lifecycle
+// stream. Minting precedes the ACP request, but publication waits for the
+// connection registration barrier so a host can answer every pending action it
+// observes.
 type liveAction struct {
 	incarnation *promptIncarnation
 	id          string
+	kind        lifecycle.ActionKind
+	blocks      bool
+	registered  bool
 }
 
-// beginAction mints one action, announces it on the stream, and returns the
-// correlation value to stamp on the outbound request. An unnegotiated connection
-// carries no action at all, and the standard ACP permission and elicitation
-// outcomes are unchanged either way.
+func withLifecycleActionTurn(ctx context.Context, in *promptIncarnation) context.Context {
+	return context.WithValue(ctx, lifecycleActionTurnKey{}, in)
+}
+
+// beginAction mints one action and returns the correlation value to stamp on the
+// outbound request. register publishes it only after the host request is known
+// to the ACP connection. An unnegotiated connection carries no action at all.
 func (s *session) beginAction(
 	ctx context.Context,
 	kind lifecycle.ActionKind,
 	blocksForeground bool,
 ) (*liveAction, map[string]any, error) {
-	incarnation := s.liveIncarnation()
+	incarnation, _ := ctx.Value(lifecycleActionTurnKey{}).(*promptIncarnation)
 	if incarnation == nil {
+		s.lifecycleMu.Lock()
+		negotiated := s.lifecycleStream != nil
+		s.lifecycleMu.Unlock()
+
+		if incarnation == nil && negotiated {
+			return nil, nil, errors.New("lifecycle action omitted its exact native turn")
+		}
+
+		if incarnation == nil {
+			return nil, nil, nil
+		}
+	}
+
+	if !incarnation.lifecycleActive() {
 		return nil, nil, nil
 	}
 
@@ -35,9 +58,11 @@ func (s *session) beginAction(
 		return nil, nil, err
 	}
 
-	action := &liveAction{incarnation: incarnation, id: actionID}
-	if err := incarnation.announceAction(ctx, actionID, kind, blocksForeground); err != nil {
-		return nil, nil, err
+	action := &liveAction{
+		incarnation: incarnation,
+		id:          actionID,
+		kind:        kind,
+		blocks:      blocksForeground,
 	}
 
 	correlation := lifecycle.ActionCorrelation{
@@ -47,6 +72,91 @@ func (s *session) beginAction(
 	}
 
 	return action, correlation.Value(), nil
+}
+
+func (a *liveAction) register(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+
+	if a.registered {
+		return errors.New("lifecycle action was registered more than once")
+	}
+
+	if err := a.incarnation.announceAction(ctx, a.id, a.kind, a.blocks); err != nil {
+		return err
+	}
+
+	a.registered = true
+
+	return nil
+}
+
+func requestPermissionWithAction(
+	ctx context.Context,
+	conn agentClient,
+	request acp.RequestPermissionRequest,
+	action *liveAction,
+	registeredHook func(),
+) (acp.RequestPermissionResponse, error) {
+	if action == nil {
+		if registeredHook != nil {
+			registeredHook()
+		}
+
+		return conn.RequestPermission(ctx, request)
+	}
+
+	registered, ok := conn.(registeredActionClient)
+	if !ok {
+		return acp.RequestPermissionResponse{}, errors.New("ACP client cannot prove permission request registration")
+	}
+
+	return registered.RequestPermissionRegistered(ctx, request, action.id, func() error {
+		if err := action.register(ctx); err != nil {
+			return err
+		}
+
+		if registeredHook != nil {
+			registeredHook()
+		}
+
+		return nil
+	})
+}
+
+func createElicitationWithAction(
+	ctx context.Context,
+	conn agentClient,
+	request acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+	action *liveAction,
+	registeredHook func(),
+) (acp.UnstableCreateElicitationResponse, error) {
+	if action == nil {
+		if registeredHook != nil {
+			registeredHook()
+		}
+
+		return conn.CreateElicitation(ctx, request, scope)
+	}
+
+	registered, ok := conn.(registeredActionClient)
+	if !ok {
+		return acp.UnstableCreateElicitationResponse{}, errors.New("ACP client cannot prove elicitation request registration")
+	}
+
+	return registered.CreateElicitationRegistered(ctx, request, scope, action.id, func() error {
+		if err := action.register(ctx); err != nil {
+			return err
+		}
+
+		if registeredHook != nil {
+			registeredHook()
+		}
+
+		return nil
+	})
 }
 
 // resolve terminalizes the action with the state its answer reached. It is safe
@@ -62,7 +172,7 @@ func (s *session) beginAction(
 // notification is delivered — an undelivered resolution leaves the host holding
 // a gap and an action with no terminal at all.
 func (a *liveAction) resolve(ctx context.Context, state lifecycle.ActionState) error {
-	if a == nil {
+	if a == nil || !a.registered {
 		return nil
 	}
 
@@ -70,7 +180,7 @@ func (a *liveAction) resolve(ctx context.Context, state lifecycle.ActionState) e
 		return a.incarnation.resolveAction(ctx, a.id, state)
 	}
 
-	if state == lifecycle.ActionFailed && a.incarnation.session.wasTurnCancelled() {
+	if state == lifecycle.ActionFailed && (a.incarnation.cancelled || a.incarnation.session.wasTurnCancelled()) {
 		state = lifecycle.ActionCancelled
 	}
 

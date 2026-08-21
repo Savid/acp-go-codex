@@ -590,7 +590,7 @@ func (p *providerAuth) goSafe(name string, fn func()) {
 }
 
 func loggableError(err error) slog.Attr {
-	return slog.String(jsonFieldError, err.Error())
+	return slog.String(jsonFieldError, valueInternalFailure)
 }
 
 func invalidAuthField(path string) error {

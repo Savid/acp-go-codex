@@ -5,12 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
@@ -61,86 +58,13 @@ func TestRolloutMirrorKeepsDurableCursorWhenRowsAlreadyMirrored(t *testing.T) {
 		id:           "session",
 		rolloutPath:  rollout,
 		mirroredRows: 2,
-		visibleRows:  0,
 	}
 
-	events := make(chan codex.Event, 4)
-	if err := session.mirrorAndEmitRolloutLive(context.Background(), events); err != nil {
-		t.Fatalf("mirror with lagging events cursor returned error: %v", err)
+	if err := session.mirrorAndEmitRollout(context.Background()); err != nil {
+		t.Fatalf("mirror returned error: %v", err)
 	}
 	if session.mirroredRows != 2 {
 		t.Fatalf("durable cursor advanced past already-mirrored rows: %d", session.mirroredRows)
-	}
-	if session.visibleRows != 2 {
-		t.Fatalf("events cursor = %d, want 2", session.visibleRows)
-	}
-}
-
-// TestRolloutCursorAdvancesOnlyOverDeliveredRows pins the loss detector: a row
-// the prompt loop never received leaves the cursor where it was, so it is
-// re-read rather than silently skipped.
-func TestRolloutCursorAdvancesOnlyOverDeliveredRows(t *testing.T) {
-	rolloutSession := &session{visibleRows: 1}
-	stopped, cancelStopped := context.WithCancel(context.Background())
-	cancelStopped()
-
-	events := make(chan codex.Event, 1)
-	rolloutSession.emitRolloutEvents(context.Background(), []rolloutMirrorRow{
-		{index: 0, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"old"}}`)},
-		{index: 4, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"visible"}}`)},
-	}, events)
-	select {
-	case event := <-events:
-		if event.Kind != codex.EventAgentMessageDelta || event.Text != "visible" || !event.Completed {
-			t.Fatalf("rollout event = %#v", event)
-		}
-	default:
-		t.Fatal("agent_message row did not emit visible event")
-	}
-	if rolloutSession.visibleRows != 5 {
-		t.Fatalf("visible cursor = %d", rolloutSession.visibleRows)
-	}
-
-	rolloutSession.emitRolloutEvents(stopped, []rolloutMirrorRow{
-		{index: 5, entry: SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"undelivered"}}`)},
-	}, make(chan codex.Event))
-	if rolloutSession.visibleRows != 5 {
-		t.Fatalf("visible cursor advanced past an undelivered row: %d", rolloutSession.visibleRows)
-	}
-
-	if event, ok := rolloutEvent(SessionStoreEntry(`{"type":"event_msg","payload":{"type":"token_count"}}`)); ok || event.Kind != "" {
-		t.Fatalf("non-message rollout event = %#v ok=%v", event, ok)
-	}
-	if event, ok := rolloutEvent(SessionStoreEntry(`not-json`)); ok || event.Kind != "" {
-		t.Fatalf("invalid rollout event = %#v ok=%v", event, ok)
-	}
-}
-
-func TestPrepareRolloutLiveCursors(t *testing.T) {
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, []byte("\n{\"type\":\"one\"}\n{\"type\":\"two\"}\n"), 0o600); err != nil {
-		t.Fatalf("write rollout: %v", err)
-	}
-	rolloutSession := &session{rolloutPath: rollout, visibleRows: 1}
-	rolloutSession.prepareRolloutLiveCursors()
-	if rolloutSession.visibleRows != 2 {
-		t.Fatalf("prepared visible cursor=%d", rolloutSession.visibleRows)
-	}
-	if rows, err := countRolloutRows(""); err != nil || rows != 0 {
-		t.Fatalf("empty rollout count rows=%d err=%v", rows, err)
-	}
-	huge := filepath.Join(t.TempDir(), "huge.jsonl")
-	if err := os.WriteFile(huge, []byte(strings.Repeat("x", maxSessionImportLineBytes+1)), 0o600); err != nil {
-		t.Fatalf("write huge rollout: %v", err)
-	}
-	if _, err := countRolloutRows(huge); err == nil {
-		t.Fatal("huge rollout count succeeded")
-	}
-
-	missing := &session{rolloutPath: filepath.Join(t.TempDir(), "missing.jsonl"), visibleRows: 4}
-	missing.prepareRolloutLiveCursors()
-	if missing.visibleRows != 4 {
-		t.Fatalf("missing rollout changed visible cursor=%d", missing.visibleRows)
 	}
 }
 

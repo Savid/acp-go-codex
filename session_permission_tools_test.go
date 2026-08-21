@@ -5,18 +5,45 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
-// strictPermissionClient enforces the hard-cutover invariant: a permission
-// request is accepted only when its toolCallId was already published and has
-// not reached a terminal state.
+type gatedHostActionWriter struct {
+	requestStarted chan json.RawMessage
+	releaseRequest chan struct{}
+	once           sync.Once
+}
+
+func (w *gatedHostActionWriter) InterruptWrite() error { return nil }
+
+func (w *gatedHostActionWriter) Write(payload []byte) (int, error) {
+	var message struct {
+		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id"`
+	}
+	_ = json.Unmarshal(payload, &message)
+	if message.Method == acp.ClientMethodSessionRequestPermission || message.Method == acp.ClientMethodElicitationCreate {
+		w.once.Do(func() {
+			w.requestStarted <- append(json.RawMessage(nil), message.ID...)
+			<-w.releaseRequest
+		})
+	}
+
+	return len(payload), nil
+}
+
+// strictPermissionClient enforces the current publication order: a permission
+// request is accepted only after its toolCallId is published and before that
+// tool call reaches a terminal state.
 type strictPermissionClient struct {
 	*recordingAgentClient
 
@@ -32,6 +59,50 @@ type blockingElicitationAgentClient struct {
 	*recordingAgentClient
 	entered chan elicitationScope
 	release chan struct{}
+}
+
+type orderedBarrierPermissionClient struct {
+	*strictPermissionClient
+	startEntered      chan struct{}
+	releaseStart      chan struct{}
+	permissionEntered chan struct{}
+	releasePermission chan struct{}
+	startOnce         sync.Once
+	permissionOnce    sync.Once
+}
+
+func (c *orderedBarrierPermissionClient) SessionUpdate(
+	ctx context.Context,
+	notification acp.SessionNotification,
+) error {
+	if notification.Update.ToolCall != nil {
+		c.startOnce.Do(func() { close(c.startEntered) })
+		select {
+		case <-c.releaseStart:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return c.strictPermissionClient.SessionUpdate(ctx, notification)
+}
+
+func (c *orderedBarrierPermissionClient) RequestPermission(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+) (acp.RequestPermissionResponse, error) {
+	response, err := c.strictPermissionClient.RequestPermission(ctx, request)
+	if err != nil {
+		return response, err
+	}
+
+	c.permissionOnce.Do(func() { close(c.permissionEntered) })
+	select {
+	case <-c.releasePermission:
+		return response, nil
+	case <-ctx.Done():
+		return acp.RequestPermissionResponse{}, ctx.Err()
+	}
 }
 
 func (c *blockingElicitationAgentClient) CreateElicitation(
@@ -51,6 +122,20 @@ func (c *blockingElicitationAgentClient) CreateElicitation(
 	case <-ctx.Done():
 		return acp.UnstableCreateElicitationResponse{}, ctx.Err()
 	}
+}
+
+func (c *blockingElicitationAgentClient) CreateElicitationRegistered(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+	_ string,
+	registered func() error,
+) (acp.UnstableCreateElicitationResponse, error) {
+	if err := registered(); err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	return c.CreateElicitation(ctx, request, scope)
 }
 
 func newStrictPermissionClient(turnNonce string) *strictPermissionClient {
@@ -140,6 +225,7 @@ func newStrictPermissionSession(t *testing.T) (*Agent, *session, *strictPermissi
 	turnCtx := session.beginTurn(ctx, "permission-turn")
 	session.setTurnID("native-permission-turn")
 	t.Cleanup(session.finishTurn)
+	t.Cleanup(session.fenceSession)
 
 	return agent, session, conn, turnCtx
 }
@@ -474,20 +560,17 @@ func TestPermissionCorrelationFailureAndHelperBranches(t *testing.T) {
 	require.ErrorContains(t, err, "pending start failed")
 	require.False(t, requested)
 
-	var unlocked permissionToolEventPublication
-	unlocked.finish(true)
-
-	failedPublication := session.preparePermissionToolEvent(codex.Event{
+	_, err = session.preparePermissionToolEvent(t.Context(), codex.Event{
 		Kind: codex.EventToolStarted,
 		Tool: codex.ToolEvent{ID: "failed-publication", Kind: toolKindMcpToolCall},
 	})
-	failedPublication.finish(false)
+	require.NoError(t, err)
 
-	completedPublication := session.preparePermissionToolEvent(codex.Event{
+	_, err = session.preparePermissionToolEvent(t.Context(), codex.Event{
 		Kind: codex.EventToolCompleted,
 		Tool: codex.ToolEvent{ID: "completed-without-start", Kind: toolKindMcpToolCall},
 	})
-	completedPublication.finish(true)
+	require.NoError(t, err)
 	require.True(t, session.permissionTools.tools["completed-without-start"].terminal)
 
 	score, compatible := permissionFingerprintScore(
@@ -561,6 +644,10 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 
 func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
 	agent, session, _, turnCtx := newStrictPermissionSession(t)
+	agent.setAgentClient(newRecordingAgentClient())
+	incarnation, err := session.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}})
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(turnCtx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"}))
 	emitNativePermissionToolEvent(t, session, turnCtx, codex.Event{
 		Kind: codex.EventToolStarted,
 		Tool: codex.ToolEvent{
@@ -600,7 +687,6 @@ func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
 	scope := <-conn.entered
 	require.Equal(t, acp.ToolCallId("exec-74d34bc0-canonical"), scope.ToolCallID)
 	require.Nil(t, scope.RequestID)
-	require.False(t, session.permissionTools.mu.TryLock(), "tool completion could race elicitation establishment")
 
 	completion := make(chan error, 1)
 	go func() {
@@ -616,15 +702,700 @@ func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
 		completion <- session.emitPromptUpdates(turnCtx, event, event, state)
 	}()
 
+	require.NoError(t, <-completion)
 	close(conn.release)
 	completed := <-result
 	require.NoError(t, completed.err)
 	require.Equal(t, "accept", asType[map[string]any](t, completed.response)["action"])
-	require.NoError(t, <-completion)
 	require.True(t, session.permissionTools.tools["exec-74d34bc0-canonical"].terminal)
+}
 
-	require.True(t, session.permissionTools.mu.TryLock())
+func TestPermissionAndElicitationReleaseToolLeaseBeforeHostResponseAtOneClientCall(t *testing.T) {
+	for _, kind := range []string{"permission", "elicitation"} {
+		t.Run(kind, func(t *testing.T) {
+			inputR, inputW := io.Pipe()
+			defer inputR.Close()
+			defer inputW.Close()
+			wire := &gatedHostActionWriter{
+				requestStarted: make(chan json.RawMessage, 1), releaseRequest: make(chan struct{}),
+			}
+			agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
+			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+			conn := newLocalAgentConnection(agent, wire, inputR)
+			agent.setAgentClient(conn)
+			client := newSpyCodexClient()
+			s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+			turnCtx := s.beginTurn(t.Context(), "lease-turn")
+			s.setTurnID("native-turn")
+			defer s.finishTurn()
+			defer s.fenceSession()
+			in, err := s.openIncarnation(turnCtx, agent.lifecycle)
+			require.NoError(t, err)
+			require.NoError(t, in.accept(turnCtx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"}))
+			start := codex.Event{
+				Kind: codex.EventToolStarted,
+				Tool: codex.ToolEvent{ID: "tool", Kind: toolKindMcpToolCall, Raw: map[string]any{"server": "wagie", "tool": "execute"}},
+			}
+			emitNativePermissionToolEvent(t, s, turnCtx, start)
+
+			requestDone := make(chan error, 1)
+			go func() {
+				actionCtx := withLifecycleActionTurn(turnCtx, in)
+				if kind == "permission" {
+					_, _, permissionErr := s.requestPermissionForTool(actionCtx, conn, acp.RequestPermissionRequest{
+						ToolCall: acp.ToolCallUpdate{ToolCallId: "tool", RawInput: map[string]any{
+							"turnId": "native-turn", "serverName": "wagie", "toolName": "execute",
+						}},
+					}, permissionToolMCP)
+					requestDone <- permissionErr
+
+					return
+				}
+
+				request, requestErr := codex.MCPElicitationRequest(map[string]any{
+					"mode": "form", "message": "Need input", "requestedSchema": map[string]any{"type": "object"},
+				}, nil)
+				if requestErr != nil {
+					requestDone <- requestErr
+
+					return
+				}
+				_, _, elicitationErr := s.createElicitationForMCPTool(
+					actionCtx, conn, request, "tool",
+					map[string]any{"turnId": "native-turn", "serverName": "wagie", "toolName": "execute"},
+				)
+				requestDone <- elicitationErr
+			}()
+
+			requestID := <-wire.requestStarted
+			s.permissionTools.mu.Lock()
+			leaseDone := s.permissionTools.tools["tool"].leaseDone
+			s.permissionTools.mu.Unlock()
+			require.NotNil(t, leaseDone)
+			close(wire.releaseRequest)
+			<-leaseDone
+
+			if release, acquireErr := agent.acquireClientCall(t.Context()); acquireErr != nil {
+				t.Fatal("host response wait retained the single client-call permit")
+			} else {
+				release()
+			}
+
+			completion := make(chan error, 1)
+			go func() {
+				state := &promptEventState{snapshot: s.snapshot(), toolContents: make(map[acp.ToolCallId][]acp.ToolCallContent)}
+				event := codex.Event{
+					Kind: codex.EventToolCompleted,
+					Tool: codex.ToolEvent{ID: "tool", Kind: toolKindMcpToolCall, Raw: map[string]any{"server": "wagie", "tool": "execute"}},
+				}
+				completion <- s.emitPromptUpdates(turnCtx, event, event, state)
+			}()
+			require.NoError(t, <-completion)
+			s.permissionTools.mu.Lock()
+			require.True(t, s.permissionTools.tools["tool"].terminal)
+			s.permissionTools.mu.Unlock()
+
+			_, err = fmt.Fprintf(inputW, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"declined"}}`+"\n", requestID)
+			require.NoError(t, err)
+			require.Error(t, <-requestDone)
+			_ = conn.InterruptTransport()
+		})
+	}
+}
+
+func TestPermissionHostWaitDoesNotBlockNativeToolDelta(t *testing.T) {
+	agent, session, _, turnCtx := newStrictPermissionSession(t)
+	agent.setAgentClient(newRecordingAgentClient())
+	incarnation, err := session.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}})
+	require.NoError(t, err)
+	require.NoError(t, incarnation.accept(turnCtx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"}))
+	emitNativePermissionToolEvent(t, session, turnCtx, codex.Event{
+		Kind: codex.EventToolStarted,
+		Tool: codex.ToolEvent{
+			ID: lifecycleTestToolID, Kind: toolKindMcpToolCall,
+			Raw: map[string]any{"server": "wagie", "tool": "execute"},
+		},
+	})
+
+	conn := &blockingPermissionAgentClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		started:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+	agent.setAgentClient(conn)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := session.requestPermissionForTool(withLifecycleActionTurn(turnCtx, incarnation), conn, acp.RequestPermissionRequest{
+			ToolCall: acp.ToolCallUpdate{
+				ToolCallId: lifecycleTestToolID,
+				RawInput: map[string]any{
+					"turnId": "native-permission-turn", "serverName": "wagie", "toolName": "execute",
+				},
+			},
+		}, permissionToolMCP)
+		done <- err
+	}()
+	<-conn.started
+
+	state := &promptEventState{snapshot: session.snapshot(), toolContents: make(map[acp.ToolCallId][]acp.ToolCallContent)}
+	delta := codex.Event{
+		Kind: codex.EventToolDelta,
+		Tool: codex.ToolEvent{
+			ID: lifecycleTestToolID, Kind: toolKindMcpToolCall, Content: "progress",
+			Raw: map[string]any{"server": "wagie", "tool": "execute"},
+		},
+	}
+	require.NoError(t, session.emitPromptUpdates(turnCtx, delta, delta, state))
+	close(conn.release)
+	require.NoError(t, <-done)
+}
+
+func TestPermissionAndCompletionWaitForSuccessfulStartPublication(t *testing.T) {
+	_, session, _, turnCtx := newStrictPermissionSession(t)
+	conn := &orderedBarrierPermissionClient{
+		strictPermissionClient: newStrictPermissionClient("permission-turn"),
+		startEntered:           make(chan struct{}),
+		releaseStart:           make(chan struct{}),
+		permissionEntered:      make(chan struct{}),
+		releasePermission:      make(chan struct{}),
+	}
+	session.agent.setAgentClient(conn)
+
+	startEvent := codex.Event{
+		Kind: codex.EventToolStarted,
+		Tool: codex.ToolEvent{
+			ID: "ordered-tool", Kind: toolKindCommandExecution,
+			Raw: map[string]any{"id": "ordered-tool", "type": toolKindCommandExecution},
+		},
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		state := &promptEventState{snapshot: session.snapshot()}
+		startDone <- session.emitPromptUpdates(turnCtx, startEvent, startEvent, state)
+	}()
+	<-conn.startEntered
+
+	permissionDone := make(chan error, 1)
+	go func() {
+		_, _, err := session.requestPermissionForTool(turnCtx, conn, acp.RequestPermissionRequest{
+			ToolCall: acp.ToolCallUpdate{
+				ToolCallId: "ordered-tool",
+				RawInput: map[string]any{
+					"turnId": "native-permission-turn", "id": "ordered-tool", "type": toolKindCommandExecution,
+				},
+			},
+		}, permissionToolCommand)
+		permissionDone <- err
+	}()
+
+	order, _ := conn.snapshot()
+	require.Empty(t, order)
+	close(conn.releaseStart)
+	require.NoError(t, <-startDone)
+	<-conn.permissionEntered
+	order, _ = conn.snapshot()
+	require.Equal(t, []string{"start:ordered-tool:in_progress", "permission:ordered-tool"}, order)
+
+	completionEvent := codex.Event{
+		Kind: codex.EventToolCompleted,
+		Tool: codex.ToolEvent{
+			ID: "ordered-tool", Kind: toolKindCommandExecution,
+			Raw: map[string]any{"id": "ordered-tool", "type": toolKindCommandExecution},
+		},
+	}
+	completionDone := make(chan error, 1)
+	go func() {
+		state := &promptEventState{snapshot: session.snapshot()}
+		completionDone <- session.emitPromptUpdates(turnCtx, completionEvent, completionEvent, state)
+	}()
+	require.NoError(t, <-completionDone, "native completion waited for the held host permission response")
+
+	close(conn.releasePermission)
+	require.NoError(t, <-permissionDone)
+	order, _ = conn.snapshot()
+	require.Equal(t, []string{
+		"start:ordered-tool:in_progress",
+		"permission:ordered-tool",
+		"update:ordered-tool:completed",
+	}, order)
+}
+
+func TestPermissionToolRegistryIsBoundedAndFailsClosed(t *testing.T) {
+	t.Run("tools", func(t *testing.T) {
+		session := &session{}
+		for index := 0; index < permissionToolLimit; index++ {
+			_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+				Kind: codex.EventToolCompleted,
+				Tool: codex.ToolEvent{ID: fmt.Sprintf("tool-%d", index), Kind: toolKindMcpToolCall},
+			})
+			require.NoError(t, err)
+		}
+		_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+			Kind: codex.EventToolCompleted,
+			Tool: codex.ToolEvent{ID: "overflow", Kind: toolKindMcpToolCall},
+		})
+		require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+		require.Len(t, session.permissionTools.tools, permissionToolLimit)
+		require.ErrorIs(t, session.permissionTools.failure, codex.ErrTurnEventOverflow)
+	})
+
+	t.Run("aliases", func(t *testing.T) {
+		registry := &permissionToolRegistry{}
+		registry.mu.Lock()
+		require.NoError(t, registry.ensure())
+		for index := 0; index < permissionAliasLimit; index++ {
+			require.NoError(t, registry.addAlias(fmt.Sprintf("alias-%d", index), "tool"))
+		}
+		err := registry.addAlias("overflow", "tool")
+		registry.mu.Unlock()
+		require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+		require.Len(t, registry.aliases, permissionAliasLimit)
+	})
+}
+
+func TestAutonomousTurnAdmissionRotatesPermissionRegistry(t *testing.T) {
+	agent := NewAgent()
+	agent.setAgentClient(newRecordingAgentClient())
+	session := &session{agent: agent, id: "session", codexThreadID: "thread"}
+	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	require.NoError(t, session.openLifecycleStream(t.Context(), negotiated))
+
+	session.permissionTools.mu.Lock()
+	session.permissionTools.tools = make(map[acp.ToolCallId]*permissionToolRecord, permissionToolLimit)
+	for index := range permissionToolLimit {
+		id := acp.ToolCallId(fmt.Sprintf("stale-%d", index))
+		session.permissionTools.tools[id] = &permissionToolRecord{id: id, terminal: true}
+	}
+	session.permissionTools.aliases = map[string]acp.ToolCallId{"reused": "stale-0"}
+	session.permissionTools.failure = codex.ErrTurnEventOverflow
 	session.permissionTools.mu.Unlock()
+
+	session.lifecycleMu.Lock()
+	incarnation, err := session.openAutonomousTurnLocked(t.Context(), "native-autonomous")
+	session.lifecycleMu.Unlock()
+	require.NoError(t, err)
+	require.NotNil(t, incarnation)
+
+	publication, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+		Kind: codex.EventToolStarted,
+		Tool: codex.ToolEvent{ID: "reused", Kind: toolKindMcpToolCall},
+	})
+	require.NoError(t, err)
+	publication.finish(session, nil)
+	session.permissionTools.mu.Lock()
+	require.NoError(t, session.permissionTools.failure)
+	require.Len(t, session.permissionTools.tools, 1)
+	require.Same(t, publication.record, session.permissionTools.tools["reused"])
+	session.permissionTools.mu.Unlock()
+}
+
+func TestPermissionToolRegistryCoordinatesStartAndLeaseLifetimes(t *testing.T) {
+	registry := &permissionToolRegistry{}
+	require.NoError(t, registry.ensure())
+	require.NoError(t, registry.ensure())
+	require.NoError(t, registry.addAlias("", "ignored"))
+	require.Error(t, registry.addTool(nil))
+	require.Error(t, registry.addTool(&permissionToolRecord{}))
+
+	record := newPermissionToolRecord("tool", permissionToolCommand, permissionToolFingerprint{})
+	require.NoError(t, registry.addTool(record))
+	require.NoError(t, registry.addAlias("native", record.id))
+	registry.acquire(record)
+	registry.acquire(record)
+
+	waiting := make(chan error, 1)
+	go func() { waiting <- registry.waitForLeases(t.Context(), record) }()
+	registry.release(nil)
+	registry.release(&permissionToolRecord{})
+	registry.release(record)
+	select {
+	case err := <-waiting:
+		require.Fail(t, "lease wait returned before the final release", "error: %v", err)
+	default:
+	}
+	registry.release(record)
+	require.NoError(t, <-waiting)
+	require.NoError(t, registry.waitForLeases(t.Context(), nil))
+	require.NoError(t, registry.waitForLeases(t.Context(), record))
+
+	registry.acquire(record)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, registry.waitForLeases(cancelled, record), context.Canceled)
+	registry.release(record)
+
+	startWaiting := make(chan error, 1)
+	go func() { startWaiting <- registry.waitForStart(t.Context(), record) }()
+	registry.completeStart(record, nil)
+	require.NoError(t, <-startWaiting)
+	require.NoError(t, registry.waitForStart(t.Context(), record))
+	registry.completeStart(record, errors.New("ignored after settlement"))
+	registry.completeStart(nil, nil)
+
+	require.NoError(t, registry.waitForStart(t.Context(), nil))
+	withoutDone := &permissionToolRecord{startErr: errors.New("settled")}
+	require.ErrorContains(t, registry.waitForStart(t.Context(), withoutDone), "settled")
+
+	cancelRecord := newPermissionToolRecord("cancel", permissionToolCommand, permissionToolFingerprint{})
+	cancelStart, cancelStartWait := context.WithCancel(t.Context())
+	cancelStartWait()
+	require.ErrorIs(t, registry.waitForStart(cancelStart, cancelRecord), context.Canceled)
+
+	failing := newPermissionToolRecord("failing", permissionToolCommand, permissionToolFingerprint{})
+	require.NoError(t, registry.addTool(failing))
+	require.NoError(t, registry.addAlias("failing-native", failing.id))
+	startErr := errors.New("start failed")
+	registry.completeStart(failing, startErr)
+	require.ErrorIs(t, registry.waitForStart(t.Context(), failing), startErr)
+	require.NotContains(t, registry.tools, failing.id)
+	require.NotContains(t, registry.aliases, "failing-native")
+
+	open := newPermissionToolRecord("open", permissionToolCommand, permissionToolFingerprint{})
+	registry.acquire(open)
+	registry.tools[open.id] = open
+	registry.tools["nil"] = nil
+	registry.reset()
+	require.ErrorIs(t, registry.waitForStart(t.Context(), open), codex.ErrConnectionClosed)
+	require.NoError(t, registry.waitForLeases(t.Context(), open))
+	require.Nil(t, registry.tools)
+	require.Nil(t, registry.aliases)
+	require.NoError(t, registry.failure)
+}
+
+func TestPermissionToolRegistryKeepsExistingEntriesAtItsBounds(t *testing.T) {
+	registry := &permissionToolRegistry{
+		tools:   make(map[acp.ToolCallId]*permissionToolRecord, permissionToolLimit),
+		aliases: make(map[string]acp.ToolCallId, permissionAliasLimit),
+	}
+	existing := newPermissionToolRecord("existing", permissionToolCommand, permissionToolFingerprint{})
+	registry.tools[existing.id] = existing
+	for index := 1; index < permissionToolLimit; index++ {
+		id := acp.ToolCallId(fmt.Sprintf("tool-%d", index))
+		registry.tools[id] = newPermissionToolRecord(id, permissionToolCommand, permissionToolFingerprint{})
+	}
+	for index := range permissionAliasLimit {
+		registry.aliases[fmt.Sprintf("alias-%d", index)] = existing.id
+	}
+	require.NoError(t, registry.addTool(existing))
+	require.NoError(t, registry.addAlias("alias-0", existing.id))
+	require.ErrorIs(t, registry.addTool(newPermissionToolRecord("overflow", permissionToolCommand, permissionToolFingerprint{})), codex.ErrTurnEventOverflow)
+
+	failed := &permissionToolRegistry{failure: errors.New("fenced")}
+	require.ErrorContains(t, failed.ensure(), "fenced")
+	require.ErrorContains(t, failed.fail(errors.New("later")), "later")
+	require.ErrorContains(t, failed.failure, "fenced")
+	require.NoError(t, failed.fail(nil))
+}
+
+func TestPermissionToolRegistryWaitsForAlreadySignaledTransitions(t *testing.T) {
+	registry := &permissionToolRegistry{}
+	leaseDone := make(chan struct{})
+	close(leaseDone)
+	require.NoError(t, registry.waitForLeases(t.Context(), &permissionToolRecord{
+		leases: 1, leaseDone: leaseDone,
+	}))
+
+	startErr := errors.New("start publication failed")
+	startDone := make(chan struct{})
+	close(startDone)
+	require.ErrorIs(t, registry.waitForStart(t.Context(), &permissionToolRecord{
+		startDone: startDone, startErr: startErr,
+	}), startErr)
+}
+
+func TestPermissionToolRequestsFailClosedAtRegistryAndLifecycleBoundaries(t *testing.T) {
+	request := func(id acp.ToolCallId) acp.RequestPermissionRequest {
+		return acp.RequestPermissionRequest{ToolCall: acp.ToolCallUpdate{
+			ToolCallId: id,
+			RawInput:   map[string]any{"turnId": "native-permission-turn"},
+		}}
+	}
+
+	t.Run("cancelled request", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		ctx, cancel := context.WithCancel(turnCtx)
+		cancel()
+		_, requested, err := session.requestPermissionForTool(ctx, conn, request("cancelled"), permissionToolCommand)
+		require.NoError(t, err)
+		require.False(t, requested)
+	})
+
+	t.Run("request registry failure", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		failure := errors.New("registry failed")
+		session.permissionTools.failure = failure
+		_, requested, err := session.requestPermissionForTool(turnCtx, conn, request("failed"), permissionToolCommand)
+		require.True(t, requested)
+		require.ErrorIs(t, err, failure)
+	})
+
+	t.Run("request tool bound", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		session.permissionTools.tools = make(map[acp.ToolCallId]*permissionToolRecord, permissionToolLimit)
+		for index := range permissionToolLimit {
+			id := acp.ToolCallId(fmt.Sprintf("terminal-%d", index))
+			session.permissionTools.tools[id] = &permissionToolRecord{id: id, terminal: true}
+		}
+		session.permissionTools.aliases = make(map[string]acp.ToolCallId)
+		_, requested, err := session.requestPermissionForTool(turnCtx, conn, request("overflow"), permissionToolCommand)
+		require.True(t, requested)
+		require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+	})
+
+	t.Run("request alias bound", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		session.permissionTools.tools = make(map[acp.ToolCallId]*permissionToolRecord)
+		session.permissionTools.aliases = make(map[string]acp.ToolCallId, permissionAliasLimit)
+		for index := range permissionAliasLimit {
+			session.permissionTools.aliases[fmt.Sprintf("alias-%d", index)] = "terminal"
+		}
+		_, requested, err := session.requestPermissionForTool(turnCtx, conn, request("overflow"), permissionToolCommand)
+		require.True(t, requested)
+		require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+	})
+
+	t.Run("request pending publication failure", func(t *testing.T) {
+		agent, session, _, turnCtx := newStrictPermissionSession(t)
+		failure := errors.New("pending publication failed")
+		conn := &errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: failure}
+		agent.setAgentClient(conn)
+		_, requested, err := session.requestPermissionForTool(turnCtx, conn, request("pending"), permissionToolCommand)
+		require.False(t, requested)
+		require.ErrorIs(t, err, failure)
+	})
+
+	t.Run("request existing start failure", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		failure := errors.New("existing start failed")
+		done := make(chan struct{})
+		close(done)
+		record := &permissionToolRecord{
+			id: "existing", class: permissionToolCommand, startDone: done, startErr: failure,
+		}
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"existing": record.id}
+		_, requested, err := session.requestPermissionForTool(turnCtx, conn, request("existing"), permissionToolCommand)
+		require.True(t, requested)
+		require.ErrorIs(t, err, failure)
+	})
+
+	t.Run("request lifecycle identity", func(t *testing.T) {
+		agent, session, _, turnCtx := newStrictPermissionSession(t)
+		conn := newRecordingAgentClient()
+		agent.setAgentClient(conn)
+		require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+		_, requested, err := session.requestPermissionForTool(turnCtx, conn, request("lifecycle"), permissionToolCommand)
+		require.False(t, requested)
+		require.ErrorContains(t, err, "exact native turn")
+	})
+
+	elicitation := func(session *session, ctx context.Context, conn agentClient, nativeID string) (bool, error) {
+		_, requested, err := session.createElicitationForMCPTool(ctx, conn, acp.UnstableCreateElicitationRequest{}, nativeID,
+			map[string]any{"turnId": "native-permission-turn"})
+
+		return requested, err
+	}
+
+	t.Run("cancelled elicitation", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		ctx, cancel := context.WithCancel(turnCtx)
+		cancel()
+		requested, err := elicitation(session, ctx, conn, "cancelled")
+		require.NoError(t, err)
+		require.False(t, requested)
+	})
+
+	t.Run("elicitation registry failure", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		failure := errors.New("registry failed")
+		session.permissionTools.failure = failure
+		requested, err := elicitation(session, turnCtx, conn, "failed")
+		require.True(t, requested)
+		require.ErrorIs(t, err, failure)
+	})
+
+	t.Run("elicitation start failure", func(t *testing.T) {
+		_, session, conn, turnCtx := newStrictPermissionSession(t)
+		failure := errors.New("start failed")
+		done := make(chan struct{})
+		close(done)
+		record := &permissionToolRecord{id: "existing", class: permissionToolMCP, startDone: done, startErr: failure}
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
+		requested, err := elicitation(session, turnCtx, conn, "native")
+		require.True(t, requested)
+		require.ErrorIs(t, err, failure)
+	})
+
+	t.Run("elicitation lifecycle identity", func(t *testing.T) {
+		agent, session, _, turnCtx := newStrictPermissionSession(t)
+		conn := newRecordingAgentClient()
+		agent.setAgentClient(conn)
+		record := newPermissionToolRecord("existing", permissionToolMCP, permissionToolFingerprint{})
+		record.startSettled = true
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
+		require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+		requested, err := elicitation(session, turnCtx, conn, "native")
+		require.False(t, requested)
+		require.ErrorContains(t, err, "exact native turn")
+	})
+}
+
+func TestPermissionToolEventPreparationWaitsAndFailsAtEveryRegistryBoundary(t *testing.T) {
+	t.Run("registry failure", func(t *testing.T) {
+		failure := errors.New("registry failed")
+		session := &session{permissionTools: permissionToolRegistry{failure: failure}}
+		_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{Kind: codex.EventToolStarted})
+		require.ErrorIs(t, err, failure)
+	})
+
+	t.Run("pending start", func(t *testing.T) {
+		session := &session{}
+		record := newPermissionToolRecord("tool", permissionToolMCP, permissionToolFingerprint{})
+		record.pendingNativeStart = true
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
+		go func() {
+			time.Sleep(time.Millisecond)
+			session.permissionTools.completeStart(record, nil)
+		}()
+		publication, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+			Kind: codex.EventToolDelta, Tool: codex.ToolEvent{ID: "native", Kind: toolKindMcpToolCall},
+		})
+		require.NoError(t, err)
+		require.Same(t, record, publication.record)
+	})
+
+	t.Run("active lease", func(t *testing.T) {
+		session := &session{}
+		record := newPermissionToolRecord("tool", permissionToolMCP, permissionToolFingerprint{})
+		record.startSettled = true
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
+		session.permissionTools.acquire(record)
+		go func() {
+			time.Sleep(time.Millisecond)
+			session.permissionTools.release(record)
+		}()
+		publication, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+			Kind: codex.EventToolCompleted, Tool: codex.ToolEvent{ID: "native", Kind: toolKindMcpToolCall},
+		})
+		require.NoError(t, err)
+		require.Same(t, record, publication.record)
+	})
+
+	t.Run("failed start", func(t *testing.T) {
+		failure := errors.New("start failed")
+		session := &session{}
+		record := &permissionToolRecord{
+			id: "tool", class: permissionToolMCP, startSettled: true, startErr: failure,
+		}
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
+		_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+			Kind: codex.EventToolStarted, Tool: codex.ToolEvent{ID: "native", Kind: toolKindMcpToolCall},
+		})
+		require.ErrorIs(t, err, failure)
+	})
+
+	t.Run("pending start cancellation", func(t *testing.T) {
+		session := &session{}
+		record := newPermissionToolRecord("tool", permissionToolMCP, permissionToolFingerprint{})
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := session.preparePermissionToolEvent(ctx, codex.Event{
+			Kind: codex.EventToolDelta, Tool: codex.ToolEvent{ID: "native", Kind: toolKindMcpToolCall},
+		})
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("active lease cancellation", func(t *testing.T) {
+		session := &session{}
+		record := newPermissionToolRecord("tool", permissionToolMCP, permissionToolFingerprint{})
+		record.startSettled = true
+		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
+		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
+		session.permissionTools.acquire(record)
+		defer session.permissionTools.release(record)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := session.preparePermissionToolEvent(ctx, codex.Event{
+			Kind: codex.EventToolCompleted, Tool: codex.ToolEvent{ID: "native", Kind: toolKindMcpToolCall},
+		})
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	fullTools := func() map[acp.ToolCallId]*permissionToolRecord {
+		tools := make(map[acp.ToolCallId]*permissionToolRecord, permissionToolLimit)
+		for index := range permissionToolLimit {
+			id := acp.ToolCallId(fmt.Sprintf("terminal-%d", index))
+			tools[id] = &permissionToolRecord{id: id, terminal: true}
+		}
+
+		return tools
+	}
+	fullAliases := func() map[string]acp.ToolCallId {
+		aliases := make(map[string]acp.ToolCallId, permissionAliasLimit)
+		for index := range permissionAliasLimit {
+			aliases[fmt.Sprintf("alias-%d", index)] = "terminal"
+		}
+
+		return aliases
+	}
+
+	for _, kind := range []codex.EventKind{codex.EventToolStarted, codex.EventToolDelta, codex.EventToolCompleted} {
+		t.Run("tool bound "+string(kind), func(t *testing.T) {
+			session := &session{permissionTools: permissionToolRegistry{
+				tools: fullTools(), aliases: make(map[string]acp.ToolCallId),
+			}}
+			_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+				Kind: kind, Tool: codex.ToolEvent{ID: "overflow", Kind: toolKindMcpToolCall},
+			})
+			require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+		})
+
+		t.Run("original alias bound "+string(kind), func(t *testing.T) {
+			session := &session{permissionTools: permissionToolRegistry{
+				tools: make(map[acp.ToolCallId]*permissionToolRecord), aliases: fullAliases(),
+			}}
+			_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+				Kind: kind, Tool: codex.ToolEvent{ID: "overflow", Kind: toolKindMcpToolCall},
+			})
+			require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+		})
+	}
+
+	for _, kind := range []codex.EventKind{codex.EventToolStarted, codex.EventToolCompleted} {
+		t.Run("canonical alias bound "+string(kind), func(t *testing.T) {
+			record := &permissionToolRecord{id: "canonical", class: permissionToolMCP, startSettled: true}
+			aliases := fullAliases()
+			delete(aliases, "alias-0")
+			aliases["native"] = record.id
+			session := &session{permissionTools: permissionToolRegistry{
+				tools: map[acp.ToolCallId]*permissionToolRecord{record.id: record}, aliases: aliases,
+			}}
+			_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
+				Kind: kind, Tool: codex.ToolEvent{ID: "native", Kind: toolKindMcpToolCall},
+			})
+			require.ErrorIs(t, err, codex.ErrTurnEventOverflow)
+		})
+	}
+}
+
+func TestPermissionToolPublicationPrependsSyntheticStart(t *testing.T) {
+	publication := permissionToolEventPublication{
+		prependStart: true,
+		event: codex.Event{Kind: codex.EventToolDelta, Text: "progress", Tool: codex.ToolEvent{
+			ID: "tool", Title: "Tool", Kind: toolKindMcpToolCall, Raw: map[string]any{"server": "wagie"},
+		}},
+	}
+	updates := publication.updates(make(map[acp.ToolCallId][]acp.ToolCallContent))
+	require.Len(t, updates, 2)
+	require.NotNil(t, updates[0].ToolCall)
+	require.Equal(t, acp.ToolCallId("tool"), updates[0].ToolCall.ToolCallId)
 }
 
 func TestMCPUserElicitationLiveShapeUsesStringRequestCorrelation(t *testing.T) {
@@ -703,6 +1474,33 @@ func TestMCPUserElicitationMintsMissingRequestCorrelation(t *testing.T) {
 	require.NotNil(t, conn.scopes[0].RequestID)
 	require.NotNil(t, conn.scopes[0].RequestID.Str)
 	require.Regexp(t, `^codex-elicitation-[0-9a-f-]{36}$`, string(*conn.scopes[0].RequestID.Str))
+}
+
+func TestStandaloneElicitationFailsClosedAtInteractionLimit(t *testing.T) {
+	agent, session, _, turnCtx := newStrictPermissionSession(t)
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	enableClientElicitation(agent, true, true)
+
+	session.mu.Lock()
+	session.interactions = make(map[string]*sessionInteraction, sessionInteractionLimit)
+	for index := range sessionInteractionLimit {
+		_, cancel := context.WithCancel(turnCtx)
+		session.interactions[fmt.Sprintf("held-%d", index)] = &sessionInteraction{cancel: cancel}
+	}
+	session.mu.Unlock()
+
+	response, err := agent.handleCodexServerRequest(turnCtx, codex.ServerRequest{
+		ID:     json.RawMessage(`"overflow-elicitation"`),
+		Method: codex.RequestMCPElicitation,
+		Params: json.RawMessage(`{"threadId":"` + session.codexThreadID + `","turnId":"native-permission-turn","serverName":"wagie","mode":"form","message":"Need input","requestedSchema":{"type":"object"}}`),
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, response)
+	require.Empty(t, conn.elicitations)
+	session.mu.Lock()
+	require.Len(t, session.interactions, sessionInteractionLimit)
+	session.mu.Unlock()
 }
 
 func TestMCPUserElicitationRejectsMissingOrStaleNativeTurn(t *testing.T) {

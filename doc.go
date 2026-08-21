@@ -38,8 +38,10 @@
 // _codex/session/fork. Calling [RateLimitsMethod] (_codex/rateLimits) reports
 // the harness's subscription rate-limit usage as a [RateLimitsResponse]; it is
 // agent-level, takes an empty params object, and reports only harness-supplied
-// values. Raw Codex events are emitted only when a session request opts in with
-// [WithSessionRawEvents].
+// values. [SteerTurnMethod] (_codex/turn/steer) consumes a PromptRequest only
+// for the exact active turn nonce carried by its route metadata and maps it to
+// native Codex turn/steer. Raw Codex events are emitted only when a session
+// request opts in with [WithSessionRawEvents].
 // The adapter advertises no ACP slash commands: slash-prefixed text such as
 // /review, /plan, and /compact remains ordinary session/prompt input for Codex
 // turn/start. Skills surfaces (`skills/list`, `$skill`, `type:"skill"` items)

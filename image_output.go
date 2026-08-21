@@ -298,7 +298,7 @@ func imageToolTitle(kind string) string {
 
 func imageNativeFailed(status string) bool {
 	switch strings.ToLower(status) {
-	case statusFailed, jsonFieldError, statusErrored, "cancelled", "canceled":
+	case statusFailed, jsonFieldError, statusErrored, authStateCancelled, "canceled":
 		return true
 	default:
 		return false
@@ -552,8 +552,8 @@ func (s *session) storeImageArtifact(ctx context.Context, nativeID string, data 
 	key := SessionKey{SessionID: string(s.id), Subpath: subpath}
 
 	// Serialize the sweep, load, and append against a concurrent store of the
-	// same artifact. The live prompt loop and the rollout tail can store the
-	// same native id at once; without this an interleaved load-then-append
+	// same artifact. Concurrent native event handlers can store the same native
+	// id at once; without this an interleaved load-then-append
 	// would write the key twice and a later single-entry load would fail as a
 	// spurious storage_failed.
 	s.imageStoreMu.Lock()

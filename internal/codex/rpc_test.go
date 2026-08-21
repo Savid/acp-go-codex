@@ -79,7 +79,8 @@ func TestRPCConnErrorBranches(t *testing.T) {
 	if _, err := marshalRaw(func() {}); err == nil {
 		t.Fatal("marshalRaw with function succeeded")
 	}
-	if (&rpcError{Message: "bad", Data: json.RawMessage(`{"x":1}`)}).Error() == "" || ((*rpcError)(nil)).Error() != "" {
+	secretRPCError := (&rpcError{Code: -1, Message: "rpc-secret-sentinel", Data: json.RawMessage(`{"secret":"rpc-secret-sentinel"}`)}).Error()
+	if secretRPCError == "" || strings.Contains(secretRPCError, "rpc-secret-sentinel") || ((*rpcError)(nil)).Error() != "" {
 		t.Fatal("rpcError Error returned unexpected text")
 	}
 }
@@ -95,7 +96,7 @@ func TestRPCConnResponseErrorAndClosePending(t *testing.T) {
 	}()
 	waitUntil(t, func() bool { return len(transport.sentMessages()) == 1 })
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("1"), Error: &rpcError{Code: -1, Message: "boom"}}
-	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "boom") {
+	if err := <-errCh; err == nil || err.Error() != "codex app-server request failed (code -1)" || strings.Contains(err.Error(), "boom") {
 		t.Fatalf("Call error = %v", err)
 	}
 
@@ -115,15 +116,16 @@ func TestRPCConnResponseErrorAndClosePending(t *testing.T) {
 }
 
 func TestRPCConnServerRequestErrors(t *testing.T) {
+	secret := "handler-secret-sentinel"
 	transport := &manualTransport{recv: make(chan rpcMessage, 4)}
 	conn := newRPCConn(transport, func(context.Context, ServerRequest) (any, error) {
-		return nil, errors.New("handler failed")
+		return nil, errors.New(secret)
 	})
 	defer conn.Close()
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("99"), Method: "server/request", Params: json.RawMessage(`{}`)}
 	waitUntil(t, func() bool { return len(transport.sentMessages()) == 1 })
 	sent := transport.sentMessages()[0]
-	if sent.Error == nil || !strings.Contains(sent.Error.Message, "handler failed") {
+	if sent.Error == nil || sent.Error.Message != "codex adapter request failed" || strings.Contains(sent.Error.Message, secret) {
 		t.Fatalf("handler error response = %#v", sent)
 	}
 
@@ -181,15 +183,16 @@ func TestRPCConnServerRequestContextCanceledErrorSuppressesResponse(t *testing.T
 	}
 }
 
-func TestRPCConnGracefulCloseDrainsServerResponse(t *testing.T) {
+func TestRPCConnCloseCancelsAndJoinsServerRequest(t *testing.T) {
 	transport := &manualTransport{recv: make(chan rpcMessage, 2)}
 	started := make(chan struct{})
-	release := make(chan struct{})
-	conn := newRPCConn(transport, func(context.Context, ServerRequest) (any, error) {
+	handlerExited := make(chan struct{})
+	conn := newRPCConn(transport, func(ctx context.Context, _ ServerRequest) (any, error) {
 		close(started)
-		<-release
+		<-ctx.Done()
+		close(handlerExited)
 
-		return map[string]any{"decision": "cancel"}, nil
+		return nil, ctx.Err()
 	})
 
 	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("103"), Method: RequestCommandApproval, Params: json.RawMessage(`{}`)}
@@ -202,19 +205,14 @@ func TestRPCConnGracefulCloseDrainsServerResponse(t *testing.T) {
 		closeErr <- conn.CloseContext(ctx)
 	}()
 
-	select {
-	case err := <-closeErr:
-		t.Fatalf("CloseContext returned before request completion: %v", err)
-	default:
-	}
-	close(release)
 	if err := <-closeErr; err != nil {
 		t.Fatalf("CloseContext returned error: %v", err)
 	}
+	<-handlerExited
 
 	sent := transport.sentMessages()
-	if len(sent) != 1 || string(sent[0].ID) != "103" || sent[0].Error != nil {
-		t.Fatalf("graceful close responses = %#v", sent)
+	if len(sent) != 0 {
+		t.Fatalf("cancelled close responses = %#v", sent)
 	}
 }
 
@@ -252,14 +250,102 @@ func TestRPCConnReadLoopSkipsMalformedLines(t *testing.T) {
 func TestRPCConnReadLoopCancelsRequestsOnRecvError(t *testing.T) {
 	transport := &manualTransport{recv: make(chan rpcMessage)}
 	conn := newRPCConn(transport, nil)
-	ctx, _, ok := conn.beginRequest("orphan")
+	ctx, finish, ok := conn.beginRequest("active")
 	if !ok {
 		t.Fatal("beginRequest before close failed")
+	}
+	if duplicateCtx, duplicateFinish, duplicateOK := conn.beginRequest("active"); duplicateOK || duplicateCtx != nil || duplicateFinish != nil {
+		t.Fatal("duplicate active request id was admitted")
 	}
 	close(transport.recv)
 	<-conn.done
 	if ctx.Err() == nil {
 		t.Fatal("readLoop recv error did not cancel active request")
+	}
+	finish()
+	if err := conn.Close(); !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("Close after passive read failure = %v", err)
+	}
+}
+
+type passiveFailureTransport struct {
+	request      rpcMessage
+	fail         chan struct{}
+	closeEntered chan struct{}
+	releaseClose chan struct{}
+	once         sync.Once
+	mu           sync.Mutex
+	reads        int
+	closes       int
+}
+
+func (t *passiveFailureTransport) Send(context.Context, rpcMessage) error { return nil }
+
+func (t *passiveFailureTransport) Recv() (rpcMessage, string, error) {
+	t.mu.Lock()
+	t.reads++
+	read := t.reads
+	t.mu.Unlock()
+	if read == 1 {
+		return t.request, string(mustRaw(t.request)), nil
+	}
+
+	<-t.fail
+
+	return rpcMessage{}, "", errors.New("passive read sentinel")
+}
+
+func (t *passiveFailureTransport) Close() error {
+	t.mu.Lock()
+	t.closes++
+	t.mu.Unlock()
+	t.once.Do(func() { close(t.closeEntered) })
+	<-t.releaseClose
+
+	return errors.New("transport containment sentinel")
+}
+
+func TestRPCPassiveReadFailureOwnsTotalMemoizedShutdown(t *testing.T) {
+	transport := &passiveFailureTransport{
+		request: rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("71"), Method: "server/request"},
+		fail:    make(chan struct{}), closeEntered: make(chan struct{}), releaseClose: make(chan struct{}),
+	}
+	handlerStarted := make(chan struct{})
+	handlerExited := make(chan struct{})
+	conn := newRPCConn(transport, func(ctx context.Context, _ ServerRequest) (any, error) {
+		close(handlerStarted)
+		<-ctx.Done()
+		close(handlerExited)
+
+		return nil, ctx.Err()
+	})
+	<-handlerStarted
+	close(transport.fail)
+	<-transport.closeEntered
+	<-handlerExited
+
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- conn.CloseContext(context.Background()) }()
+	}
+	select {
+	case err := <-results:
+		t.Fatalf("concurrent CloseContext returned before transport containment: %v", err)
+	default:
+	}
+
+	close(transport.releaseClose)
+	for range 2 {
+		err := <-results
+		if !strings.Contains(err.Error(), "passive read sentinel") || !strings.Contains(err.Error(), "transport containment sentinel") {
+			t.Fatalf("memoized shutdown error = %v", err)
+		}
+	}
+	transport.mu.Lock()
+	closes := transport.closes
+	transport.mu.Unlock()
+	if closes != 1 {
+		t.Fatalf("transport Close calls = %d, want 1", closes)
 	}
 }
 
@@ -321,6 +407,7 @@ func (t *manualTransport) Recv() (rpcMessage, string, error) {
 func (t *manualTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer func() { _ = recover() }()
 	if !t.done {
 		t.done = true
 		close(t.recv)
@@ -441,7 +528,7 @@ func TestRPCTransportAndPendingCallErrors(t *testing.T) {
 	}
 }
 
-func TestRPCDoneAndPlaceholderCancelEdges(t *testing.T) {
+func TestRPCDoneEdges(t *testing.T) {
 	doneTransport := &manualTransport{recv: make(chan rpcMessage, 1)}
 	doneConn := newRPCConn(doneTransport, nil)
 	errCh := make(chan error, 1)
@@ -455,7 +542,6 @@ func TestRPCDoneAndPlaceholderCancelEdges(t *testing.T) {
 
 	readTransport := &manualTransport{recv: make(chan rpcMessage, 1)}
 	readConn := newRPCConn(readTransport, nil)
-	readConn.recordCloseError(nil)
 	errCh = make(chan error, 1)
 	go func() { errCh <- readConn.Call(context.Background(), "wait", nil, nil) }()
 	waitUntil(t, func() bool { return len(readTransport.sentMessages()) == 1 })
@@ -467,44 +553,6 @@ func TestRPCDoneAndPlaceholderCancelEdges(t *testing.T) {
 		t.Fatalf("closeError = %v, want connection closed", readConn.closeError())
 	}
 	_ = readConn.Close()
-
-	client := NewPlaceholderClient(Options{})
-	thread, err := client.StartThread(context.Background(), ThreadStartRequest{})
-	if err != nil {
-		t.Fatalf("StartThread returned error: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	turn, err := client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
-	if err != nil {
-		t.Fatalf("RunTurn returned error: %v", err)
-	}
-	cancel()
-	time.Sleep(10 * time.Millisecond)
-	for range turn.Events {
-	}
-
-	ctx, cancel = context.WithCancel(context.Background())
-	turn, err = client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
-	if err != nil {
-		t.Fatalf("RunTurn third returned error: %v", err)
-	}
-	<-turn.Events
-	cancel()
-	time.Sleep(10 * time.Millisecond)
-	for range turn.Events {
-	}
-
-	ctx, cancel = context.WithCancel(context.Background())
-	turn, err = client.RunTurn(ctx, TurnStartRequest{ThreadID: thread.ID})
-	if err != nil {
-		t.Fatalf("RunTurn second returned error: %v", err)
-	}
-	<-turn.Events
-	<-turn.Events
-	cancel()
-	time.Sleep(10 * time.Millisecond)
-	for range turn.Events {
-	}
 }
 
 type responseTransport struct {
@@ -531,6 +579,11 @@ func (t *responseTransport) Send(_ context.Context, msg rpcMessage) error {
 
 func (t *responseTransport) Recv() (rpcMessage, string, error) {
 	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+
+		return rpcMessage{}, "", errors.New("closed")
+	}
 	if t.recv == nil {
 		t.recv = make(chan rpcMessage, 16)
 	}

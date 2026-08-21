@@ -8,6 +8,7 @@ import (
 
 var (
 	ErrConnectionClosed  = errors.New("codex app-server connection closed")
+	ErrAppServerEvent    = errors.New("codex app-server reported an error event")
 	ErrTurnEventOverflow = errors.New("codex turn event queue overflow")
 	// ErrBackgroundTerminalsUnsupported reports that the running app-server does
 	// not carry the thread-scoped background-terminal methods at all. It is the
@@ -19,16 +20,15 @@ var (
 	ErrPackageStageCleanupIncomplete  = errors.New("codex package stage cleanup incomplete")
 )
 
-// ProcessExitError reports that the codex app-server process terminated. It
-// carries the process exit status and a bounded tail of the process stderr so a
-// mid-turn transport death caused by the process exiting is classified as
-// cause:"process_exit" with the real exit/stderr detail instead of a bare EOF.
-// Transport death while the process is still alive is not a ProcessExitError and
-// stays cause:"transport".
+const (
+	appServerErrorText = "Codex app-server reported an error event"
+	turnFailedText     = "Codex turn failed"
+	processExitText    = "codex app-server process exited"
+)
+
+// ProcessExitError reports that the codex app-server process terminated.
 type ProcessExitError struct {
-	Status     string
-	StderrTail string
-	Err        error
+	Err error
 }
 
 func (e *ProcessExitError) Error() string {
@@ -36,21 +36,7 @@ func (e *ProcessExitError) Error() string {
 		return ""
 	}
 
-	var b strings.Builder
-	b.WriteString("codex app-server process exited")
-
-	if e.Status != "" {
-		b.WriteString(" (")
-		b.WriteString(e.Status)
-		b.WriteString(")")
-	}
-
-	if e.StderrTail != "" {
-		b.WriteString(": ")
-		b.WriteString(e.StderrTail)
-	}
-
-	return b.String()
+	return processExitText
 }
 
 func (e *ProcessExitError) Unwrap() error {
@@ -71,9 +57,10 @@ const (
 )
 
 // TurnFailedError is a native turn failure surfaced by the Codex app-server. It
-// carries the classified cause plus the real native cause text and, when the
-// harness reports them, the upstream HTTP status and provider error code. The
-// ACP layer translates it into the uniform `codex_turn_failed` wire error.
+// carries a fixed public classification plus, when the harness reports them,
+// the upstream HTTP status and provider error code. Raw provider text is never
+// retained here. The ACP layer translates it into the uniform
+// `codex_turn_failed` wire error.
 type TurnFailedError struct {
 	Cause        string
 	Message      string
@@ -120,6 +107,12 @@ func normalizeThreadError(err error) error {
 
 func isNativeThreadNotFound(err error) bool {
 	text := strings.ToLower(err.Error())
+
+	var nativeErr *rpcError
+	if errors.As(err, &nativeErr) {
+		text = strings.ToLower(nativeErr.Message)
+	}
+
 	switch {
 	case strings.Contains(text, "not materialized yet"):
 		return false

@@ -49,11 +49,7 @@ func (e *rpcError) Error() string {
 		return ""
 	}
 
-	if len(e.Data) == 0 {
-		return e.Message
-	}
-
-	return fmt.Sprintf("%s: %s", e.Message, string(e.Data))
+	return fmt.Sprintf("codex app-server request failed (code %d)", e.Code)
 }
 
 type lineTransport struct {
@@ -125,22 +121,17 @@ func (t *lineTransport) Recv() (rpcMessage, string, error) {
 	return msg, raw, nil
 }
 
-// readError classifies a stdout read failure. When the stream ends because the
-// app-server process exited, it returns a *ProcessExitError carrying the real
-// exit status and stderr tail so the failure surfaces as cause:"process_exit"
-// instead of a bare transport EOF. A read failure with the process still alive
-// is returned unchanged and stays cause:"transport".
+// readError distinguishes process exit from a live transport fault.
 func (t *lineTransport) readError(err error) error {
 	if t.proc == nil {
 		return err
 	}
 
-	status, stderrTail, ok := t.proc.exited(t.grace)
-	if !ok {
+	if !t.proc.exited(t.grace) {
 		return err
 	}
 
-	return &ProcessExitError{Status: status, StderrTail: stderrTail, Err: err}
+	return &ProcessExitError{Err: err}
 }
 
 func (t *lineTransport) Close() error {
@@ -166,15 +157,18 @@ type rpcConn struct {
 	events    chan rpcEvent
 	done      chan struct{}
 	doneOnce  sync.Once
+	shutdown  sync.Once
 
 	nextID         atomic.Int64
 	malformedLines atomic.Int64
 
-	mu       sync.Mutex
-	pending  map[string]pendingCall
-	requests map[string]*pendingRequest
-	closed   bool
-	closeErr error
+	mu          sync.Mutex
+	pending     map[string]pendingCall
+	requests    map[string]*pendingRequest
+	closed      bool
+	closeErr    error
+	closeWait   chan struct{}
+	shutdownErr error
 }
 
 type rpcEvent struct {
@@ -191,6 +185,7 @@ func newRPCConn(transport rpcTransport, handler RequestHandler) *rpcConn {
 		done:      make(chan struct{}),
 		pending:   make(map[string]pendingCall),
 		requests:  make(map[string]*pendingRequest),
+		closeWait: make(chan struct{}),
 	}
 
 	go func() {
@@ -296,82 +291,69 @@ func (c *rpcConn) Respond(ctx context.Context, id json.RawMessage, result any, r
 }
 
 func (c *rpcConn) Close() error {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	return c.closeContext(ctx, false)
+	return c.closeContext(context.Background())
 }
 
 func (c *rpcConn) CloseContext(ctx context.Context) error {
-	return c.closeContext(ctx, true)
+	return c.closeContext(ctx)
 }
 
-func (c *rpcConn) closeContext(ctx context.Context, reportWaitErr bool) error {
+func (c *rpcConn) closeContext(_ context.Context) error {
+	c.startShutdown(nil)
+	<-c.closeWait
+
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-
-		return nil
-	}
-
-	c.closed = true
-	for key, call := range c.pending {
-		delete(c.pending, key)
-		close(call.result)
-	}
-
-	requestDone := make([]<-chan struct{}, 0, len(c.requests))
-	for _, request := range c.requests {
-		requestDone = append(requestDone, request.done)
-	}
+	err := c.shutdownErr
 	c.mu.Unlock()
-
-	var waitErr error
-
-	for _, done := range requestDone {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			waitErr = ctx.Err()
-		}
-	}
-
-	if waitErr != nil {
-		c.mu.Lock()
-		for _, request := range c.requests {
-			request.cancel()
-		}
-		c.mu.Unlock()
-	}
-
-	if !reportWaitErr {
-		waitErr = nil
-	}
-
-	err := errors.Join(waitErr, c.transport.Close())
-	c.closeDone()
 
 	return err
 }
 
-func (c *rpcConn) readLoop() {
-	defer func() {
+func (c *rpcConn) startShutdown(cause error) {
+	c.shutdown.Do(func() {
 		c.mu.Lock()
-		if !c.closed {
-			c.closed = true
-			for key, call := range c.pending {
-				delete(c.pending, key)
-				close(call.result)
-			}
 
-			for key, request := range c.requests {
-				delete(c.requests, key)
-				request.cancel()
-			}
+		c.closed = true
+		if cause != nil && c.closeErr == nil {
+			c.closeErr = fmt.Errorf("%w: %w", ErrConnectionClosed, cause)
+		}
+
+		shutdownCause := c.closeErr
+
+		for key, call := range c.pending {
+			delete(c.pending, key)
+			close(call.result)
+		}
+
+		requests := make([]*pendingRequest, 0, len(c.requests))
+		for _, request := range c.requests {
+			requests = append(requests, request)
 		}
 		c.mu.Unlock()
-		c.closeDone()
-	}()
+
+		for _, request := range requests {
+			request.cancel()
+		}
+
+		go func() {
+			transportErr := c.transport.Close()
+
+			for _, request := range requests {
+				<-request.done
+			}
+
+			<-c.done
+
+			c.mu.Lock()
+			c.shutdownErr = errors.Join(shutdownCause, transportErr)
+			close(c.closeWait)
+			c.mu.Unlock()
+		}()
+	})
+}
+
+func (c *rpcConn) readLoop() {
+	defer c.closeDone()
 
 	for {
 		msg, raw, err := c.transport.Recv()
@@ -382,7 +364,7 @@ func (c *rpcConn) readLoop() {
 				continue
 			}
 
-			c.recordCloseError(err)
+			c.startShutdown(err)
 
 			return
 		}
@@ -400,21 +382,6 @@ func (c *rpcConn) readLoop() {
 			c.deliverNotification(msg, raw)
 		}
 	}
-}
-
-func (c *rpcConn) recordCloseError(err error) {
-	if err == nil {
-		return
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.closed || c.closeErr != nil {
-		return
-	}
-
-	c.closeErr = fmt.Errorf("%w: %w", ErrConnectionClosed, err)
 }
 
 func (c *rpcConn) err() error {
@@ -487,7 +454,7 @@ func (c *rpcConn) handleRequest(msg rpcMessage) {
 	}
 
 	if err != nil {
-		_ = c.Respond(ctx, msg.ID, nil, &rpcError{Code: -32000, Message: err.Error()})
+		_ = c.Respond(ctx, msg.ID, nil, &rpcError{Code: -32000, Message: "codex adapter request failed"})
 
 		return
 	}
@@ -501,6 +468,13 @@ func (c *rpcConn) beginRequest(key string) (context.Context, func(), bool) {
 
 	c.mu.Lock()
 	if c.closed {
+		c.mu.Unlock()
+		cancel()
+
+		return nil, nil, false
+	}
+
+	if _, exists := c.requests[key]; exists {
 		c.mu.Unlock()
 		cancel()
 

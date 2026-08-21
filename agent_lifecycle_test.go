@@ -95,7 +95,7 @@ func TestLifecycleFactsAreNegativeUnderEveryContainmentMode(t *testing.T) {
 		require.Equal(t, mode, agent.ContainmentMode())
 
 		facts := agent.provenLifecycleFacts()
-		require.False(t, facts.UpdatesOutsidePrompt, mode)
+		require.True(t, facts.UpdatesOutsidePrompt, mode)
 		require.False(t, facts.AuthoritativeQuiescence, mode)
 		require.Empty(t, facts.QuiescenceSource, mode)
 		require.Equal(t, []lifecycle.ActivityKind{}, facts.ActivityKinds, mode)

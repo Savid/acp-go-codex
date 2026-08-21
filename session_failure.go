@@ -8,6 +8,39 @@ import (
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
+type hostDeliveryError struct {
+	err error
+}
+
+func (e *hostDeliveryError) Error() string {
+	if e == nil || e.err == nil {
+		return "ACP host delivery failed"
+	}
+
+	return e.err.Error()
+}
+
+func (e *hostDeliveryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+
+	return e.err
+}
+
+func wrapHostDeliveryError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var delivery *hostDeliveryError
+	if errors.As(err, &delivery) {
+		return err
+	}
+
+	return &hostDeliveryError{err: err}
+}
+
 // turnFailureFromEvent extracts the native failure cause from a terminal event:
 // a codex `error` event, or a `turn/completed` whose status is failed/errored.
 func turnFailureFromEvent(event codex.Event) error {
@@ -35,13 +68,13 @@ func (s *session) mapTurnFailure(err error) error {
 	data := map[string]any{
 		jsonFieldError:   valueTurnFailed,
 		jsonFieldCause:   codex.CauseProvider,
-		jsonFieldMessage: err.Error(),
+		jsonFieldMessage: "Codex provider turn failed",
 	}
 
 	var imageErr *imageOutputError
 	if errors.As(err, &imageErr) {
 		data[jsonFieldCause] = codex.CauseTransport
-		data[jsonFieldMessage] = imageErr.message
+		data[jsonFieldMessage] = "Codex image output delivery failed"
 		data["stage"] = imageOutputStage
 
 		data[jsonFieldReason] = imageErr.reason
@@ -64,29 +97,38 @@ func (s *session) mapTurnFailure(err error) error {
 	switch {
 	case errors.As(err, &tf):
 		data[jsonFieldCause] = tf.Cause
-		data[jsonFieldMessage] = tf.Message
+		data[jsonFieldMessage] = turnFailureMessage(tf.Cause)
 
 		if tf.StatusCode > 0 {
 			data[jsonFieldStatusCode] = tf.StatusCode
 		}
 
-		if tf.ProviderCode != "" {
-			data[jsonFieldProviderCode] = tf.ProviderCode
-		}
 	case errors.As(err, &procExit):
-		// The app-server process died mid-turn: name the real exit status and
-		// stderr tail instead of a bare transport EOF.
 		data[jsonFieldCause] = codex.CauseProcessExit
-		data[jsonFieldMessage] = procExit.Error()
+		data[jsonFieldMessage] = turnFailureMessage(codex.CauseProcessExit)
 
 		s.markClientDead()
 	case errors.Is(err, codex.ErrConnectionClosed):
 		data[jsonFieldCause] = codex.CauseTransport
+		data[jsonFieldMessage] = turnFailureMessage(codex.CauseTransport)
 
 		s.markClientDead()
 	}
 
 	return acp.NewInternalError(data)
+}
+
+func turnFailureMessage(cause string) string {
+	switch cause {
+	case codex.CauseTransport:
+		return "Codex transport failed"
+	case codex.CauseProcessExit:
+		return "Codex process exited"
+	case codex.CauseTimeout:
+		return "Codex turn timed out"
+	default:
+		return "Codex provider turn failed"
+	}
 }
 
 // codexAuthRequiredError surfaces an authentication failure as the -32000
@@ -101,7 +143,7 @@ func codexAuthRequiredError(err error, account map[string]any) error {
 	data := map[string]any{
 		jsonFieldError:   valueTurnFailed,
 		jsonFieldCause:   codex.CauseProvider,
-		jsonFieldMessage: err.Error(),
+		jsonFieldMessage: "Codex authentication is required",
 		codexMetaKey: map[string]any{
 			authMetaAuthKey: map[string]any{
 				jsonFieldReason: "codex-auth-required",

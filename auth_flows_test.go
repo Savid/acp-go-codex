@@ -175,9 +175,12 @@ func TestAuthorizeStopsReplayingOnceTheSessionCloses(t *testing.T) {
 
 	first := fixture.authorize(t, authMethodDeviceCode, "request-1")
 
-	fixture.broker.closeSession(acp.SessionId(fixture.sessionID))
+	_, err := fixture.agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: acp.SessionId(fixture.sessionID)})
+	if err != nil {
+		t.Fatalf("close owning session: %v", err)
+	}
 
-	if _, err := fixture.call(t, AuthMethodsMethod, map[string]any{"sessionId": fixture.sessionID}); err == nil {
+	if _, err = fixture.call(t, AuthMethodsMethod, map[string]any{"sessionId": fixture.sessionID}); err == nil {
 		t.Fatal("a closed session still answered a provider-auth leg")
 	} else {
 		requireInvalidField(t, err, "sessionId")
@@ -1400,7 +1403,9 @@ func TestLoginCompletionReachesTheBrokerThroughTheEventSink(t *testing.T) {
 	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
 
 	sink := &codexClientEventSink{agent: fixture.agent}
-	sink.SetClient(fixture.client)
+	if err := sink.SetClient(fixture.client); err != nil {
+		t.Fatal(err)
+	}
 	sink.Handle(t.Context(), codex.Event{
 		Kind:  codex.EventLoginCompleted,
 		Login: codex.LoginCompletion{LoginID: "login-1", Success: true},
@@ -1420,7 +1425,9 @@ func TestRejectedLoginFailsThroughTheEventSink(t *testing.T) {
 	flow := fixture.authorize(t, authMethodDeviceCode, "request-1")
 
 	sink := &codexClientEventSink{agent: fixture.agent}
-	sink.SetClient(fixture.client)
+	if err := sink.SetClient(fixture.client); err != nil {
+		t.Fatal(err)
+	}
 	sink.Handle(t.Context(), codex.Event{
 		Kind:  codex.EventLoginCompleted,
 		Login: codex.LoginCompletion{LoginID: "login-1", Success: false},

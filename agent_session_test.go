@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -585,13 +586,8 @@ func (c *unknownDispatchClient) RunTurn(ctx context.Context, _ codex.TurnStartRe
 
 func (c *blockingInterruptClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
 	c.runOnce.Do(func() { close(c.runStarted) })
-	events := make(chan codex.Event)
-	go func() {
-		<-ctx.Done()
-		close(events)
-	}()
 
-	return codex.Turn{ID: "native-turn", Events: events}, nil
+	return codex.Turn{ID: "native-turn"}, nil
 }
 
 func (c *blockingInterruptClient) CancelTurn(context.Context, string, string) error {
@@ -984,6 +980,7 @@ func TestLifecycleMetaRejectsDeletedNamespaces(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newSpyCodexClient(), nil
 	}))
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
 	cases := []struct {
 		name  string
@@ -1358,6 +1355,7 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	if err := activeAgent.storeStartedSession(activeSession); err != nil {
 		t.Fatalf("store active session: %v", err)
 	}
+	t.Cleanup(activeSession.fenceSession)
 	if _, err := activeAgent.ResumeSession(ctx, ResumeSessionRequest(activeID, "/tmp/project")); err != nil {
 		t.Fatalf("ResumeSession active returned error: %v", err)
 	}
@@ -1396,11 +1394,12 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}
 
 	activeLoadErrAgent := NewAgent(WithSessionStore(&configurableStore{loadErr: errors.New("active load failed")}))
-	activeLoadSession := newSession(activeLoadErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{}, nil)
+	activeLoadSession := newSession(activeLoadErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, newSpyCodexClient(), sessionMeta{}, nil)
 	activeLoadSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeLoadErrAgent.storeStartedSession(activeLoadSession); err != nil {
 		t.Fatalf("store active load err session: %v", err)
 	}
+	t.Cleanup(activeLoadSession.fenceSession)
 	if _, err := activeLoadErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
 		t.Fatal("LoadSession active ignored store load error")
 	}
@@ -1408,11 +1407,12 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	activeReplayErrStore := &configurableStore{entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)}}
 	activeReplayErrAgent := NewAgent(WithSessionStore(activeReplayErrStore))
 	activeReplayErrAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
-	activeReplayErrSession := newSession(activeReplayErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{}, nil)
+	activeReplayErrSession := newSession(activeReplayErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, newSpyCodexClient(), sessionMeta{}, nil)
 	activeReplayErrSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeReplayErrAgent.storeStartedSession(activeReplayErrSession); err != nil {
 		t.Fatalf("store active replay err session: %v", err)
 	}
+	t.Cleanup(activeReplayErrSession.fenceSession)
 	if _, err := activeReplayErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
 		t.Fatal("LoadSession active ignored rollout replay error")
 	}
@@ -1662,13 +1662,7 @@ func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnSta
 	c.mu.Unlock()
 	c.startOnce.Do(func() { close(c.turnStarted) })
 
-	events := make(chan codex.Event)
-	go func() {
-		<-ctx.Done()
-		close(events)
-	}()
-
-	return codex.Turn{ID: "turn", Events: events}, nil
+	return codex.Turn{ID: "turn"}, nil
 }
 
 // A steering interrupt followed by session/close removes the wrapper session
@@ -1807,7 +1801,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	client.mu.Lock()
 	require.Equal(t, 2, client.resumeCount)
 	require.Equal(t, nativePath, client.resume.Path)
-	require.Equal(t, []string{nativeThreadID, nativeThreadID}, client.unsubscribed)
+	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
 	client.mu.Unlock()
 
 	agent.setAgentClient(&errorAgentClient{
@@ -1863,32 +1857,38 @@ type loadedThreadCarrierClient struct {
 	*spyCodexClient
 
 	mu            sync.Mutex
-	subscribed    bool
 	environment   map[string]string
 	extraPathDirs []string
 	calls         []string
 }
 
-func (c *loadedThreadCarrierClient) UnsubscribeThread(ctx context.Context, threadID string) error {
-	if err := c.spyCodexClient.UnsubscribeThread(ctx, threadID); err != nil {
-		return err
+type joinedRebindClient struct {
+	*spyCodexClient
+	active  *session
+	checked chan error
+}
+
+func (c *joinedRebindClient) ResumeThread(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+	c.active.lifecycleMu.Lock()
+	pumping := c.active.nativeEventPumping
+	stopping := c.active.nativeEventStopping
+	c.active.lifecycleMu.Unlock()
+	if !pumping || stopping {
+		c.checked <- fmt.Errorf("old pump state pumping=%v stopping=%v", pumping, stopping)
+	} else {
+		c.checked <- nil
 	}
 
-	c.mu.Lock()
-	c.subscribed = false
-	c.calls = append(c.calls, "unsubscribe")
-	c.mu.Unlock()
+	thread, err := c.spyCodexClient.ResumeThread(ctx, req)
+	thread.Path = req.Path
 
-	return nil
+	return thread, err
 }
 
 func (c *loadedThreadCarrierClient) ResumeThread(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
 	c.mu.Lock()
-	if !c.subscribed {
-		c.environment = cloneStringMap(req.Environment)
-		c.extraPathDirs = cloneStrings(req.ExtraPathDirs)
-	}
-	c.subscribed = true
+	c.environment = cloneStringMap(req.Environment)
+	c.extraPathDirs = cloneStrings(req.ExtraPathDirs)
 	c.calls = append(c.calls, "resume")
 	c.mu.Unlock()
 
@@ -1913,6 +1913,7 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		agent.sessions[active.id] = active
 		agent.runtimeClient = client
 		agent.runtimeDead = false
+		t.Cleanup(active.fenceSession)
 
 		return active
 	}
@@ -1974,15 +1975,6 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		active := bind(agent, client)
 		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
 		require.ErrorContains(t, err, "resume failed")
-	})
-
-	t.Run("unsubscribe failure", func(t *testing.T) {
-		client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), unsubscribeErr: errors.New("unsubscribe failed")}
-		agent := NewAgent()
-		active := bind(agent, client)
-		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
-		require.ErrorContains(t, err, "unsubscribe failed")
-		require.Empty(t, client.resume.ThreadID)
 	})
 
 	for _, tc := range []struct {
@@ -2062,6 +2054,67 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 	})
 }
 
+func TestSameFingerprintResumeAndLoadShareActiveTurnAdmission(t *testing.T) {
+	for _, method := range []string{"resume", "load"} {
+		for _, turnKind := range []string{"foreground", "autonomous"} {
+			t.Run(method+"_"+turnKind, func(t *testing.T) {
+				client := newSpyCodexClient()
+				agent := NewAgent()
+				recorder := newRecordingAgentClient()
+				agent.setAgentClient(recorder)
+				cwd := t.TempDir()
+				s := newSession(agent, "session", cwd, nil, codex.Thread{ID: "thread", Path: "/rollout"}, client, sessionMeta{}, nil)
+				s.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+					Cwd: cwd, ResumeID: "session", Meta: sessionMeta{},
+				})
+				agent.sessions[s.id] = s
+				agent.runtimeClient = client
+				t.Cleanup(s.fenceSession)
+
+				var (
+					foregroundCleanup func()
+					autonomous        *promptIncarnation
+				)
+				if turnKind == "foreground" {
+					foregroundCleanup = beginTestPromptTurn(t, s, "live-foreground", "foreground-turn")
+					defer foregroundCleanup()
+				} else {
+					agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+					require.NoError(t, s.openLifecycleStream(t.Context(), agent.lifecycle))
+					s.lifecycleMu.Lock()
+					var err error
+					autonomous, err = s.openAutonomousTurnLocked(t.Context(), "autonomous-turn")
+					s.lifecycleMu.Unlock()
+					require.NoError(t, err)
+				}
+
+				baseline := len(recorder.updates)
+				var err error
+				switch method {
+				case "resume":
+					_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(s.id, cwd))
+				case "load":
+					_, err = agent.LoadSession(t.Context(), LoadSessionRequest(s.id, cwd))
+				}
+				require.Error(t, err)
+				require.Len(t, recorder.updates, baseline, "refused path injected history or replaced lifecycle state")
+				client.mu.Lock()
+				require.Empty(t, client.resume.ThreadID, "refused path reached native resume")
+				client.mu.Unlock()
+
+				if autonomous != nil {
+					s.lifecycleMu.Lock()
+					require.Same(t, autonomous, s.agentIncarnation)
+					require.False(t, autonomous.settled)
+					s.lifecycleMu.Unlock()
+				} else {
+					require.Equal(t, "live-foreground", s.activeTurnNonce())
+				}
+			})
+		}
+	}
+}
+
 func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
 	oldPath := filepath.Join(t.TempDir(), "old-bin")
 	newPath := filepath.Join(t.TempDir(), "new-bin")
@@ -2082,6 +2135,7 @@ func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
 	}, nil)
 	agent.sessions[active.id] = active
 	agent.runtimeClient = client
+	t.Cleanup(active.fenceSession)
 
 	meta := sessionMeta{
 		Env:           map[string]string{"WAGIE_API_TOKEN": "new-token", "WAGIE_OPERATION_ID": "operation-new"},
@@ -2112,12 +2166,11 @@ func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
 	require.Equal(t, newPath, active.snapshot().extraPathDirs[0])
 }
 
-func TestActiveRebindDetachesLoadedThreadBeforeApplyingCarrier(t *testing.T) {
+func TestActiveRebindAppliesCarrierWithoutDetachingBroker(t *testing.T) {
 	oldPath := filepath.Join(t.TempDir(), "old-bin")
 	newPath := filepath.Join(t.TempDir(), "new-bin")
 	client := &loadedThreadCarrierClient{
 		spyCodexClient: newSpyCodexClient(),
-		subscribed:     true,
 		environment:    map[string]string{"WAGIE_OPERATION_ID": "operation-old"},
 		extraPathDirs:  []string{oldPath},
 	}
@@ -2132,6 +2185,7 @@ func TestActiveRebindDetachesLoadedThreadBeforeApplyingCarrier(t *testing.T) {
 	}, nil)
 	agent.sessions[active.id] = active
 	agent.runtimeClient = client
+	t.Cleanup(active.fenceSession)
 
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
 	_, err := agent.rebindActiveStoredSession(
@@ -2147,10 +2201,174 @@ func TestActiveRebindDetachesLoadedThreadBeforeApplyingCarrier(t *testing.T) {
 	require.NoError(t, err)
 
 	client.mu.Lock()
-	require.Equal(t, []string{"unsubscribe", "resume"}, client.calls)
+	require.Equal(t, []string{"resume"}, client.calls)
 	require.Equal(t, "operation-new", client.environment["WAGIE_OPERATION_ID"])
 	require.Equal(t, []string{newPath}, client.extraPathDirs)
 	client.mu.Unlock()
+}
+
+func TestActiveRebindMaintainsExactBrokerDuringResume(t *testing.T) {
+	client := &joinedRebindClient{spyCodexClient: newSpyCodexClient(), checked: make(chan error, 1)}
+	agent := NewAgent()
+	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+		ID: "thread-active", Path: "/native/rollout.jsonl",
+	}, client, sessionMeta{}, nil)
+	client.active = active
+	agent.sessions[active.id] = active
+	agent.runtimeClient = client
+	require.NoError(t, active.attachNativeEvents())
+	t.Cleanup(active.fenceSession)
+
+	_, err := agent.rebindActiveStoredSession(
+		context.Background(),
+		ResumeSessionRequest("session", "/tmp/project"),
+		[]SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)},
+		sessionMeta{}, active,
+	)
+	require.NoError(t, err)
+	require.NoError(t, <-client.checked)
+	active.lifecycleMu.Lock()
+	require.True(t, active.nativeEventSource)
+	require.True(t, active.nativeEventPumping)
+	require.False(t, active.nativeEventStopping)
+	require.NoError(t, active.lifecycleFailure)
+	active.lifecycleMu.Unlock()
+}
+
+func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
+	t.Run("pending establishment and pre-open work refuse rebind", func(t *testing.T) {
+		for _, prepare := range []func(*session){
+			func(s *session) {
+				s.establishment = &establishmentObligation{responseID: "pending", done: make(chan struct{})}
+			},
+			func(s *session) {
+				s.preOpenEvents = []codex.Event{{
+					Kind: codex.EventAgentMessageDelta, Scope: codex.EventScopeThread,
+					ThreadID: "thread-active", TurnID: "pre-open",
+				}}
+			},
+		} {
+			agent := NewAgent()
+			s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread-active"}, newSpyCodexClient(), sessionMeta{}, nil)
+			s.lifecycleMu.Lock()
+			prepare(s)
+			s.lifecycleMu.Unlock()
+			require.Error(t, s.beginActiveNativeRebind(t.Context()))
+		}
+
+		agent := NewAgent()
+		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+		s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread-active"}, newSpyCodexClient(), sessionMeta{}, nil)
+		require.Error(t, s.beginActiveNativeRebind(t.Context()), "an unopened negotiated lifecycle is pending establishment work")
+	})
+
+	t.Run("agent event wins", func(t *testing.T) {
+		agent := NewAgent()
+		agent.options.SessionStore = nil
+		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+		agent.setAgentClient(newRecordingAgentClient())
+		client := newSpyCodexClient()
+		s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread-active"}, client, sessionMeta{}, nil)
+		require.NoError(t, s.openLifecycleStream(t.Context(), agent.lifecycle))
+		require.NoError(t, s.routeNativeEvent(codex.Event{
+			Kind: codex.EventAgentMessageDelta, Scope: codex.EventScopeThread,
+			ThreadID: "thread-active", TurnID: "event-winner", ItemID: "message", Text: "winner",
+		}))
+		require.Error(t, s.beginActiveNativeRebind(t.Context()))
+		s.lifecycleMu.Lock()
+		require.Equal(t, "event-winner", s.agentIncarnation.nativeTurnID)
+		s.lifecycleMu.Unlock()
+		s.fenceSession()
+	})
+
+	t.Run("rebind wins", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		client := &activeRebindEdgeClient{spyCodexClient: newSpyCodexClient()}
+		client.thread.ID = "thread-active"
+		client.thread.Path = "/native/rollout.jsonl"
+		client.resume = func(ctx context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return codex.Thread{}, ctx.Err()
+			}
+			if err := client.publishTurn(req.ThreadID, "buffered-event", []codex.Event{
+				{Kind: codex.EventAgentMessageDelta, ItemID: "message", Text: "buffered"},
+				{Kind: codex.EventCompleted, StopReason: codex.StopReasonEndTurn},
+			}); err != nil {
+				return codex.Thread{}, err
+			}
+
+			return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+		}
+
+		agent := NewAgent()
+		agent.options.SessionStore = nil
+		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+		recorder := newRecordingAgentClient()
+		agent.setAgentClient(recorder)
+		s := newSession(agent, "session", t.TempDir(), nil, client.thread, client, sessionMeta{}, nil)
+		agent.sessions[s.id] = s
+		agent.runtimeClient = client
+		require.NoError(t, s.attachNativeEvents())
+		require.NoError(t, s.openLifecycleStream(t.Context(), agent.lifecycle))
+		t.Cleanup(s.fenceSession)
+
+		rebound := make(chan error, 1)
+		go func() {
+			_, err := agent.rebindActiveStoredSession(
+				t.Context(), ResumeSessionRequest(s.id, s.cwd),
+				[]SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)},
+				sessionMeta{}, s,
+			)
+			rebound <- err
+		}()
+		<-started
+
+		type claimResult struct {
+			in  *promptIncarnation
+			err error
+		}
+		probeCtx, cancelProbe := context.WithCancel(t.Context())
+		enteredProbe := make(chan struct{})
+		claimed := make(chan claimResult, 1)
+		go func() {
+			close(enteredProbe)
+			in, _, err := s.claimLifecycleTurn(probeCtx, "server-request-after-rebind")
+			claimed <- claimResult{in: in, err: err}
+		}()
+		<-enteredProbe
+		cancelProbe()
+		probe := <-claimed
+		require.ErrorIs(t, probe.err, context.Canceled)
+		require.Nil(t, probe.in)
+
+		close(release)
+		require.NoError(t, <-rebound)
+		go func() {
+			in, _, err := s.claimLifecycleTurn(t.Context(), "server-request-after-rebind")
+			claimed <- claimResult{in: in, err: err}
+		}()
+		result := <-claimed
+		require.NoError(t, result.err)
+		require.NotNil(t, result.in)
+		require.Equal(t, "server-request-after-rebind", result.in.nativeTurnID)
+		require.True(t, recorderHasAgentText(recorder, "buffered"), "buffered broker event was dropped during rebind")
+		require.NoError(t, agent.Cancel(t.Context(), CancelRequest(s.id, result.in.turnNonce)))
+	})
+}
+
+func recorderHasAgentText(recorder *recordingAgentClient, text string) bool {
+	for _, update := range recorder.updates {
+		if update.Update.AgentMessageChunk != nil && update.Update.AgentMessageChunk.Content.Text != nil &&
+			update.Update.AgentMessageChunk.Content.Text.Text == text {
+			return true
+		}
+	}
+
+	return false
 }
 
 func TestRuntimeCrashRecoveryPreservesRotatedThreadCarrier(t *testing.T) {
@@ -2848,9 +3066,9 @@ func TestForkSessionErrorBranches(t *testing.T) {
 	if _, err := agent.forkSession(ctx, ForkSessionRequest("missing", "/tmp/project")); err == nil {
 		t.Fatal("forkSession accepted missing parent")
 	}
-	parentResp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
-	if err != nil {
-		t.Fatalf("NewSession parent returned error: %v", err)
+	parentResp, parentErr := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	if parentErr != nil {
+		t.Fatalf("NewSession parent returned error: %v", parentErr)
 	}
 	if _, err := agent.forkSession(ctx, ForkSessionRequest(parentResp.SessionId, "relative")); err == nil {
 		t.Fatal("forkSession accepted relative cwd")
@@ -2885,9 +3103,26 @@ func TestForkSessionErrorBranches(t *testing.T) {
 		t.Fatal("forkSession ignored fork error")
 	}
 
+	resumeFailureClient := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("child resume failed"),
+	}
+	resumeFailureAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return resumeFailureClient, nil
+	}))
+	resumeFailureParent := newSession(
+		resumeFailureAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil,
+	)
+	require.NoError(t, resumeFailureAgent.storeStartedSession(resumeFailureParent))
+	_, resumeFailureErr := resumeFailureAgent.forkSession(ctx, ForkSessionRequest("parent", "/tmp/project"))
+	require.ErrorContains(t, resumeFailureErr, "child resume failed")
+	resumeFailureClient.mu.Lock()
+	require.Equal(t, []string{"fork-thread"}, resumeFailureClient.deletedThreads)
+	resumeFailureClient.mu.Unlock()
+
+	limitClient := newSpyCodexClient()
 	limitAgent := NewAgent(
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
-		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return limitClient, nil }),
 	)
 	limitParent := newSession(limitAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := limitAgent.storeStartedSession(limitParent); err != nil {
@@ -2896,6 +3131,250 @@ func TestForkSessionErrorBranches(t *testing.T) {
 	if _, err := limitAgent.forkSession(ctx, ForkSessionRequest("parent", "/tmp/project")); err == nil {
 		t.Fatal("forkSession ignored store backpressure")
 	}
+	limitClient.mu.Lock()
+	require.Equal(t, []string{"fork-thread"}, limitClient.deletedThreads)
+	limitClient.mu.Unlock()
+}
+
+type forkShapeClient struct {
+	*spyCodexClient
+	forkThread   codex.Thread
+	resumeThread codex.Thread
+}
+
+type ambiguousCanaryFailureClient struct {
+	*runtimeRecordingClient
+	obligation *establishmentObligation
+}
+
+func (c *ambiguousCanaryFailureClient) SubscribeThread(ctx context.Context, threadID string) (codex.ThreadEventStream, error) {
+	if err := ctx.Err(); err != nil {
+		return codex.ThreadEventStream{}, err
+	}
+	c.spyCodexClient.mu.Lock()
+	if c.feeds == nil {
+		c.feeds = make(map[string]chan codex.Event)
+	}
+	events := make(chan codex.Event)
+	c.feeds[threadID] = events
+	c.spyCodexClient.mu.Unlock()
+	var once sync.Once
+
+	return codex.ThreadEventStream{Events: events, Release: func() {
+		once.Do(func() {
+			c.spyCodexClient.mu.Lock()
+			delete(c.feeds, threadID)
+			close(events)
+			c.spyCodexClient.mu.Unlock()
+		})
+	}}, nil
+}
+
+func (c *ambiguousCanaryFailureClient) RunTurn(_ context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
+	c.obligation.mu.Lock()
+	active := c.obligation.session
+	c.obligation.mu.Unlock()
+	active.lifecycleMu.Lock()
+	active.lifecycleDeliveryActive = true
+	active.lifecycleMu.Unlock()
+	if err := c.publishTurn(req.ThreadID, "first", []codex.Event{
+		{Kind: codex.EventRaw, TurnID: "first"},
+		{Kind: codex.EventRaw, TurnID: "second"},
+		{Kind: codex.EventRaw, TurnID: "second"},
+	}); err != nil {
+		return codex.Turn{}, err
+	}
+
+	return codex.Turn{}, errors.New("ambiguous canary failure")
+}
+
+func (c *forkShapeClient) ForkThread(context.Context, codex.ThreadForkRequest) (codex.Thread, error) {
+	return c.forkThread, nil
+}
+
+func (c *forkShapeClient) ResumeThread(context.Context, codex.ThreadResumeRequest) (codex.Thread, error) {
+	return c.resumeThread, nil
+}
+
+func boundEstablishmentContext(t *testing.T) context.Context {
+	t.Helper()
+	hooks := newEstablishmentHooks(NewAgent().log)
+	obligation, err := hooks.reserve("already-bound")
+	require.NoError(t, err)
+	require.NoError(t, obligation.bind(&session{}))
+
+	return withEstablishmentObligation(t.Context(), obligation)
+}
+
+func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
+	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}`)}
+
+	t.Run("new", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+		agent.lifecycle = negotiated
+		_, err := agent.NewSession(boundEstablishmentContext(t), NewSessionRequest(t.TempDir()))
+		require.ErrorContains(t, err, "changed owner")
+	})
+
+	for _, operation := range []struct {
+		name string
+		run  func(*Agent, context.Context) error
+	}{
+		{name: "resume materialized", run: func(agent *Agent, ctx context.Context) error {
+			_, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", t.TempDir()), entries)
+
+			return err
+		}},
+		{name: "load materialized", run: func(agent *Agent, ctx context.Context) error {
+			_, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("stored", t.TempDir()), entries)
+
+			return err
+		}},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			client := newSpyCodexClient()
+			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+			agent.lifecycle = negotiated
+			require.ErrorContains(t, operation.run(agent, boundEstablishmentContext(t)), "changed owner")
+		})
+	}
+
+	t.Run("retained", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent := NewAgent()
+		agent.lifecycle = negotiated
+		agent.runtimeClient = client
+		retained := &retainedRuntimeThread{
+			sessionID: "stored", threadID: "thread", client: client, claimed: true,
+		}
+		agent.retainedThreads[retained.sessionID] = retained
+		_, _, err := agent.resumeRetainedRuntimeSession(
+			boundEstablishmentContext(t), ResumeSessionRequest("stored", t.TempDir()), sessionMeta{}, retained,
+		)
+		require.ErrorContains(t, err, "changed owner")
+	})
+
+	t.Run("active admission", func(t *testing.T) {
+		agent := NewAgent()
+		agent.lifecycle = negotiated
+		active := &session{agent: agent, nativeEventOpened: true}
+		_, err := agent.beginActiveLifecycleAdmission(boundEstablishmentContext(t), active)
+		require.ErrorContains(t, err, "changed owner")
+	})
+
+	t.Run("fork", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+		t.Cleanup(func() { require.NoError(t, agent.Close()) })
+		agent.lifecycle = negotiated
+		parent := newSession(agent, "parent", t.TempDir(), nil, codex.Thread{ID: "parent-thread"}, client, sessionMeta{}, nil)
+		require.NoError(t, agent.storeStartedSession(parent))
+		_, err := agent.forkSession(boundEstablishmentContext(t), ForkSessionRequest(parent.id, t.TempDir()))
+		require.ErrorContains(t, err, "changed owner")
+	})
+}
+
+func TestRetainedResumeRollbackJoinsLifecycleRebindFailure(t *testing.T) {
+	client := &ambiguousCanaryFailureClient{runtimeRecordingClient: newRuntimeRecordingClient()}
+	agent := NewAgent()
+	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.runtimeClient = client
+	retained := &retainedRuntimeThread{sessionID: "stored", threadID: "thread", client: client, claimed: true}
+	agent.retainedThreads[retained.sessionID] = retained
+	params := ResumeSessionRequest(
+		retained.sessionID,
+		t.TempDir(),
+		WithSessionMCPServers(HTTPMCPServer("marker", "https://example.test/mcp", nil)),
+	)
+
+	hooks := newEstablishmentHooks(agent.log)
+	obligation, reserveErr := hooks.reserve("retained-resume")
+	require.NoError(t, reserveErr)
+	client.obligation = obligation
+	_, _, err := agent.resumeRetainedRuntimeSession(withEstablishmentObligation(t.Context(), obligation), params, sessionMeta{}, retained)
+	require.ErrorContains(t, err, "ambiguous canary failure")
+	require.ErrorContains(t, err, "native lifecycle is active")
+	require.False(t, retained.claimed)
+	obligation.mu.Lock()
+	active := obligation.session
+	obligation.mu.Unlock()
+	active.lifecycleMu.Lock()
+	active.lifecycleDeliveryActive = false
+	active.lifecycleMu.Unlock()
+	active.fenceSession()
+}
+
+func TestForkIdentityAndCleanupFailuresAreContained(t *testing.T) {
+	makeAgent := func(client codex.Client) (*Agent, *session) {
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+		t.Cleanup(func() { require.NoError(t, agent.Close()) })
+		parent := newSession(agent, "parent", t.TempDir(), nil, codex.Thread{ID: "parent-thread"}, client, sessionMeta{}, nil)
+		require.NoError(t, agent.storeStartedSession(parent))
+
+		return agent, parent
+	}
+
+	t.Run("pending parent", func(t *testing.T) {
+		client := newSpyCodexClient()
+		agent, parent := makeAgent(client)
+		hooks := newEstablishmentHooks(agent.log)
+		obligation, reserveErr := hooks.reserve("pending-parent")
+		require.NoError(t, reserveErr)
+		require.NoError(t, obligation.bind(parent))
+		parent.establishment = obligation
+		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		require.ErrorContains(t, err, "still outstanding")
+	})
+
+	t.Run("missing child identity", func(t *testing.T) {
+		client := &forkShapeClient{spyCodexClient: newSpyCodexClient()}
+		agent, parent := makeAgent(client)
+		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		require.ErrorContains(t, err, "omitted its child thread identity")
+	})
+
+	t.Run("changed child identity", func(t *testing.T) {
+		client := &forkShapeClient{
+			spyCodexClient: newSpyCodexClient(), forkThread: codex.Thread{ID: "child"}, resumeThread: codex.Thread{ID: "other"},
+		}
+		agent, parent := makeAgent(client)
+		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		require.ErrorContains(t, err, "different child thread")
+	})
+
+	t.Run("cleanup outcomes", func(t *testing.T) {
+		agent := NewAgent()
+		notFound := &errorCodexClient{spyCodexClient: newSpyCodexClient(), deleteErr: codex.ErrThreadNotFound}
+		require.NoError(t, agent.cleanupUnregisteredFork(t.Context(), notFound, "child", nil))
+		deleteFailure := &errorCodexClient{spyCodexClient: newSpyCodexClient(), deleteErr: errors.New("delete failed")}
+		require.ErrorContains(t, agent.cleanupUnregisteredFork(t.Context(), deleteFailure, "child", nil), "delete failed")
+	})
+}
+
+func TestCloseSessionRetriesRetainedRegistryPublication(t *testing.T) {
+	client := newSpyCodexClient()
+	agent := NewAgent()
+	active := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	active.closeContained = true
+	active.closeCommitDone = true
+	agent.sessions[active.id] = active
+	agent.runtimeClient = client
+	for index := range retainedRuntimeThreadLimit {
+		id := acp.SessionId(fmt.Sprintf("retained-%d", index))
+		agent.retainedThreads[id] = &retainedRuntimeThread{sessionID: id, threadID: string(id), client: client}
+	}
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: active.id})
+	require.ErrorContains(t, err, "registry is full")
+	require.True(t, active.closeRemovalPending)
+
+	agent.retainedThreads = make(map[acp.SessionId]*retainedRuntimeThread)
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: active.id})
+	require.NoError(t, err)
+	require.Nil(t, agent.activeSession(active.id))
+	require.NotNil(t, agent.retainedThreads[active.id])
 }
 
 func TestSessionHelperBranches(t *testing.T) {
@@ -2945,6 +3424,8 @@ func TestSessionHelperBranches(t *testing.T) {
 	} else {
 		cancel()
 	}
+	requireRequestError(t, cancelACPError(errTurnRouteMismatch, nil), -32602, "Invalid params")
+	require.NoError(t, cancelACPError(nil, nil))
 }
 
 func TestDeleteRetryAndConfigBranches(t *testing.T) {

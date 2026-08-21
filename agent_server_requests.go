@@ -30,10 +30,19 @@ func (a *Agent) handleCodexServerRequest(ctx context.Context, req codex.ServerRe
 
 		ctx, finish = session.beginInteraction(ctx, codex.ServerInteractionKey(req, params))
 		defer finish()
-		// turn/start names the authoritative native turn before RunTurn returns.
-		// Requests that race that return wait until the session has bound the ID
-		// and emitted lifecycle acceptance; stale IDs are rejected afterward.
-		if err := session.waitForTurnBinding(ctx); err != nil {
+		// A request names the authoritative native turn. On the session-owned
+		// stream it either binds to the accepted prompt or is itself the proof
+		// that opens an agent-origin turn between prompts.
+		turn, lifecycleOwned, err := session.claimLifecycleTurn(ctx, codex.RequestTurnID(params))
+		if err == nil && lifecycleOwned {
+			ctx = withLifecycleActionTurn(withTurnRoute(ctx, turn.turnNonce), turn)
+		}
+
+		if err == nil && !lifecycleOwned {
+			err = session.waitForTurnBinding(ctx)
+		}
+
+		if err != nil {
 			if cancellation, ok := codexPermissionCancellationResponse(req.Method, params); ok {
 				return cancellation, nil
 			}
@@ -239,14 +248,14 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 		return nil, err
 	}
 
-	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	resp, err := createElicitationWithAction(ctx, conn, acp.UnstableCreateElicitationRequest{
 		Form: form,
 	}, elicitationScope{
 		SessionID:         session.id,
 		TurnNonce:         turnNonce,
 		ToolCallID:        acp.ToolCallId(codex.ToolUserInputToolCallID(req, params)),
 		ActionCorrelation: correlation,
-	})
+	}, action, nil)
 
 	if resolveErr := action.resolve(ctx, elicitationActionState(resp, err)); resolveErr != nil {
 		return nil, resolveErr
@@ -391,12 +400,12 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 			return nil, actionErr
 		}
 
-		resp, err = conn.CreateElicitation(ctx, request, elicitationScope{
+		resp, err = createElicitationWithAction(ctx, conn, request, elicitationScope{
 			SessionID:         session.id,
 			TurnNonce:         turnNonce,
 			RequestID:         requestID,
 			ActionCorrelation: correlation,
-		})
+		}, action, nil)
 
 		if resolveErr := action.resolve(ctx, elicitationActionState(resp, err)); resolveErr != nil {
 			return nil, resolveErr

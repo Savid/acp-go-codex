@@ -14,10 +14,10 @@ func TestRecoverAgentGoroutineLogsPanic(t *testing.T) {
 
 	func() {
 		defer recoverAgentGoroutine(context.Background(), logger, "test goroutine")
-		panic("boom")
+		panic("panic-secret-sentinel")
 	}()
 
-	if !strings.Contains(buf.String(), "test goroutine") || !strings.Contains(buf.String(), "boom") {
+	if !strings.Contains(buf.String(), "test goroutine") || strings.Contains(buf.String(), "panic-secret-sentinel") {
 		t.Fatalf("panic log = %q", buf.String())
 	}
 }

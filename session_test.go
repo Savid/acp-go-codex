@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -267,6 +268,58 @@ func TestSessionCloseUsesBoundedBackgroundContext(t *testing.T) {
 	}
 }
 
+type coordinatedSessionCloseClient struct {
+	*spyCodexClient
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int64
+}
+
+func (c *coordinatedSessionCloseClient) UnsubscribeThread(ctx context.Context, _ string) error {
+	if c.calls.Add(1) == 1 {
+		close(c.started)
+	}
+
+	select {
+	case <-c.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestSessionCloseCoordinatesConcurrentCallersExactlyOnce(t *testing.T) {
+	var commits atomic.Int64
+	store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
+		commits.Add(1)
+
+		return nil
+	}}
+	agent := NewAgent(WithSessionStore(store))
+	client := &coordinatedSessionCloseClient{
+		spyCodexClient: newSpyCodexClient(), started: make(chan struct{}), release: make(chan struct{}),
+	}
+	s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	s.unsyncedEntries = []SessionStoreEntry{[]byte(`{"type":"event_msg"}`)}
+	agent.sessions[s.id] = s
+	agent.runtimeClient = client
+
+	const callers = 24
+	results := make(chan error, callers)
+	for range callers {
+		go func() { results <- s.Close(t.Context()) }()
+	}
+	<-client.started
+	require.Equal(t, int64(1), client.calls.Load())
+	close(client.release)
+	for range callers {
+		require.NoError(t, <-results)
+	}
+
+	require.Equal(t, int64(1), client.calls.Load())
+	require.Equal(t, int64(1), commits.Load())
+}
+
 func TestEnsureLiveClientRelaunchFailures(t *testing.T) {
 	ctx := context.Background()
 
@@ -333,9 +386,10 @@ func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
 	})
 
 	for _, test := range []struct {
-		name   string
-		mutate func(*Agent, *session)
-		check  func(*testing.T, error)
+		name          string
+		rebindFailure bool
+		mutate        func(*Agent, *session)
+		check         func(*testing.T, error)
 	}{
 		{
 			name: "logical session removed",
@@ -352,7 +406,7 @@ func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
 		},
 		{
 			name: "runtime generation retired",
-			mutate: func(agent *Agent, _ *session) {
+			mutate: func(agent *Agent, active *session) {
 				agent.mu.Lock()
 				agent.runtimeDead = true
 				agent.mu.Unlock()
@@ -363,12 +417,44 @@ func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
 				require.ErrorIs(t, err, codex.ErrConnectionClosed)
 			},
 		},
+		{
+			name:          "logical session removed with rebind refusal",
+			rebindFailure: true,
+			mutate: func(agent *Agent, active *session) {
+				agent.mu.Lock()
+				delete(agent.sessions, active.id)
+				agent.mu.Unlock()
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				require.ErrorContains(t, err, "unknown session")
+				require.ErrorContains(t, err, "native lifecycle is active")
+			},
+		},
+		{
+			name:          "runtime generation retired with rebind refusal",
+			rebindFailure: true,
+			mutate: func(agent *Agent, active *session) {
+				agent.mu.Lock()
+				agent.runtimeDead = true
+				agent.mu.Unlock()
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				require.ErrorIs(t, err, codex.ErrConnectionClosed)
+				require.ErrorContains(t, err, "native lifecycle is active")
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			replacement := &blockingLifecycleCodexClient{
-				spyCodexClient: newSpyCodexClient(),
-				resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
-				resumeRelease:  make(chan struct{}),
+			blocking := &blockingLifecycleCodexClient{
+				spyCodexClient: newSpyCodexClient(), resumeStarted: make(chan codex.ThreadResumeRequest, 1), resumeRelease: make(chan struct{}),
+			}
+			var replacement codex.Client = blocking
+			var activeReplacement *activeAfterSubscribeClient
+			if test.rebindFailure {
+				activeReplacement = &activeAfterSubscribeClient{blockingLifecycleCodexClient: blocking}
+				replacement = activeReplacement
 			}
 			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 				return replacement, nil
@@ -378,20 +464,111 @@ func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
 				agent: agent, id: acp.SessionId(test.name), cwd: "/tmp/project",
 				codexThreadID: "thread-1", client: old, clientDead: true,
 			}
+			if activeReplacement != nil {
+				activeReplacement.active = active
+			}
 			agent.sessions[active.id] = active
 			agent.runtimeClient = old
 			agent.runtimeDead = true
 
 			done := make(chan error, 1)
 			go func() { done <- active.ensureLiveClient(context.Background()) }()
-			<-replacement.resumeStarted
+			<-blocking.resumeStarted
 			test.mutate(agent, active)
-			close(replacement.resumeRelease)
+			close(blocking.resumeRelease)
 			test.check(t, <-done)
 			require.True(t, active.clientDead)
+			active.lifecycleMu.Lock()
+			active.lifecycleDeliveryActive = false
+			active.lifecycleMu.Unlock()
+			active.fenceSession()
 			require.NoError(t, agent.Close())
 		})
 	}
+}
+
+type activeAfterSubscribeClient struct {
+	*blockingLifecycleCodexClient
+	active *session
+}
+
+func (c *activeAfterSubscribeClient) SubscribeThread(ctx context.Context, threadID string) (codex.ThreadEventStream, error) {
+	stream, err := c.blockingLifecycleCodexClient.SubscribeThread(ctx, threadID)
+	if err == nil {
+		c.active.lifecycleMu.Lock()
+		c.active.lifecycleDeliveryActive = true
+		c.active.lifecycleMu.Unlock()
+	}
+
+	return stream, err
+}
+
+type canaryPreparationFailureClient struct {
+	*runtimeRecordingClient
+	session *session
+}
+
+func (c *canaryPreparationFailureClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	c.session.lifecycleMu.Lock()
+	c.session.lifecycleDeliveryActive = true
+	c.session.lifecycleMu.Unlock()
+
+	return codex.Turn{}, errors.New("runtime_ready failed")
+}
+
+func TestEnsureLiveClientContainsBrokerAndCanaryRecoveryFailures(t *testing.T) {
+	t.Run("broker rebind", func(t *testing.T) {
+		replacement := newSpyCodexClient()
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return replacement, nil }))
+		old := newSpyCodexClient()
+		active := &session{agent: agent, id: "session", codexThreadID: "thread", client: old, clientDead: true, lifecycleClosing: true}
+		agent.sessions[active.id] = active
+		agent.runtimeClient = old
+		agent.runtimeDead = true
+		require.ErrorContains(t, active.ensureLiveClient(t.Context()), "lifecycle is closing")
+		active.lifecycleClosing = false
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("canary rebind succeeds", func(t *testing.T) {
+		replacement := &runtimeFailureClient{
+			runtimeRecordingClient: newRuntimeRecordingClient(),
+			events:                 []codex.Event{{Kind: codex.EventCompleted, StopReason: codex.StopReasonEndTurn}},
+		}
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return replacement, nil }))
+		old := newSpyCodexClient()
+		active := &session{
+			agent: agent, id: "session", codexThreadID: "thread", client: old, clientDead: true,
+			mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example.test/mcp", nil)},
+		}
+		agent.sessions[active.id] = active
+		agent.runtimeClient = old
+		agent.runtimeDead = true
+		require.ErrorContains(t, active.ensureLiveClient(t.Context()), "marker was not observed")
+		require.NoError(t, agent.Close())
+	})
+
+	t.Run("canary rebind refusal joins", func(t *testing.T) {
+		replacement := &canaryPreparationFailureClient{runtimeRecordingClient: newRuntimeRecordingClient()}
+		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return replacement, nil }))
+		old := newSpyCodexClient()
+		active := &session{
+			agent: agent, id: "session", codexThreadID: "thread", client: old, clientDead: true,
+			mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example.test/mcp", nil)},
+		}
+		replacement.session = active
+		agent.sessions[active.id] = active
+		agent.runtimeClient = old
+		agent.runtimeDead = true
+		err := active.ensureLiveClient(t.Context())
+		require.ErrorContains(t, err, "marker was not observed")
+		require.ErrorContains(t, err, "native lifecycle is active")
+		active.lifecycleMu.Lock()
+		active.lifecycleDeliveryActive = false
+		active.lifecycleMu.Unlock()
+		active.fenceSession()
+		require.NoError(t, agent.Close())
+	})
 }
 
 type blockingUnsubscribeErrorClient struct {
@@ -432,4 +609,35 @@ func TestSessionContainmentAcceptsConcurrentRuntimeRetirementProof(t *testing.T)
 
 	require.NoError(t, <-done)
 	require.True(t, agent.runtimeDead)
+}
+
+func TestSessionTurnAndCloseOperationsFailClosedAtOwnershipBoundaries(t *testing.T) {
+	s := &session{closing: true}
+	_, err := s.beginPromptTurn(t.Context(), "nonce")
+	require.Error(t, err)
+	require.ErrorIs(t, s.shutdownActiveTurnForNonce(t.Context(), true, "nonce"), errTurnRouteMismatch)
+
+	s = &session{turnNonce: "current", cancel: func() {}, turnContainment: &turnContainment{done: make(chan struct{})}}
+	handled, err := s.shutdownPromptTurn(t.Context(), true, "stale", true)
+	require.True(t, handled)
+	require.ErrorIs(t, err, errTurnRouteMismatch)
+
+	completed := errors.New("memoized close")
+	done := make(chan struct{})
+	close(done)
+	s = &session{
+		closeOperation:  &sessionCloseOperation{done: done, err: completed},
+		closeContained:  true,
+		closeCommitDone: true,
+	}
+	require.ErrorIs(t, s.Close(t.Context()), completed)
+
+	done = make(chan struct{})
+	s = &session{closeOperation: &sessionCloseOperation{done: done}}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, s.Close(ctx), context.Canceled)
+
+	s = &session{nativeEventDone: make(chan struct{})}
+	require.ErrorIs(t, s.unsubscribeContainedThread(ctx, newSpyCodexClient(), "thread"), context.Canceled)
 }

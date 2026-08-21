@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func assertTurnFailureParse(t *testing.T) {
@@ -37,10 +40,10 @@ func assertTurnFailureParse(t *testing.T) {
 	if !errors.As(failed.Err, &tf) {
 		t.Fatalf("failed turn err = %v, want TurnFailedError", failed.Err)
 	}
-	if tf.Cause != CauseProvider || tf.StatusCode != 429 || tf.ProviderCode != "rate_limit" || tf.Message != "provider rate limited" {
+	if tf.Cause != CauseProvider || tf.StatusCode != 429 || tf.ProviderCode != "rate_limit" || tf.Message != turnFailedText {
 		t.Fatalf("turn failure = %#v", tf)
 	}
-	if tf.Error() != "provider rate limited" || (*TurnFailedError)(nil).Error() != "" {
+	if tf.Error() != turnFailedText || (*TurnFailedError)(nil).Error() != "" {
 		t.Fatalf("TurnFailedError.Error mismatch: %q", tf.Error())
 	}
 
@@ -48,7 +51,7 @@ func assertTurnFailureParse(t *testing.T) {
 		"turn": map[string]any{"status": "errored"},
 	})})
 	var bareErr *TurnFailedError
-	if !errors.As(bare.Err, &bareErr) || bareErr.Message != "Codex turn failed" || bareErr.StatusCode != 0 {
+	if !errors.As(bare.Err, &bareErr) || bareErr.Message != turnFailedText || bareErr.StatusCode != 0 {
 		t.Fatalf("bare turn failure = %#v", bare.Err)
 	}
 
@@ -64,7 +67,6 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	transport := newScriptTransport()
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
 	defer client.Close(context.Background())
-
 	ctx := context.Background()
 	thread, err := client.StartThread(ctx, ThreadStartRequest{
 		Cwd:                   "/repo",
@@ -84,6 +86,7 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	if start["permissions"] == nil || start["personality"] != "pragmatic" || start["serviceTier"] != "flex" || start["config"] == nil {
 		t.Fatalf("thread/start params = %#v", start)
 	}
+	client.closeThread(thread.ID)
 	if _, startErr := client.StartThread(ctx, ThreadStartRequest{Personality: ""}); startErr != nil {
 		t.Fatalf("StartThread with empty personality returned error: %v", startErr)
 	}
@@ -116,23 +119,6 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 	turns, err := client.ListTurns(ctx, ThreadTurnsListRequest{ThreadID: "thread-1", Limit: 2, SortDirection: "asc"})
 	if err != nil || len(turns.Turns) != 1 || turns.NextCursor != "next" {
 		t.Fatalf("ListTurns = %#v err=%v", turns, err)
-	}
-}
-
-func TestRunTurnDispatchFailureClosesRegisteredStream(t *testing.T) {
-	transport := newScriptTransport()
-	transport.fail(methodTurnStart, "dispatch rejected")
-	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
-	t.Cleanup(func() { _ = client.Close(context.Background()) })
-
-	turn, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
-	if err == nil || turn.Events != nil {
-		t.Fatalf("RunTurn dispatch failure = (%v, %v), want nil stream and error", turn, err)
-	}
-	client.mu.Lock()
-	defer client.mu.Unlock()
-	if len(client.turns) != 0 {
-		t.Fatalf("dispatch failure retained turn registrations: %#v", client.turns)
 	}
 }
 
@@ -225,8 +211,9 @@ func TestAppServerRunTurnMapsEvents(t *testing.T) {
 	transport := newScriptTransport()
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
 	defer client.Close(context.Background())
+	feed := claimRoutedThread(t, client, "thread-1")
 
-	turn, err := client.RunTurn(context.Background(), TurnStartRequest{
+	_, err := client.RunTurn(context.Background(), TurnStartRequest{
 		ThreadID:          "thread-1",
 		Prompt:            []UserInput{{"type": "text", "text": "hello"}},
 		Model:             "gpt-a",
@@ -244,8 +231,12 @@ func TestAppServerRunTurnMapsEvents(t *testing.T) {
 		t.Fatalf("turn/start params = %#v", params)
 	}
 
-	var got []Event
-	for event := range turn.Events {
+	got := make([]Event, 0, 6)
+	for range 6 {
+		event, open := awaitEvent(t, feed.Events)
+		if !open {
+			t.Fatal("thread broker closed at turn completion")
+		}
 		got = append(got, event)
 	}
 	if len(got) != 6 {
@@ -267,31 +258,35 @@ func TestAppServerRunTurnEmitsConnectionError(t *testing.T) {
 	transport := newAbruptCloseTransport()
 	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
 	defer client.Close(context.Background())
+	feed := claimRoutedThread(t, client, "thread-1")
 
-	turn, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
+	_, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread-1"})
 	if err != nil {
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 	transport.CloseWithError(errors.New("boom"))
-	event, ok := <-turn.Events
+	event, ok := <-feed.Events
 	if !ok {
 		t.Fatal("turn stream closed without an error event")
 	}
 	if event.Kind != EventError || !errors.Is(event.Err, ErrConnectionClosed) {
 		t.Fatalf("event = %#v, want connection error", event)
 	}
-	if _, ok := <-turn.Events; ok {
+	if _, ok := <-feed.Events; ok {
 		t.Fatal("turn stream stayed open after connection error")
 	}
 }
 
 func TestAppServerMappingHelpers(t *testing.T) {
-	thread := threadFromResponse(map[string]any{"thread": map[string]any{
+	thread, err := threadFromResponse(map[string]any{"thread": map[string]any{
 		"id":        "id",
 		"sessionId": "sid",
 		"path":      "/tmp/a",
 		"updatedAt": float64(10),
 	}})
+	if err != nil {
+		t.Fatalf("thread decode: %v", err)
+	}
 	if thread.ID != "id" || thread.SessionID != "sid" || thread.UpdatedAt == "" {
 		t.Fatalf("thread = %#v", thread)
 	}
@@ -467,8 +462,8 @@ func TestAppServerValueMappingHelpers(t *testing.T) {
 	if !ok || len(modifications) != 1 {
 		t.Fatal("permissionProfile did not skip empty roots")
 	}
-	if threads := threadsFromResponse(map[string]any{"threads": []any{"bad"}}); len(threads) != 0 {
-		t.Fatalf("threadsFromResponse = %#v", threads)
+	if _, err := threadsFromResponse(map[string]any{"threads": []any{map[string]any{"id": "missing-session-id"}}}); err == nil {
+		t.Fatal("invalid thread list item was accepted")
 	}
 }
 
@@ -500,18 +495,38 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 	}
 	for _, tc := range cases {
 		event := eventFromRPC(rpcEvent{Method: tc.method, Params: mustRaw(tc.params), Raw: "raw"})
-		if event.Kind != tc.kind || event.RawMethod != tc.method || event.RawJSON != "raw" {
+		wantRaw := "raw"
+		if tc.kind == EventError {
+			wantRaw = ""
+		}
+		if event.Kind != tc.kind || event.RawMethod != tc.method || event.RawJSON != wantRaw {
 			t.Fatalf("%s mapped to %#v", tc.method, event)
 		}
 	}
 	if eventFromRPC(rpcEvent{Method: "error", Params: mustRaw(map[string]any{"message": "boom"})}).Err == nil {
 		t.Fatal("error event did not include error")
 	}
-	if event := eventFromRPC(rpcEvent{Method: "error", Params: mustRaw(map[string]any{"error": ""})}); event.Text != `Codex app-server error event: {"error":""}` {
+	if event := eventFromRPC(rpcEvent{Method: "error", Params: mustRaw(map[string]any{"error": ""})}); event.Text != appServerErrorText || len(event.RawParams) != 0 {
 		t.Fatalf("empty error event text = %q", event.Text)
 	}
-	if event := eventFromRPC(rpcEvent{Method: "error"}); event.Text != "Codex app-server emitted error event without details" {
+	if event := eventFromRPC(rpcEvent{Method: "error"}); event.Text != appServerErrorText {
 		t.Fatalf("missing error event text = %q", event.Text)
+	}
+	const secretErrorSentinel = "native-error-secret-sentinel"
+	secretEvent := eventFromRPC(rpcEvent{
+		Method: "error",
+		Params: mustRaw(map[string]any{
+			"message": secretErrorSentinel,
+			"error":   map[string]any{"body": secretErrorSentinel},
+		}),
+		Raw: `{"method":"error","params":{"message":"` + secretErrorSentinel + `"}}`,
+	})
+	if !errors.Is(secretEvent.Err, ErrAppServerEvent) ||
+		strings.Contains(secretEvent.Text, secretErrorSentinel) ||
+		strings.Contains(secretEvent.Err.Error(), secretErrorSentinel) ||
+		strings.Contains(string(secretEvent.RawParams), secretErrorSentinel) ||
+		strings.Contains(secretEvent.RawJSON, secretErrorSentinel) {
+		t.Fatalf("secret error event escaped fixed classification: %#v", secretEvent)
 	}
 	if account := eventFromRPC(rpcEvent{Method: "account/updated", Params: mustRaw(map[string]any{"email": "plain@example.com"})}).Account; account.Email != "plain@example.com" {
 		t.Fatalf("plain account event = %#v", account)
@@ -624,247 +639,6 @@ func TestAppServerClientNormalizesMissingThreadRPCError(t *testing.T) {
 	}
 }
 
-func TestAppServerEventPumpBranches(t *testing.T) {
-	transport := newScriptTransport()
-	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
-	client.ensureEventPump()
-	defer client.Close(context.Background())
-	stream, err := client.registerTurn(context.Background(), "thread-1")
-	if err != nil {
-		t.Fatalf("registerTurn returned error: %v", err)
-	}
-	if bindErr := client.setTurnID(stream, "turn-1"); bindErr != nil {
-		t.Fatalf("setTurnID returned error: %v", bindErr)
-	}
-	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/agentMessage/delta", Params: mustRaw(map[string]any{"threadId": "other", "turnId": "turn-1", "delta": "skip-thread"})}
-	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/agentMessage/delta", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "other", "delta": "skip-turn"})}
-	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "unknown", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1"})}
-	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/completed", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "turn": map[string]any{"status": "completed"}})}
-	var got []Event
-	for event := range stream.out {
-		got = append(got, event)
-	}
-	if len(got) != 2 || got[0].Kind != EventRaw || got[1].StopReason != StopReasonEndTurn {
-		t.Fatalf("pumped events = %#v", got)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, regErr := client.registerTurn(ctx, "thread-1"); regErr == nil {
-		t.Fatal("registerTurn accepted canceled context")
-	}
-	if _, runErr := client.RunTurn(ctx, TurnStartRequest{ThreadID: "thread-1"}); runErr == nil {
-		t.Fatal("RunTurn accepted canceled context")
-	}
-	nilTurnsClient := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
-	nilStream, err := nilTurnsClient.registerTurn(context.Background(), "thread-nil")
-	if err != nil {
-		t.Fatalf("register nil-turns client returned error: %v", err)
-	}
-	nilTurnsClient.closeTurn(nilStream)
-	_ = nilTurnsClient.Close(context.Background())
-
-	assertTurnOverflow(t, client)
-
-	doneRejected := make(chan struct{})
-	close(doneRejected)
-	rejected := &turnStream{
-		cancel: func() {}, done: doneRejected,
-		threadID: "thread-rejected", turnID: "turn-rejected", out: make(chan Event, turnEventBuffer+1),
-	}
-	client.mu.Lock()
-	client.turns[rejected] = struct{}{}
-	client.mu.Unlock()
-	client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread-rejected"})
-	client.mu.Lock()
-	_, stillRegistered := client.turns[rejected]
-	client.mu.Unlock()
-	if stillRegistered {
-		t.Fatal("dispatch did not remove canceled stream")
-	}
-	if _, open := <-rejected.out; open {
-		t.Fatal("done stream stayed open")
-	}
-
-	stopped, err := client.registerTurn(context.Background(), "thread-stopped")
-	if err != nil {
-		t.Fatalf("register stopped turn: %v", err)
-	}
-	client.closeTurn(stopped)
-	if bindErr := client.setTurnID(stopped, "late"); !errors.Is(bindErr, ErrConnectionClosed) {
-		t.Fatalf("binding stopped stream error = %v", bindErr)
-	}
-
-	terminal, err := client.registerTurn(context.Background(), "thread-terminal")
-	if err != nil {
-		t.Fatalf("register terminal turn: %v", err)
-	}
-	if bindErr := client.setTurnID(terminal, "turn-terminal"); bindErr != nil {
-		t.Fatalf("bind terminal turn: %v", bindErr)
-	}
-	if !terminal.send(Event{Kind: EventCompleted, Scope: EventScopeThread, ThreadID: "thread-terminal", TurnID: "turn-terminal"}) {
-		t.Fatal("terminal event was not accepted")
-	}
-	if event := <-terminal.out; event.Kind != EventCompleted {
-		t.Fatalf("terminal event = %#v", event)
-	}
-	if _, open := <-terminal.out; open {
-		t.Fatal("terminal stream stayed open")
-	}
-	openStream, err := client.registerTurn(context.Background(), "thread-1")
-	if err != nil {
-		t.Fatalf("register open stream returned error: %v", err)
-	}
-	client.closeAllTurns()
-	if _, ok := <-openStream.out; ok {
-		t.Fatal("closeAllTurns did not close stream")
-	}
-}
-
-func assertTurnOverflow(t *testing.T, client *AppServerClient) {
-	t.Helper()
-
-	blocked, err := client.registerTurn(context.Background(), "thread-1")
-	if err != nil {
-		t.Fatalf("register blocked turn returned error: %v", err)
-	}
-	if bindErr := client.setTurnID(blocked, "blocked-turn"); bindErr != nil {
-		t.Fatalf("bind blocked turn: %v", bindErr)
-	}
-	for range turnEventBuffer {
-		client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread-1", TurnID: "blocked-turn"})
-	}
-	client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread-1", TurnID: "blocked-turn"})
-	for range turnEventBuffer {
-		if event := <-blocked.out; event.Kind != EventRaw {
-			t.Fatalf("buffered event = %#v", event)
-		}
-	}
-	overflow, ok := <-blocked.out
-	if !ok || overflow.Kind != EventError || !errors.Is(overflow.Err, ErrTurnEventOverflow) {
-		t.Fatalf("overflow event = %#v open=%v", overflow, ok)
-	}
-	if _, open := <-blocked.out; open {
-		t.Fatal("overflowed stream stayed open")
-	}
-	if blocked.send(Event{Kind: EventRaw}) {
-		t.Fatal("overflowed turn stream accepted event")
-	}
-}
-
-func TestSaturatedTurnDoesNotBlockPeerTerminal(t *testing.T) {
-	client := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
-	defer client.Close(context.Background())
-
-	blocked, err := client.registerTurn(context.Background(), "thread-blocked")
-	if err != nil {
-		t.Fatalf("register blocked turn: %v", err)
-	}
-	if bindErr := client.setTurnID(blocked, "turn-blocked"); bindErr != nil {
-		t.Fatalf("bind blocked turn: %v", bindErr)
-	}
-	peer, err := client.registerTurn(context.Background(), "thread-peer")
-	if err != nil {
-		t.Fatalf("register peer turn: %v", err)
-	}
-	if bindErr := client.setTurnID(peer, "turn-peer"); bindErr != nil {
-		t.Fatalf("bind peer turn: %v", bindErr)
-	}
-
-	for range turnEventBuffer + 1 {
-		client.dispatchEvent(Event{
-			Kind: EventRaw, Scope: EventScopeThread,
-			ThreadID: "thread-blocked", TurnID: "turn-blocked",
-		})
-	}
-	client.dispatchEvent(Event{
-		Kind: EventCompleted, Scope: EventScopeThread,
-		ThreadID: "thread-peer", TurnID: "turn-peer",
-	})
-
-	if event := <-peer.out; event.Kind != EventCompleted {
-		t.Fatalf("peer terminal behind saturated turn = %#v", event)
-	}
-	if _, open := <-peer.out; open {
-		t.Fatal("peer terminal did not close its stream")
-	}
-}
-
-func TestPreAckStaleEventsDoNotReachAcknowledgedTurn(t *testing.T) {
-	client := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
-	defer client.Close(context.Background())
-
-	stream, err := client.registerTurn(context.Background(), "thread")
-	if err != nil {
-		t.Fatalf("register turn: %v", err)
-	}
-	client.dispatchEvent(Event{
-		Kind: EventCompleted, Scope: EventScopeThread,
-		ThreadID: "thread", TurnID: "stale-turn",
-	})
-	client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread"})
-	if bindErr := client.setTurnID(stream, "current-turn"); bindErr != nil {
-		t.Fatalf("bind current turn: %v", bindErr)
-	}
-
-	select {
-	case event := <-stream.out:
-		t.Fatalf("pre-ack stale event reached current turn: %#v", event)
-	default:
-	}
-
-	client.dispatchEvent(Event{
-		Kind: EventCompleted, Scope: EventScopeThread,
-		ThreadID: "thread", TurnID: "current-turn",
-	})
-	if event := <-stream.out; event.Kind != EventCompleted {
-		t.Fatalf("current terminal after stale pre-ack event = %#v", event)
-	}
-
-	terminalFirst, err := client.registerTurn(context.Background(), "thread-terminal-first")
-	if err != nil {
-		t.Fatalf("register terminal-first turn: %v", err)
-	}
-	client.dispatchEvent(Event{
-		Kind: EventCompleted, Scope: EventScopeThread,
-		ThreadID: "thread-terminal-first", TurnID: "terminal-first",
-	})
-	client.dispatchEvent(Event{
-		Kind: EventRaw, Scope: EventScopeThread,
-		ThreadID: "thread-terminal-first", TurnID: "terminal-first",
-	})
-	if bindErr := client.setTurnID(terminalFirst, "terminal-first"); bindErr != nil {
-		t.Fatalf("bind terminal-first turn: %v", bindErr)
-	}
-	if event := <-terminalFirst.out; event.Kind != EventCompleted {
-		t.Fatalf("terminal-first event = %#v", event)
-	}
-}
-
-func TestUnboundTurnOverflowFailsOnlyThatStream(t *testing.T) {
-	client := &AppServerClient{rpc: newRPCConn(newScriptTransport(), nil)}
-	defer client.Close(context.Background())
-
-	stream, err := client.registerTurn(context.Background(), "thread")
-	if err != nil {
-		t.Fatalf("register unbound turn: %v", err)
-	}
-	for range turnEventBuffer + 1 {
-		client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread"})
-	}
-
-	overflow, open := <-stream.out
-	if !open || !errors.Is(overflow.Err, ErrTurnEventOverflow) {
-		t.Fatalf("unbound overflow event = %#v open=%v", overflow, open)
-	}
-	if _, open := <-stream.out; open {
-		t.Fatal("unbound overflow stream stayed open")
-	}
-	if bindErr := client.setTurnID(stream, "acknowledged-turn"); !errors.Is(bindErr, ErrTurnEventOverflow) {
-		t.Fatalf("binding overflowed stream error = %v", bindErr)
-	}
-}
-
 func TestAppServerEventPumpAccountAndClose(t *testing.T) {
 	updated := make(chan Event, 1)
 	accountClient := &AppServerClient{
@@ -884,17 +658,18 @@ func TestAppServerEventPumpAccountAndClose(t *testing.T) {
 	if err := closedClient.Close(context.Background()); err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
-	if _, err := closedClient.registerTurn(context.Background(), "thread-1"); err == nil {
-		t.Fatal("registerTurn accepted closed client")
+	if err := closedClient.registerThread("thread-1"); err == nil {
+		t.Fatal("registerThread accepted closed client")
 	}
 }
 
 type scriptTransport struct {
-	mu     sync.Mutex
-	sent   []rpcMessage
-	recv   chan rpcMessage
-	closed bool
-	errs   map[string]*rpcError
+	mu      sync.Mutex
+	sent    []rpcMessage
+	recv    chan rpcMessage
+	closed  bool
+	errs    map[string]*rpcError
+	threads int
 }
 
 type abruptCloseTransport struct {
@@ -909,6 +684,19 @@ type abruptCloseTransport struct {
 type failingSendTransport struct {
 	done chan struct{}
 	err  error
+}
+
+type hookedResponseTransport struct {
+	*responseTransport
+	hook func()
+}
+
+func (t *hookedResponseTransport) Send(ctx context.Context, msg rpcMessage) error {
+	if t.hook != nil {
+		t.hook()
+	}
+
+	return t.responseTransport.Send(ctx, msg)
 }
 
 func (t *failingSendTransport) Send(context.Context, rpcMessage) error { return t.err }
@@ -1003,7 +791,17 @@ func (t *scriptTransport) Send(_ context.Context, msg rpcMessage) error {
 
 			return nil
 		}
-		t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Result: mustRaw(t.response(msg.Method))}
+		response := t.response(msg.Method)
+		switch msg.Method {
+		case methodThreadStart, methodThreadFork:
+			t.threads++
+			response = scriptThreadResponse(fmt.Sprintf("thread-%d", t.threads))
+		case methodThreadResume:
+			var params map[string]any
+			_ = json.Unmarshal(msg.Params, &params)
+			response = scriptThreadResponse(stringValue(params, fieldThreadID))
+		}
+		t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: msg.ID, Result: mustRaw(response)}
 		if msg.Method == methodTurnStart {
 			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/plan/updated", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "items": []any{map[string]any{"text": "plan", "status": "running"}}})}
 			t.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "item/reasoning/textDelta", Params: mustRaw(map[string]any{"threadId": "thread-1", "turnId": "turn-1", "delta": "why"})}
@@ -1071,9 +869,9 @@ func (t *scriptTransport) fail(method string, message string) {
 func (t *scriptTransport) response(method string) any {
 	switch method {
 	case methodThreadStart, methodThreadResume, methodThreadFork:
-		return map[string]any{"thread": map[string]any{"id": "thread-1", "sessionId": "session-1", "path": "/tmp/rollout.jsonl", "cwd": "/repo", "model": "gpt-a", "modelProvider": "openai", "updatedAt": float64(10)}, "reasoningEffort": "high"}
+		return scriptThreadResponse("thread-1")
 	case methodThreadList:
-		return map[string]any{"data": []any{map[string]any{"id": "thread-1"}}}
+		return map[string]any{"data": []any{map[string]any{"id": "thread-1", "sessionId": "thread-1"}}}
 	case methodThreadRead:
 		items := []any{
 			map[string]any{"id": "item-1"},
@@ -1088,7 +886,7 @@ func (t *scriptTransport) response(method string) any {
 		}
 
 		return map[string]any{
-			"thread":   map[string]any{"id": "thread-1"},
+			"thread":   map[string]any{"id": "thread-1", "sessionId": "thread-1"},
 			"items":    items,
 			"messages": items,
 		}
@@ -1132,6 +930,16 @@ func (t *scriptTransport) response(method string) any {
 		}}
 	default:
 		return map[string]any{"ok": true}
+	}
+}
+
+func scriptThreadResponse(threadID string) map[string]any {
+	return map[string]any{
+		"thread": map[string]any{
+			"id": threadID, "sessionId": "session-1", "path": "/tmp/rollout.jsonl",
+			"cwd": "/repo", "model": "gpt-a", "modelProvider": "openai", "updatedAt": float64(10),
+		},
+		"reasoningEffort": "high",
 	}
 }
 
@@ -1191,28 +999,13 @@ while read line; do :; done
 		t.Fatalf("second Close returned error: %v", err)
 	}
 
-	fallback := &AppServerClient{rpc: newRPCConn(&responseTransport{responses: map[string]any{
+	malformedResume := &AppServerClient{rpc: newRPCConn(&responseTransport{responses: map[string]any{
 		methodThreadResume: map[string]any{},
 	}}, nil)}
-	thread, err := fallback.ResumeThread(context.Background(), ThreadResumeRequest{ThreadID: "requested"})
-	if err != nil || thread.ID != "requested" {
-		t.Fatalf("resume fallback thread=%#v err=%v", thread, err)
+	if _, err := malformedResume.ResumeThread(context.Background(), ThreadResumeRequest{ThreadID: "requested"}); err == nil {
+		t.Fatal("resume accepted a response without the returned thread identity")
 	}
-	_ = fallback.Close(context.Background())
-
-	turnTransport := &responseTransport{responses: map[string]any{
-		methodTurnStart: map[string]any{"turnId": "fallback-turn"},
-	}}
-	turnClient := &AppServerClient{rpc: newRPCConn(turnTransport, nil)}
-	turn, err := turnClient.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread"})
-	if err != nil {
-		t.Fatalf("RunTurn fallback returned error: %v", err)
-	}
-	turnTransport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, Method: "turn/completed", Params: mustRaw(map[string]any{"threadId": "thread", "turnId": "fallback-turn"})}
-	if event := <-turn.Events; event.Kind != EventCompleted {
-		t.Fatalf("fallback event = %#v", event)
-	}
-	_ = turnClient.Close(context.Background())
+	_ = malformedResume.Close(context.Background())
 
 	mapping := &AppServerClient{rpc: newRPCConn(&responseTransport{responses: map[string]any{
 		methodCollaborationList: map[string]any{"data": []any{map[string]any{}, map[string]any{"name": "named"}}},
@@ -1235,6 +1028,151 @@ while read line; do :; done
 
 	if completedItemEvent(Event{}, map[string]any{"itemId": "outer"}).Kind != EventRaw {
 		t.Fatal("completed item without a tool-like type should stay raw")
+	}
+}
+
+func TestAppServerThreadCallsFailClosedAtEveryAcceptanceBoundary(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	transport := &responseTransport{responses: map[string]any{}}
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	if _, err := client.StartThread(cancelled, ThreadStartRequest{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled StartThread error = %v", err)
+	}
+	if _, err := client.ResumeThread(cancelled, ThreadResumeRequest{ThreadID: "thread"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ResumeThread error = %v", err)
+	}
+	if _, err := client.ForkThread(cancelled, ThreadForkRequest{ThreadID: "thread"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ForkThread error = %v", err)
+	}
+	_ = client.Close(context.Background())
+
+	closedTransport := &responseTransport{responses: map[string]any{}}
+	closed := &AppServerClient{rpc: newRPCConn(closedTransport, nil), closed: true}
+	if _, err := closed.StartThread(context.Background(), ThreadStartRequest{}); err == nil {
+		t.Fatal("closed StartThread succeeded")
+	}
+	if _, err := closed.ForkThread(context.Background(), ThreadForkRequest{ThreadID: "thread"}); err == nil {
+		t.Fatal("closed ForkThread succeeded")
+	}
+	_ = closedTransport.Close()
+	_ = closed.rpc.Close()
+
+	for method, call := range map[string]func(*AppServerClient) error{
+		methodThreadStart: func(client *AppServerClient) error {
+			_, err := client.StartThread(context.Background(), ThreadStartRequest{})
+
+			return err
+		},
+		methodThreadFork: func(client *AppServerClient) error {
+			_, err := client.ForkThread(context.Background(), ThreadForkRequest{ThreadID: "source"})
+
+			return err
+		},
+		methodThreadRead: func(client *AppServerClient) error {
+			_, err := client.ReadThread(context.Background(), ThreadReadRequest{ThreadID: "thread"})
+
+			return err
+		},
+	} {
+		t.Run(method, func(t *testing.T) {
+			transport := &responseTransport{responses: map[string]any{method: map[string]any{}}}
+			client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+			if err := call(client); err == nil {
+				t.Fatal("malformed response succeeded")
+			}
+			_ = client.Close(context.Background())
+		})
+	}
+
+	resumeTransport := &responseTransport{responses: map[string]any{
+		methodThreadResume: scriptThreadResponse("different"),
+	}}
+	resume := &AppServerClient{rpc: newRPCConn(resumeTransport, nil)}
+	if _, err := resume.ResumeThread(context.Background(), ThreadResumeRequest{ThreadID: "requested"}); err == nil {
+		t.Fatal("ResumeThread accepted a different returned identity")
+	}
+	_ = resume.Close(context.Background())
+
+	sendErr := errors.New("send failed")
+	failing := &AppServerClient{rpc: newRPCConn(&failingSendTransport{done: make(chan struct{}), err: sendErr}, nil)}
+	if _, err := failing.ForkThread(context.Background(), ThreadForkRequest{ThreadID: "source"}); !errors.Is(err, sendErr) {
+		t.Fatalf("ForkThread send error = %v", err)
+	}
+	_ = failing.Close(context.Background())
+}
+
+func TestAppServerTurnAndSubscriptionHonorCallAndContextFailure(t *testing.T) {
+	sendErr := errors.New("send failed")
+	transport := &failingSendTransport{done: make(chan struct{}), err: sendErr}
+	client := &AppServerClient{rpc: newRPCConn(transport, nil), threads: map[string]*threadStream{}}
+	stream := newThreadStream("thread")
+	stream.claimed = true
+	client.threads["thread"] = stream
+	if _, err := client.RunTurn(context.Background(), TurnStartRequest{ThreadID: "thread"}); !errors.Is(err, sendErr) {
+		t.Fatalf("RunTurn send error = %v", err)
+	}
+	_ = client.Close(context.Background())
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&AppServerClient{}).SubscribeThread(cancelled, "thread"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SubscribeThread canceled error = %v", err)
+	}
+
+	client = &AppServerClient{threads: map[string]*threadStream{"thread": newThreadStream("thread")}}
+	watch, cancelWatch := context.WithCancel(context.Background())
+	feed, err := client.SubscribeThread(watch, "thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelWatch()
+	select {
+	case <-client.eventPumpDone():
+	default:
+	}
+	select {
+	case _, open := <-feed.Events:
+		if open {
+			t.Fatal("canceled subscription remained open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled subscription did not release")
+	}
+}
+
+func TestThreadAcceptanceReturnsRoutingFailureAfterValidNativeResponse(t *testing.T) {
+	for method, call := range map[string]func(*AppServerClient) error{
+		methodThreadStart: func(client *AppServerClient) error {
+			_, err := client.StartThread(context.Background(), ThreadStartRequest{})
+
+			return err
+		},
+		methodThreadResume: func(client *AppServerClient) error {
+			_, err := client.ResumeThread(context.Background(), ThreadResumeRequest{ThreadID: "thread"})
+
+			return err
+		},
+		methodThreadFork: func(client *AppServerClient) error {
+			_, err := client.ForkThread(context.Background(), ThreadForkRequest{ThreadID: "source"})
+
+			return err
+		},
+	} {
+		t.Run(method, func(t *testing.T) {
+			base := &responseTransport{responses: map[string]any{method: scriptThreadResponse("thread")}}
+			client := &AppServerClient{}
+			transport := &hookedResponseTransport{responseTransport: base, hook: func() {
+				client.mu.Lock()
+				client.routingFailure = errors.New("routing failed during acknowledgement")
+				client.mu.Unlock()
+			}}
+			client.rpc = newRPCConn(transport, nil)
+			if err := call(client); err == nil {
+				t.Fatal("thread acceptance ignored routing failure")
+			}
+			_ = client.Close(context.Background())
+		})
 	}
 }
 
@@ -1323,8 +1261,13 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 
 func runLiveTurn(ctx context.Context, t *testing.T, client Client, threadID string) {
 	t.Helper()
+	feed, err := client.SubscribeThread(ctx, threadID)
+	if err != nil {
+		t.Fatalf("SubscribeThread returned error: %v", err)
+	}
+	defer feed.Release()
 
-	turn, err := client.RunTurn(ctx, TurnStartRequest{
+	_, err = client.RunTurn(ctx, TurnStartRequest{
 		ThreadID: threadID,
 		Prompt: []UserInput{{
 			"type": "text",
@@ -1335,17 +1278,14 @@ func runLiveTurn(ctx context.Context, t *testing.T, client Client, threadID stri
 		t.Fatalf("RunTurn returned error: %v", err)
 	}
 
-	completed := false
-	for event := range turn.Events {
+	for {
+		event := <-feed.Events
 		if event.Kind == EventError {
 			t.Fatalf("live turn event error: %v", event.Err)
 		}
 		if event.Kind == EventCompleted {
-			completed = true
+			return
 		}
-	}
-	if !completed {
-		t.Fatal("live turn did not emit completion")
 	}
 }
 
@@ -1357,5 +1297,41 @@ func TestDispatchEventForwardsRuntimeErrors(t *testing.T) {
 	client.dispatchEvent(Event{Kind: EventError, Err: errors.New("runtime failed")})
 	if !called {
 		t.Fatal("runtime error was not forwarded to the event handler")
+	}
+}
+
+func TestAppServerCloseOwnedCancellationJoinsAllConcurrentCallers(t *testing.T) {
+	transport := &manualTransport{recv: make(chan rpcMessage, 2)}
+	handlerStarted := make(chan struct{})
+	handlerExited := make(chan struct{})
+	rpc := newRPCConn(transport, func(ctx context.Context, _ ServerRequest) (any, error) {
+		close(handlerStarted)
+		<-ctx.Done()
+		close(handlerExited)
+
+		return nil, ctx.Err()
+	})
+	var cancelOnce sync.Once
+	processCancelled := make(chan struct{})
+	client := &AppServerClient{
+		rpc: rpc,
+		procCancel: func() {
+			cancelOnce.Do(func() { close(processCancelled) })
+		},
+	}
+	client.ensureEventPump()
+	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("1"), Method: RequestCommandApproval, Params: json.RawMessage(`{}`)}
+	<-handlerStarted
+
+	const callers = 32
+	results := make(chan error, callers)
+	for range callers {
+		go func() { results <- client.Close(t.Context()) }()
+	}
+
+	<-processCancelled
+	<-handlerExited
+	for range callers {
+		require.NoError(t, <-results)
 	}
 }

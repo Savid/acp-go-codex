@@ -4,25 +4,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 var (
 	sessionRolloutAppendTimeout = 60 * time.Second
 	sessionRolloutAppendDelays  = []time.Duration{0, 200 * time.Millisecond, 800 * time.Millisecond}
 )
-
-// sessionRolloutEventBuffer bounds the live rollout tail's hand-off to the
-// prompt loop. The tail blocks on a full buffer rather than dropping, so a
-// visible frame is delivered or the incarnation ends: it is never silently lost.
-const sessionRolloutEventBuffer = 128
 
 // promptSettlementTimeout bounds the settlement a cancelled request must not
 // abort. Settlement runs on a detached context, so it needs a bound of its own.
@@ -36,69 +27,10 @@ type rolloutMirrorRow struct {
 }
 
 func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
-	return s.mirrorAndEmitRolloutLive(ctx, nil)
-}
-
-// prepareRolloutLiveCursors fences the live rollout cursors to the incarnation
-// that is about to open. The rollout file is shared across every turn of a
-// thread, so a row a previous incarnation already accounted for must never enter
-// this one. When the fence itself cannot be read the live tail publishes nothing
-// for this incarnation: the durable mirror still runs, but nothing guesses which
-// rows are old.
-func (s *session) prepareRolloutLiveCursors() {
-	rows, err := countRolloutRows(s.rolloutPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		rows, err = 0, nil
-	}
-
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
 
-	s.rolloutIdentity = nativeTurnIdentity{}
-	s.rolloutLiveFenced = err != nil
-
-	if rows > s.visibleRows {
-		s.visibleRows = rows
-	}
-}
-
-func countRolloutRows(path string) (int, error) {
-	if path == "" {
-		return 0, nil
-	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(nil, maxSessionImportLineBytes)
-
-	rows := 0
-
-	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) != "" {
-			rows++
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return 0, err
-	}
-
-	return rows, nil
-}
-
-func (s *session) mirrorAndEmitRolloutLive(
-	ctx context.Context,
-	events chan<- codex.Event,
-) error {
-	s.mirrorMu.Lock()
-	defer s.mirrorMu.Unlock()
-
-	return s.mirrorRolloutLocked(ctx, events)
+	return s.mirrorRolloutLocked(ctx)
 }
 
 // mirrorRolloutLocked is one mirror pass over the rollout file. The caller holds
@@ -110,21 +42,14 @@ func (s *session) mirrorAndEmitRolloutLive(
 // holds nothing afterwards to say a durable prefix is still owed, so it latches
 // that failure instead — the close boundary's rung is the only thing left that
 // can make the capture the settlement never made.
-func (s *session) mirrorRolloutLocked(
-	ctx context.Context,
-	events chan<- codex.Event,
-) error {
+func (s *session) mirrorRolloutLocked(ctx context.Context) error {
 	store := s.agent.options.SessionStore
 
-	if s.rolloutLiveFenced {
-		events = nil
-	}
-
-	if s.rolloutPath == "" || (store == nil && events == nil) {
+	if s.rolloutPath == "" || store == nil {
 		return nil
 	}
 
-	startRow := s.rolloutStartRow(store != nil, events != nil)
+	startRow := s.mirroredRows
 
 	file, err := os.Open(s.rolloutPath)
 	if err != nil {
@@ -166,11 +91,9 @@ func (s *session) mirrorRolloutLocked(
 		return s.latchCaptureFailure(store, err)
 	}
 
-	if store != nil {
-		clean, err = s.prepareDurableImageRolloutEntries(ctx, clean)
-		if err != nil {
-			return s.latchCaptureFailure(store, err)
-		}
+	clean, err = s.prepareDurableImageRolloutEntries(ctx, clean)
+	if err != nil {
+		return s.latchCaptureFailure(store, err)
 	}
 
 	// Everything the store is owed is in hand from here on: a commit that fails
@@ -182,37 +105,12 @@ func (s *session) mirrorRolloutLocked(
 		rows[index] = rolloutMirrorRow{index: startRow + index, entry: entry}
 	}
 
-	s.mergeRolloutIdentity(rolloutNativeTerminalIdentity(clean))
-
-	if store != nil {
-		durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
-		if err := s.commitRolloutEntries(ctx, store, durableEntries, nextMirroredRow); err != nil {
-			return err
-		}
-	}
-
-	if events != nil {
-		s.emitRolloutEvents(ctx, rows, events)
+	durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
+	if err := s.commitRolloutEntries(ctx, store, durableEntries, nextMirroredRow); err != nil {
+		return err
 	}
 
 	return nil
-}
-
-func (s *session) mergeRolloutIdentity(next nativeTurnIdentity) {
-	if next.turnID != "" && next.turnID != s.rolloutIdentity.turnID {
-		s.rolloutIdentity = nativeTurnIdentity{turnID: next.turnID}
-	}
-
-	if next.messageID != "" {
-		s.rolloutIdentity.messageID = next.messageID
-	}
-}
-
-func (s *session) rolloutIdentitySnapshot() nativeTurnIdentity {
-	s.mirrorMu.Lock()
-	defer s.mirrorMu.Unlock()
-
-	return s.rolloutIdentity
 }
 
 func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, int, error) {
@@ -227,33 +125,6 @@ func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEn
 	}
 
 	return clean, len(clean), nil
-}
-
-func (s *session) rolloutStartRow(
-	storeEnabled bool,
-	eventsEnabled bool,
-) int {
-	startRow := 0
-	set := false
-
-	for _, cursor := range []struct {
-		enabled bool
-		row     int
-	}{
-		{storeEnabled, s.mirroredRows},
-		{eventsEnabled, s.visibleRows},
-	} {
-		if !cursor.enabled {
-			continue
-		}
-
-		if !set || cursor.row < startRow {
-			startRow = cursor.row
-			set = true
-		}
-	}
-
-	return startRow
 }
 
 func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKey, entries []SessionStoreEntry) error {
@@ -308,95 +179,6 @@ func (s *session) durableRolloutEntries(rows []rolloutMirrorRow) ([]SessionStore
 	return entries, nextRow
 }
 
-// emitRolloutEvents hands the visible rows the app-server never forwarded to the
-// prompt loop. Delivery is backpressured rather than dropped, and the cursor
-// advances only over rows the loop actually received, so an undelivered row
-// stays unaccounted instead of disappearing.
-func (s *session) emitRolloutEvents(ctx context.Context, rows []rolloutMirrorRow, events chan<- codex.Event) {
-	for _, row := range rows {
-		if row.index < s.visibleRows {
-			continue
-		}
-
-		event, ok := rolloutEvent(row.entry)
-		if ok {
-			select {
-			case events <- event:
-			case <-ctx.Done():
-				return
-			}
-		}
-
-		s.visibleRows = row.index + 1
-	}
-}
-
-func rolloutEvent(entry SessionStoreEntry) (codex.Event, bool) {
-	row, err := decodeRolloutRow(entry)
-	if err != nil {
-		return codex.Event{}, false
-	}
-
-	if row.Type == valueEventMsg &&
-		stringFromAny(row.Payload[jsonFieldType]) == valueAgentMessage &&
-		stringFromAny(row.Payload[jsonFieldMessage]) != "" {
-		return codex.Event{
-			Kind:      codex.EventAgentMessageDelta,
-			Text:      stringFromAny(row.Payload[jsonFieldMessage]),
-			Completed: true,
-			RawJSON:   string(entry),
-		}, true
-	}
-
-	if row.Type == valueResponseItem && stringFromAny(row.Payload[jsonFieldType]) == valueImageGenerationCall {
-		image := rolloutImageEvent(row.Payload)
-		if reference, _ := row.Payload[jsonFieldResult].(map[string]any); reference != nil {
-			image.ArtifactRef = stringFromAny(reference[imageArtifactRefKey])
-		}
-
-		return codex.Event{
-			Kind:    codex.EventImageCompleted,
-			ItemID:  image.ID,
-			Image:   image,
-			RawJSON: string(entry),
-		}, true
-	}
-
-	return codex.Event{}, false
-}
-
-func (s *session) startRolloutTail(
-	ctx context.Context,
-	events chan<- codex.Event,
-) (context.CancelFunc, <-chan struct{}) {
-	tailCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-
-	go func() {
-		defer recoverAgentGoroutine(ctx, agentLogger(s.agent), "Codex rollout tail")
-		defer close(done)
-
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-tailCtx.Done():
-				// The prompt loop is gone by the time the tail stops, so the
-				// final pass is durability only. Publishing into a hand-off
-				// nobody reads would block on a full buffer forever.
-				_ = s.mirrorAndEmitRollout(context.WithoutCancel(ctx))
-
-				return
-			case <-ticker.C:
-				_ = s.mirrorAndEmitRolloutLive(tailCtx, events)
-			}
-		}
-	}()
-
-	return cancel, done
-}
-
 // commitRolloutEntries places one durable prefix. A failed commit retains the
 // exact entries it did not place instead of dropping them, and the next prompt
 // blocks on that retention until the store holds it: the alternative is a turn
@@ -431,7 +213,7 @@ func (s *session) commitRolloutEntries(
 // latchCaptureFailure records that a mirror pass failed before it captured the
 // durable prefix it was reading, and returns the failure unchanged. Only a pass
 // that was mirroring for a store latches: without one there is no durable prefix
-// to owe, and the live tail's own rows are accounted for by their own cursor.
+// to owe.
 func (s *session) latchCaptureFailure(store SessionStore, err error) error {
 	if store != nil {
 		s.captureFailed = true
@@ -466,9 +248,10 @@ func (s *session) ensureMirrorSynced(ctx context.Context) error {
 }
 
 // commitResumableSnapshot places the durable state the closing session leaves
-// behind. It is the close boundary's own rung, so it runs after the containment
-// proof and after the stream fence, on a context the request's cancellation
-// cannot reach, and under the deadline the rest of the boundary works to.
+// behind. It is the close boundary's own rung, so it runs after containment and
+// terminal lifecycle settlement but before the final stream fence, on a context
+// the request's cancellation cannot reach and under the deadline the rest of
+// the boundary works to.
 func (s *session) commitResumableSnapshot(ctx context.Context) error {
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
@@ -499,7 +282,7 @@ func (s *session) recaptureFailedMirror(ctx context.Context) error {
 		return nil
 	}
 
-	return s.mirrorRolloutLocked(ctx, nil)
+	return s.mirrorRolloutLocked(ctx)
 }
 
 // fencePersistence stops every later commit for this session. It takes the

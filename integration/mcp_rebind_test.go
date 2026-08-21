@@ -123,8 +123,11 @@ func runNativeMCPRebindCanary(
 
 	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 	defer cancel()
+	feed, err := client.SubscribeThread(ctx, threadID)
+	require.NoError(t, err)
+	defer feed.Release()
 
-	turn, err := client.RunTurn(ctx, codex.TurnStartRequest{
+	_, err = client.RunTurn(ctx, codex.TurnStartRequest{
 		ThreadID: threadID,
 		Prompt: []codex.UserInput{{
 			"type": "text",
@@ -139,7 +142,8 @@ func runNativeMCPRebindCanary(
 	forbidden := crossRoute + "_marker:"
 	var observed strings.Builder
 	completed := false
-	for event := range turn.Events {
+	for {
+		event := <-feed.Events
 		observed.WriteString(event.Text)
 		observed.WriteString(event.Tool.Content)
 		if len(event.Tool.Raw) > 0 {
@@ -153,6 +157,7 @@ func runNativeMCPRebindCanary(
 		if event.Kind == codex.EventCompleted {
 			require.Equal(t, codex.StopReasonEndTurn, event.StopReason)
 			completed = true
+			break
 		}
 	}
 

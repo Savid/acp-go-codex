@@ -1,11 +1,5 @@
 package codex
 
-// rateLimitsMinVersion is the earliest native codex version that exposes the
-// account/rateLimits/read request. The app-server carried the rate-limit
-// snapshot on the token-count notification path before this, but the explicit
-// read method only arrived in 0.142.0.
-const rateLimitsMinVersion = "0.142.0"
-
 // Codex-native rate-limit window identifiers.
 const (
 	windowPrimary   = "primary"
@@ -35,22 +29,6 @@ type RateLimitWindow struct {
 type RateLimitSnapshot struct {
 	Windows  []RateLimitWindow
 	PlanType string
-}
-
-// HasData reports whether the snapshot carries any harness-reported content.
-func (s RateLimitSnapshot) HasData() bool {
-	return len(s.Windows) > 0 || s.PlanType != ""
-}
-
-// rateLimitSnapshotPayload extracts the RateLimitSnapshot object from an
-// account/rateLimits/read response or account/rateLimits/updated notification,
-// both of which nest it under "rateLimits".
-func rateLimitSnapshotPayload(values map[string]any) map[string]any {
-	if snapshot := mapValue(values, "rateLimits"); snapshot != nil {
-		return snapshot
-	}
-
-	return values
 }
 
 // rateLimitSnapshotFromMap decodes a codex app-server v2 RateLimitSnapshot.

@@ -36,7 +36,7 @@ func TestStandaloneIsolationDefaultsAndFencesDurableHome(t *testing.T) {
 
 	mismatched := NewAgent(WithHome("/var/lib/other"), WithProcessIsolation(isolation))
 	if _, err := mismatched.Initialize(t.Context(), acp.InitializeRequest{}); err == nil ||
-		!strings.Contains(err.Error(), "WithHome must equal ProcessIsolation.StandaloneStateRoot") {
+		!strings.Contains(err.Error(), valueInternalFailure) || strings.Contains(err.Error(), "StandaloneStateRoot") {
 		t.Fatalf("mismatched standalone home error = %v", err)
 	}
 }
@@ -233,7 +233,7 @@ func TestContainmentModeSelections(t *testing.T) {
 		t.Fatal("off-Darwin opt-in was accepted")
 	}
 	invalidAgent := NewAgent(WithDarwinBestEffortContainment())
-	if _, err := invalidAgent.NewSession(t.Context(), acp.NewSessionRequest{Cwd: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "supported only on darwin") {
+	if _, err := invalidAgent.NewSession(t.Context(), acp.NewSessionRequest{Cwd: t.TempDir()}); err == nil || !strings.Contains(err.Error(), valueInternalFailure) {
 		t.Fatalf("embedded lifecycle accepted off-Darwin opt-in: %v", err)
 	}
 	for _, key := range []string{

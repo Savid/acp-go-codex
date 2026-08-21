@@ -22,6 +22,14 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 		return lifecycle.Negotiated{}, nil
 	}
 
+	a.mu.Lock()
+	carrier, ok := a.conn.(lifecycleCarrier)
+	a.mu.Unlock()
+
+	if ok && !carrier.LifecycleDeliverySupported() {
+		return lifecycle.Negotiated{}, nil
+	}
+
 	negotiated, answered := offer.Answer(a.provenLifecycleFacts())
 	if !answered {
 		return lifecycle.Negotiated{}, nil
@@ -34,15 +42,13 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 // resolved on the agent that enforces containment rather than compiled in once
 // for the package.
 //
-// All three facts are negative, and none of them turns on the containment mode:
+// These facts do not turn on the containment mode:
 // the mode changes which identity the app-server runs under and which vacancy
-// the adapter can prove about it, and neither reaches these answers. Each is
-// negative for a reason that holds under every mode this adapter can select:
+// the adapter can prove about it, and neither reaches these answers. Each
+// answer holds under every mode this adapter can select:
 //
-//   - `updatesOutsidePrompt` is false because a session opens one incarnation
-//     per prompt and fences it at settlement, so no lifecycle envelope is ever
-//     delivered while no prompt is in flight. That is a property of this
-//     adapter's stream ownership, which containment does not touch.
+//   - `updatesOutsidePrompt` is true because a session claims one exact native
+//     thread broker and keeps its lifecycle stream across prompt settlement.
 //   - `authoritativeQuiescence` is false because one logical session's
 //     descendants cannot be proved gone while the app-server generation they
 //     live in keeps serving every peer session. Even the authoritative boundary
@@ -62,7 +68,7 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 // say.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	return lifecycle.Negotiated{
-		UpdatesOutsidePrompt:    false,
+		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: false,
 		ActivityKinds:           []lifecycle.ActivityKind{},
 	}
