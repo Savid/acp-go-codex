@@ -26,22 +26,15 @@ func (a *Agent) handleCodexServerRequest(ctx context.Context, req codex.ServerRe
 			return nil, fmt.Errorf("codex server request %q addressed unknown threadId", req.Method)
 		}
 
-		var finish func()
+		var (
+			finish func()
+			err    error
+		)
 
 		ctx, finish = session.beginInteraction(ctx, codex.ServerInteractionKey(req, params))
 		defer finish()
-		// A request names the authoritative native turn. On the session-owned
-		// stream it either binds to the accepted prompt or is itself the proof
-		// that opens an agent-origin turn between prompts.
-		turn, lifecycleOwned, err := session.claimLifecycleTurn(ctx, codex.RequestTurnID(params))
-		if err == nil && lifecycleOwned {
-			ctx = withLifecycleActionTurn(withTurnRoute(ctx, turn.turnNonce), turn)
-		}
 
-		if err == nil && !lifecycleOwned {
-			err = session.waitForTurnBinding(ctx)
-		}
-
+		ctx, err = session.claimServerRequestTurn(ctx, req.Method, params)
 		if err != nil {
 			if cancellation, ok := codexPermissionCancellationResponse(req.Method, params); ok {
 				return cancellation, nil

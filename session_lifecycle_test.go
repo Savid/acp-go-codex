@@ -952,16 +952,15 @@ func TestSessionLifecycleBetweenPromptFailureEOFAndBoundsFailClosed(t *testing.T
 		}), codex.ErrTurnEventOverflow)
 	})
 
-	t.Run("terminal retention exhaustion fences instead of evicting", func(t *testing.T) {
+	t.Run("terminal retention exhaustion evicts and keeps routing", func(t *testing.T) {
 		agent := NewAgent()
+		agent.setAgentClient(newRecordingAgentClient())
 		s := &session{agent: agent, id: "session", codexThreadID: "thread", client: newSpyCodexClient()}
 		in, err := s.openIncarnation(ctx, negotiated)
 		require.NoError(t, err)
 		s.clearIncarnation(in)
-		s.terminalNativeTurns = make(map[string]struct{}, terminalNativeTurnLimit)
-		for index := range terminalNativeTurnLimit {
-			s.terminalNativeTurns[fmt.Sprintf("old-%d", index)] = struct{}{}
-		}
+		fillTerminalNativeTurns(s)
+		s.nativeEventOpened = true
 		events := make(chan codex.Event, 1)
 		events <- codex.Event{
 			Kind: codex.EventCompleted, Scope: codex.EventScopeThread,
@@ -971,8 +970,9 @@ func TestSessionLifecycleBetweenPromptFailureEOFAndBoundsFailClosed(t *testing.T
 		done := make(chan struct{})
 		go s.runNativeEventPump(events, make(chan chan error), done)
 		<-done
-		require.ErrorContains(t, s.lifecycleFailure, "retention limit")
-		require.True(t, in.stream.Fenced())
+		require.ErrorIs(t, s.lifecycleFailure, codex.ErrConnectionClosed)
+		require.Contains(t, s.terminalNativeTurns, "new")
+		require.NotContains(t, s.terminalNativeTurns, "old-0")
 	})
 }
 
@@ -1474,13 +1474,115 @@ func TestLifecycleEstablishmentAndStreamOpenFailClosedAtEveryBoundary(t *testing
 	s = &session{agent: NewAgent()}
 	in = &promptIncarnation{session: s, accepted: true, nativeTurnID: "overflow", events: make(chan codex.Event, 1)}
 	s.incarnation = in
-	s.terminalNativeTurns = make(map[string]struct{}, terminalNativeTurnLimit)
-	for index := range terminalNativeTurnLimit {
-		s.terminalNativeTurns[fmt.Sprintf("old-%d", index)] = struct{}{}
-	}
+	fillTerminalNativeTurns(s)
 	s.clearIncarnation(in)
-	require.ErrorContains(t, s.lifecycleFailure, "retention limit")
-	require.True(t, s.clientDead)
+	require.NoError(t, s.lifecycleFailure)
+	require.False(t, s.clientDead)
+	require.Contains(t, s.terminalNativeTurns, "overflow")
+	require.NotContains(t, s.terminalNativeTurns, "old-0")
+}
+
+// fillTerminalNativeTurns saturates the tombstone retention so the next settled
+// turn has to evict.
+func fillTerminalNativeTurns(s *session) {
+	for index := range terminalNativeTurnLimit {
+		s.rememberTerminalNativeTurnLocked(fmt.Sprintf("old-%d", index))
+	}
+}
+
+// TestTurnlessThreadNotificationsAreToleratedInEveryWindow drives the
+// app-server notifications that name a thread and no turn through each window
+// one can arrive in. They are notices about the thread, not evidence about a
+// turn, so none of them ends anything.
+func TestTurnlessThreadNotificationsAreToleratedInEveryWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event codex.Event
+	}{
+		{name: "guardianWarning", event: codex.Event{
+			Kind: codex.EventWarning, Scope: codex.EventScopeThread, ThreadID: "thread",
+			RawMethod: "guardianWarning", Text: "guardian held a command",
+		}},
+		{name: "warning", event: codex.Event{
+			Kind: codex.EventWarning, Scope: codex.EventScopeThread, ThreadID: "thread",
+			RawMethod: "warning", Text: "sandbox degraded",
+		}},
+		{name: "thread status changed", event: codex.Event{
+			Kind: codex.EventRaw, Scope: codex.EventScopeThread, ThreadID: "thread",
+			RawMethod: "thread/status/changed",
+		}},
+		{name: "thread name updated", event: codex.Event{
+			Kind: codex.EventRaw, Scope: codex.EventScopeThread, ThreadID: "thread",
+			RawMethod: "thread/name/updated",
+		}},
+		{name: "thread queue changed", event: codex.Event{
+			Kind: codex.EventRaw, Scope: codex.EventScopeThread, ThreadID: "thread",
+			RawMethod: "thread/queue/changed",
+		}},
+		{name: "hook started", event: codex.Event{
+			Kind: codex.EventRaw, Scope: codex.EventScopeThread, ThreadID: "thread",
+			RawMethod: "hook/started",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := &session{agent: NewAgent(), codexThreadID: "thread"}
+			require.NoError(t, before.routeNativeEvent(tc.event))
+			require.Empty(t, before.preOpenEvents)
+
+			canary := &session{agent: NewAgent(), codexThreadID: "thread"}
+			canary.nativeCanary = &nativeCanary{events: make(chan codex.Event, sessionNativeEventBuffer)}
+			require.NoError(t, canary.routeNativeEvent(tc.event))
+			require.Empty(t, canary.nativeCanary.preBind)
+			require.Empty(t, canary.nativeCanary.events)
+
+			live := &session{agent: NewAgent(), codexThreadID: "thread", nativeEventOpened: true}
+			in := &promptIncarnation{
+				session: live, accepted: true, nativeTurnID: "turn",
+				events: make(chan codex.Event, sessionNativeEventBuffer),
+			}
+			live.incarnation = in
+			require.NoError(t, live.routeNativeEvent(tc.event))
+			require.Empty(t, in.events)
+			require.False(t, in.eventsClosed)
+			require.NoError(t, live.lifecycleFailure)
+		})
+	}
+}
+
+// TestSettledNativeTurnTrailingEventsAreDropped covers what the app-server
+// keeps emitting after a turn's terminal: a token-usage flush, a completed item
+// racing the terminal, and a raw response item.
+func TestSettledNativeTurnTrailingEventsAreDropped(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event codex.Event
+	}{
+		{name: "token usage flush", event: codex.Event{
+			Kind: codex.EventUsageUpdated, RawMethod: "thread/tokenUsage/updated",
+		}},
+		{name: "racing item completion", event: codex.Event{
+			Kind: codex.EventToolCompleted, RawMethod: "item/completed",
+		}},
+		{name: "raw response item", event: codex.Event{
+			Kind: codex.EventRaw, RawMethod: "rawResponseItem/completed",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := NewAgent()
+			agent.setAgentClient(newRecordingAgentClient())
+			s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
+			require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+			s.rememberTerminalNativeTurnLocked("settled")
+
+			event := tc.event
+			event.Scope = codex.EventScopeThread
+			event.ThreadID = "thread"
+			event.TurnID = "settled"
+			require.NoError(t, s.routeNativeEvent(event))
+			require.Nil(t, s.agentIncarnation)
+			require.NoError(t, s.lifecycleFailure)
+		})
+	}
 }
 
 func TestNativeEventRoutingRejectsEveryAmbiguousOwnershipShape(t *testing.T) {
@@ -1497,7 +1599,8 @@ func TestNativeEventRoutingRejectsEveryAmbiguousOwnershipShape(t *testing.T) {
 	require.ErrorContains(t, s.routeNativeEvent(codex.Event{Scope: codex.EventScopeThread, ThreadID: "other"}), "outside its exact thread")
 
 	s.nativeCanary = &nativeCanary{events: make(chan codex.Event, sessionNativeEventBuffer+1)}
-	require.ErrorContains(t, s.routeNativeEvent(threadEvent("")), "omitted its native turn identity")
+	require.NoError(t, s.routeNativeEvent(threadEvent("")))
+	require.Empty(t, s.nativeCanary.preBind)
 	s.nativeCanary.preBind = make([]codex.Event, sessionNativeEventBuffer)
 	require.ErrorIs(t, s.routeNativeEvent(threadEvent("turn")), codex.ErrTurnEventOverflow)
 	s.nativeCanary.preBind = nil
@@ -1658,6 +1761,51 @@ func TestLifecycleTurnWaitObservesExactOwnerAndCancellation(t *testing.T) {
 	require.NoError(t, <-errs)
 }
 
+// TestServerRequestTurnClaimExemptsOnlyTurnlessElicitations pins which native
+// requests may omit a turn. Every approval kind and `tool/requestUserInput`
+// state a required turnId on the wire; `mcpServer/elicitation/request` types it
+// nullable because MCP elicitation is a standalone server-to-client request.
+func TestServerRequestTurnClaimExemptsOnlyTurnlessElicitations(t *testing.T) {
+	newRequestSession := func(t *testing.T) *session {
+		t.Helper()
+		agent := NewAgent()
+		agent.setAgentClient(newRecordingAgentClient())
+		s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
+		require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+
+		return s
+	}
+
+	s := newRequestSession(t)
+	claimed, err := s.claimServerRequestTurn(t.Context(), codex.RequestMCPElicitation, map[string]any{
+		"threadId": "thread", "serverName": "docs",
+	})
+	require.NoError(t, err)
+	require.Equal(t, t.Context(), claimed)
+	require.Nil(t, s.agentIncarnation)
+
+	for _, method := range []string{
+		codex.RequestCommandApproval,
+		codex.RequestFileChangeApproval,
+		codex.RequestPermissionsApproval,
+		codex.RequestToolUserInput,
+	} {
+		t.Run(method, func(t *testing.T) {
+			s := newRequestSession(t)
+			_, err := s.claimServerRequestTurn(t.Context(), method, map[string]any{"threadId": "thread"})
+			require.ErrorContains(t, err, "omitted its native turn identity")
+		})
+	}
+
+	s = newRequestSession(t)
+	bound, err := s.claimServerRequestTurn(t.Context(), codex.RequestMCPElicitation, map[string]any{
+		"threadId": "thread", "serverName": "docs", "turnId": "native",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, s.agentIncarnation)
+	require.Equal(t, inboundRouteMeta(s.agentIncarnation.turnNonce), turnRouteMetaFromContext(bound))
+}
+
 func TestLifecycleTurnClaimFailsClosedAcrossEveryOwnershipBoundary(t *testing.T) {
 	newClaimSession := func(t *testing.T) *session {
 		t.Helper()
@@ -1735,16 +1883,25 @@ func TestLifecycleTurnClaimFailsClosedAcrossEveryOwnershipBoundary(t *testing.T)
 
 func TestTerminalNativeTurnRetentionIsIdempotentAndBounded(t *testing.T) {
 	s := &session{}
-	require.NoError(t, s.rememberTerminalNativeTurnLocked(""))
-	require.NoError(t, s.rememberTerminalNativeTurnLocked("turn"))
+	s.rememberTerminalNativeTurnLocked("")
+	require.Empty(t, s.terminalNativeTurns)
+	s.rememberTerminalNativeTurnLocked("turn")
 	require.Contains(t, s.terminalNativeTurns, "turn")
-	require.NoError(t, s.rememberTerminalNativeTurnLocked("turn"))
+	s.rememberTerminalNativeTurnLocked("turn")
+	require.Len(t, s.terminalNativeTurnOrder, 1)
 
-	s.terminalNativeTurns = make(map[string]struct{}, terminalNativeTurnLimit)
-	for index := range terminalNativeTurnLimit {
-		s.terminalNativeTurns[fmt.Sprintf("turn-%d", index)] = struct{}{}
-	}
-	require.ErrorContains(t, s.rememberTerminalNativeTurnLocked("overflow"), "retention limit")
+	s = &session{}
+	fillTerminalNativeTurns(s)
+	s.rememberTerminalNativeTurnLocked("overflow")
+	require.Len(t, s.terminalNativeTurns, terminalNativeTurnLimit)
+	require.Len(t, s.terminalNativeTurnOrder, terminalNativeTurnLimit)
+	require.NotContains(t, s.terminalNativeTurns, "old-0")
+	require.Contains(t, s.terminalNativeTurns, "old-1")
+	require.Contains(t, s.terminalNativeTurns, "overflow")
+
+	s.rememberTerminalNativeTurnLocked("next")
+	require.NotContains(t, s.terminalNativeTurns, "old-1")
+	require.Contains(t, s.terminalNativeTurns, "next")
 }
 
 func TestAutonomousTurnAdmissionRejectsClosedPromptAndRandomFailure(t *testing.T) {
@@ -1777,15 +1934,13 @@ func TestAutonomousTurnSettlementRejectsChangedAndTerminalOwners(t *testing.T) {
 
 	in = &promptIncarnation{session: s, nativeTurnID: "overflow"}
 	s.agentIncarnation = in
-	s.terminalNativeTurns = make(map[string]struct{}, terminalNativeTurnLimit)
-	for index := range terminalNativeTurnLimit {
-		s.terminalNativeTurns[fmt.Sprintf("old-%d", index)] = struct{}{}
-	}
-	err = s.settleAutonomousTurnLocked(t.Context(), in, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed)
-	require.ErrorContains(t, err, "retention limit")
+	fillTerminalNativeTurns(s)
+	require.NoError(t, s.settleAutonomousTurnLocked(t.Context(), in, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed))
+	require.Contains(t, s.terminalNativeTurns, "overflow")
+	require.Nil(t, s.agentIncarnation)
 }
 
-func TestAutonomousRoutingRejectsTerminalConcurrentAndTerminatingTurns(t *testing.T) {
+func TestAutonomousRoutingDropsTerminalAndRejectsConcurrentTurns(t *testing.T) {
 	newAutonomousSession := func(t *testing.T) *session {
 		t.Helper()
 		agent := NewAgent()
@@ -1801,7 +1956,8 @@ func TestAutonomousRoutingRejectsTerminalConcurrentAndTerminatingTurns(t *testin
 
 	s := newAutonomousSession(t)
 	s.terminalNativeTurns = map[string]struct{}{"terminal": {}}
-	require.ErrorContains(t, s.routeNativeEvent(event("terminal")), "terminal native turn")
+	require.NoError(t, s.routeNativeEvent(event("terminal")))
+	require.Nil(t, s.agentIncarnation)
 
 	s = newAutonomousSession(t)
 	s.agentIncarnation = &promptIncarnation{nativeTurnID: "one"}

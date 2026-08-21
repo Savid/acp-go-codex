@@ -460,6 +460,8 @@ func (s *session) prepareNativeEventRebind() error {
 	s.nativeEventOpened = false
 	s.preOpenEvents = append(s.preOpenEvents, pending...)
 	s.terminalNativeTurns = nil
+	s.terminalNativeTurnOrder = nil
+	s.terminalNativeTurnNext = 0
 	s.signalLifecycleChangedLocked()
 	s.lifecycleMu.Unlock()
 
@@ -889,15 +891,7 @@ func (s *session) clearIncarnation(in *promptIncarnation) {
 			return
 		}
 
-		if in.nativeTurnID != "" {
-			if err := s.rememberTerminalNativeTurnLocked(in.nativeTurnID); err != nil {
-				s.lifecycleMu.Unlock()
-				s.failNativeIncarnation(err)
-
-				return
-			}
-		}
-
+		s.rememberTerminalNativeTurnLocked(in.nativeTurnID)
 		s.closeCycleEventsLocked(in)
 		s.incarnation = nil
 		s.signalLifecycleChangedLocked()
@@ -1278,11 +1272,11 @@ func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event)
 		return fmt.Errorf("codex thread broker received an event outside its exact thread")
 	}
 
-	if canary := s.nativeCanary; canary != nil {
-		if event.TurnID == "" {
-			return errors.New("codex runtime_ready event omitted its native turn identity")
-		}
+	if event.TurnID == "" {
+		return s.applyTurnlessThreadEventLocked(event)
+	}
 
+	if canary := s.nativeCanary; canary != nil {
 		if canary.turnID == "" {
 			if len(canary.preBind) == sessionNativeEventBuffer {
 				return codex.ErrTurnEventOverflow
@@ -1330,19 +1324,6 @@ func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event)
 		return nil
 	}
 
-	if event.TurnID == "" {
-		switch event.Kind {
-		case codex.EventAccountUpdated:
-			s.setAccount(redactedAccountMeta(event.Account))
-
-			return nil
-		case codex.EventRaw:
-			return nil
-		default:
-			return errors.New("codex thread event omitted its native turn identity")
-		}
-	}
-
 	if current := s.incarnation; current != nil {
 		if current.nativeTurnID == "" {
 			if len(current.preBind) == sessionNativeEventBuffer {
@@ -1368,6 +1349,23 @@ func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event)
 	}
 
 	return s.routeAutonomousEventLocked(ctx, event)
+}
+
+// applyTurnlessThreadEventLocked disposes of a thread event the app-server
+// attributed to no turn. Thread-scoped notices — guardian warnings, status,
+// name, queue, and goal changes — carry a thread and nothing else, so only a
+// kind that is itself turn evidence has to name the turn it belongs to.
+func (s *session) applyTurnlessThreadEventLocked(event codex.Event) error {
+	switch event.Kind {
+	case codex.EventAccountUpdated:
+		s.setAccount(redactedAccountMeta(event.Account))
+
+		return nil
+	case codex.EventRaw, codex.EventWarning:
+		return nil
+	default:
+		return errors.New("codex thread event omitted its native turn identity")
+	}
 }
 
 func (s *session) enqueuePromptEventLocked(in *promptIncarnation, event codex.Event) bool {
@@ -1412,8 +1410,11 @@ func (s *session) routeAutonomousEventLocked(ctx context.Context, event codex.Ev
 		defer cancel()
 	}
 
+	// A settled turn keeps flushing: a late token-usage update, a completed item
+	// racing its turn terminal. None of it reopens the turn, and none of it is
+	// the start of a new one.
 	if _, terminal := s.terminalNativeTurns[event.TurnID]; terminal {
-		return errors.New("codex emitted an event for a terminal native turn")
+		return nil
 	}
 
 	if s.incarnation != nil {
@@ -1508,9 +1509,9 @@ func (s *session) completeAutonomousSettlement(
 
 	if mirrorErr != nil {
 		in.settled = true
-		terminalErr := s.rememberTerminalNativeTurnLocked(in.nativeTurnID)
+		s.rememberTerminalNativeTurnLocked(in.nativeTurnID)
 		s.agentIncarnation = nil
-		boundary.err = errors.Join(priorErr, mirrorErr, terminalErr)
+		boundary.err = errors.Join(priorErr, mirrorErr)
 		_ = s.latchLifecycleFailureLocked(boundary.err)
 		close(boundary.done)
 		s.signalLifecycleChangedLocked()
@@ -1523,7 +1524,7 @@ func (s *session) completeAutonomousSettlement(
 	boundary.err = errors.Join(priorErr, settleErr)
 	if settleErr != nil && s.agentIncarnation == in {
 		in.settled = true
-		boundary.err = errors.Join(boundary.err, s.rememberTerminalNativeTurnLocked(in.nativeTurnID))
+		s.rememberTerminalNativeTurnLocked(in.nativeTurnID)
 		s.agentIncarnation = nil
 		s.signalLifecycleChangedLocked()
 	}
@@ -1567,9 +1568,7 @@ func (s *session) settleAutonomousTurnLocked(
 		return err
 	}
 
-	if err := s.rememberTerminalNativeTurnLocked(in.nativeTurnID); err != nil {
-		return err
-	}
+	s.rememberTerminalNativeTurnLocked(in.nativeTurnID)
 
 	if s.agentIncarnation == in {
 		s.agentIncarnation = nil
@@ -1628,6 +1627,33 @@ func (s *session) openAutonomousTurnLocked(ctx context.Context, nativeTurnID str
 	}
 
 	return in, nil
+}
+
+// claimServerRequestTurn binds an app-server request to the foreground turn it
+// names, returning the routing context the answer is delivered under. An MCP
+// elicitation is the one request whose turn identity is optional: an MCP server
+// can elicit outside any turn, and such a request belongs to no turn rather
+// than to a missing one.
+func (s *session) claimServerRequestTurn(
+	ctx context.Context,
+	method string,
+	params map[string]any,
+) (context.Context, error) {
+	nativeTurnID := codex.RequestTurnID(params)
+	if nativeTurnID == "" && method == codex.RequestMCPElicitation {
+		return ctx, nil
+	}
+
+	turn, lifecycleOwned, err := s.claimLifecycleTurn(ctx, nativeTurnID)
+	if err != nil {
+		return ctx, err
+	}
+
+	if !lifecycleOwned {
+		return ctx, s.waitForTurnBinding(ctx)
+	}
+
+	return withLifecycleActionTurn(withTurnRoute(ctx, turn.turnNonce), turn), nil
 }
 
 // claimLifecycleTurn binds an app-server request to its exact foreground turn.
@@ -1853,9 +1879,13 @@ func (s *session) handleAutonomousEvent(ctx context.Context, event codex.Event, 
 	return nil
 }
 
-func (s *session) rememberTerminalNativeTurnLocked(turnID string) error {
+// rememberTerminalNativeTurnLocked tombstones a settled native turn so its
+// trailing events are never read as a new one. Retention is bounded and the
+// oldest tombstone is evicted, because the oldest settled turn is the one the
+// app-server is least likely to still be flushing.
+func (s *session) rememberTerminalNativeTurnLocked(turnID string) {
 	if turnID == "" {
-		return nil
+		return
 	}
 
 	if s.terminalNativeTurns == nil {
@@ -1863,16 +1893,18 @@ func (s *session) rememberTerminalNativeTurnLocked(turnID string) error {
 	}
 
 	if _, exists := s.terminalNativeTurns[turnID]; exists {
-		return nil
+		return
 	}
 
-	if len(s.terminalNativeTurns) == terminalNativeTurnLimit {
-		return errors.New("codex native turn retention limit reached")
+	if len(s.terminalNativeTurnOrder) == terminalNativeTurnLimit {
+		delete(s.terminalNativeTurns, s.terminalNativeTurnOrder[s.terminalNativeTurnNext])
+		s.terminalNativeTurnOrder[s.terminalNativeTurnNext] = turnID
+		s.terminalNativeTurnNext = (s.terminalNativeTurnNext + 1) % terminalNativeTurnLimit
+	} else {
+		s.terminalNativeTurnOrder = append(s.terminalNativeTurnOrder, turnID)
 	}
 
 	s.terminalNativeTurns[turnID] = struct{}{}
-
-	return nil
 }
 
 func (s *session) failNativeIncarnation(err error) {

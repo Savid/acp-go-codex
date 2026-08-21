@@ -463,6 +463,38 @@ func TestServerRequestPendingApprovalIsAnsweredCancelledOnShutdown(t *testing.T)
 	}
 }
 
+// TestTurnlessMCPElicitationIsAnsweredNotRefused covers the one native request
+// whose turn identity is optional. MCP models elicitation as a standalone
+// server-to-client request, so app-server sends `turnId: null` whenever it
+// cannot correlate a turn, and every other request kind still has to name one.
+func TestTurnlessMCPElicitationIsAnsweredNotRefused(t *testing.T) {
+	const schema = `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`
+
+	for name, params := range map[string]string{
+		"explicit null": `"turnId":null,"message":"Name?","mode":"form","requestedSchema":` + schema,
+		"absent":        `"message":"Name?","mode":"form","requestedSchema":` + schema,
+		"tool approval": `"turnId":null,"_meta":{"codex_approval_kind":"mcp_tool_call"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent, session, ctx := newServerRequestSession(t)
+			enableClientElicitation(agent, true, false)
+			agent.setAgentClient(newRecordingAgentClient())
+
+			response, err := agent.handleCodexServerRequest(ctx, codex.ServerRequest{
+				Method: codex.RequestMCPElicitation,
+				Params: json.RawMessage(
+					`{"threadId":"` + session.codexThreadID + `","serverName":"docs",` + params + `}`,
+				),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, response)
+			session.mu.Lock()
+			require.False(t, session.clientDead)
+			session.mu.Unlock()
+		})
+	}
+}
+
 func TestCodexPermissionCancellationResponses(t *testing.T) {
 	for name, test := range map[string]struct {
 		method string

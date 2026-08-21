@@ -108,6 +108,8 @@ type session struct {
 	nativeCanary            *nativeCanary
 	preOpenEvents           []codex.Event
 	terminalNativeTurns     map[string]struct{}
+	terminalNativeTurnOrder []string
+	terminalNativeTurnNext  int
 	establishment           *establishmentObligation
 	establishmentRebind     bool
 	establishmentErr        error
