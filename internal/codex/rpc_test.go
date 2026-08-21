@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -216,34 +215,22 @@ func TestRPCConnCloseCancelsAndJoinsServerRequest(t *testing.T) {
 	}
 }
 
-func TestRPCConnReadLoopSkipsMalformedLines(t *testing.T) {
-	transport := &rawManualTransport{recv: make(chan recvItem, 4)}
+func TestRPCConnReadLoopFailsClosedOnMalformedLine(t *testing.T) {
+	cause := errors.New("malformed JSON-RPC frame")
+	transport := &rawManualTransport{recv: make(chan recvItem, 1)}
 	conn := newRPCConn(transport, nil)
-	defer conn.Close()
 
-	transport.recv <- recvItem{err: fmt.Errorf("%w: empty line", errSkippableLine)}
-	transport.recv <- recvItem{err: fmt.Errorf("%w: invalid character", errSkippableLine)}
-	transport.recv <- recvItem{msg: rpcMessage{JSONRPC: jsonRPCVersion, Method: "note", Params: json.RawMessage(`{"ok":true}`)}, raw: `{"method":"note"}`}
+	transport.recv <- recvItem{err: cause}
+	<-conn.done
 
-	select {
-	case event := <-conn.Events():
-		if event.Method != "note" {
-			t.Fatalf("event after malformed lines = %#v", event)
-		}
-	case <-conn.done:
-		t.Fatal("connection closed on malformed line")
-	case <-time.After(time.Second):
-		t.Fatal("valid notification not delivered after malformed lines")
+	if err := conn.Call(context.Background(), "after-malformed", nil, nil); !errors.Is(err, cause) {
+		t.Fatalf("active connection cause = %v, want %v", err, cause)
 	}
-
-	if got := conn.MalformedLines(); got != 2 {
-		t.Fatalf("MalformedLines = %d, want 2", got)
+	if err := conn.Close(); !errors.Is(err, cause) {
+		t.Fatalf("Close cause = %v, want %v", err, cause)
 	}
-
-	select {
-	case <-conn.done:
-		t.Fatal("connection closed despite only malformed lines")
-	default:
+	if _, ok := <-conn.Events(); ok {
+		t.Fatal("events remained open after malformed frame")
 	}
 }
 
@@ -341,6 +328,36 @@ func TestRPCPassiveReadFailureOwnsTotalMemoizedShutdown(t *testing.T) {
 			t.Fatalf("memoized shutdown error = %v", err)
 		}
 	}
+	transport.mu.Lock()
+	closes := transport.closes
+	transport.mu.Unlock()
+	if closes != 1 {
+		t.Fatalf("transport Close calls = %d, want 1", closes)
+	}
+}
+
+func TestRPCConnCloseContextTimesOutWhileSharedShutdownContinues(t *testing.T) {
+	transport := &passiveFailureTransport{
+		request: rpcMessage{JSONRPC: jsonRPCVersion, Method: "note"},
+		fail:    make(chan struct{}), closeEntered: make(chan struct{}), releaseClose: make(chan struct{}),
+	}
+	conn := newRPCConn(transport, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := conn.CloseContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloseContext error = %v, want context cancellation", err)
+	}
+	<-transport.closeEntered
+	close(transport.fail)
+
+	result := make(chan error, 1)
+	go func() { result <- conn.CloseContext(context.Background()) }()
+	close(transport.releaseClose)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "transport containment sentinel") {
+		t.Fatalf("shared shutdown result = %v", err)
+	}
+
 	transport.mu.Lock()
 	closes := transport.closes
 	transport.mu.Unlock()

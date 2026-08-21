@@ -18,11 +18,6 @@ const jsonRPCVersion = "2.0"
 // frame cannot force an unbounded buffer allocation before the JSON is parsed.
 const maxNativeLineBytes = 10 * 1024 * 1024
 
-// errSkippableLine marks a native stdout line that is malformed or empty but
-// does not indicate a dead connection. The read loop skips and counts these
-// lines rather than tearing down the whole session.
-var errSkippableLine = errors.New("skippable JSON-RPC line")
-
 type rpcTransport interface {
 	Send(context.Context, rpcMessage) error
 	Recv() (rpcMessage, string, error)
@@ -110,12 +105,12 @@ func (t *lineTransport) Recv() (rpcMessage, string, error) {
 
 	raw := string(t.s.Bytes())
 	if raw == "" {
-		return rpcMessage{}, raw, fmt.Errorf("%w: empty line", errSkippableLine)
+		return rpcMessage{}, raw, errors.New("empty JSON-RPC line")
 	}
 
 	var msg rpcMessage
 	if err := json.Unmarshal(t.s.Bytes(), &msg); err != nil {
-		return rpcMessage{}, raw, fmt.Errorf("%w: %w", errSkippableLine, err)
+		return rpcMessage{}, raw, fmt.Errorf("decode JSON-RPC line: %w", err)
 	}
 
 	return msg, raw, nil
@@ -159,8 +154,7 @@ type rpcConn struct {
 	doneOnce  sync.Once
 	shutdown  sync.Once
 
-	nextID         atomic.Int64
-	malformedLines atomic.Int64
+	nextID atomic.Int64
 
 	mu          sync.Mutex
 	pending     map[string]pendingCall
@@ -198,10 +192,6 @@ func newRPCConn(transport rpcTransport, handler RequestHandler) *rpcConn {
 }
 
 func (c *rpcConn) Events() <-chan rpcEvent { return c.events }
-
-// MalformedLines reports how many malformed or empty native lines were skipped
-// without tearing down the connection.
-func (c *rpcConn) MalformedLines() int64 { return c.malformedLines.Load() }
 
 func (c *rpcConn) Call(ctx context.Context, method string, params any, result any) error {
 	if err := ctx.Err(); err != nil {
@@ -298,9 +288,14 @@ func (c *rpcConn) CloseContext(ctx context.Context) error {
 	return c.closeContext(ctx)
 }
 
-func (c *rpcConn) closeContext(_ context.Context) error {
+func (c *rpcConn) closeContext(ctx context.Context) error {
 	c.startShutdown(nil)
-	<-c.closeWait
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closeWait:
+	}
 
 	c.mu.Lock()
 	err := c.shutdownErr
@@ -358,12 +353,6 @@ func (c *rpcConn) readLoop() {
 	for {
 		msg, raw, err := c.transport.Recv()
 		if err != nil {
-			if errors.Is(err, errSkippableLine) {
-				c.malformedLines.Add(1)
-
-				continue
-			}
-
 			c.startShutdown(err)
 
 			return

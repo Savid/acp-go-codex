@@ -926,15 +926,7 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 		done := c.closeDone
 		c.mu.Unlock()
 
-		if done != nil {
-			<-done
-		}
-
-		c.mu.Lock()
-		err := c.closeErr
-		c.mu.Unlock()
-
-		return err
+		return c.waitClose(ctx, done)
 	}
 
 	c.closed = true
@@ -942,6 +934,13 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 	done := c.closeDone
 	c.mu.Unlock()
 
+	// #nosec G118 -- containment must outlive the initiating caller's context.
+	go c.finishClose(done)
+
+	return c.waitClose(ctx, done)
+}
+
+func (c *AppServerClient) finishClose(done chan struct{}) {
 	// The launched process is the owned cancellation path for the RPC reader,
 	// writers, server-request handlers, and event pump. Cancel it before joining
 	// those workers so Close never depends on an app-server choosing to exit.
@@ -949,7 +948,7 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 		c.procCancel()
 	}
 
-	err := discardOwnedCloseCancellation(c.rpc.CloseContext(ctx))
+	err := discardOwnedCloseCancellation(c.rpc.CloseContext(context.Background()))
 	if pumpDone := c.eventPumpDone(); pumpDone != nil {
 		<-pumpDone
 	} else {
@@ -960,6 +959,18 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 	c.closeErr = err
 
 	close(done)
+	c.mu.Unlock()
+}
+
+func (c *AppServerClient) waitClose(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+	}
+
+	c.mu.Lock()
+	err := c.closeErr
 	c.mu.Unlock()
 
 	return err

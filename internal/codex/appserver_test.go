@@ -777,6 +777,37 @@ func (t *abruptCloseTransport) CloseWithError(err error) {
 	t.mu.Unlock()
 }
 
+func TestAppServerCloseContextTimesOutAndConcurrentCallerJoinsResult(t *testing.T) {
+	transport := &passiveFailureTransport{
+		request: rpcMessage{JSONRPC: jsonRPCVersion, Method: "note"},
+		fail:    make(chan struct{}), closeEntered: make(chan struct{}), releaseClose: make(chan struct{}),
+	}
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	client.ensureEventPump()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.Close(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close error = %v, want context cancellation", err)
+	}
+	<-transport.closeEntered
+	close(transport.fail)
+
+	result := make(chan error, 1)
+	go func() { result <- client.Close(context.Background()) }()
+	close(transport.releaseClose)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "transport containment sentinel") {
+		t.Fatalf("shared close result = %v", err)
+	}
+
+	transport.mu.Lock()
+	closes := transport.closes
+	transport.mu.Unlock()
+	if closes != 1 {
+		t.Fatalf("transport Close calls = %d, want 1", closes)
+	}
+}
+
 func (t *scriptTransport) Send(_ context.Context, msg rpcMessage) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()

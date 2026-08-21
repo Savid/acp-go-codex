@@ -14,10 +14,10 @@ cp ~/.codex/sessions/<...>/<session-id>.jsonl ./session.jsonl
 go run . -session <session-id> -cwd /absolute/path/to/project
 ```
 
-If the JSONL includes a `session_meta` row (or top-level `session_id`/
-`sessionId`), `-session` can be omitted and the id is inferred; `-cwd` likewise
-defaults to the `session_meta` cwd or the current directory. Loading uses normal
-ACP `session/load`, and the prompt uses normal ACP `session/prompt`.
+If the JSONL includes a `session_meta` row with `payload.id`, `-session` can be
+omitted and the id is inferred; `-cwd` likewise defaults to `payload.cwd` or the
+current directory. Loading uses normal ACP `session/load`, and the prompt uses
+normal ACP `session/prompt`.
 
 Pass `-prompt "..."` to change the smoke-test turn, `-path` to point at a
 specific `codex` CLI, and `-home` to choose the parent root for isolated Codex
