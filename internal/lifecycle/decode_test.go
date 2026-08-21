@@ -442,7 +442,13 @@ func TestClosedVocabulariesRefuseAnUnlistedMember(t *testing.T) {
 	require.False(t, ActionState("answered").Valid())
 	require.False(t, OwnerType("cycle").Valid())
 	require.False(t, ProofClass("drain-window").Valid())
-	require.True(t, ProofClassNativeSettledBarrier.Valid())
+	require.False(t, ProofClass("native-settled-barrier").Valid())
+	require.True(t, ProofClassProcessContainment.Valid())
+	require.True(t, ActivityTask.Valid())
+	require.True(t, ActivitySubagent.Valid())
+	require.False(t, ActivityKind("monitor").Valid())
+	require.False(t, ActivityKind("goal").Valid())
+	require.False(t, ActivityKind("other").Valid())
 }
 
 func TestDecodePresenceRulesInsideNestedObjects(t *testing.T) {

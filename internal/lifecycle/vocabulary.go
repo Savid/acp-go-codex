@@ -30,23 +30,16 @@ const (
 )
 
 // ProofClass names how a configuration proves background quiescence. The set is
-// closed: quiet time, prompt return, process silence, queue drainage, a drain
-// window, a poll predicate, and ACP idle are never members.
+// closed at one member: quiet time, prompt return, process silence, queue
+// drainage, a drain window, a poll predicate, and ACP idle are never members.
 type ProofClass string
 
-const (
-	// ProofClassProcessContainment proves vacancy by containing the complete
-	// native process tree, either per prompt or close-fenced.
-	ProofClassProcessContainment ProofClass = "process-containment"
-	// ProofClassNativeSettledBarrier proves background quiescence from a
-	// structured native event with the session left open.
-	ProofClassNativeSettledBarrier ProofClass = "native-settled-barrier"
-)
+// ProofClassProcessContainment proves vacancy by containing the complete native
+// process tree, either per prompt or close-fenced.
+const ProofClassProcessContainment ProofClass = "process-containment"
 
-// Valid reports whether the proof class is one of the closed two.
-func (c ProofClass) Valid() bool {
-	return c == ProofClassProcessContainment || c == ProofClassNativeSettledBarrier
-}
+// Valid reports whether the proof class is the closed set's one member.
+func (c ProofClass) Valid() bool { return c == ProofClassProcessContainment }
 
 // ForegroundState is one foreground cycle's state. A finished cycle's outcome is
 // recorded on its ending transition, never as an extra state.
@@ -138,20 +131,12 @@ type ActivityKind string
 // The closed activity-kind vocabulary.
 const (
 	ActivityTask     ActivityKind = "task"
-	ActivityMonitor  ActivityKind = "monitor"
 	ActivitySubagent ActivityKind = "subagent"
-	ActivityGoal     ActivityKind = "goal"
-	ActivityOther    ActivityKind = "other"
 )
 
 // Valid reports whether the kind is part of the closed activity vocabulary.
 func (k ActivityKind) Valid() bool {
-	switch k {
-	case ActivityTask, ActivityMonitor, ActivitySubagent, ActivityGoal, ActivityOther:
-		return true
-	default:
-		return false
-	}
+	return k == ActivityTask || k == ActivitySubagent
 }
 
 // ActivityState is one activity's state. The last three are terminal, and

@@ -369,7 +369,7 @@ func TestActivityIdentityIsFixedOnFirstSight(t *testing.T) {
 		name  string
 		patch ActivityUpdate
 	}{
-		{name: "kind", patch: ActivityUpdate{ActivityID: "act-1", State: ActivityRunning, Kind: ActivityMonitor}},
+		{name: "kind", patch: ActivityUpdate{ActivityID: "act-1", State: ActivityRunning, Kind: ActivitySubagent}},
 		{name: "parent", patch: ActivityUpdate{ActivityID: "act-1", State: ActivityRunning, ParentID: "other"}},
 		{name: "tool link", patch: ActivityUpdate{ActivityID: "act-1", State: ActivityRunning, ToolCallID: "tool-2"}},
 		{name: "cause", patch: ActivityUpdate{ActivityID: "act-1", State: ActivityRunning, Cause: CauseActivity}},
@@ -504,7 +504,7 @@ func TestQuiescenceIsRefusedWhenTheAnswerNamedAnotherClass(t *testing.T) {
 	}
 	reducer := openStream(t, negotiated)
 
-	fact := QuiescenceFact{Quiescent: true, Source: ProofClassNativeSettledBarrier, Watermark: 1}
+	fact := QuiescenceFact{Quiescent: true, Source: ProofClass("drain-window"), Watermark: 1}
 	require.ErrorIs(t, reducer.Reduce(deliver(2, QuiescenceEvent(fact))),
 		&ViolationError{Kind: ViolationUnnegotiatedFact})
 }

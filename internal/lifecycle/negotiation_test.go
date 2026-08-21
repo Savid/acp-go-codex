@@ -191,7 +191,7 @@ func TestAdvertisementRendersOnlyProvenFacts(t *testing.T) {
 	require.Equal(t, "process-containment", proven.Advertisement()["quiescenceSource"])
 	require.Equal(t, []string{"task"}, proven.Advertisement()["activityKinds"])
 	require.True(t, proven.DeclaresActivityKind(ActivityTask))
-	require.False(t, proven.DeclaresActivityKind(ActivityGoal))
+	require.False(t, proven.DeclaresActivityKind(ActivitySubagent))
 }
 
 func TestRejectKeyRefusesTheLiteralByName(t *testing.T) {
