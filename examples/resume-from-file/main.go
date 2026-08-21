@@ -292,6 +292,7 @@ func rolloutMeta(entry codexacp.SessionStoreEntry) (string, string) {
 	}
 
 	var cwd string
+
 	_ = json.Unmarshal(payload["cwd"], &cwd)
 
 	return id, cwd
