@@ -1440,6 +1440,15 @@ func fakeCodexModeEnvMap(mode fakeCodexMode) map[string]string {
 	return map[string]string{fakeCodexModeEnv: string(raw)}
 }
 
+func fakeCodexProcessIsolation(mode fakeCodexMode) ProcessIsolation {
+	isolation := testProcessIsolation()
+	for key, value := range fakeCodexModeEnvMap(mode) {
+		isolation.BaseEnvironment[key] = value
+	}
+
+	return isolation
+}
+
 // runFakeCodexAppServer speaks just enough of the codex app-server JSON-RPC
 // protocol to complete the launch handshake, then dies mid-turn on turn/start so
 // the transport observes a real process exit (exit status 1 + stderr tail).

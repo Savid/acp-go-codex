@@ -123,7 +123,8 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	if opted.ContainmentMode() != RuntimeContainmentUnavailable {
 		t.Fatalf("off-Darwin opted mode = %q", opted.ContainmentMode())
 	}
-	if _, err := opted.Initialize(t.Context(), acp.InitializeRequest{}); err == nil || !strings.Contains(err.Error(), "supported only on darwin") {
+	if _, err := opted.Initialize(t.Context(), acp.InitializeRequest{}); err == nil ||
+		!strings.Contains(err.Error(), valueInternalFailure) || strings.Contains(err.Error(), "supported only on darwin") {
 		t.Fatalf("off-Darwin opt-in initialization error = %v", err)
 	}
 

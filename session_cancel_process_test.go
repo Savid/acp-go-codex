@@ -43,17 +43,16 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(testReachableExecutable(t)),
-		WithProcessIsolation(testProcessIsolation()),
-		WithHome(home),
-		WithScratchDir(scratch),
-		WithSessionStore(store),
-		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+		WithProcessIsolation(fakeCodexProcessIsolation(fakeCodexMode{
 			Mode:           fakeCodexCancelTreeMode,
 			ChildStarted:   childStarted,
 			CancelReturned: cancelReturned,
 			ChildSentinel:  childSentinel,
 			RolloutPath:    rolloutPath,
 		})),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
 	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
@@ -144,18 +143,17 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(testReachableExecutable(t)),
-		WithProcessIsolation(testProcessIsolation()),
-		WithHome(home),
-		WithScratchDir(scratch),
-		WithSessionStore(store),
-		WithTurnTimeout(250*time.Millisecond),
-		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+		WithProcessIsolation(fakeCodexProcessIsolation(fakeCodexMode{
 			Mode:           fakeCodexCancelTreeMode,
 			ChildStarted:   childStarted,
 			CancelReturned: timeoutReturned,
 			ChildSentinel:  childSentinel,
 			RolloutPath:    rolloutPath,
 		})),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
+		WithTurnTimeout(250*time.Millisecond),
 	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
@@ -232,17 +230,16 @@ func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(testReachableExecutable(t)),
-		WithProcessIsolation(testProcessIsolation()),
-		WithHome(home),
-		WithScratchDir(scratch),
-		WithSessionStore(store),
-		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+		WithProcessIsolation(fakeCodexProcessIsolation(fakeCodexMode{
 			Mode:           fakeCodexCancelTreeMode,
 			ChildStarted:   childStarted,
 			CancelReturned: cancelReturned,
 			ChildSentinel:  childSentinel,
 			RolloutPath:    rolloutPath,
 		})),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
 	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
