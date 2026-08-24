@@ -66,6 +66,12 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		rolloutPath,
 		`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
 	))
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: fakeCodexThreadID,
+		Path:     rolloutPath,
+		Cwd:      root,
+	})
+	require.NoError(t, err)
 
 	sessionID := acp.SessionId("cancel-tree-session")
 	session := newSession(
@@ -73,7 +79,7 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		sessionID,
 		root,
 		nil,
-		codex.Thread{ID: fakeCodexThreadID, Path: rolloutPath},
+		thread,
 		client,
 		sessionMeta{},
 		nil,
@@ -167,6 +173,12 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		rolloutPath,
 		`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
 	))
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: fakeCodexThreadID,
+		Path:     rolloutPath,
+		Cwd:      root,
+	})
+	require.NoError(t, err)
 
 	sessionID := acp.SessionId("timeout-tree-session")
 	session := newSession(
@@ -174,7 +186,7 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		sessionID,
 		root,
 		nil,
-		codex.Thread{ID: fakeCodexThreadID, Path: rolloutPath},
+		thread,
 		client,
 		sessionMeta{},
 		nil,

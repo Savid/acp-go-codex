@@ -1407,6 +1407,7 @@ const (
 	fakeCodexReplacementPrompt    = "REPLACEMENT_TURN"
 	fakeCodexReplacementReply     = "REPLACEMENT_OK"
 	fakeCodexThreadID             = "thread-cancel-tree"
+	fakeCodexSessionID            = "session-cancel-tree"
 	fakeCodexBlockingTurnID       = "turn-blocking"
 	fakeCodexReplacementTurnID    = "turn-replacement"
 	fakeCodexBackgroundProcessID  = "background-target-process"
@@ -1473,12 +1474,20 @@ func runFakeCodexAppServer() {
 			continue
 		}
 
-		if method, _ := msg[jsonFieldMethod].(string); method == "turn/start" {
+		method, _ := msg[jsonFieldMethod].(string)
+		switch method {
+		case "thread/resume":
+			params, _ := msg["params"].(map[string]any)
+			threadID, _ := params["threadId"].(string)
+			writeReply(id, map[string]any{"thread": map[string]any{
+				"id": threadID, "sessionId": threadID,
+			}})
+		case "turn/start":
 			writeReply(id, map[string]any{"turn": map[string]any{"id": "turn-1"}})
 			os.Exit(1)
+		default:
+			writeReply(id, map[string]any{})
 		}
-
-		writeReply(id, map[string]any{})
 	}
 }
 
@@ -1541,7 +1550,9 @@ func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
 					)
 				}
 			}
-			writeReply(id, map[string]any{"thread": map[string]any{"id": fakeCodexThreadID, "path": rolloutPath}})
+			writeReply(id, map[string]any{"thread": map[string]any{
+				"id": fakeCodexThreadID, "sessionId": fakeCodexSessionID, "path": rolloutPath,
+			}})
 		case "thread/resume":
 			params, _ := msg["params"].(map[string]any)
 			threadID, _ := params["threadId"].(string)
@@ -1551,7 +1562,9 @@ func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
 				continue
 			}
 			path, _ := params["path"].(string)
-			writeReply(id, map[string]any{"thread": map[string]any{"id": fakeCodexThreadID, "path": path}})
+			writeReply(id, map[string]any{"thread": map[string]any{
+				"id": fakeCodexThreadID, "sessionId": fakeCodexSessionID, "path": path,
+			}})
 		case "turn/start":
 			rawParams, _ := json.Marshal(msg["params"])
 			if strings.Contains(string(rawParams), fakeCodexBlockingPrompt) {

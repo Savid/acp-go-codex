@@ -256,8 +256,15 @@ func TestTurnFailureProcessDeath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch fake app-server: %v", err)
 	}
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: "thread-1",
+		Cwd:      "/tmp/project",
+	})
+	if err != nil {
+		t.Fatalf("resume fake thread: %v", err)
+	}
 
-	s := &session{agent: NewAgent(), id: "death", cwd: "/tmp/project", codexThreadID: "thread-1"}
+	s := &session{agent: NewAgent(), id: "death", cwd: "/tmp/project", codexThreadID: thread.ID}
 	s.agent.setAgentClient(newRecordingAgentClient())
 	s.client = client
 	t.Cleanup(func() { _ = client.Close(context.Background()) })
