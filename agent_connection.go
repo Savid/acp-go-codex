@@ -514,19 +514,23 @@ func registeredActionRequest[T any](
 		select {
 		case writeErr = <-ready:
 		case <-ctx.Done():
-			return early.value, errors.Join(early.err, ctx.Err())
 		}
 	case <-ctx.Done():
+	}
+
+	if ctx.Err() != nil {
 		cancelRequest(ctx.Err())
 
 		var interruptErr error
-		if interrupt != nil {
+		if !haveEarly && interrupt != nil {
 			interruptErr = interrupt()
 		}
 
-		finished := <-result
+		if !haveEarly {
+			early = <-result
+		}
 
-		return finished.value, errors.Join(ctx.Err(), interruptErr, finished.err)
+		return early.value, errors.Join(ctx.Err(), interruptErr, early.err)
 	}
 
 	if writeErr != nil {

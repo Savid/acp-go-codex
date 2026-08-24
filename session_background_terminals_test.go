@@ -297,6 +297,11 @@ func TestDeleteSoleRetainedThreadFencesUnsupportedGeneration(t *testing.T) {
 	require.NoError(t, agent.Close())
 }
 
+func TestAgentCloseAcceptsConnectionCloseAfterRuntimeFence(t *testing.T) {
+	agent, _, _ := soleFailedSweepAgent(t, codex.ErrConnectionClosed)
+	require.NoError(t, agent.Close())
+}
+
 type unsupportedBackgroundTerminalClient struct {
 	*spyCodexClient
 }
