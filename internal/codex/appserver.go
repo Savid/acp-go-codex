@@ -74,6 +74,7 @@ const (
 
 	statusCompleted  = "completed"
 	statusDone       = "done"
+	statusActive     = "active"
 	valuePlan        = "plan"
 	valueDefault     = "default"
 	valuePlaceholder = "placeholder"
@@ -2040,7 +2041,7 @@ func isZeroUsage(usage Usage) bool {
 
 func planStatusFromString(status string) PlanStepStatus {
 	switch strings.ToLower(status) {
-	case "inprogress", "in_progress", "active", "running":
+	case "inprogress", "in_progress", statusActive, "running":
 		return PlanStepInProgress
 	case string(EventCompleted), "complete", statusDone:
 		return PlanStepCompleted

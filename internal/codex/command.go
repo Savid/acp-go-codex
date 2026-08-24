@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const defaultCodexExecutable = "codex"
+
 const (
 	envCodexHome     = "CODEX_HOME"
 	envHome          = "HOME"
@@ -207,7 +209,7 @@ func appServerArgs(options Options) []string {
 
 func resolveCodexPath(path string, env []string, isolation *ProcessIsolation) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		path = "codex" //nolint:goconst // Executable identity is distinct from Darwin registry metadata.
+		path = defaultCodexExecutable
 	}
 
 	var (
