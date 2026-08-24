@@ -1137,7 +1137,7 @@ func (s *session) containThreadOrFenceGeneration(
 	agentClosed := s.agent.closed
 	s.agent.mu.Unlock()
 
-	if agentClosed && fenceErr == nil {
+	if agentClosed && fenceErr == nil && errors.Is(containErr, codex.ErrConnectionClosed) {
 		return nil
 	}
 
@@ -1173,11 +1173,15 @@ func (s *session) unsubscribeContainedThread(
 		return nil
 	}
 
-	// Cancellation may retire the generation concurrently with unsubscribe.
+	// Cancellation or agent shutdown may retire the generation concurrently with unsubscribe.
 	// Once that transition owns the client, its containment proof supersedes a
 	// connection-closed unsubscribe result.
 	current, _, nowDead := s.closeState()
-	if current == client && nowDead {
+	s.agent.mu.Lock()
+	agentClosed := s.agent.closed
+	s.agent.mu.Unlock()
+
+	if current == client && (nowDead || (agentClosed && errors.Is(unsubscribeErr, codex.ErrConnectionClosed))) {
 		return s.agent.quiesceRuntimeAfterCancel(ctx, client)
 	}
 
