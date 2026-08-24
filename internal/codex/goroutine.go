@@ -14,7 +14,7 @@ func handleCodexGoroutinePanic(ctx context.Context, name string, shutdown func(a
 		return
 	}
 
-	slog.Default().ErrorContext(ctx, "codex goroutine panic", slog.String("goroutine", name), slog.Any("panic", recovered))
+	slog.Default().ErrorContext(ctx, "codex goroutine panic", slog.String("goroutine", name))
 
 	if shutdown != nil {
 		shutdown(recovered)

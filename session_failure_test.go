@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +51,21 @@ func isTurnFailure(err error, cause string) bool {
 	}
 
 	return data[jsonFieldError] == valueTurnFailed && data[jsonFieldCause] == cause
+}
+
+func TestHostDeliveryErrorPreservesCauseAndHandlesEmptyValues(t *testing.T) {
+	require.Equal(t, "ACP host delivery failed", (*hostDeliveryError)(nil).Error())
+	require.NoError(t, (*hostDeliveryError)(nil).Unwrap())
+	empty := &hostDeliveryError{}
+	require.Equal(t, "ACP host delivery failed", empty.Error())
+	require.NoError(t, empty.Unwrap())
+	require.NoError(t, wrapHostDeliveryError(nil))
+
+	cause := errors.New("notification write failed")
+	wrapped := wrapHostDeliveryError(cause)
+	require.Equal(t, cause.Error(), wrapped.Error())
+	require.ErrorIs(t, wrapped, cause)
+	require.Same(t, wrapped, wrapHostDeliveryError(wrapped))
 }
 
 // sequencedClientFactory hands out pre-built clients in order, so a test can
@@ -134,9 +149,8 @@ func TestTurnFailureProviderError(t *testing.T) {
 				if authData[jsonFieldCause] != codex.CauseProvider {
 					t.Fatalf("auth cause = %v, want provider", authData[jsonFieldCause])
 				}
-				if msg, _ := authData[jsonFieldMessage].(string); !strings.Contains(msg, "unauthorized") {
-					t.Fatalf("auth message = %v, want native cause", authData[jsonFieldMessage])
-				}
+				require.Equal(t, "Codex authentication is required", authData[jsonFieldMessage])
+				require.NotContains(t, promptErr.Error(), tc.failure.Message)
 				if asType[map[string]any](t, authData[codexMetaKey])[authMetaAuthKey] == nil {
 					t.Fatalf("auth data missing _meta.codex.auth: %#v", authData)
 				}
@@ -148,15 +162,12 @@ func TestTurnFailureProviderError(t *testing.T) {
 			if data[jsonFieldCause] != tc.wantCause {
 				t.Fatalf("cause = %v, want %s", data[jsonFieldCause], tc.wantCause)
 			}
-			if msg, _ := data[jsonFieldMessage].(string); !strings.Contains(msg, "rate limited") {
-				t.Fatalf("message = %v, want injected cause", data[jsonFieldMessage])
-			}
+			require.Equal(t, "Codex provider turn failed", data[jsonFieldMessage])
+			require.NotContains(t, promptErr.Error(), tc.failure.Message)
 			if data[jsonFieldStatusCode] != tc.wantStatus {
 				t.Fatalf("statusCode = %v, want %d", data[jsonFieldStatusCode], tc.wantStatus)
 			}
-			if data[jsonFieldProviderCode] != "rate_limit" {
-				t.Fatalf("providerCode = %v", data[jsonFieldProviderCode])
-			}
+			require.NotContains(t, data, jsonFieldProviderCode)
 		})
 	}
 }
@@ -185,18 +196,12 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 
 	data := turnFailureData(t, promptErr)
 	msg, _ := data[jsonFieldMessage].(string)
-	if !strings.Contains(msg, "upstream reset the stream") {
-		t.Fatalf("message = %q, want real transport cause", msg)
-	}
-	if msg == "EOF" {
-		t.Fatal("message is a bare EOF")
-	}
+	require.Equal(t, "Codex transport failed", msg)
+	require.NotContains(t, promptErr.Error(), "upstream reset the stream")
 }
 
-// The process-exit mapping itself is platform-independent: a ProcessExitError
-// reported mid-turn must surface cause:"process_exit" with the real exit status
-// and stderr tail, and must mark the session for lazy relaunch. T3 proves the
-// same contract against a real dying app-server where that fixture can run.
+// The process-exit mapping is platform-independent and carries only its fixed
+// classification while still marking the session for lazy relaunch.
 func TestTurnFailureProcessExitMapping(t *testing.T) {
 	ctx := context.Background()
 
@@ -205,9 +210,7 @@ func TestTurnFailureProcessExitMapping(t *testing.T) {
 		ThreadID: "thread-1",
 		TurnID:   "turn-1",
 		Err: &codex.ProcessExitError{
-			Status:     "exit status 1",
-			StderrTail: "out of memory",
-			Err:        errors.New("EOF"),
+			Err: errors.New("native-stderr-secret"),
 		},
 	}}}
 	agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
@@ -222,9 +225,8 @@ func TestTurnFailureProcessExitMapping(t *testing.T) {
 
 	data := turnFailureData(t, promptErr)
 	message, _ := data[jsonFieldMessage].(string)
-	require.Contains(t, message, "exit status 1")
-	require.Contains(t, message, "out of memory")
-	require.NotEqual(t, "EOF", message)
+	require.Equal(t, "Codex process exited", message)
+	require.NotContains(t, promptErr.Error(), "native-stderr-secret")
 
 	session := agent.activeSession(resp.SessionId)
 	require.NotNil(t, session)
@@ -232,10 +234,8 @@ func TestTurnFailureProcessExitMapping(t *testing.T) {
 	require.True(t, clientDead, "process death did not mark the session for lazy relaunch")
 }
 
-// T3 — a real app-server process death mid-turn surfaces cause:"process_exit"
-// with the true exit status and stderr tail (never a bare EOF) and marks the
-// session for lazy relaunch. The fake app-server is this test binary re-execed
-// via TestMain; it dies on turn/start.
+// A real app-server process death carries the fixed process-exit classification
+// and marks the session for lazy relaunch.
 func TestTurnFailureProcessDeath(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
 	ctx := context.Background()
@@ -256,8 +256,15 @@ func TestTurnFailureProcessDeath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch fake app-server: %v", err)
 	}
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: "thread-1",
+		Cwd:      "/tmp/project",
+	})
+	if err != nil {
+		t.Fatalf("resume fake thread: %v", err)
+	}
 
-	s := &session{agent: NewAgent(), id: "death", cwd: "/tmp/project", codexThreadID: "thread-1"}
+	s := &session{agent: NewAgent(), id: "death", cwd: "/tmp/project", codexThreadID: thread.ID}
 	s.agent.setAgentClient(newRecordingAgentClient())
 	s.client = client
 	t.Cleanup(func() { _ = client.Close(context.Background()) })
@@ -272,14 +279,8 @@ func TestTurnFailureProcessDeath(t *testing.T) {
 
 	data := turnFailureData(t, promptErr)
 	msg, _ := data[jsonFieldMessage].(string)
-	if !strings.Contains(msg, "exit status 1") {
-		t.Fatalf("message = %q, want the real exit status", msg)
-	}
-	if !strings.Contains(msg, "out of memory") {
-		t.Fatalf("message = %q, want the stderr tail", msg)
-	}
-	if msg == "EOF" {
-		t.Fatal("process-death message is a bare EOF")
+	if msg != "Codex process exited" {
+		t.Fatalf("message = %q, want fixed process-exit classification", msg)
 	}
 
 	if !s.clientDead {
@@ -376,10 +377,10 @@ type cancelAtTurnStartClient struct {
 	cancelled bool
 }
 
-func (c *cancelAtTurnStartClient) RunTurn(context.Context, codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *cancelAtTurnStartClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
 	c.session.cancelTurn()
 
-	return make(chan codex.Event), nil
+	return codex.Turn{ID: "turn"}, nil
 }
 
 func (c *cancelAtTurnStartClient) CancelTurn(context.Context, string, string) error {
@@ -444,7 +445,7 @@ func TestTurnFailureTimeoutIncludesTerminalContainmentFailure(t *testing.T) {
 		TextPromptRequest(timeoutSession.id, "test-turn", "hi"),
 	)
 	require.True(t, isTurnFailure(err, codex.CauseTimeout))
-	require.ErrorContains(t, err, containErr.Error())
+	require.NotContains(t, err.Error(), containErr.Error())
 	require.True(t, timeoutSession.clientDead)
 	interrupt.mu.Lock()
 	require.True(t, interrupt.closed, "failed targeted containment must fence the shared runtime")
@@ -540,14 +541,8 @@ func (c *terminalCleanupErrorClient) TerminateBackgroundTerminal(
 	return false, c.err
 }
 
-func (c *recordingCancelClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (<-chan codex.Event, error) {
-	out := make(chan codex.Event)
-	go func() {
-		defer close(out)
-		<-ctx.Done()
-	}()
-
-	return out, nil
+func (c *recordingCancelClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
+	return codex.Turn{ID: "turn"}, nil
 }
 
 func (c *recordingCancelClient) CancelTurn(context.Context, string, string) error {
@@ -601,4 +596,30 @@ func TestMapTurnFailureBranches(t *testing.T) {
 	if failSession.clientDead {
 		t.Fatal("provider failure must not mark the client dead")
 	}
+}
+
+func TestOpaqueErrorsStayInternalAcrossLogsAndGenericWireErrors(t *testing.T) {
+	const secret = "hostile-error-secret-sentinel"
+	sentinel := errors.New(secret)
+	joined := errors.Join(errors.New("aggregate close failed"), sentinel)
+	require.ErrorIs(t, joined, sentinel, "internal aggregate lost errors.Is identity")
+	cancelCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	for _, wireErr := range []error{
+		requestError(t.Context(), joined),
+		requestError(cancelCtx, sentinel),
+		(&session{agent: NewAgent()}).mapTurnFailure(&codex.TurnFailedError{
+			Cause: codex.CauseProvider, Message: secret, ProviderCode: secret,
+		}),
+		codexAuthRequiredError(errors.New("unauthorized "+secret), nil),
+	} {
+		require.NotContains(t, wireErr.Error(), secret)
+	}
+
+	var output lockedLogBuffer
+	agent := NewAgent(WithLogger(slog.New(slog.NewTextHandler(&output, nil))))
+	s := &session{agent: agent}
+	s.recordRawEmitFailure(t.Context(), sentinel)
+	require.NotContains(t, output.String(), secret)
 }

@@ -42,16 +42,23 @@ func TestRolloutMeta(t *testing.T) {
 	require.Equal(t, "meta-id", id)
 	require.Equal(t, "/meta", cwd)
 
-	id, cwd = rolloutMeta(codexacp.SessionStoreEntry(`{"type":"session_meta","session_id":"top-id","cwd":"/top"}`))
-	require.Equal(t, "top-id", id)
-	require.Equal(t, "/top", cwd)
+	for _, entry := range []codexacp.SessionStoreEntry{
+		codexacp.SessionStoreEntry(`[1,2,3]`),
+		codexacp.SessionStoreEntry(`{"Type":"session_meta","payload":{"id":"meta-id","cwd":"/meta"}}`),
+		codexacp.SessionStoreEntry(`{"type":"session_meta","Payload":{"id":"meta-id","cwd":"/meta"}}`),
+		codexacp.SessionStoreEntry(`{"type":"session_meta","payload":{"ID":"meta-id","cwd":"/meta"}}`),
+		codexacp.SessionStoreEntry(`{"type":"session_meta","session_id":"meta-id","cwd":"/meta"}`),
+		codexacp.SessionStoreEntry(`{"type":"session_meta","sessionId":"meta-id","cwd":"/meta"}`),
+		codexacp.SessionStoreEntry(`{"session_id":"meta-id","cwd":"/meta"}`),
+		codexacp.SessionStoreEntry(`{"sessionId":"meta-id","cwd":"/meta"}`),
+	} {
+		id, cwd = rolloutMeta(entry)
+		require.Empty(t, id)
+		require.Empty(t, cwd)
+	}
 
-	id, cwd = rolloutMeta(codexacp.SessionStoreEntry(`{"sessionId":"camel-id"}`))
-	require.Equal(t, "camel-id", id)
-	require.Empty(t, cwd)
-
-	id, cwd = rolloutMeta(codexacp.SessionStoreEntry(`[1,2,3]`))
-	require.Empty(t, id)
+	id, cwd = rolloutMeta(codexacp.SessionStoreEntry(`{"type":"session_meta","payload":{"id":"meta-id","Cwd":"/meta"}}`))
+	require.Equal(t, "meta-id", id)
 	require.Empty(t, cwd)
 }
 

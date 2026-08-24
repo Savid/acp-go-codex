@@ -45,6 +45,19 @@ are adapter-private process-management names, `CODEX_HOME`, `HOME`, and the XDG
 cache, config, data, runtime, and state roots. `WithHome` and the app-server's
 static launch environment remain authoritative.
 
+`effort` and `personality` are nonempty native values. The adapter does not
+compare them with its advertised config-option menus: it carries them through
+new, load, resume, and fork metadata and sends them on the native surface that
+uses them. A native `thread/start` or `turn/start` rejection is returned to the
+host unchanged by any local value-list verdict. The two are not checked alike:
+`personality` is refused at both doors it reaches when Codex does not recognise
+it, while `effort` reaches only `turn/start`, which accepts every string. Metadata
+naming an effort Codex does not know still starts the turn and still reads back
+exactly as it was sent. Native refusal text remains internal; ACP receives the
+closed `codex_turn_failed` classification and structured cause/status fields.
+The permission and sandbox fields remain safety boundaries rather than
+menu-valued passthroughs.
+
 Session `extraPathDirs` is the only session search-path authority. It is an
 array whose elements must each be a string, nonempty, absolute, and free of the
 platform path-list separator. A rejected element names its exact field, such as
@@ -68,11 +81,45 @@ Accepted initialize capability metadata under `_meta.codex`:
 | Key | Purpose |
 | --- | --- |
 | `fork` | `_codex/session/fork` extension method. |
+| `steer` | `_codex/turn/steer` exact-route extension method, accepting an ACP `PromptRequest` payload for the active turn. |
 | `elicitation` | Client capability gated elicitation support. |
 | `rawEvent` | `_codex/rawEvent` notification opt-in details. |
 | `sessionStore` | Store format and key shape. |
 | `structuredOutput` | JSON Schema request and response paths. |
 | `providerAuth` | A single `methods` array naming the enabled `_codex/auth/*` extension names. Present only while `-provider-auth-root` is configured, and it carries no `injectionKey`: a brokered ChatGPT credential returns through the existing `codex-chatgpt-auth-tokens` auth method, so `_meta.codex.options.providerAuth` is an unsupported option field. |
+
+## Turn route
+
+Initialize advertises the reserved routing extension under `acp-go.dev/route`
+in `agentCapabilities._meta`:
+
+```json
+{
+  "agentCapabilities": {
+    "_meta": {
+      "acp-go.dev/route": {"versions": [1]}
+    }
+  }
+}
+```
+
+The same exact `{version, turnNonce}` route is required by
+`_codex/turn/steer`. The adapter waits for a queued prompt's native
+acknowledgement, then sends native `turn/steer` with that exact thread and
+`expectedTurnId`; cancellation, terminalization, or rebind never retargets the
+steer to a newer turn.
+
+| Direction | Surface | Value |
+| --- | --- | --- |
+| host to agent | `session/prompt`, `session/cancel`, `_codex/turn/steer` | `{"version": 1, "turnNonce": "<nonce>"}`, required and carrying exactly those two members. |
+| agent to host | `session/update` | The same version-1 object, naming the turn the update belongs to. |
+| agent to host | `elicitation/create` | `version`, `sessionId`, `turnNonce`, and exactly one of `toolCallId` or `requestId`. |
+
+The inbound object is read before anything else the request asks for, so a
+prompt, cancel, or steer that fails routing is refused before it reaches Codex. A
+`turnNonce` is a non-empty string of at most 4096 bytes, and on `session/cancel`
+it must name the session's active turn. Every rejection is invalid params whose
+`field` is `_meta.acp-go.dev/route`.
 
 ## Media envelope
 
@@ -139,6 +186,81 @@ The key's absence is the actionable signal that no handoff root reached this
 adapter, so a host can check its own configuration rather than discovering the
 gap on a rejected prompt. The inbound envelope a host sends per block is
 documented with the [handoff input form](/docs/core/prompt-streaming).
+
+## Lifecycle negotiation
+
+`acp-go.dev/lifecycle` is settled on `initialize` itself rather than through a
+capability object. The client offers the versions it implements on
+`InitializeRequest._meta`:
+
+```json
+{
+  "_meta": {
+    "acp-go.dev/lifecycle": {"versions": [1]}
+  }
+}
+```
+
+The negotiated `acp-go.dev/lifecycle` answer is placed on
+`InitializeResponse._meta`, never in `agentCapabilities._meta`, and it states
+the facts this adapter's own configuration proves:
+
+```json
+{
+  "_meta": {
+    "acp-go.dev/lifecycle": {
+      "versions": [1],
+      "updatesOutsidePrompt": true,
+      "authoritativeQuiescence": false,
+      "activityKinds": []
+    }
+  }
+}
+```
+
+| Field | Value | Why |
+| --- | --- | --- |
+| `versions` | `[1]` | The intersection of the offer with the one version this adapter implements. |
+| `updatesOutsidePrompt` | `true` | A session owns one exact app-server thread stream for its native incarnation, so native events between prompts open and settle agent-origin lifecycle turns without loss. |
+| `authoritativeQuiescence` | `false` | Nothing here proves one session's descendants gone while the app-server generation they live in keeps serving its peers, so no quiescence proof class is claimed and no `quiescenceSource` is named. |
+| `activityKinds` | `[]` | Codex work reaches ACP as ordinary tool-call updates; this adapter reads no structured native activity registry, so it emits no `activity_update`. |
+
+An absent offer and an empty version intersection are both answered by omitting
+the key from the response, and such a connection emits no lifecycle envelope at
+all. `Serve` also omits the answer unless its output is an `*os.File`, exposes a
+write deadline, or implements `InterruptWrite() error`, because other carriers
+cannot guarantee that shutdown interrupts and joins a stalled lifecycle
+notification.
+
+While version 1 is negotiated, `session/prompt` carries its submission identity
+under the same key, and a prompt that omits it is refused before dispatch:
+
+```json
+{
+  "_meta": {
+    "acp-go.dev/lifecycle": {
+      "version": 1,
+      "submission": {"submissionId": "sub-1", "clientNonce": "non-1"}
+    }
+  }
+}
+```
+
+`submissionId` and `clientNonce` are required and `runId` is optional; each is a
+non-empty opaque handle of at most 4096 bytes. On a connection where the
+extension was not negotiated, the key on `session/prompt` is itself the
+rejection.
+
+Every lifecycle event rides `_meta["acp-go.dev/lifecycle"]` on an identity-only
+`session_info_update` notification, carrying `version`, `streamId`, `sequence`,
+and `event`. A pending `session/request_permission` or `elicitation/create`
+carries `version`, `streamId`, and an `action` object naming the action and its
+owning turn; on an elicitation that object sits beside the route envelope rather
+than replacing it.
+
+On every other inbound surface the key has no meaning and is refused rather than
+ignored, with invalid params carrying
+`{"error": "unsupported", "field": "_meta[\"acp-go.dev/lifecycle\"]"}`.
 
 ## Rules
 

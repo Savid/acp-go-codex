@@ -91,6 +91,8 @@ OpenTelemetry providers.
 - ACP session lifecycle — create, prompt, cancel, close, list, load, resume, and
   fork — over one shared Codex app-server per Agent with thread-scoped routing,
   crash fencing, all-thread restore, and bounded MCP readiness canaries.
+- Exact-route active-turn steering through `_codex/turn/steer`, mapped to native
+  Codex `turn/steer` with the acknowledged thread and expected turn ID.
 - Prompt streaming for messages, reasoning, plans, tool calls, diffs, usage, and
   session metadata, carrying durable native turn and terminal assistant
   identities alongside optional session-level JSON Schema structured output.

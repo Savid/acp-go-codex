@@ -81,18 +81,12 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 
 	options.Model = model
 
-	effort, err := metaOptionString(optionsMap, metaEffortKey)
+	effort, err := nonEmptyMetaOptionString(optionsMap, metaEffortKey)
 	if err != nil {
 		return codexOptions{}, err
 	}
 
-	if effort != "" {
-		if !validReasoningEffort(effort) {
-			return codexOptions{}, unsupportedField("_meta.codex.options." + metaEffortKey)
-		}
-
-		options.ReasoningEffort = effort
-	}
+	options.ReasoningEffort = effort
 
 	tier, err := metaOptionString(optionsMap, metaServiceTierKey)
 	if err != nil {
@@ -101,18 +95,12 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 
 	options.ServiceTier = tier
 
-	personality, err := metaOptionString(optionsMap, metaPersonalityKey)
+	personality, err := nonEmptyMetaOptionString(optionsMap, metaPersonalityKey)
 	if err != nil {
 		return codexOptions{}, err
 	}
 
-	if personality != "" {
-		if !validPersonality(personality) {
-			return codexOptions{}, unsupportedField("_meta.codex.options." + metaPersonalityKey)
-		}
-
-		options.Personality = personality
-	}
+	options.Personality = personality
 
 	if rawEnv, ok := optionsMap[metaEnvKey]; ok {
 		env, envErr := stringMapFromMeta(rawEnv)
@@ -175,6 +163,22 @@ func metaOptionString(optionsMap map[string]any, key string) (string, error) {
 
 	value, ok := raw.(string)
 	if !ok {
+		return "", unsupportedField("_meta.codex.options." + key)
+	}
+
+	return value, nil
+}
+
+// nonEmptyMetaOptionString distinguishes an omitted option from a present
+// empty select value. The former leaves native defaults intact; the latter has
+// no value to pass through and is an input-shape error.
+func nonEmptyMetaOptionString(optionsMap map[string]any, key string) (string, error) {
+	value, err := metaOptionString(optionsMap, key)
+	if err != nil {
+		return "", err
+	}
+
+	if _, present := optionsMap[key]; present && value == "" {
 		return "", unsupportedField("_meta.codex.options." + key)
 	}
 
@@ -348,24 +352,6 @@ func validateSchemaObject(schema any) error {
 	}
 
 	return nil
-}
-
-func validReasoningEffort(value string) bool {
-	switch value {
-	case effortValueNone, "minimal", effortValueLow, effortValueMedium, effortValueHigh, "xhigh":
-		return true
-	default:
-		return false
-	}
-}
-
-func validPersonality(value string) bool {
-	switch value {
-	case effortValueNone, personalityFriendly, personalityPragmatic:
-		return true
-	default:
-		return false
-	}
 }
 
 func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {

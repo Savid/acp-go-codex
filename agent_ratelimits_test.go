@@ -34,7 +34,6 @@ func decodeRateLimits(t *testing.T, result any) RateLimitsResponse {
 func TestRateLimitsFreshQuery(t *testing.T) {
 	agent := NewAgent()
 	client := newSpyCodexClient()
-	client.rateLimitsSupported = true
 	client.rateLimits = codex.RateLimitSnapshot{
 		PlanType: "pro",
 		Windows: []codex.RateLimitWindow{
@@ -54,98 +53,42 @@ func TestRateLimitsFreshQuery(t *testing.T) {
 	require.Equal(t, float64(25), resp.Windows[0].UsedPercent)
 	require.Equal(t, "1970-01-12T13:46:40Z", resp.Windows[0].ResetsAt)
 	require.Equal(t, 1, client.rateLimitsReads)
-
-	// The fresh snapshot is cached: a later call with no supporting client still
-	// returns it.
-	cached, ok := agent.cachedRateLimits()
-	require.True(t, ok)
-	require.Equal(t, "pro", cached.PlanType)
 }
 
-func TestRateLimitsFallsBackToCacheOnError(t *testing.T) {
+func TestRateLimitsFreshQueryReturnsReadError(t *testing.T) {
 	agent := NewAgent()
-	agent.cacheRateLimits(codex.RateLimitSnapshot{PlanType: "plus", Windows: []codex.RateLimitWindow{{ID: "primary", UsedPercent: 5}}})
-
 	client := newSpyCodexClient()
-	client.rateLimitsSupported = true
-	client.rateLimitsErr = errors.New("boom")
+	readErr := errors.New("rate-limit read failed")
+	client.rateLimitsErr = readErr
 	storeRateLimitsSession(t, agent, "thread-1", client)
 
-	resp := decodeRateLimits(t, agent.rateLimits(context.Background()))
-	require.Equal(t, "plus", resp.PlanType)
-	require.Len(t, resp.Windows, 1)
+	_, err := agent.rateLimits(context.Background())
+	require.ErrorIs(t, err, readErr)
 	require.Equal(t, 1, client.rateLimitsReads)
 }
 
-func TestRateLimitsFallsBackWhenFreshQueryEmpty(t *testing.T) {
+func TestRateLimitsReturnsFreshEmptySnapshot(t *testing.T) {
 	agent := NewAgent()
-	agent.cacheRateLimits(codex.RateLimitSnapshot{PlanType: "team"})
-
 	client := newSpyCodexClient()
-	client.rateLimitsSupported = true // returns empty snapshot
 	storeRateLimitsSession(t, agent, "thread-1", client)
 
-	resp := decodeRateLimits(t, agent.rateLimits(context.Background()))
-	require.Equal(t, "team", resp.PlanType)
-}
-
-func TestRateLimitsSkipsUnsupportedVersion(t *testing.T) {
-	agent := NewAgent()
-
-	client := newSpyCodexClient() // rateLimitsSupported defaults false
-	storeRateLimitsSession(t, agent, "thread-1", client)
-
-	resp := decodeRateLimits(t, agent.rateLimits(context.Background()))
+	response, err := agent.rateLimits(context.Background())
+	require.NoError(t, err)
+	resp := decodeRateLimits(t, response)
 	require.Empty(t, resp.Windows)
 	require.NotNil(t, resp.Windows)
-	require.Equal(t, 0, client.rateLimitsReads)
+	require.Equal(t, 1, client.rateLimitsReads)
 }
 
 func TestRateLimitsEmptyWhenNothingKnown(t *testing.T) {
 	agent := NewAgent()
 
-	resp := decodeRateLimits(t, agent.rateLimits(context.Background()))
+	response, err := agent.rateLimits(context.Background())
+	require.NoError(t, err)
+	resp := decodeRateLimits(t, response)
 	require.NotNil(t, resp.Windows)
 	require.Empty(t, resp.Windows)
 	require.Empty(t, resp.PlanType)
-}
-
-func TestRateLimitsCacheLatestWins(t *testing.T) {
-	agent := NewAgent()
-
-	agent.cacheRateLimits(codex.RateLimitSnapshot{PlanType: "plus"})
-	agent.cacheRateLimits(codex.RateLimitSnapshot{PlanType: "pro"})
-	agent.cacheRateLimits(codex.RateLimitSnapshot{}) // no data: ignored
-
-	cached, ok := agent.cachedRateLimits()
-	require.True(t, ok)
-	require.Equal(t, "pro", cached.PlanType)
-}
-
-func TestRateLimitsCacheEmptyBeforeAnyData(t *testing.T) {
-	agent := NewAgent()
-	_, ok := agent.cachedRateLimits()
-	require.False(t, ok)
-}
-
-func TestApplyCodexClientEventCachesRateLimits(t *testing.T) {
-	agent := NewAgent()
-	client := newSpyCodexClient()
-
-	agent.applyCodexClientEvent(context.Background(), client, codex.Event{
-		Kind:       codex.EventRateLimitsUpdated,
-		RateLimits: &codex.RateLimitSnapshot{PlanType: "pro"},
-	})
-
-	cached, ok := agent.cachedRateLimits()
-	require.True(t, ok)
-	require.Equal(t, "pro", cached.PlanType)
-
-	// A rate-limits event without a payload is a no-op.
-	agent.applyCodexClientEvent(context.Background(), client, codex.Event{Kind: codex.EventRateLimitsUpdated})
-	cached, ok = agent.cachedRateLimits()
-	require.True(t, ok)
-	require.Equal(t, "pro", cached.PlanType)
 }
 
 func TestRateLimitsLiveClientSkipsClosedAgent(t *testing.T) {

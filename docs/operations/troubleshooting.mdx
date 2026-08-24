@@ -92,18 +92,13 @@ with the elicitation capability advertised — which is why
 
 ## Rate limits look stale or empty
 
-The Codex app-server reports rate-limit usage on some responses only, and the
-explicit `account/rateLimits/read` request exists only on native versions from
-0.142.0. The `_codex/rateLimits` extension method therefore prefers a fresh
-read against a live session whose native version supports the request; when no
-such session exists, the read fails, or the fresh snapshot is empty, the
-adapter falls back to the latest cached snapshot. The cache is fed by
-successful fresh reads and by native rate-limit update events observed during
-turns. When nothing has ever been reported, the response is an empty window
-set — absence is never an error.
+`_codex/rateLimits` issues a fresh `account/rateLimits/read` request through a
+live session every time. The supported Codex CLI floor includes that method;
+the adapter has no older-version capability gate and does not retain a cached
+snapshot. An empty native snapshot is returned as an empty `windows` array, and
+an agent with no live session also returns that empty shape. A native read
+failure fails the extension request instead of returning earlier data.
 
-`agent_ratelimits_test.go` pins this behavior:
-`TestRateLimitsFallsBackToCacheOnError` and
-`TestRateLimitsFallsBackWhenFreshQueryEmpty` cover the cached fallback,
-`TestApplyCodexClientEventCachesRateLimits` covers event-driven caching, and
-`TestRateLimitsEmptyWhenNothingKnown` covers the empty, error-free default.
+`agent_ratelimits_test.go` pins the fresh, empty, error, and no-live-session
+cases. `internal/codex/ratelimits_test.go` pins the current nested app-server
+response and notification shapes.

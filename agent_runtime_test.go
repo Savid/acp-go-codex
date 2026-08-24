@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,40 @@ type blockingCloseRuntimeClient struct {
 	count   atomic.Int64
 }
 
+type parallelContainmentRuntimeClient struct {
+	*blockingCloseRuntimeClient
+	expected           int64
+	containmentStarted atomic.Int64
+	allStarted         chan struct{}
+	releaseContainment chan struct{}
+	allStartedOnce     sync.Once
+}
+
+func (c *parallelContainmentRuntimeClient) Close(context.Context) error {
+	c.count.Add(1)
+	close(c.started)
+	<-c.allStarted
+	close(c.releaseContainment)
+
+	return codex.ErrProcessContainmentIncomplete
+}
+
+func (c *parallelContainmentRuntimeClient) ListBackgroundTerminals(
+	ctx context.Context,
+	_ codex.BackgroundTerminalListRequest,
+) (codex.BackgroundTerminalListResponse, error) {
+	if c.containmentStarted.Add(1) == c.expected {
+		c.allStartedOnce.Do(func() { close(c.allStarted) })
+	}
+
+	select {
+	case <-c.releaseContainment:
+		return codex.BackgroundTerminalListResponse{}, nil
+	case <-ctx.Done():
+		return codex.BackgroundTerminalListResponse{}, ctx.Err()
+	}
+}
+
 func (c *blockingCloseRuntimeClient) Close(context.Context) error {
 	c.count.Add(1)
 	close(c.started)
@@ -58,18 +93,16 @@ func (c *runtimeFailureClient) ResumeThread(ctx context.Context, req codex.Threa
 	return c.runtimeRecordingClient.ResumeThread(ctx, req)
 }
 
-func (c *runtimeFailureClient) RunTurn(context.Context, codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *runtimeFailureClient) RunTurn(_ context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	if c.runErr != nil {
-		return nil, c.runErr
+		return codex.Turn{}, c.runErr
 	}
 
-	events := make(chan codex.Event, len(c.events))
-	for _, event := range c.events {
-		events <- event
+	if err := c.publishTurn(req.ThreadID, "turn", c.events); err != nil {
+		return codex.Turn{}, err
 	}
-	close(events)
 
-	return events, nil
+	return codex.Turn{ID: "turn"}, nil
 }
 
 type runtimeRecordingClient struct {
@@ -81,6 +114,12 @@ type runtimeRecordingClient struct {
 	turns      []codex.TurnStartRequest
 	order      []string
 	closeCount int
+}
+
+type panickingCloseRuntimeClient struct{ *spyCodexClient }
+
+func (c *panickingCloseRuntimeClient) Close(context.Context) error {
+	panic("runtime close panic")
 }
 
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
@@ -131,30 +170,33 @@ func (c *runtimeRecordingClient) ResumeThread(_ context.Context, req codex.Threa
 	return codex.Thread{ID: req.ThreadID, Cwd: req.Cwd}, nil
 }
 
-func (c *runtimeRecordingClient) RunTurn(_ context.Context, req codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *runtimeRecordingClient) RunTurn(_ context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	text, _ := req.Prompt[0]["text"].(string)
 	c.mu.Lock()
 	c.turns = append(c.turns, req)
 	c.mu.Unlock()
-	events := make(chan codex.Event, 2)
+	events := make([]codex.Event, 0, 2)
 	if strings.Contains(text, "runtime_ready") {
 		nonce := strings.SplitN(strings.SplitN(text, "nonce ", 2)[1], ".", 2)[0]
 		c.mu.Lock()
 		c.order = append(c.order, "canary:"+req.ThreadID)
 		c.mu.Unlock()
-		events <- codex.Event{
+		events = append(events, codex.Event{
 			Kind:     codex.EventToolCompleted,
 			ThreadID: req.ThreadID,
+			TurnID:   "turn",
 			Tool: codex.ToolEvent{
 				Title:   "runtime_ready",
 				Content: nonce,
 			},
-		}
+		})
 	}
-	events <- codex.Event{Kind: codex.EventCompleted, ThreadID: req.ThreadID, StopReason: codex.StopReasonEndTurn}
-	close(events)
+	events = append(events, codex.Event{Kind: codex.EventCompleted, ThreadID: req.ThreadID, TurnID: "turn", StopReason: codex.StopReasonEndTurn})
+	if err := c.publishTurn(req.ThreadID, "turn", events); err != nil {
+		return codex.Turn{}, err
+	}
 
-	return events, nil
+	return codex.Turn{ID: "turn"}, nil
 }
 
 func TestSharedRuntimeEightThreadRaceStressPreservesCWDAndTurnRouting(t *testing.T) {
@@ -342,30 +384,51 @@ func TestAgentSharesOneRuntimeAcrossThreadsAndReleasesItAtAgentClose(t *testing.
 }
 
 func TestAgentCloseConcurrentCallersJoinMemoizedContainmentResult(t *testing.T) {
-	client := &blockingCloseRuntimeClient{
-		spyCodexClient: newSpyCodexClient(),
-		started:        make(chan struct{}),
-		release:        make(chan struct{}),
+	const sessions = 32
+	client := &parallelContainmentRuntimeClient{
+		blockingCloseRuntimeClient: &blockingCloseRuntimeClient{
+			spyCodexClient: newSpyCodexClient(),
+			started:        make(chan struct{}),
+			release:        make(chan struct{}),
+		},
+		expected:           sessions,
+		allStarted:         make(chan struct{}),
+		releaseContainment: make(chan struct{}),
 	}
 	agent := NewAgent()
 	agent.runtimeClient = client
-
-	results := make(chan error, 2)
-	go func() { results <- agent.Close() }()
-	<-client.started
-	go func() { results <- agent.Close() }()
-
-	select {
-	case result := <-results:
-		t.Fatalf("concurrent Close returned before the owned cleanup completed: %v", result)
-	case <-time.After(25 * time.Millisecond):
+	for index := range sessions {
+		id := acp.SessionId(fmt.Sprintf("session-%d", index))
+		threadID := fmt.Sprintf("thread-%d", index)
+		agent.sessions[id] = newSession(agent, id, "/tmp/project", nil, codex.Thread{ID: threadID}, client, sessionMeta{}, nil)
 	}
 
-	close(client.release)
-	require.ErrorIs(t, <-results, codex.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-results, codex.ErrProcessContainmentIncomplete)
+	const callers = 32
+	results := make(chan error, callers)
+	go func() { results <- agent.Close() }()
+	<-client.allStarted
+	for range callers - 1 {
+		go func() { results <- agent.Close() }()
+	}
+
+	<-client.started
+	for range callers {
+		require.ErrorIs(t, <-results, codex.ErrProcessContainmentIncomplete)
+	}
 	require.ErrorIs(t, agent.Close(), codex.ErrProcessContainmentIncomplete)
 	require.EqualValues(t, 1, client.count.Load())
+	require.EqualValues(t, sessions, client.containmentStarted.Load())
+}
+
+func TestAgentCloseContainsPanicsFromOwnedSessionAndRuntime(t *testing.T) {
+	sessionPanic := NewAgent()
+	sessionPanic.sessions["nil"] = nil
+	require.ErrorContains(t, sessionPanic.Close(), "session close panicked")
+
+	runtimePanic := NewAgent()
+	runtimePanic.runtimeClient = &panickingCloseRuntimeClient{spyCodexClient: newSpyCodexClient()}
+	runtimePanic.runtimeDead = false
+	require.ErrorContains(t, runtimePanic.Close(), "runtime close panicked")
 }
 
 func TestAgentCloseJoinsIncompleteRuntimeLaunchBeforeMemoizing(t *testing.T) {
@@ -964,7 +1027,7 @@ func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
 	agent.runtimeDead = true
 	active.setClientDead(true)
 
-	active.lifecycle.Lock()
+	active.sessionOps.Lock()
 	active.mu.Lock()
 	active.closing = true
 	active.mu.Unlock()
@@ -976,7 +1039,7 @@ func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
 	require.Same(t, newClient, client)
 	require.Zero(t, newClient.resumeCallCount(), "an admitted close must never be rebound")
 
-	active.lifecycle.Unlock()
+	active.sessionOps.Unlock()
 	require.NoError(t, agent.Close())
 }
 
@@ -1080,7 +1143,8 @@ func TestRuntimeFailureAndHelperBranches(t *testing.T) {
 
 	invalidHome := NewAgent(WithEnv(map[string]string{"CODEX_HOME": "/env-home"}))
 	_, err = invalidHome.Initialize(t.Context(), acp.InitializeRequest{})
-	require.ErrorContains(t, err, "reserved")
+	require.ErrorContains(t, err, valueInternalFailure)
+	require.NotContains(t, err.Error(), "CODEX_HOME")
 	t.Setenv("CODEX_HOME", "/process-home")
 	require.Equal(t, filepath.Clean("/process-home"), NewAgent().resolvedCodexHome())
 }
@@ -1216,24 +1280,54 @@ func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {
 	require.ErrorContains(t, err, "different thread")
 
 	require.NoError(t, agent.runtimeReadyCanary(ctx, newSpyCodexClient(), valid))
-	valid.mcpServers = []acp.McpServer{HTTPMCPServer("marker", "https://example/mcp", nil)}
+	canarySession := func(client codex.Client) *session {
+		s := &session{
+			agent: agent, id: "s", codexThreadID: "thread", cwd: "/work", client: client,
+			mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example/mcp", nil)},
+		}
+		t.Cleanup(s.fenceSession)
+
+		return s
+	}
 
 	oldRead := runtimeRandRead
 	t.Cleanup(func() { runtimeRandRead = oldRead })
 	runtimeRandRead = func([]byte) (int, error) { return 0, errors.New("rand") }
-	require.Error(t, agent.runtimeReadyCanary(ctx, newSpyCodexClient(), valid))
+	randClient := newSpyCodexClient()
+	require.Error(t, agent.runtimeReadyCanary(ctx, randClient, canarySession(randClient)))
 	runtimeRandRead = oldRead
 
 	failure := &runtimeFailureClient{runtimeRecordingClient: newRuntimeRecordingClient(), runErr: errors.New("turn")}
-	require.Error(t, agent.runtimeReadyCanary(ctx, failure, valid))
+	require.Error(t, agent.runtimeReadyCanary(ctx, failure, canarySession(failure)))
 
 	noMarker := &runtimeFailureClient{runtimeRecordingClient: newRuntimeRecordingClient(), events: []codex.Event{{Kind: codex.EventCompleted}}}
-	require.Error(t, agent.runtimeReadyCanary(ctx, noMarker, valid))
+	require.Error(t, agent.runtimeReadyCanary(ctx, noMarker, canarySession(noMarker)))
 
 	oldDeadline := runtimeReadyDeadline
 	t.Cleanup(func() { runtimeReadyDeadline = oldDeadline })
 	runtimeReadyDeadline = time.Nanosecond
-	require.Error(t, agent.runtimeReadyCanary(ctx, failure, valid))
+	deadlineClient := deadlineEventClient{runtimeRecordingClient: newRuntimeRecordingClient()}
+	require.Error(t, agent.runtimeReadyCanary(ctx, deadlineClient, canarySession(deadlineClient)))
+	deadlineFailure := deadlineFailureClient{runtimeRecordingClient: newRuntimeRecordingClient()}
+	require.Error(t, agent.runtimeReadyCanary(ctx, deadlineFailure, canarySession(deadlineFailure)))
+	runtimeReadyDeadline = oldDeadline
+
+	beginFailureClient := newRuntimeRecordingClient()
+	beginFailureSession := canarySession(beginFailureClient)
+	beginFailureSession.lifecycleFailure = errors.New("broker failed")
+	require.ErrorContains(t, agent.runtimeReadyCanary(ctx, beginFailureClient, beginFailureSession), "begin runtime_ready")
+
+	preBindFailure := &preBindFailureClient{runtimeRecordingClient: newRuntimeRecordingClient()}
+	preBindFailure.session = canarySession(preBindFailure)
+	require.ErrorContains(t, agent.runtimeReadyCanary(ctx, preBindFailure, preBindFailure.session), "failed runtime_ready acknowledgement")
+
+	omitted := omittedCanaryTurnClient{runtimeRecordingClient: newRuntimeRecordingClient()}
+	require.ErrorContains(t, agent.runtimeReadyCanary(ctx, omitted, canarySession(omitted)), "omitted its native turn identity")
+
+	closing := &closingCanaryClient{runtimeRecordingClient: newRuntimeRecordingClient(), closed: make(chan struct{})}
+	closing.session = canarySession(closing)
+	require.ErrorContains(t, agent.runtimeReadyCanary(ctx, closing, closing.session), "marker was not observed")
+	<-closing.closed
 }
 
 func TestRuntimeReadyEventBranches(t *testing.T) {
@@ -1310,7 +1404,9 @@ func TestRuntimeRemainingCanaryAndObserverBranches(t *testing.T) {
 		events:                 []codex.Event{{Kind: codex.EventError}},
 	}
 	_, err := agent.resumeRuntimeSession(ctx, noMarker, valid)
-	require.Error(t, err)
+	require.NoError(t, err)
+	t.Cleanup(valid.fenceSession)
+	require.Error(t, agent.runtimeReadyCanary(ctx, noMarker, valid))
 	oldDeadline := runtimeReadyDeadline
 	t.Cleanup(func() { runtimeReadyDeadline = oldDeadline })
 	runtimeReadyDeadline = time.Nanosecond
@@ -1433,12 +1529,73 @@ func TestRemainingRouteConnectionAndRequestBranches(t *testing.T) {
 
 type deadlineEventClient struct{ *runtimeRecordingClient }
 
-func (c deadlineEventClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c deadlineEventClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
 	<-ctx.Done()
-	events := make(chan codex.Event)
-	close(events)
 
-	return events, nil
+	return codex.Turn{ID: "turn"}, nil
+}
+
+type deadlineFailureClient struct{ *runtimeRecordingClient }
+
+func (c deadlineFailureClient) RunTurn(ctx context.Context, _ codex.TurnStartRequest) (codex.Turn, error) {
+	<-ctx.Done()
+
+	return codex.Turn{}, ctx.Err()
+}
+
+type preBindFailureClient struct {
+	*runtimeRecordingClient
+	session *session
+}
+
+func (c *preBindFailureClient) RunTurn(_ context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
+	if err := c.publishTurn(req.ThreadID, "turn", []codex.Event{{Kind: codex.EventRaw}}); err != nil {
+		return codex.Turn{}, err
+	}
+	for {
+		c.session.lifecycleMu.Lock()
+		buffered := c.session.nativeCanary != nil && len(c.session.nativeCanary.preBind) != 0
+		c.session.lifecycleMu.Unlock()
+		if buffered {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	return codex.Turn{}, errors.New("turn failed after native activity")
+}
+
+type omittedCanaryTurnClient struct{ *runtimeRecordingClient }
+
+func (omittedCanaryTurnClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	return codex.Turn{}, nil
+}
+
+type closingCanaryClient struct {
+	*runtimeRecordingClient
+	session *session
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (c *closingCanaryClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	go func() {
+		for {
+			c.session.lifecycleMu.Lock()
+			canary := c.session.nativeCanary
+			if canary != nil && canary.turnID == "turn" {
+				c.session.closeCanaryEventsLocked(canary)
+				c.session.lifecycleMu.Unlock()
+				c.once.Do(func() { close(c.closed) })
+
+				return
+			}
+			c.session.lifecycleMu.Unlock()
+			runtime.Gosched()
+		}
+	}()
+
+	return codex.Turn{ID: "turn"}, nil
 }
 
 // A stored rollout is generated by the trusted process and then handed to the
@@ -1520,11 +1677,11 @@ func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {
 			target.agent.sessions[target.id] = &session{agent: target.agent, id: target.id, materializedPath: "old"}
 		}
 		candidate := &session{agent: target.agent, id: target.id, materializedPath: "candidate"}
-		storeErr := target.agent.storeStartedSession(candidate)
+		require.Error(t, target.agent.storeStartedSession(candidate))
+
 		if target.current {
-			require.NoError(t, storeErr)
-		} else {
-			require.Error(t, storeErr)
+			require.NotSame(t, candidate, target.agent.activeSession(target.id),
+				"an incomplete close keeps the id it still owes state under")
 		}
 	}
 
@@ -1575,6 +1732,7 @@ func TestRemainingSessionCanaryCleanupBranches(t *testing.T) {
 	}))
 	parent, err := resumeErrAgent.NewSession(ctx, NewSessionRequest("/work"))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, resumeErrAgent.Close()) })
 	_, err = resumeErrAgent.forkSession(ctx, ForkSessionRequest(parent.SessionId, "/work"))
 	require.ErrorContains(t, err, "fork resume failed")
 
@@ -1584,6 +1742,7 @@ func TestRemainingSessionCanaryCleanupBranches(t *testing.T) {
 	}))
 	parent, err = forkAgent.NewSession(ctx, NewSessionRequest("/work"))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, forkAgent.Close()) })
 	_, err = forkAgent.forkSession(ctx, ForkSessionRequest(parent.SessionId, "/work", WithSessionMCPServers(server)))
 	require.ErrorContains(t, err, "runtime_ready")
 }
@@ -1625,11 +1784,13 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		agent.sessions[active.id] = active
 		agent.retainedThreads = nil
 
-		removed, retainedOwnership := agent.finishSessionCloseRetainingThread(active.id, &session{})
+		removed, retainedOwnership, finishErr := agent.finishSessionCloseRetainingThread(active.id, &session{})
+		require.NoError(t, finishErr)
 		require.False(t, removed)
 		require.False(t, retainedOwnership)
 		active.closing = true
-		removed, retainedOwnership = agent.finishSessionCloseRetainingThread(active.id, active)
+		removed, retainedOwnership, finishErr = agent.finishSessionCloseRetainingThread(active.id, active)
+		require.NoError(t, finishErr)
 		require.True(t, removed)
 		require.True(t, retainedOwnership)
 		retained := agent.retainedThreads[active.id]
@@ -1648,7 +1809,8 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		agent.runtimeClient = client
 		agent.runtimeDead = true
 		active.closing = true
-		removed, retainedOwnership := agent.finishSessionCloseRetainingThread(active.id, active)
+		removed, retainedOwnership, finishErr := agent.finishSessionCloseRetainingThread(active.id, active)
+		require.NoError(t, finishErr)
 		require.True(t, removed)
 		require.False(t, retainedOwnership)
 		require.Empty(t, agent.retainedThreads)
@@ -1687,6 +1849,21 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		agent, retained, candidate := fixture()
 		agent.closed = true
 		require.Error(t, agent.storeRetainedRuntimeSession(candidate, retained))
+
+		// The retained-thread claim and a delete of the same id already exclude
+		// each other, so re-reading the fence here is belt-and-braces: no
+		// ordering may register a wrapper behind a delete, and the refusal
+		// carries the verdict the fence has actually reached.
+		agent, retained, candidate = fixture()
+		releaseDelete := agent.claimSessionDelete(candidate.id)
+		requireSessionDeleteInProgress(t, agent.storeRetainedRuntimeSession(candidate, retained))
+		require.NotContains(t, agent.sessions, candidate.id)
+		releaseDelete()
+
+		agent, retained, candidate = fixture()
+		agent.deleted[candidate.id] = struct{}{}
+		requireUnknownSession(t, agent.storeRetainedRuntimeSession(candidate, retained))
+		require.NotContains(t, agent.sessions, candidate.id)
 
 		agent, _, candidate = fixture()
 		require.ErrorContains(t, agent.storeRetainedRuntimeSession(candidate, nil), "ownership changed")
@@ -1773,4 +1950,34 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		require.NoError(t, agent.releaseRetainedRuntimeThreads(client, 7))
 		require.Same(t, unrelated, agent.retainedThreads[unrelated.sessionID])
 	})
+}
+
+func TestRetainedRuntimeThreadRegistryBoundAndRetryRetirement(t *testing.T) {
+	agent := NewAgent()
+	client := newSpyCodexClient()
+	agent.runtimeClient = client
+	for i := range retainedRuntimeThreadLimit {
+		id := acp.SessionId(fmt.Sprintf("retained-%d", i))
+		agent.retainedThreads[id] = &retainedRuntimeThread{sessionID: id, client: client}
+	}
+
+	target := &session{
+		agent: agent, id: "overflow", client: client, codexThreadID: "thread-overflow",
+		closing: true, closeContained: true, closeCommitDone: true,
+	}
+	agent.sessions[target.id] = target
+
+	removed, retained, err := agent.finishSessionCloseRetainingThread(target.id, target)
+	require.False(t, removed)
+	require.False(t, retained)
+	require.ErrorContains(t, err, "registry is full")
+	require.Same(t, target, agent.activeSession(target.id), "a refused retirement must retain its exact retry owner")
+
+	delete(agent.retainedThreads, "retained-0")
+	removed, retained, err = agent.finishSessionCloseRetainingThread(target.id, target)
+	require.NoError(t, err)
+	require.True(t, removed)
+	require.True(t, retained)
+	require.Nil(t, agent.activeSession(target.id))
+	require.Same(t, client, agent.retainedThreads[target.id].client)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -87,7 +88,7 @@ func TestLogoutRejectsAnEnvironmentSelectedCodexHomeBeforeNativeCreation(t *test
 	)
 
 	_, err := agent.Logout(t.Context(), acp.LogoutRequest{})
-	if err == nil || !containsAll(err.Error(), "explicit WithHome", "reserved") {
+	if err == nil || !strings.Contains(err.Error(), valueInternalFailure) || strings.Contains(err.Error(), "WithHome") {
 		t.Fatalf("logout error = %v", err)
 	}
 	if client.loggedOut {
@@ -137,8 +138,8 @@ func TestAuthCapabilitiesTerminalArgsAndAuthRequired(t *testing.T) {
 	if authData[jsonFieldCause] != codex.CauseProvider {
 		t.Fatalf("auth required cause = %v, want %s", authData[jsonFieldCause], codex.CauseProvider)
 	}
-	if authData[jsonFieldMessage] != "not logged in" {
-		t.Fatalf("auth required message = %v, want native cause text", authData[jsonFieldMessage])
+	if authData[jsonFieldMessage] != "Codex authentication is required" {
+		t.Fatalf("auth required message = %v, want closed classification", authData[jsonFieldMessage])
 	}
 	codexAuthMeta := asType[map[string]any](t, asType[map[string]any](t, authData[codexMetaKey])[authMetaAuthKey])
 	if codexAuthMeta[jsonFieldReason] != "codex-auth-required" {
@@ -810,9 +811,9 @@ func TestProviderAuthGoSafeRecoversAPanic(t *testing.T) {
 	<-done
 }
 
-func TestLoggableErrorCarriesTheMessage(t *testing.T) {
+func TestLoggableErrorUsesClosedClassification(t *testing.T) {
 	attr := loggableError(errors.New("boom"))
-	if attr.Value.String() != "boom" {
+	if attr.Value.String() != valueInternalFailure {
 		t.Fatalf("attr = %v", attr)
 	}
 }

@@ -351,7 +351,7 @@ func replayStatus(status string) acp.ToolCallStatus {
 		return acp.ToolCallStatusCompleted
 	case statusFailed, jsonFieldError, statusErrored:
 		return acp.ToolCallStatusFailed
-	case "pending":
+	case authStatePending:
 		return acp.ToolCallStatusPending
 	default:
 		return acp.ToolCallStatusInProgress

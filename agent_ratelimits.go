@@ -30,28 +30,26 @@ type RateLimitWindow struct {
 	ResetsAt    string  `json:"resetsAt,omitempty"`
 }
 
-// rateLimits resolves the current rate-limit view. It prefers a fresh
-// account/rateLimits/read against a live session whose native version supports
-// the request, falls back to the latest cached snapshot, and otherwise reports
-// an empty window set. Absence is never an error.
-func (a *Agent) rateLimits(ctx context.Context) RateLimitsResponse {
-	if client, ok := a.liveRateLimitsClient(); ok {
-		if snapshot, err := client.ReadRateLimits(ctx); err == nil && snapshot.HasData() {
-			a.cacheRateLimits(snapshot)
-
-			return rateLimitsResponseFromSnapshot(snapshot)
-		}
+// rateLimits reads the current app-server snapshot through any live session.
+// The supported Codex floor always exposes account/rateLimits/read, so a live
+// native client is queried directly and a read failure is returned. An agent
+// without a live session, including a placeholder-only agent, reports an empty
+// window set.
+func (a *Agent) rateLimits(ctx context.Context) (RateLimitsResponse, error) {
+	client, ok := a.liveRateLimitsClient()
+	if !ok {
+		return RateLimitsResponse{Windows: []RateLimitWindow{}}, nil
 	}
 
-	if snapshot, ok := a.cachedRateLimits(); ok {
-		return rateLimitsResponseFromSnapshot(snapshot)
+	snapshot, err := client.ReadRateLimits(ctx)
+	if err != nil {
+		return RateLimitsResponse{}, err
 	}
 
-	return RateLimitsResponse{Windows: []RateLimitWindow{}}
+	return rateLimitsResponseFromSnapshot(snapshot), nil
 }
 
-// liveRateLimitsClient returns a live session client whose native version
-// supports the account/rateLimits/read request, if one exists.
+// liveRateLimitsClient returns a live session client, if one exists.
 func (a *Agent) liveRateLimitsClient() (codex.Client, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -61,7 +59,7 @@ func (a *Agent) liveRateLimitsClient() (codex.Client, bool) {
 	}
 
 	for _, session := range a.sessions {
-		if session.client != nil && session.client.RateLimitsSupported() {
+		if session.client != nil {
 			return session.client, true
 		}
 	}

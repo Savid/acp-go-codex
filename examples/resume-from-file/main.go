@@ -271,26 +271,29 @@ func readTranscriptJSONL(path string) ([]codexacp.SessionStoreEntry, string, str
 }
 
 func rolloutMeta(entry codexacp.SessionStoreEntry) (string, string) {
-	var obj map[string]any
+	var obj map[string]json.RawMessage
 	if json.Unmarshal(entry, &obj) != nil {
 		return "", ""
 	}
 
-	if rowType, _ := obj["type"].(string); rowType == "session_meta" {
-		if payload, ok := obj["payload"].(map[string]any); ok {
-			id, _ := payload["id"].(string)
-			dir, _ := payload["cwd"].(string)
-
-			return id, dir
-		}
+	var rowType string
+	if json.Unmarshal(obj["type"], &rowType) != nil || rowType != "session_meta" {
+		return "", ""
 	}
 
-	id, _ := obj["session_id"].(string)
-	if id == "" {
-		id, _ = obj["sessionId"].(string)
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(obj["payload"], &payload) != nil {
+		return "", ""
 	}
 
-	dir, _ := obj["cwd"].(string)
+	var id string
+	if json.Unmarshal(payload["id"], &id) != nil || id == "" {
+		return "", ""
+	}
 
-	return id, dir
+	var cwd string
+
+	_ = json.Unmarshal(payload["cwd"], &cwd)
+
+	return id, cwd
 }

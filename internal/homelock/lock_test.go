@@ -109,6 +109,29 @@ func TestLockFailureBranches(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	// A platform with no lock primitive is unreachable from the platforms this
+	// package builds tests for, so the refusal is driven through the hook the
+	// build-tagged files install. What is pinned is the contract a host reads:
+	// construction fails, it fails with the family sentinel, and it leaves no
+	// home directory or lock file behind to suggest a claim nobody holds.
+	t.Run("unsupported platform", func(t *testing.T) {
+		restoreLockHooks(t)
+
+		home := filepath.Join(t.TempDir(), "home")
+		requireLock = func() error { return ErrRuntimeLockUnsupported }
+
+		_, err := Acquire(home)
+		require.ErrorIs(t, err, ErrRuntimeLockUnsupported)
+
+		_, err = AcquireClaim(home)
+		require.ErrorIs(t, err, ErrRuntimeLockUnsupported)
+
+		_, err = AcquireLiveness(home)
+		require.ErrorIs(t, err, ErrRuntimeLockUnsupported)
+
+		require.NoDirExists(t, home)
+	})
+
 	t.Run("release", func(t *testing.T) {
 		restoreLockHooks(t)
 		lock, err := Acquire(t.TempDir())
@@ -127,6 +150,7 @@ func restoreLockHooks(t *testing.T) {
 	originalStatFile := statFile
 	originalChmodFile := chmodFile
 	originalSameFile := sameFile
+	originalRequireLock := requireLock
 	originalPlatformLock := platformLock
 	originalPlatformUnlock := platformUnlock
 	originalValidateFS := validateFS
@@ -137,6 +161,7 @@ func restoreLockHooks(t *testing.T) {
 		statFile = originalStatFile
 		chmodFile = originalChmodFile
 		sameFile = originalSameFile
+		requireLock = originalRequireLock
 		platformLock = originalPlatformLock
 		platformUnlock = originalPlatformUnlock
 		validateFS = originalValidateFS

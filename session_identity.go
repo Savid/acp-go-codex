@@ -14,8 +14,9 @@ const (
 )
 
 // nativeTurnIdentity is the provider-owned correlation for one Codex turn and
-// its terminal assistant response item. Values always originate in app-server
-// events or the native rollout; the adapter never manufactures either ID.
+// its terminal assistant response item. Live values originate only in the
+// native app-server event source; replayed values may originate in the durable
+// rollout the adapter imported earlier.
 type nativeTurnIdentity struct {
 	turnID    string
 	messageID string
@@ -102,7 +103,7 @@ func (s *session) emitUpdatesWithNativeIdentity(
 			SessionId: s.id,
 			Update:    update,
 		}); err != nil {
-			return err
+			return wrapHostDeliveryError(err)
 		}
 	}
 
@@ -113,18 +114,10 @@ func nativeIdentityChanged(left, right nativeTurnIdentity) bool {
 	return left.turnID != right.turnID || left.messageID != right.messageID
 }
 
-// finalizePromptNativeIdentity reconciles the app-server stream with the
-// durable rollout and publishes the terminal pair on a standard ACP update.
+// finalizePromptNativeIdentity publishes the exact terminal identity observed
+// on the native app-server stream. The rollout is durability, never a second
+// live event or identity source.
 func (s *session) finalizePromptNativeIdentity(ctx context.Context, state *promptEventState) error {
-	durableIdentity := s.rolloutIdentitySnapshot()
-	if durableIdentity.turnID != "" {
-		state.nativeIdentity.turnID = durableIdentity.turnID
-	}
-
-	if durableIdentity.messageID != "" {
-		state.nativeIdentity.messageID = durableIdentity.messageID
-	}
-
 	if !nativeIdentityChanged(state.nativeIdentity, state.emittedNativeIdentity) {
 		return nil
 	}

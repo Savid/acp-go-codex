@@ -2,10 +2,10 @@
 
 package codexacp
 
-// handoffOpenFlags is empty because the handoff form cannot be reached on
-// Windows: every file:///C:/... spelling leaves a path that fails
-// filepath.IsAbs once FromSlash has run, so the block is refused as
-// invalid_handoff long before anything is opened. Windows has no equivalent of
-// the non-blocking open the form depends on, so it stays unreachable rather
-// than half-enabled.
+// handoffOpenFlags carries no platform open flags on Windows, and none are
+// owed: the non-blocking open is a Unix flag against a Unix hazard, and Windows
+// has no equivalent to ask for. Nothing about containment rests on that, or on
+// any argument that the handoff form is unreachable here. The read is confined
+// by opening through the root handle and by requiring the descriptor it returns
+// to be a regular file, and both of those bind on every platform.
 const handoffOpenFlags = 0

@@ -63,33 +63,12 @@ func TestRateLimitSnapshotFromMap(t *testing.T) {
 	}
 }
 
-func TestRateLimitSnapshotHasData(t *testing.T) {
-	require.False(t, RateLimitSnapshot{Windows: []RateLimitWindow{}}.HasData())
-	require.True(t, RateLimitSnapshot{PlanType: "pro"}.HasData())
-	require.True(t, RateLimitSnapshot{Windows: []RateLimitWindow{{ID: "primary"}}}.HasData())
-}
-
-func TestRateLimitSnapshotPayload(t *testing.T) {
-	nested := map[string]any{"planType": "pro"}
-	require.Equal(t, nested, rateLimitSnapshotPayload(map[string]any{"rateLimits": nested}))
-
-	flat := map[string]any{"primary": map[string]any{"usedPercent": float64(1)}}
-	require.Equal(t, flat, rateLimitSnapshotPayload(flat))
-}
-
 func TestFloat64Value(t *testing.T) {
 	require.Equal(t, float64(0), float64Value(nil, "x"))
 	require.Equal(t, float64(3.5), float64Value(map[string]any{"x": float64(3.5)}, "x"))
 	require.Equal(t, float64(4), float64Value(map[string]any{"x": int64(4)}, "x"))
 	require.Equal(t, float64(5), float64Value(map[string]any{"x": int(5)}, "x"))
 	require.Equal(t, float64(0), float64Value(map[string]any{"x": "nope"}, "x"))
-}
-
-func TestRateLimitsSupported(t *testing.T) {
-	require.True(t, (&AppServerClient{nativeVersion: "0.142.0"}).RateLimitsSupported())
-	require.True(t, (&AppServerClient{nativeVersion: "0.143.1"}).RateLimitsSupported())
-	require.False(t, (&AppServerClient{nativeVersion: "0.141.0"}).RateLimitsSupported())
-	require.False(t, (&AppServerClient{nativeVersion: ""}).RateLimitsSupported())
 }
 
 func TestReadRateLimits(t *testing.T) {
@@ -99,7 +78,6 @@ func TestReadRateLimits(t *testing.T) {
 
 	snapshot, err := client.ReadRateLimits(context.Background())
 	require.NoError(t, err)
-	require.True(t, snapshot.HasData())
 	require.Equal(t, "pro", snapshot.PlanType)
 	require.Len(t, snapshot.Windows, 2)
 	require.Equal(t, "primary", snapshot.Windows[0].ID)
@@ -156,9 +134,9 @@ func TestDispatchRateLimitsUpdatedWithoutHandler(t *testing.T) {
 
 func TestPlaceholderRateLimits(t *testing.T) {
 	client := NewPlaceholderClient(Options{})
-	require.False(t, client.RateLimitsSupported())
 
 	snapshot, err := client.ReadRateLimits(context.Background())
 	require.NoError(t, err)
-	require.False(t, snapshot.HasData())
+	require.Empty(t, snapshot.PlanType)
+	require.Empty(t, snapshot.Windows)
 }

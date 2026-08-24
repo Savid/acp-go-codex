@@ -6,6 +6,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
 // handleCodexServerRequest bridges native Codex app-server requests onto ACP
@@ -25,10 +26,22 @@ func (a *Agent) handleCodexServerRequest(ctx context.Context, req codex.ServerRe
 			return nil, fmt.Errorf("codex server request %q addressed unknown threadId", req.Method)
 		}
 
-		var finish func()
+		var (
+			finish func()
+			err    error
+		)
 
 		ctx, finish = session.beginInteraction(ctx, codex.ServerInteractionKey(req, params))
 		defer finish()
+
+		ctx, err = session.claimServerRequestTurn(ctx, req.Method, params)
+		if err != nil {
+			if cancellation, ok := codexPermissionCancellationResponse(req.Method, params); ok {
+				return cancellation, nil
+			}
+
+			return nil, err
+		}
 	}
 
 	var (
@@ -223,13 +236,24 @@ func (a *Agent) handleCodexToolUserInput(ctx context.Context, req codex.ServerRe
 		return codex.EmptyToolUserInputResponse(), nil //nolint:nilerr // A refused question is answered, not failed.
 	}
 
-	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	action, correlation, err := session.beginAction(ctx, lifecycle.ActionElicitation, true)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := createElicitationWithAction(ctx, conn, acp.UnstableCreateElicitationRequest{
 		Form: form,
 	}, elicitationScope{
-		SessionID:  session.id,
-		TurnNonce:  turnNonce,
-		ToolCallID: acp.ToolCallId(codex.ToolUserInputToolCallID(req, params)),
-	})
+		SessionID:         session.id,
+		TurnNonce:         turnNonce,
+		ToolCallID:        acp.ToolCallId(codex.ToolUserInputToolCallID(req, params)),
+		ActionCorrelation: correlation,
+	}, action, nil)
+
+	if resolveErr := action.resolve(ctx, elicitationActionState(resp, err)); resolveErr != nil {
+		return nil, resolveErr
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -362,11 +386,23 @@ func (a *Agent) handleCodexMCPUserElicitation(ctx context.Context, req codex.Ser
 			requestID = &acp.RequestId{Str: &requestIDValue}
 		}
 
-		resp, err = conn.CreateElicitation(ctx, request, elicitationScope{
-			SessionID: session.id,
-			TurnNonce: turnNonce,
-			RequestID: requestID,
-		})
+		var action *liveAction
+
+		action, correlation, actionErr := session.beginAction(ctx, lifecycle.ActionElicitation, true)
+		if actionErr != nil {
+			return nil, actionErr
+		}
+
+		resp, err = createElicitationWithAction(ctx, conn, request, elicitationScope{
+			SessionID:         session.id,
+			TurnNonce:         turnNonce,
+			RequestID:         requestID,
+			ActionCorrelation: correlation,
+		}, action, nil)
+
+		if resolveErr := action.resolve(ctx, elicitationActionState(resp, err)); resolveErr != nil {
+			return nil, resolveErr
+		}
 	}
 
 	if err != nil {

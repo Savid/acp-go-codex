@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
 const jsonFieldMethod = "method"
@@ -24,17 +27,62 @@ type agentClient interface {
 	NotifyExtension(context.Context, string, any) error
 }
 
+// registeredActionClient exposes the point at which an outbound ACP action
+// request is both present in the connection's pending-request registry and has
+// been written successfully to the host. Lifecycle publication must wait for
+// this barrier so the host can answer every pending action it observes.
+type registeredActionClient interface {
+	CreateElicitationRegistered(
+		context.Context,
+		acp.UnstableCreateElicitationRequest,
+		elicitationScope,
+		string,
+		func() error,
+	) (acp.UnstableCreateElicitationResponse, error)
+	RequestPermissionRegistered(
+		context.Context,
+		acp.RequestPermissionRequest,
+		string,
+		func() error,
+	) (acp.RequestPermissionResponse, error)
+}
+
+type lifecycleNotificationClient interface {
+	SessionUpdateLifecycle(context.Context, acp.SessionNotification) error
+}
+
+type lifecycleCarrier interface {
+	LifecycleDeliverySupported() bool
+}
+
+type transportInterrupter interface {
+	InterruptTransport() error
+}
+
+type writeInterrupter interface {
+	InterruptWrite() error
+}
+
 type elicitationScope struct {
 	SessionID  acp.SessionId
 	TurnNonce  string
 	ToolCallID acp.ToolCallId
 	RequestID  *acp.RequestId
+	// ActionCorrelation is the lifecycle identity of the action this request
+	// holds open. It coexists with the reserved route object rather than
+	// replacing it: the route object routes and authenticates the callback, and
+	// this names the same pending request on the ordered stream.
+	ActionCorrelation map[string]any
 }
 
 type localAgentConnection struct {
-	agent       *Agent
-	conn        *acp.Connection
-	initialized atomic.Bool
+	agent         *Agent
+	conn          *acp.Connection
+	registrations *requestRegistrationWriter
+	establishment *establishmentHooks
+	output        io.Writer
+	lifecycleOK   bool
+	initialized   atomic.Bool
 }
 
 type localAgentHandler func(context.Context, *Agent, json.RawMessage) (any, *acp.RequestError)
@@ -45,7 +93,8 @@ type localAgentParams[Req any] interface {
 }
 
 var (
-	_ agentClient = (*localAgentConnection)(nil)
+	_ agentClient            = (*localAgentConnection)(nil)
+	_ registeredActionClient = (*localAgentConnection)(nil)
 
 	localAgentHandlers = map[string]localAgentHandler{
 		acp.AgentMethodAuthenticate:           localResponse((*Agent).Authenticate),
@@ -64,13 +113,115 @@ var (
 )
 
 func newLocalAgentConnection(agent *Agent, output io.Writer, input io.Reader) *localAgentConnection {
-	conn := &localAgentConnection{agent: agent}
-	inputGate := newConnectionInputGate(input)
-	conn.conn = acp.NewConnection(conn.handle, output, inputGate)
-	conn.conn.SetLogger(agent.log)
+	establishment := newEstablishmentHooks(agent.log)
+	registrations := newRequestRegistrationWriter(establishment.wrap(output))
+	conn := &localAgentConnection{
+		agent: agent, registrations: registrations, establishment: establishment, output: output,
+		lifecycleOK: interruptibleOutput(output),
+	}
+	inputGate := newConnectionInputGate(newEstablishmentTagReader(input))
+	conn.conn = acp.NewConnection(conn.handle, registrations, inputGate)
+	conn.conn.SetLogger(secretSafeLogger(agent.log))
 	inputGate.open()
 
 	return conn
+}
+
+func interruptibleOutput(output io.Writer) bool {
+	if output == nil {
+		return false
+	}
+
+	if _, ok := output.(writeDeadlineSetter); ok {
+		return true
+	}
+
+	if _, ok := output.(writeInterrupter); ok {
+		return true
+	}
+
+	_, ok := output.(*os.File)
+
+	return ok
+}
+
+func (c *localAgentConnection) LifecycleDeliverySupported() bool {
+	return c != nil && c.lifecycleOK
+}
+
+type requestRegistrationWriter struct {
+	out     io.Writer
+	mu      sync.Mutex
+	pending map[string]chan error
+}
+
+func newRequestRegistrationWriter(out io.Writer) *requestRegistrationWriter {
+	return &requestRegistrationWriter{out: out, pending: make(map[string]chan error)}
+}
+
+func (w *requestRegistrationWriter) expect(actionID string) (<-chan error, func(), error) {
+	if actionID == "" {
+		return nil, nil, errors.New("lifecycle action registration requires an action id")
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if _, exists := w.pending[actionID]; exists {
+		return nil, nil, errors.New("duplicate lifecycle action registration")
+	}
+
+	ready := make(chan error, 1)
+	w.pending[actionID] = ready
+	cancel := func() {
+		w.mu.Lock()
+		delete(w.pending, actionID)
+		w.mu.Unlock()
+	}
+
+	return ready, cancel, nil
+}
+
+func (w *requestRegistrationWriter) Write(payload []byte) (int, error) {
+	actionID := outboundLifecycleActionID(payload)
+
+	n, err := w.out.Write(payload)
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+
+	if actionID != "" {
+		w.mu.Lock()
+		ready := w.pending[actionID]
+		delete(w.pending, actionID)
+		w.mu.Unlock()
+
+		if ready != nil {
+			ready <- err
+
+			close(ready)
+		}
+	}
+
+	return n, err
+}
+
+func outboundLifecycleActionID(payload []byte) string {
+	var message struct {
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
+	}
+	if json.Unmarshal(payload, &message) != nil ||
+		(message.Method != acp.ClientMethodSessionRequestPermission && message.Method != acp.ClientMethodElicitationCreate) {
+		return ""
+	}
+
+	meta, _ := message.Params[jsonFieldMeta].(map[string]any)
+	value, _ := meta[lifecycle.MetaKey].(map[string]any)
+	action, _ := value["action"].(map[string]any)
+	actionID, _ := action["actionId"].(string)
+
+	return actionID
 }
 
 type connectionInputGate struct {
@@ -122,6 +273,20 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 		})
 
 		return nil, reqErr
+	}
+
+	if establishingMethod(method) {
+		responseID := establishmentHookID(params)
+		if responseID != "" {
+			obligation, reserveErr := c.establishment.reserve(responseID)
+			if reserveErr != nil {
+				reqErr = acp.NewInvalidRequest(map[string]any{jsonFieldError: reserveErr.Error()})
+
+				return nil, reqErr
+			}
+
+			ctx = withEstablishmentObligation(ctx, obligation)
+		}
 	}
 
 	if strings.HasPrefix(method, "_") {
@@ -220,6 +385,43 @@ func (c *localAgentConnection) CreateElicitation(
 	return acp.SendRequest[acp.UnstableCreateElicitationResponse](c.conn, ctx, acp.ClientMethodElicitationCreate, raw)
 }
 
+func (c *localAgentConnection) CreateElicitationRegistered(
+	ctx context.Context,
+	params acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+	actionID string,
+	registered func() error,
+) (acp.UnstableCreateElicitationResponse, error) {
+	raw, err := scopedElicitationParams(params, scope)
+	if err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	var releaseOnce sync.Once
+
+	releaseCall := func() { releaseOnce.Do(release) }
+	defer releaseCall()
+
+	return registeredActionRequest(ctx, c.registrations, actionID, c.InterruptTransport, func() error {
+		releaseCall()
+
+		if registered != nil {
+			if err := registered(); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}, func(requestCtx context.Context) (acp.UnstableCreateElicitationResponse, error) {
+		return acp.SendRequest[acp.UnstableCreateElicitationResponse](c.conn, requestCtx, acp.ClientMethodElicitationCreate, raw)
+	})
+}
+
 func (c *localAgentConnection) RequestPermission(
 	ctx context.Context,
 	params acp.RequestPermissionRequest,
@@ -233,6 +435,133 @@ func (c *localAgentConnection) RequestPermission(
 	return acp.SendRequest[acp.RequestPermissionResponse](c.conn, ctx, acp.ClientMethodSessionRequestPermission, params)
 }
 
+func (c *localAgentConnection) RequestPermissionRegistered(
+	ctx context.Context,
+	params acp.RequestPermissionRequest,
+	actionID string,
+	registered func() error,
+) (acp.RequestPermissionResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+
+	var releaseOnce sync.Once
+
+	releaseCall := func() { releaseOnce.Do(release) }
+	defer releaseCall()
+
+	return registeredActionRequest(ctx, c.registrations, actionID, c.InterruptTransport, func() error {
+		releaseCall()
+
+		if registered != nil {
+			if err := registered(); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}, func(requestCtx context.Context) (acp.RequestPermissionResponse, error) {
+		return acp.SendRequest[acp.RequestPermissionResponse](c.conn, requestCtx, acp.ClientMethodSessionRequestPermission, params)
+	})
+}
+
+type registeredActionResult[T any] struct {
+	value T
+	err   error
+}
+
+func registeredActionRequest[T any](
+	ctx context.Context,
+	writer *requestRegistrationWriter,
+	actionID string,
+	interrupt func() error,
+	registered func() error,
+	request func(context.Context) (T, error),
+) (T, error) {
+	var zero T
+	if writer == nil {
+		return zero, errors.New("ACP action registration barrier is unavailable")
+	}
+
+	ready, abandon, err := writer.expect(actionID)
+	if err != nil {
+		return zero, err
+	}
+	defer abandon()
+
+	requestCtx, cancelRequest := context.WithCancelCause(ctx)
+	defer cancelRequest(nil)
+
+	result := make(chan registeredActionResult[T], 1)
+
+	go func() {
+		value, requestErr := request(requestCtx)
+		result <- registeredActionResult[T]{value: value, err: requestErr}
+	}()
+
+	var writeErr error
+
+	var early registeredActionResult[T]
+
+	haveEarly := false
+
+	select {
+	case writeErr = <-ready:
+	case early = <-result:
+		haveEarly = true
+
+		select {
+		case writeErr = <-ready:
+		case <-ctx.Done():
+			return early.value, errors.Join(early.err, ctx.Err())
+		}
+	case <-ctx.Done():
+		cancelRequest(ctx.Err())
+
+		var interruptErr error
+		if interrupt != nil {
+			interruptErr = interrupt()
+		}
+
+		finished := <-result
+
+		return finished.value, errors.Join(ctx.Err(), interruptErr, finished.err)
+	}
+
+	if writeErr != nil {
+		cancelRequest(writeErr)
+
+		if haveEarly {
+			return early.value, errors.Join(early.err, writeErr)
+		}
+
+		finished := <-result
+
+		return finished.value, errors.Join(finished.err, writeErr)
+	}
+
+	if registered != nil {
+		if err = registered(); err != nil {
+			cancelRequest(err)
+
+			if !haveEarly {
+				<-result
+			}
+
+			return zero, err
+		}
+	}
+
+	if haveEarly {
+		return early.value, early.err
+	}
+
+	finished := <-result
+
+	return finished.value, finished.err
+}
+
 func (c *localAgentConnection) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
 	release, err := c.agent.acquireClientCall(ctx)
 	if err != nil {
@@ -241,6 +570,68 @@ func (c *localAgentConnection) SessionUpdate(ctx context.Context, params acp.Ses
 	defer release()
 
 	return c.conn.SendNotification(ctx, acp.ClientMethodSessionUpdate, params)
+}
+
+func (c *localAgentConnection) SessionUpdateLifecycle(ctx context.Context, params acp.SessionNotification) error {
+	if !c.LifecycleDeliverySupported() {
+		return errors.New("ACP output transport cannot provide bounded lifecycle delivery")
+	}
+
+	release, err := c.agent.acquireLifecycleCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- c.conn.SendNotification(ctx, acp.ClientMethodSessionUpdate, params)
+	}()
+
+	select {
+	case err = <-result:
+		return err
+	case <-ctx.Done():
+		interruptErr := c.InterruptTransport()
+		writeErr := <-result
+
+		return errors.Join(ctx.Err(), interruptErr, writeErr)
+	}
+}
+
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+}
+
+func (c *localAgentConnection) InterruptTransport() error {
+	if c == nil || c.output == nil {
+		return errors.New("ACP output transport is unavailable")
+	}
+
+	if c.establishment != nil {
+		c.establishment.failAll(errEstablishmentCancelled)
+	}
+
+	var interruptErr error
+	if interrupter, ok := c.output.(writeInterrupter); ok {
+		interruptErr = interrupter.InterruptWrite()
+	}
+
+	if deadline, ok := c.output.(writeDeadlineSetter); ok {
+		interruptErr = errors.Join(interruptErr, deadline.SetWriteDeadline(time.Now()))
+	}
+
+	if closer, ok := c.output.(io.Closer); ok {
+		interruptErr = errors.Join(interruptErr, closer.Close())
+
+		return interruptErr
+	}
+
+	if !interruptibleOutput(c.output) {
+		return errors.New("ACP output transport cannot interrupt a stalled write")
+	}
+
+	return interruptErr
 }
 
 func (c *localAgentConnection) NotifyExtension(ctx context.Context, method string, params any) error {
@@ -271,7 +662,7 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 	}
 
 	if context.Cause(ctx) == context.Canceled {
-		return acp.NewRequestCancelled(map[string]any{jsonFieldError: err.Error()})
+		return acp.NewRequestCancelled(map[string]any{jsonFieldError: "request_cancelled"})
 	}
 
 	var reqErr *acp.RequestError
@@ -279,7 +670,7 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 		return reqErr
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	return acp.NewInternalError(map[string]any{jsonFieldError: valueInternalFailure})
 }
 
 func scopedElicitationParams(
@@ -293,9 +684,9 @@ func scopedElicitationParams(
 	switch {
 	case params.Form != nil:
 		payload = map[string]any{
-			jsonFieldMessage:  params.Form.Message,
-			jsonFieldMode:     valueForm,
-			"requestedSchema": params.Form.RequestedSchema,
+			jsonFieldMessage:         params.Form.Message,
+			jsonFieldMode:            valueForm,
+			jsonFieldRequestedSchema: params.Form.RequestedSchema,
 		}
 		meta = params.Form.Meta
 	case params.Url != nil:
@@ -315,7 +706,7 @@ func scopedElicitationParams(
 		return nil, err
 	}
 
-	payload[jsonFieldMeta] = stamped
+	payload[jsonFieldMeta] = stampActionCorrelation(stamped, scope.ActionCorrelation)
 
 	return json.Marshal(payload)
 }

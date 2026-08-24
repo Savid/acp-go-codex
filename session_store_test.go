@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestInMemorySessionStoreContract(t *testing.T) {
@@ -67,6 +69,67 @@ func TestInMemorySessionStoreContract(t *testing.T) {
 	}
 }
 
+// TestInMemorySessionStoreTombstoneIsFinal pins tombstone finality where it has
+// to live: in the store. An adapter-level deletion marker is not a substitute,
+// because the store is what a second writer, a late tail, or a restarted
+// adapter reaches. Both writing verbs are covered — a whole replacement
+// generation resurrects strictly more than an append does.
+func TestInMemorySessionStoreTombstoneIsFinal(t *testing.T) {
+	ctx := context.Background()
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "a"}
+
+	for _, test := range []struct {
+		name  string
+		write func(*InMemorySessionStore) error
+	}{
+		{"append", func(store *InMemorySessionStore) error {
+			return store.Append(ctx, main, []SessionStoreEntry{SessionStoreEntry(`{"late":true}`)})
+		}},
+		{"replace", func(store *InMemorySessionStore) error {
+			return store.Replace(ctx, main, []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"late":true}`)}},
+				{Key: sub, Entries: []SessionStoreEntry{SessionStoreEntry(`{"late":"sub"}`)}},
+			})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			if err := store.Append(ctx, main, []SessionStoreEntry{SessionStoreEntry(`{"one":1}`)}); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+
+			if err := store.Delete(ctx, main); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+
+			// The deleted state is already the caller's answer, so the refusal is
+			// silent rather than an error.
+			if err := test.write(store); err != nil {
+				t.Fatalf("write over tombstone: %v", err)
+			}
+
+			if got, _ := store.Load(ctx, main); len(got) != 0 {
+				t.Fatalf("write resurrected the tombstoned main key: %q", got)
+			}
+
+			if got, _ := store.Load(ctx, sub); len(got) != 0 {
+				t.Fatalf("write resurrected a subpath under the tombstoned session: %q", got)
+			}
+
+			summaries, err := store.ListSessions(ctx)
+			if err != nil || len(summaries) != 0 {
+				t.Fatalf("ListSessions = %#v err=%v", summaries, err)
+			}
+
+			subkeys, err := store.ListSubkeys(ctx, main)
+			if err != nil || len(subkeys) != 0 {
+				t.Fatalf("ListSubkeys = %#v err=%v", subkeys, err)
+			}
+		})
+	}
+}
+
 func TestInMemorySessionStoreReplaceValidation(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
@@ -88,6 +151,38 @@ func TestInMemorySessionStoreReplaceValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInMemorySessionStoreReplaceRefusesDuplicateKeys pins the reference store's
+// answer to a set that names one key twice. Such a set states two truths about
+// the same key, so it is refused by name and before any key is written — never
+// resolved by letting the later entry win.
+func TestInMemorySessionStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s"}
+	artifact := SessionKey{SessionID: "s", Subpath: "images/1"}
+
+	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":0}`)}},
+		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"first"}`)}},
+	}))
+
+	err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":1}`)}},
+		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"second"}`)}},
+		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"third"}`)}},
+	})
+	require.ErrorContains(t, err, "images/1")
+
+	entries, err := store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"row":0}`)}, entries,
+		"a refused set writes nothing at all")
+
+	artifactEntries, err := store.Load(ctx, artifact)
+	require.NoError(t, err)
+	require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"artifact":"first"}`)}, artifactEntries)
 }
 
 func TestInMemorySessionStoreEdgeBranches(t *testing.T) {
@@ -153,9 +248,10 @@ func TestInMemorySessionStoreEdgeBranches(t *testing.T) {
 	}
 }
 
-// TestInMemorySessionStoreReplaceEmptyEntrySurvives pins the docs/04 rule that
-// a listed key whose Entries are empty stays LIVE after Replace (exactly the
-// listed keys survive), and that Delete is the tombstone path that cascades to
+// TestInMemorySessionStoreReplaceEmptyEntrySurvives pins the rule that Replace
+// keeps exactly the keys it lists: a listed key whose Entries are empty stays
+// live and merely loses its content, so emptiness is never read as removal.
+// Delete is the only tombstone path, and it is the one that cascades to
 // subpaths.
 func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {
 	ctx := context.Background()

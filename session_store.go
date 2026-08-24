@@ -187,10 +187,22 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 
 	mainCount := 0
 
+	// Two replacements naming one key are refused before anything is written,
+	// rather than resolved by letting the later one win: a set that names a key
+	// twice states two different truths about it, and picking one would commit a
+	// generation neither the caller nor any other store would agree on.
+	seen := make(map[SessionKey]struct{}, len(replacements))
+
 	for _, replacement := range replacements {
 		if replacement.Key.SessionID != main.SessionID {
 			return fmt.Errorf("replacement key does not match main session")
 		}
+
+		if _, duplicate := seen[replacement.Key]; duplicate {
+			return fmt.Errorf("duplicate replacement key %q", replacement.Key.Subpath)
+		}
+
+		seen[replacement.Key] = struct{}{}
 
 		if replacement.Key.Subpath == SessionStoreMainSubpath {
 			mainCount++
@@ -199,6 +211,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 
 	if mainCount != 1 {
 		return fmt.Errorf("replacements must include the main key exactly once")
+	}
+
+	// A tombstone this write did not create is final. The store enforces that
+	// itself rather than trusting an adapter-level deletion marker: a
+	// replacement landing after a delete would answer for a session the host has
+	// already been told is gone, and it would answer with a whole generation.
+	if s.isTombstonedLocked(main) {
+		return nil
 	}
 
 	for candidate := range s.entries {

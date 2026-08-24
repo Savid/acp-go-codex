@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
 // session is one Codex app-server process owned by an ACP session.
@@ -43,31 +44,110 @@ type session struct {
 
 	client codex.Client
 
-	lifecycle        sync.RWMutex
-	turn             chan struct{}
-	mu               sync.Mutex
-	closing          bool
-	cancel           context.CancelFunc
-	turnDone         <-chan struct{}
-	turnID           string
-	turnNonce        string
-	turnCancelled    bool
-	clientDead       bool
-	rawEmitFailures  int64
-	interactions     map[string]*sessionInteraction
-	mirrorMu         sync.Mutex
-	mirroredRows     int
-	imageStoreMu     sync.Mutex
-	rawEventMu       sync.Mutex
-	rawEventSequence int64
-	completionRows   int
-	visibleRows      int
-	rolloutIdentity  nativeTurnIdentity
-	permissionTools  permissionToolRegistry
+	// sessionOps serializes the session-scoped native operations — close,
+	// delete, and the runtime rebinds that stand behind them — against the
+	// ordinary requests that read the session while they run.
+	sessionOps          sync.RWMutex
+	nativeControlMu     sync.Mutex
+	turn                chan struct{}
+	mu                  sync.Mutex
+	closing             bool
+	closeContained      bool
+	closeCommitPending  bool
+	closeCommitDone     bool
+	closeRemovalPending bool
+	closeOperation      *sessionCloseOperation
+	cancel              context.CancelFunc
+	turnDone            <-chan struct{}
+	turnID              string
+	turnNonce           string
+	turnReady           chan struct{}
+	turnAccepted        bool
+	turnDispatched      bool
+	turnCancelled       bool
+	turnContainment     *turnContainment
+	clientDead          bool
+	rawEmitFailures     int64
+	interactions        map[string]*sessionInteraction
+	mirrorMu            sync.Mutex
+	mirroredRows        int
+	imageStoreMu        sync.Mutex
+	rawEventMu          sync.Mutex
+	rawEventSequence    int64
+	permissionTools     permissionToolRegistry
+	// lifecycleMu owns the one stream and native event feed for this exact
+	// app-server/thread incarnation. The stream survives prompt completion and
+	// is fenced only when the native binding ends.
+	lifecycleMu             sync.Mutex
+	lifecycleRouteMu        lifecycleRouteGate
+	lifecycleStream         *lifecycle.Stream
+	incarnation             *promptIncarnation
+	agentIncarnation        *promptIncarnation
+	lifecycleFailure        error
+	lifecycleChanged        chan struct{}
+	lifecycleClosing        bool
+	lifecycleDeliveries     []lifecycleDelivery
+	lifecycleDeliveryRun    bool
+	lifecycleDeliveryActive bool
+	lifecycleDeliveryStop   bool
+	lifecycleDeliveryCancel context.CancelFunc
+	lifecycleDeliveryDone   chan struct{}
+	nativeRouteCancel       context.CancelFunc
+	nativeEventCancel       context.CancelFunc
+	nativeEventRelease      func()
+	nativeEventDone         chan struct{}
+	nativeEventBarrier      chan chan error
+	nativeEventSource       bool
+	nativeEventOpened       bool
+	nativeEventStopping     bool
+	nativeEventPumping      bool
+	nativeEventAttaching    bool
+	nativeEventRebinding    bool
+	nativeEventReplaying    bool
+	nativeRebindEvents      []codex.Event
+	nativeCanary            *nativeCanary
+	preOpenEvents           []codex.Event
+	terminalNativeTurns     map[string]struct{}
+	terminalNativeTurnOrder []string
+	terminalNativeTurnNext  int
+	establishment           *establishmentObligation
+	establishmentRebind     bool
+	establishmentErr        error
+	// settleGate is held for one prompt's whole settlement order, from the turn
+	// it acquired through the durable commit, the terminal lifecycle event, and
+	// the v1 result. Close and delete take it, so neither returns while a prompt
+	// can still write.
+	settleGate sync.Mutex
+	// unsyncedEntries is the exact durable prefix a failed commit did not place.
+	// It is retained rather than dropped, and the next prompt blocks loudly on
+	// it until the store holds it.
+	unsyncedEntries []SessionStoreEntry
+	unsyncedRow     int
+	// captureFailed records that a mirror pass failed before it could capture the
+	// durable prefix it was reading. Such a pass retains nothing, so this is the
+	// only thing left saying a prefix is still owed, and the close boundary reads
+	// the rollout file again exactly when it is set.
+	captureFailed bool
+	// persistenceFenced stops every later commit. Delete sets it before it
+	// tombstones, so no settlement writer can recreate the row it removed.
+	persistenceFenced bool
 }
 
 type sessionInteraction struct {
 	cancel context.CancelFunc
+}
+
+const sessionInteractionLimit = 1024
+
+type turnContainment struct {
+	done    chan struct{}
+	err     error
+	started bool
+}
+
+type sessionCloseOperation struct {
+	done chan struct{}
+	err  error
 }
 
 type sessionSnapshot struct {
@@ -161,6 +241,18 @@ func (s *session) ensureLiveClient(ctx context.Context) error {
 		return err
 	}
 
+	if err := s.rebindNativeEvents(client); err != nil {
+		return err
+	}
+
+	if err := s.agent.runtimeReadyCanary(ctx, client, s); err != nil {
+		if rebindErr := s.prepareNativeEventRebind(); rebindErr != nil {
+			return errors.Join(err, rebindErr)
+		}
+
+		return err
+	}
+
 	// Publish the rebound client only if this is still the current runtime
 	// generation and the logical session was not closed while native resume was
 	// in flight. Agent.mu before session.mu preserves the lifecycle lock order.
@@ -184,11 +276,21 @@ func (s *session) ensureLiveClient(ctx context.Context) error {
 	s.agent.mu.Unlock()
 
 	if current != s || closing {
-		return newUnknownSession()
+		unknown := newUnknownSession()
+		if rebindErr := s.prepareNativeEventRebind(); rebindErr != nil {
+			return errors.Join(unknown, rebindErr)
+		}
+
+		return unknown
 	}
 
 	if !runtimeCurrent {
-		return fmt.Errorf("%w: Codex runtime generation changed during session recovery", codex.ErrConnectionClosed)
+		runtimeErr := fmt.Errorf("%w: Codex runtime generation changed during session recovery", codex.ErrConnectionClosed)
+		if rebindErr := s.prepareNativeEventRebind(); rebindErr != nil {
+			return errors.Join(runtimeErr, rebindErr)
+		}
+
+		return runtimeErr
 	}
 
 	return nil
@@ -300,7 +402,7 @@ func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "session_prompt"})
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: limitSessionPrompt})
 	}
 }
 
@@ -321,11 +423,31 @@ func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Conte
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.beginTurnLocked(ctx, turnNonce)
+}
+
+func (s *session) beginPromptTurn(ctx context.Context, turnNonce string) (context.Context, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closing {
+		return nil, newSessionCloseInProgress()
+	}
+
+	return s.beginTurnLocked(ctx, turnNonce), nil
+}
+
+func (s *session) beginTurnLocked(ctx context.Context, turnNonce string) context.Context {
 	turnCtx, cancel := context.WithCancel(ctx)
 	turnCtx = withTurnRoute(turnCtx, turnNonce)
 	s.cancel = cancel
 	s.turnDone = turnCtx.Done()
+	s.turnID = ""
+	s.turnReady = make(chan struct{})
+	s.turnAccepted = false
+	s.turnDispatched = false
 	s.turnCancelled = false
+	s.turnContainment = nil
 	s.turnNonce = turnNonce
 
 	return turnCtx
@@ -335,11 +457,16 @@ func (s *session) finishTurn() {
 	s.mu.Lock()
 	cancel := s.cancel
 	interactions := s.detachInteractionsLocked()
+	s.releaseTurnBindingLocked(false)
 	s.cancel = nil
 	s.turnDone = nil
 	s.turnID = ""
 	s.turnNonce = ""
+	s.turnReady = nil
+	s.turnAccepted = false
+	s.turnDispatched = false
 	s.turnCancelled = false
+	s.turnContainment = nil
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Unlock()
 
@@ -354,18 +481,55 @@ func (s *session) finishTurn() {
 
 func (s *session) activeTurnNonce() string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	turnNonce := s.turnNonce
+	turnDone := s.turnDone
+	s.mu.Unlock()
 
-	return s.turnNonce
+	if turnNonce != "" && turnDone != nil {
+		select {
+		case <-turnDone:
+		default:
+			return turnNonce
+		}
+	}
+
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	if current := s.agentIncarnation; current != nil && !current.settled {
+		return current.turnNonce
+	}
+
+	return ""
 }
 
 func (s *session) activeTurnNonceForNativeTurn(nativeTurnID string) (string, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	active := s.turnDone != nil && s.turnNonce != "" && s.turnID != "" && s.turnID == nativeTurnID
+	active := s.turnDone != nil && s.turnAccepted && s.turnNonce != "" && s.turnID != "" && s.turnID == nativeTurnID
+	if active {
+		select {
+		case <-s.turnDone:
+			active = false
+		default:
+		}
+	}
 
-	return s.turnNonce, active
+	turnNonce := s.turnNonce
+	s.mu.Unlock()
+
+	if active {
+		return turnNonce, true
+	}
+
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	if current := s.agentIncarnation; current != nil && !current.settled && current.nativeTurnID == nativeTurnID {
+		return current.turnNonce, true
+	}
+
+	return turnNonce, false
 }
 
 func (s *session) setTurnID(turnID string) {
@@ -375,7 +539,63 @@ func (s *session) setTurnID(turnID string) {
 
 	s.mu.Lock()
 	s.turnID = turnID
+	s.releaseTurnBindingLocked(true)
 	s.mu.Unlock()
+}
+
+func (s *session) stageTurnID(turnID string) {
+	if turnID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	s.turnID = turnID
+	s.mu.Unlock()
+}
+
+func (s *session) markTurnDispatched() {
+	s.mu.Lock()
+	s.turnDispatched = true
+	s.mu.Unlock()
+}
+
+func (s *session) acceptTurnBinding() {
+	s.mu.Lock()
+	s.releaseTurnBindingLocked(true)
+	s.mu.Unlock()
+}
+
+func (s *session) rejectTurnBinding() {
+	s.mu.Lock()
+	s.releaseTurnBindingLocked(false)
+	s.mu.Unlock()
+}
+
+func (s *session) releaseTurnBindingLocked(accepted bool) {
+	if s.turnReady == nil {
+		return
+	}
+
+	s.turnAccepted = accepted
+	close(s.turnReady)
+	s.turnReady = nil
+}
+
+func (s *session) waitForTurnBinding(ctx context.Context) error {
+	s.mu.Lock()
+	ready := s.turnReady
+	s.mu.Unlock()
+
+	if ready == nil {
+		return ctx.Err()
+	}
+
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *session) activeTurnID() string {
@@ -459,6 +679,166 @@ func (s *session) cancelTurn() {
 	}
 }
 
+func (s *session) ensureTurnContainmentLocked() *turnContainment {
+	if s.cancel == nil {
+		return nil
+	}
+
+	if s.turnContainment == nil {
+		s.turnContainment = &turnContainment{done: make(chan struct{})}
+	}
+
+	return s.turnContainment
+}
+
+func (s *session) shutdownActiveTurn(ctx context.Context, protectPeers bool) error {
+	handled, err := s.shutdownPromptTurn(ctx, protectPeers, "", false)
+	if handled {
+		return err
+	}
+
+	_, err = s.shutdownAgentTurn(ctx, protectPeers)
+
+	return err
+}
+
+var errTurnRouteMismatch = errors.New("turnNonce does not identify the active turn")
+
+func (s *session) shutdownActiveTurnForNonce(ctx context.Context, protectPeers bool, turnNonce string) error {
+	handled, err := s.shutdownPromptTurn(ctx, protectPeers, turnNonce, true)
+	if handled {
+		return err
+	}
+
+	handled, err = s.shutdownAgentTurnForNonce(ctx, protectPeers, turnNonce)
+	if !handled {
+		return errTurnRouteMismatch
+	}
+
+	return err
+}
+
+func (s *session) shutdownPromptTurn(
+	ctx context.Context,
+	protectPeers bool,
+	expectedNonce string,
+	requireExactNonce bool,
+) (bool, error) {
+	s.mu.Lock()
+
+	boundary := s.ensureTurnContainmentLocked()
+	if boundary == nil {
+		s.mu.Unlock()
+
+		return false, nil
+	}
+
+	if requireExactNonce && s.turnNonce != expectedNonce {
+		s.mu.Unlock()
+
+		return true, errTurnRouteMismatch
+	}
+
+	if boundary.started {
+		done := boundary.done
+		s.mu.Unlock()
+
+		select {
+		case <-done:
+			return true, boundary.err
+		case <-ctx.Done():
+			return true, ctx.Err()
+		}
+	}
+
+	boundary.started = true
+
+	cancelTurn := s.cancel
+	if cancelTurn != nil {
+		s.turnCancelled = true
+	}
+
+	interactions := s.detachInteractionsLocked()
+	s.mu.Unlock()
+
+	// Cancellation releases prompt preparation and turn/start, but settlement
+	// cannot pass the boundary installed above. If native dispatch won the race,
+	// binding supplies the ID that must be interrupted before that boundary is
+	// completed.
+	if cancelTurn != nil {
+		cancelTurn()
+	}
+
+	for _, cancel := range interactions {
+		cancel()
+	}
+
+	bindErr := s.waitForTurnBinding(ctx)
+	s.nativeControlMu.Lock()
+	defer s.nativeControlMu.Unlock()
+
+	s.mu.Lock()
+	client := s.client
+	threadID := s.codexThreadID
+	turnID := s.turnID
+	turnDispatched := s.turnDispatched
+	s.mu.Unlock()
+
+	interruptErr := bindErr
+	if interruptErr == nil && turnDispatched && turnID == "" {
+		interruptErr = errors.New("codex turn dispatch outcome is unknown without a native turn ID")
+	}
+
+	if interruptErr == nil && turnID != "" {
+		interruptCtx, cancelInterrupt := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		interruptErr = client.CancelTurn(interruptCtx, threadID, turnID)
+
+		cancelInterrupt()
+	}
+
+	containmentErr := s.containCancelledTurnWithPolicy(ctx, client, threadID, interruptErr, protectPeers)
+
+	s.mu.Lock()
+	boundary.err = containmentErr
+
+	cancelTurn = s.cancel
+	if cancelTurn != nil {
+		s.turnCancelled = true
+	}
+
+	interactions = s.detachInteractionsLocked()
+
+	close(boundary.done)
+	s.mu.Unlock()
+
+	if cancelTurn != nil {
+		cancelTurn()
+	}
+
+	for _, cancel := range interactions {
+		cancel()
+	}
+
+	return true, containmentErr
+}
+
+func (s *session) awaitTurnContainment(ctx context.Context) error {
+	s.mu.Lock()
+	boundary := s.turnContainment
+	s.mu.Unlock()
+
+	if boundary == nil {
+		return nil
+	}
+
+	select {
+	case <-boundary.done:
+		return boundary.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *session) wasTurnCancelled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -485,6 +865,16 @@ func (s *session) beginInteraction(parent context.Context, key string) (context.
 	base := parent
 	turnDone := s.turnDone
 	ctx, cancel := context.WithCancel(base)
+	watchTurn := false
+
+	if turnDone != nil {
+		select {
+		case <-turnDone:
+			cancel()
+		default:
+			watchTurn = true
+		}
+	}
 
 	if s.interactions == nil {
 		s.interactions = make(map[string]*sessionInteraction)
@@ -492,13 +882,18 @@ func (s *session) beginInteraction(parent context.Context, key string) (context.
 
 	if previous := s.interactions[key]; previous != nil {
 		previous.cancel()
+	} else if len(s.interactions) == sessionInteractionLimit {
+		s.mu.Unlock()
+		cancel()
+
+		return ctx, func() {}
 	}
 
 	interaction := &sessionInteraction{cancel: cancel}
 	s.interactions[key] = interaction
 	s.mu.Unlock()
 
-	if turnDone != nil {
+	if watchTurn {
 		go func() {
 			defer recoverAgentGoroutine(parent, agentLogger(s.agent), "Codex interaction watcher")
 
@@ -537,37 +932,6 @@ func (s *session) detachInteractionsLocked() []context.CancelFunc {
 	return cancels
 }
 
-func (s *session) unsubscribe(ctx context.Context) error {
-	s.cancelTurn()
-	client, codexThreadID, clientDead := s.closeState()
-
-	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-	defer cancel()
-
-	if client == nil || codexThreadID == "" {
-		return nil
-	}
-
-	if clientDead {
-		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
-	}
-
-	unsubscribeErr := client.UnsubscribeThread(closeCtx, codexThreadID)
-	if unsubscribeErr == nil {
-		return nil
-	}
-
-	// Cancellation may retire the generation concurrently with unsubscribe.
-	// Once that transition owns the client, its containment proof supersedes a
-	// connection-closed unsubscribe result.
-	current, _, nowDead := s.closeState()
-	if current == client && nowDead {
-		return s.agent.quiesceRuntimeAfterCancel(closeCtx, client)
-	}
-
-	return unsubscribeErr
-}
-
 func (s *session) releaseMaterialized() error {
 	s.mu.Lock()
 	materializedPath := s.materializedPath
@@ -594,13 +958,234 @@ func (s *session) releaseMaterialized() error {
 	return nil
 }
 
-// Close releases one logical thread. The Agent owns the shared app-server and
-// closes it only when the service itself closes.
+// Close ends one logical session. The Agent owns the shared app-server and
+// closes it only when the service itself closes, so this is the session's own
+// containment boundary rather than the runtime's.
+//
+// A live prompt's context is cancelled to stop local consumption, but native
+// interruption and containment complete before settlement may pass.
+//
+// The ladder travels with the boundary, so this path owes every rung a wire
+// close owes — including the durable one. An embedded shutdown that dropped the
+// prefix a settlement captured and could not place would lose a turn the host
+// was already shown, and this session's materialized rollout is the only
+// remaining copy of it: the material is released after the commit lands, never
+// while the commit is still owed.
 func (s *session) Close(ctx context.Context) error {
-	s.lifecycle.Lock()
-	defer s.lifecycle.Unlock()
+	for {
+		s.mu.Lock()
+		s.closing = true
 
-	return errors.Join(s.unsubscribe(ctx), s.releaseMaterialized())
+		if operation := s.closeOperation; operation != nil {
+			select {
+			case <-operation.done:
+				complete := s.closeContained && s.closeCommitDone && !s.closeCommitPending && !s.closeRemovalPending
+				if complete {
+					err := operation.err
+					s.mu.Unlock()
+
+					return err
+				}
+
+				s.closeOperation = nil
+				s.mu.Unlock()
+
+				continue
+			default:
+				done := operation.done
+				s.mu.Unlock()
+
+				select {
+				case <-done:
+					return operation.err
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}
+
+		operation := &sessionCloseOperation{done: make(chan struct{})}
+		s.closeOperation = operation
+		s.mu.Unlock()
+
+		err := s.closeOwned(ctx)
+
+		s.mu.Lock()
+		operation.err = err
+		close(operation.done)
+		s.mu.Unlock()
+
+		return err
+	}
+}
+
+func (s *session) closeOwned(ctx context.Context) error {
+	s.mu.Lock()
+	alreadyContained := s.closeContained
+	s.mu.Unlock()
+
+	var shutdownErr error
+
+	if !alreadyContained {
+		gateErr := s.beginLifecycleClose(ctx)
+		shutdownErr = errors.Join(gateErr, s.shutdownActiveTurn(ctx, true))
+		s.awaitPromptSettlement()
+	}
+
+	s.sessionOps.Lock()
+	defer s.sessionOps.Unlock()
+
+	s.mu.Lock()
+	alreadyContained = s.closeContained
+	commitDone := s.closeCommitDone
+	s.mu.Unlock()
+
+	if !alreadyContained {
+		if containErr := errors.Join(shutdownErr, s.containSession(ctx)); containErr != nil {
+			// An incomplete boundary terminalizes nothing and commits nothing new.
+			// The stream ends either way, because the session it belonged to is over
+			// whether or not its descendants could be proved gone.
+			s.fenceSession()
+
+			return containErr
+		}
+
+		s.mu.Lock()
+		s.closeContained = true
+		s.mu.Unlock()
+	}
+
+	if !commitDone {
+		if commitErr := s.commitResumableSnapshot(ctx); commitErr != nil {
+			s.mu.Lock()
+			s.closeCommitPending = true
+			s.mu.Unlock()
+			s.fenceSession()
+
+			return commitErr
+		}
+
+		s.mu.Lock()
+		s.closeCommitDone = true
+		s.closeCommitPending = false
+		s.mu.Unlock()
+	}
+
+	s.fenceSession()
+
+	releaseErr := s.releaseMaterialized()
+	s.mu.Lock()
+	s.closeRemovalPending = releaseErr != nil
+	s.mu.Unlock()
+
+	return releaseErr
+}
+
+// awaitPromptSettlement stops the live prompt and waits for the settlement it
+// owes: the durable commit, the terminal lifecycle event, and the v1 result.
+func (s *session) awaitPromptSettlement() {
+	s.cancelTurn()
+	s.waitForSettleGate()
+}
+
+func (s *session) waitForSettleGate() {
+	s.settleGate.Lock()
+	defer s.settleGate.Unlock() //nolint:gocritic // Deliberate synchronization barrier.
+}
+
+// containSession finishes this session's containment boundary. The thread-scoped
+// background-terminal sweep is the only targeted containment the app-server
+// offers; when it cannot be proved — because the app-server does not carry those
+// methods, or because a terminal outlived the sweep — the shared generation is
+// fenced only when no peer owns it. Otherwise close reports an incomplete
+// boundary without destroying a sibling session.
+func (s *session) containSession(ctx context.Context) error {
+	client, codexThreadID, clientDead := s.closeState()
+
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+
+	if client == nil || codexThreadID == "" {
+		return nil
+	}
+
+	if clientDead {
+		return s.agent.quiesceRuntimeAfterSessionClose(closeCtx, client, s)
+	}
+
+	if err := s.containThreadOrFenceGeneration(closeCtx, client, codexThreadID); err != nil {
+		return err
+	}
+
+	return s.unsubscribeContainedThread(closeCtx, client, codexThreadID)
+}
+
+// containThreadOrFenceGeneration proves this thread's background terminals gone,
+// or fences the generation they live in when it cannot.
+func (s *session) containThreadOrFenceGeneration(
+	ctx context.Context,
+	client codex.Client,
+	codexThreadID string,
+) error {
+	containErr := terminateThreadBackgroundTerminals(ctx, client, codexThreadID)
+	if containErr == nil {
+		return nil
+	}
+
+	fenceErr := s.agent.quiesceRuntimeAfterSessionClose(ctx, client, s)
+	s.agent.mu.Lock()
+	agentClosed := s.agent.closed
+	s.agent.mu.Unlock()
+
+	if agentClosed && fenceErr == nil && errors.Is(containErr, codex.ErrConnectionClosed) {
+		return nil
+	}
+
+	// Where the app-server offers no thread-scoped containment at all, the
+	// generation fence is the boundary rather than a fallback after a failure,
+	// so its result is the boundary's result. A sweep that was offered and did
+	// not prove the thread contained is a failure in its own right, and both are
+	// reported.
+	if errors.Is(containErr, codex.ErrBackgroundTerminalsUnsupported) {
+		if fenceErr != nil {
+			return errors.Join(containErr, fenceErr)
+		}
+
+		return fenceErr
+	}
+
+	return errors.Join(containErr, fenceErr)
+}
+
+func (s *session) unsubscribeContainedThread(
+	ctx context.Context,
+	client codex.Client,
+	codexThreadID string,
+) error {
+	// Publish the expected source stop and join the pump before native
+	// unsubscribe can close the broker channel.
+	if err := s.stopNativeEventsContext(ctx); err != nil {
+		return err
+	}
+
+	unsubscribeErr := client.UnsubscribeThread(ctx, codexThreadID)
+	if unsubscribeErr == nil {
+		return nil
+	}
+
+	// Cancellation or agent shutdown may retire the generation concurrently with unsubscribe.
+	// Once that transition owns the client, its containment proof supersedes a
+	// connection-closed unsubscribe result.
+	current, _, nowDead := s.closeState()
+	s.agent.mu.Lock()
+	agentClosed := s.agent.closed
+	s.agent.mu.Unlock()
+
+	if current == client && (nowDead || (agentClosed && errors.Is(unsubscribeErr, codex.ErrConnectionClosed))) {
+		return s.agent.quiesceRuntimeAfterCancel(ctx, client)
+	}
+
+	return unsubscribeErr
 }
 
 func (s *session) info() acp.SessionInfo {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 )
 
 const codexVersionArgument = "--version"
@@ -62,10 +63,7 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 		return "", fmt.Errorf("prepare codex CLI version probe: %w", err)
 	}
 
-	var (
-		stdout bytes.Buffer
-		stderr bytes.Buffer
-	)
+	var stdout bytes.Buffer
 
 	// The supervisor reads a hangup on its control input as caller death and
 	// abandons agent identity acquisition. This probe sends no control data, so
@@ -85,7 +83,7 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 
 	cmd.Stdin = controlRead
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = io.Discard
 
 	waiter, err := versionStartProcess(cmd)
 	if err != nil {
@@ -112,12 +110,7 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	waitErr, containmentErr := proof.awaitCommand(waiter.result())
 
 	if waitErr != nil || containmentErr != nil {
-		probeErr := waitErr
-		if waitErr != nil && stderr.Len() != 0 {
-			probeErr = fmt.Errorf("%w: %s", waitErr, bytes.TrimSpace(stderr.Bytes()))
-		}
-
-		return "", fmt.Errorf("check codex CLI version: %w", errors.Join(probeErr, containmentErr))
+		return "", fmt.Errorf("check codex CLI version: %w", errors.Join(waitErr, containmentErr))
 	}
 
 	return validateCodexVersionOutput(stdout.String())

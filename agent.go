@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 	"github.com/savid/acp-go-codex/internal/observer"
 )
 
@@ -27,6 +28,8 @@ const (
 	closeTimeout                    = 5 * time.Second
 
 	jsonFieldError      = "error"
+	jsonFieldCode       = "code"
+	jsonFieldData       = "data"
 	jsonFieldMessage    = "message"
 	jsonFieldCwd        = "cwd"
 	jsonFieldEntries    = "entries"
@@ -37,26 +40,28 @@ const (
 	validationDuplicate = "duplicate"
 	errValueUnsupported = "unsupported"
 
-	jsonFieldSource        = "source"
-	jsonFieldSequence      = "sequence"
-	jsonFieldEvent         = "event"
-	jsonFieldScope         = "scope"
-	jsonFieldName          = "name"
-	jsonFieldServer        = "server"
-	jsonFieldPrompt        = "prompt"
-	jsonFieldText          = "text"
-	jsonFieldType          = "type"
-	jsonFieldURL           = "url"
-	jsonFieldMode          = "mode"
-	jsonFieldTitle         = "title"
-	jsonFieldMeta          = "_meta"
-	jsonFieldAction        = "action"
-	jsonFieldReason        = "reason"
-	jsonFieldPath          = "path"
-	jsonFieldConfigID      = "configId"
-	jsonFieldAccessToken   = "accessToken"
-	jsonFieldNetworkAccess = "networkAccess"
-	jsonFieldResult        = "result"
+	jsonFieldSource          = "source"
+	jsonFieldSequence        = "sequence"
+	jsonFieldEvent           = "event"
+	jsonFieldScope           = "scope"
+	jsonFieldName            = "name"
+	jsonFieldServer          = "server"
+	jsonFieldPrompt          = "prompt"
+	jsonFieldText            = "text"
+	jsonFieldUnstable        = "unstable"
+	jsonFieldType            = "type"
+	jsonFieldURL             = "url"
+	jsonFieldMode            = "mode"
+	jsonFieldTitle           = "title"
+	jsonFieldMeta            = "_meta"
+	jsonFieldAction          = "action"
+	jsonFieldReason          = "reason"
+	jsonFieldPath            = "path"
+	jsonFieldConfigID        = "configId"
+	jsonFieldAccessToken     = "accessToken"
+	jsonFieldNetworkAccess   = "networkAccess"
+	jsonFieldRequestedSchema = "requestedSchema"
+	jsonFieldResult          = "result"
 
 	valueBackpressure        = "backpressure"
 	valueSession             = "session"
@@ -82,6 +87,10 @@ const (
 	roleAssistant            = "assistant"
 	eventUserMessage         = "user_message"
 
+	// limitSessionPrompt names the per-session prompt serialization limit a
+	// concurrent second prompt is refused under. The token is family-fixed.
+	limitSessionPrompt = "session_prompt"
+
 	jsonFieldLimit        = "limit"
 	jsonFieldValue        = "value"
 	jsonFieldContent      = "content"
@@ -89,7 +98,8 @@ const (
 	jsonFieldStatusCode   = "statusCode"
 	jsonFieldProviderCode = "providerCode"
 
-	valueTurnFailed = "codex_turn_failed"
+	valueTurnFailed      = "codex_turn_failed"
+	valueInternalFailure = "codex_internal_failure"
 
 	modeDefault acp.SessionModeId = "default"
 	modePlan    acp.SessionModeId = "plan"
@@ -118,7 +128,9 @@ type Agent struct {
 	conn              agentClient
 	sessions          map[acp.SessionId]*session
 	deleted           map[acp.SessionId]struct{}
+	deleting          map[acp.SessionId]int
 	clientCalls       chan struct{}
+	lifecycleCalls    chan struct{}
 	authTokens        *ChatGPTAuthTokens
 	providerProcesses *providerProcessSnapshotTracker
 	containmentMode   RuntimeContainmentMode
@@ -137,9 +149,10 @@ type Agent struct {
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
-
-	rateLimitsMu   sync.Mutex
-	rateLimitsSnap *codex.RateLimitSnapshot
+	// lifecycle is the answer this connection settled on at initialize. An
+	// absent answer makes every envelope, prompt correlation, and action
+	// correlation illegal on the connection.
+	lifecycle lifecycle.Negotiated
 }
 
 type codexClientEventSink struct {
@@ -149,7 +162,10 @@ type codexClientEventSink struct {
 	mu      sync.Mutex
 	client  codex.Client
 	pending []codex.Event
+	failure error
 }
+
+const startupClientEventLimit = 1024
 
 var (
 	_ acp.Agent                  = (*Agent)(nil)
@@ -212,7 +228,9 @@ func NewAgent(opts ...Option) *Agent {
 		observe:           observe,
 		sessions:          make(map[acp.SessionId]*session),
 		deleted:           make(map[acp.SessionId]struct{}),
+		deleting:          make(map[acp.SessionId]int),
 		clientCalls:       make(chan struct{}, clientCallLimit),
+		lifecycleCalls:    make(chan struct{}, 1),
 		providerProcesses: providerProcesses,
 		containmentMode:   mode,
 		retainedThreads:   make(map[acp.SessionId]*retainedRuntimeThread),
@@ -307,7 +325,8 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	agent := NewAgent(opts...)
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
-			agent.log.DebugContext(context.Background(), "close Codex ACP agent failed", slog.String("error", closeErr.Error()))
+			agent.log.DebugContext(context.Background(), "close Codex ACP agent failed")
+
 			serveErr = closeErr
 		}
 	}()
@@ -340,33 +359,78 @@ func (a *Agent) Close() error {
 	closeDone := make(chan struct{})
 	a.closeDone = closeDone
 
-	if a.providerAuth != nil {
-		defer a.providerAuth.closeAll()
-	}
-
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
 	}
 
+	conn := a.conn
 	a.sessions = make(map[acp.SessionId]*session)
 	a.closed = true
 	a.conn = nil
 	a.mu.Unlock()
 
-	var err error
+	closeCtx := context.Background()
 
-	for _, session := range sessions {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = errors.Join(err, session.Close(ctx))
-
-		cancel()
+	// The ladder's fourth rung, for every session at once: no completer may
+	// outlive the process that armed it, and cancelling the flows after the
+	// native interrupts below would leave each one armed against a tree already
+	// being torn down.
+	if a.providerAuth != nil {
+		a.providerAuth.closeAll()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-	err = errors.Join(err, a.closeSharedRuntime(ctx))
+	results := make(chan error, len(sessions))
+	for _, ownedSession := range sessions {
+		go func(target *session) {
+			var sessionErr error
 
-	cancel()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					handleAgentGoroutinePanic(closeCtx, a.log, "Codex session close", nil, recovered)
+
+					sessionErr = errors.New("codex session close panicked")
+				}
+
+				results <- sessionErr
+			}()
+
+			sessionErr = target.Close(closeCtx)
+		}(ownedSession)
+	}
+
+	runtimeResult := make(chan error, 1)
+
+	go func() {
+		var runtimeErr error
+
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				handleAgentGoroutinePanic(closeCtx, a.log, "Codex runtime close", nil, recovered)
+
+				runtimeErr = errors.New("codex runtime close panicked")
+			}
+
+			runtimeResult <- runtimeErr
+		}()
+
+		runtimeErr = a.closeSharedRuntime(closeCtx)
+	}()
+
+	// Closing the owned ACP transport is the cancellation path for stalled
+	// writers and host requests. Every worker is still joined below; interrupt
+	// never substitutes for joining it.
+	if interrupter, ok := conn.(transportInterrupter); ok {
+		_ = interrupter.InterruptTransport()
+	}
+
+	var err error
+
+	for range sessions {
+		err = errors.Join(err, <-results)
+	}
+
+	err = errors.Join(err, <-runtimeResult)
 
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 
@@ -410,19 +474,24 @@ func (a *Agent) externalAuthTokens() (ChatGPTAuthTokens, bool) {
 // this and not just initialize: an embedded host can open a session and prompt
 // without ever handshaking. The code is internal error rather than invalid
 // params because the caller's params are fine — what is broken is the agent
-// the embedding host built. The joined Go text is the whole payload because
-// there is no wire field to name, and the prose is all the operator has.
+// the embedding host built. The wire classification is closed; the original
+// error remains available to the embedding caller through optionsErr.
 func (a *Agent) optionsError() error {
 	if a.optionsErr == nil {
 		return nil
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: a.optionsErr.Error()})
+	return acp.NewInternalError(map[string]any{jsonFieldError: valueInternalFailure})
 }
 
 // Initialize implements ACP initialize.
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
 	if err := a.optionsError(); err != nil {
+		return acp.InitializeResponse{}, err
+	}
+
+	negotiated, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
 		return acp.InitializeResponse{}, err
 	}
 
@@ -432,19 +501,25 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	a.mu.Lock()
 	a.clientCapabilities = cloneClientCapabilities(params.ClientCapabilities)
 	a.positionEncoding = positionEncoding
+	a.lifecycle = negotiated
 	a.mu.Unlock()
 
 	codexMeta := map[string]any{
 		"fork": map[string]any{
-			"unstable":      true,
-			jsonFieldMethod: ForkSessionMethod,
-			"request":       "acp.UnstableForkSessionRequest JSON payload only",
-			"response":      "acp.UnstableForkSessionResponse JSON payload only",
+			jsonFieldUnstable: true,
+			jsonFieldMethod:   ForkSessionMethod,
+			"request":         "acp.UnstableForkSessionRequest JSON payload only",
+			"response":        "acp.UnstableForkSessionResponse JSON payload only",
+		},
+		"steer": map[string]any{
+			jsonFieldUnstable: true,
+			jsonFieldMethod:   SteerTurnMethod,
+			"request":         "acp.PromptRequest JSON payload with exact turn route",
 		},
 		"elicitation": map[string]any{
-			"unstable":     true,
-			jsonFieldScope: valueSession,
-			"tracks":       "ACP v1 elicitation",
+			jsonFieldUnstable: true,
+			jsonFieldScope:    valueSession,
+			"tracks":          "ACP v1 elicitation",
 		},
 		rawEventCapabilityKey: map[string]any{
 			jsonFieldMethod:  RawEventMethod,
@@ -469,6 +544,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
+		Meta:            lifecycleResponseMeta(negotiated),
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
 			Title:   &title,
@@ -572,7 +648,14 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 		return nil, err
 	}
 
-	eventSink.SetClient(client)
+	if sinkErr := eventSink.SetClient(client); sinkErr != nil {
+		closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		closeErr := client.Close(closeCtx)
+
+		cancelClose()
+
+		return nil, errors.Join(sinkErr, closeErr)
+	}
 
 	if tokens, ok := a.externalAuthTokens(); ok {
 		if err := client.LoginWithChatGPTTokens(ctx, toCodexAuthTokens(tokens)); err != nil {
@@ -616,7 +699,7 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	}
 
 	switch event.Kind {
-	case codex.EventAccountUpdated, codex.EventLoginCompleted, codex.EventRateLimitsUpdated, codex.EventError:
+	case codex.EventAccountUpdated, codex.EventLoginCompleted, codex.EventError:
 	default:
 		return
 	}
@@ -625,6 +708,20 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 
 	client := s.client
 	if client == nil {
+		if s.failure != nil {
+			s.mu.Unlock()
+
+			return
+		}
+
+		if len(s.pending) == startupClientEventLimit {
+			s.pending = nil
+			s.failure = fmt.Errorf("%w: startup client event router", codex.ErrTurnEventOverflow)
+			s.mu.Unlock()
+
+			return
+		}
+
 		s.pending = append(s.pending, event)
 		s.mu.Unlock()
 
@@ -635,8 +732,17 @@ func (s *codexClientEventSink) Handle(_ context.Context, event codex.Event) {
 	s.agent.applyCodexClientEvent(context.Background(), client, event)
 }
 
-func (s *codexClientEventSink) SetClient(client codex.Client) {
+func (s *codexClientEventSink) SetClient(client codex.Client) error {
 	s.mu.Lock()
+
+	failure := s.failure
+	if failure != nil {
+		s.pending = nil
+		s.mu.Unlock()
+
+		return errors.Join(codex.ErrConnectionClosed, failure)
+	}
+
 	s.client = client
 	pending := append([]codex.Event(nil), s.pending...)
 	s.pending = nil
@@ -645,6 +751,8 @@ func (s *codexClientEventSink) SetClient(client codex.Client) {
 	for i := range pending {
 		s.agent.applyCodexClientEvent(context.Background(), client, pending[i])
 	}
+
+	return nil
 }
 
 func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, event codex.Event) {
@@ -654,10 +762,6 @@ func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, 
 	case codex.EventLoginCompleted:
 		if a.providerAuth != nil {
 			a.providerAuth.loginCompleted(ctx, event.Login)
-		}
-	case codex.EventRateLimitsUpdated:
-		if event.RateLimits != nil {
-			a.cacheRateLimits(*event.RateLimits)
 		}
 	case codex.EventError:
 		// Native error notifications also carry ordinary turn failures such as
@@ -679,32 +783,6 @@ func codexRuntimeDied(err error) bool {
 	var processExit *codex.ProcessExitError
 
 	return errors.Is(err, codex.ErrConnectionClosed) || errors.As(err, &processExit)
-}
-
-// cacheRateLimits records the latest harness-reported rate-limit snapshot.
-// The cache is agent-level and latest-wins across every session: any newer
-// snapshot from any client replaces the previous one.
-func (a *Agent) cacheRateLimits(snapshot codex.RateLimitSnapshot) {
-	if !snapshot.HasData() {
-		return
-	}
-
-	a.rateLimitsMu.Lock()
-	defer a.rateLimitsMu.Unlock()
-
-	a.rateLimitsSnap = &snapshot
-}
-
-// cachedRateLimits returns the latest cached snapshot, if any.
-func (a *Agent) cachedRateLimits() (codex.RateLimitSnapshot, bool) {
-	a.rateLimitsMu.Lock()
-	defer a.rateLimitsMu.Unlock()
-
-	if a.rateLimitsSnap == nil {
-		return codex.RateLimitSnapshot{}, false
-	}
-
-	return *a.rateLimitsSnap, true
 }
 
 func (a *Agent) updateAccountForClient(client codex.Client, threadID string, account codex.Account) {
@@ -758,12 +836,33 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	}
 }
 
+func (a *Agent) acquireLifecycleCall(ctx context.Context) (func(), error) {
+	if a.lifecycleCalls == nil {
+		return func() {}, nil
+	}
+
+	select {
+	case a.lifecycleCalls <- struct{}{}:
+		return func() { <-a.lifecycleCalls }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (a *Agent) session(id acp.SessionId) (*session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.closed {
 		return nil, newAgentClosedError()
+	}
+
+	// A committed tombstone answers before the active map is even consulted. The
+	// agent keeps owning a wrapper whose teardown has not finished, so the map
+	// can still hold one; the id is nonetheless wire-indistinguishable from one
+	// that never existed, on this method and every other session-scoped request.
+	if a.deleteCommittedLocked(id) {
+		return nil, newUnknownSession()
 	}
 
 	session, ok := a.sessions[id]
@@ -793,6 +892,16 @@ func (a *Agent) acquireSessionLifecycle(id acp.SessionId) (func(), error) {
 		return nil, newAgentClosedError()
 	}
 
+	// Only a delete still in flight is answered here, and it is answered with a
+	// retriable conflict because it may yet fail. A committed tombstone is left
+	// to the deleted-id check further in, which also retries the native cleanup
+	// a previous delete may have failed to finish.
+	if a.deletePendingLocked(id) {
+		a.mu.Unlock()
+
+		return nil, newSessionDeleteInProgress()
+	}
+
 	session := a.sessions[id]
 	if session == nil {
 		a.mu.Unlock()
@@ -809,21 +918,32 @@ func (a *Agent) acquireSessionLifecycle(id acp.SessionId) (func(), error) {
 		return nil, newSessionCloseInProgress()
 	}
 
-	session.lifecycle.RLock()
+	session.sessionOps.RLock()
 
 	if err := a.validateSessionLifecycle(id, session); err != nil {
-		session.lifecycle.RUnlock()
+		session.sessionOps.RUnlock()
 
 		return nil, err
 	}
 
-	return session.lifecycle.RUnlock, nil
+	if session.lifecycleEstablishmentPending() {
+		session.sessionOps.RUnlock()
+
+		return nil, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex session establishment response is still outstanding",
+			jsonFieldLimit: limitSessionPrompt,
+		})
+	}
+
+	return session.sessionOps.RUnlock, nil
 }
 
 func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) error {
 	a.mu.Lock()
 	closed := a.closed
 	current := a.sessions[id]
+	deleting := a.deletePendingLocked(id)
+	deleted := a.deleteCommittedLocked(id)
 
 	session.mu.Lock()
 	closing := session.closing
@@ -835,6 +955,14 @@ func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) err
 		return newAgentClosedError()
 	case closing:
 		return newSessionCloseInProgress()
+	case deleted:
+		return newUnknownSession()
+
+	// A delete that has not yet committed its tombstone may still fail, leaving
+	// the id perfectly loadable, so it earns a retriable conflict rather than the
+	// permanent unknown-session verdict a host would take as final.
+	case deleting:
+		return newSessionDeleteInProgress()
 	case current != session:
 		return newUnknownSession()
 	default:
@@ -842,25 +970,99 @@ func (a *Agent) validateSessionLifecycle(id acp.SessionId, session *session) err
 	}
 }
 
-func (a *Agent) storeStartedSession(session *session) error {
-	a.mu.Lock()
-	if a.closed {
-		a.mu.Unlock()
+// deletePendingLocked reports that a delete of this id is still running. Delete
+// claims the id before it inspects the active wrapper, so a store-only delete —
+// which has no wrapper whose close flag could carry the fence — is still visible
+// to load and resume admission. Agent.mu is held by the caller.
+func (a *Agent) deletePendingLocked(id acp.SessionId) bool { return a.deleting[id] > 0 }
 
-		if err := session.Close(context.Background()); err != nil {
-			a.log.DebugContext(context.Background(), "close rejected Codex session failed", slog.String(jsonFieldError, err.Error()))
+// deleteCommittedLocked reports that a delete of this id reached its durable
+// tombstone. Only a committed tombstone proves the id is gone; a delete that is
+// still running may still fail, in which case the id was never deleted at all.
+// Agent.mu is held by the caller.
+func (a *Agent) deleteCommittedLocked(id acp.SessionId) bool {
+	_, ok := a.deleted[id]
+
+	return ok
+}
+
+// deleteFencedLocked reports that an id is barred from coming back at all: a
+// committed tombstone bars it forever, and a running delete bars it for the
+// duration. Callers that answer a host distinguish the two with
+// deleteCommittedLocked, because only the tombstone earns a terminal verdict.
+// Agent.mu is held by the caller.
+func (a *Agent) deleteFencedLocked(id acp.SessionId) bool {
+	return a.deleteCommittedLocked(id) || a.deletePendingLocked(id)
+}
+
+// claimSessionDelete fences an id for one delete. The claim is counted because
+// two concurrent deletes of the same id are both legal and idempotent, and the
+// fence must outlive the later of them.
+func (a *Agent) claimSessionDelete(id acp.SessionId) func() {
+	a.mu.Lock()
+	a.deleting[id]++
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+
+		if a.deleting[id] <= 1 {
+			delete(a.deleting, id)
+
+			return
 		}
 
+		a.deleting[id]--
+	}
+}
+
+// storeStartedSession decides whether a freshly started native thread may become
+// reachable under its id. It only decides: a refusal leaves the candidate
+// untouched for its caller to close, because the caller owns the wrapper until
+// registration succeeds and every caller already closes on error. Closing here
+// too would run one session's containment boundary twice over one native
+// thread, and the second sweep — against a thread the first one already
+// unsubscribed — can fail and escalate into the generation fence, retiring the
+// shared app-server for the sake of a thread that was already contained.
+// storeRetainedRuntimeSession refuses the same way, so both registration paths
+// have one shape.
+func (a *Agent) storeStartedSession(session *session) error {
+	if a.negotiatedLifecycle().Present() {
+		if err := session.attachNativeEvents(); err != nil {
+			return err
+		}
+	}
+
+	a.mu.Lock()
+
+	switch {
+	case a.closed:
+		a.mu.Unlock()
+
 		return newAgentClosedError()
+
+	// The admission check at the head of load and resume happens before the
+	// native resume it blocks in, so the fence is re-read here, where the
+	// wrapper would actually become reachable. A resume that raced a delete
+	// hands back a native thread nobody may address, so it is refused with the
+	// verdict the fence has actually reached: a committed tombstone makes the id
+	// permanently unknown, while a delete still in flight has decided nothing
+	// yet and only conflicts.
+	case a.deleteFencedLocked(session.id):
+		committed := a.deleteCommittedLocked(session.id)
+		a.mu.Unlock()
+
+		if committed {
+			return newUnknownSession()
+		}
+
+		return newSessionDeleteInProgress()
 	}
 
 	previous := a.sessions[session.id]
 	if previous == nil && len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
 		a.mu.Unlock()
-
-		if err := session.Close(context.Background()); err != nil {
-			a.log.DebugContext(context.Background(), "close backpressured Codex session failed", slog.String(jsonFieldError, err.Error()))
-		}
 
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: "active_sessions"})
 	}
@@ -872,7 +1074,17 @@ func (a *Agent) storeStartedSession(session *session) error {
 
 	if previous != nil {
 		if err := previous.Close(context.Background()); err != nil {
-			a.log.WarnContext(context.Background(), "close replaced Codex session failed", slog.String(jsonFieldError, err.Error()))
+			// The replaced session's close is a whole boundary, and one that does
+			// not complete still owes every rung behind the failure: the prefix a
+			// settlement captured and could not place, the materialized rollout that
+			// prefix is read back from, and the scratch reservation holding it.
+			// Installing over it would drop all three with a wrapper nothing
+			// references any more, so the id goes back to the session that still
+			// owes them and the install is refused; the caller closes its candidate,
+			// and the next load runs the boundary again.
+			a.restoreReplacedSession(session, previous)
+
+			return err
 		}
 
 		return nil
@@ -881,6 +1093,32 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil
+}
+
+// restoreReplacedSession gives a replaced session its id back when its own close
+// boundary did not complete. The agent goes on owning it, so Agent.Close still
+// sweeps it and a later load still finds the state it holds.
+func (a *Agent) restoreReplacedSession(candidate *session, previous *session) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.sessions[candidate.id] == candidate {
+		a.sessions[candidate.id] = previous
+	}
+}
+
+// closeSessionProviderAuth cancels every pending provider-auth flow the
+// addressed session owns: armed completers are disarmed and each record
+// terminalizes as cancelled/session_closed. It is the shutdown ladder's fourth
+// rung, and it runs identically on session close, session/delete, and
+// Agent.Close — always before the native interrupt, so no flow is abandoned to
+// a process that is already being torn down.
+func (a *Agent) closeSessionProviderAuth(id acp.SessionId) {
+	if a.providerAuth == nil {
+		return
+	}
+
+	a.providerAuth.closeSession(id)
 }
 
 // readmitProviderAuth tells the provider-auth broker that a session id is live
@@ -913,6 +1151,16 @@ func newSessionCloseInProgress() *acp.RequestError {
 	return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session close in progress"})
 }
 
+// newSessionDeleteInProgress refuses a lifecycle request that raced a delete
+// which has not yet committed its tombstone. The refusal is a conflict rather
+// than the unknown-session verdict because a delete can still fail, and a host
+// told an id is unknown is entitled to treat that as permanent.
+func newSessionDeleteInProgress() *acp.RequestError {
+	return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session delete lifecycle is already in progress"})
+}
+
+var errNoActiveSessionForDelete = errors.New("no active session for delete")
+
 // beginSessionClose prevents new lifecycle requests from entering before the
 // native unsubscribe begins. The caller acquires session.lifecycle for the
 // native operation after this method returns.
@@ -924,9 +1172,52 @@ func (a *Agent) beginSessionClose(id acp.SessionId) (*session, error) {
 		return nil, newAgentClosedError()
 	}
 
+	// Close is a session-scoped request method, so a committed tombstone answers
+	// it as unknown rather than handing back the wrapper the delete's own
+	// teardown still owns.
+	if a.deleteCommittedLocked(id) {
+		return nil, newUnknownSession()
+	}
+
 	session := a.sessions[id]
 	if session == nil {
 		return nil, newUnknownSession()
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	if session.closing {
+		if session.closeContained && (session.closeCommitPending || session.closeRemovalPending) {
+			session.closeCommitPending = false
+			session.closeRemovalPending = false
+
+			return session, nil
+		}
+
+		return nil, newSessionCloseInProgress()
+	}
+
+	session.closing = true
+
+	return session, nil
+}
+
+// beginSessionDelete closes prompt admission for an active wrapper while still
+// permitting deletion of a store-only session. Agent.mu then session.mu is the
+// same lock order used by ordinary session lookup, so prompt admission and
+// delete admission have one linearization point at session.closing.
+func (a *Agent) beginSessionDelete(id acp.SessionId) (*session, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return nil, newAgentClosedError()
+	}
+
+	session := a.sessions[id]
+	if session == nil {
+		return nil, errNoActiveSessionForDelete
 	}
 
 	session.mu.Lock()
@@ -941,42 +1232,74 @@ func (a *Agent) beginSessionClose(id acp.SessionId) (*session, error) {
 	return session, nil
 }
 
+// abortSessionClose gives an incomplete boundary its session back. The close
+// swept the provider-auth flows before it began, so a session it then re-admits
+// is answered by the lifecycle surface and refused as unknown by every auth leg
+// until some later load happened to readmit it; the sweep is undone here with
+// the admission that caused it. The flows the sweep cancelled stay cancelled —
+// they belonged to a session the host asked to close, and the retry is what
+// decides that session's fate, not the legs it had in flight.
 func (a *Agent) abortSessionClose(id acp.SessionId, session *session) {
+	if !a.clearSessionClosing(id, session) {
+		return
+	}
+
+	a.readmitProviderAuth(id)
+}
+
+// clearSessionClosing reopens admission for a session the agent still holds, and
+// reports whether it did. The broker's own lock is taken outside this one.
+func (a *Agent) clearSessionClosing(id acp.SessionId, session *session) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.sessions[id] != session {
-		return
+		return false
 	}
 
 	session.mu.Lock()
 	session.closing = false
+	session.closeContained = false
+	session.closeCommitPending = false
+	session.closeCommitDone = false
+	session.closeRemovalPending = false
 	session.mu.Unlock()
+
+	return true
 }
 
 // finishSessionCloseRetainingThread publishes native-thread ownership only
 // after unsubscribe succeeded. Materialized rollout cleanup moves with that
 // ownership so the canonical path remains valid until rebind or runtime end.
-func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *session) (bool, bool) {
+func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *session) (bool, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.sessions[id] != session {
-		return false, false
+		return false, false, nil
 	}
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
-	delete(a.sessions, id)
-
 	if a.runtimeClient != session.client || a.runtimeDead || session.clientDead || session.codexThreadID == "" {
-		return true, false
+		delete(a.sessions, id)
+
+		return true, false, nil
 	}
 
 	if a.retainedThreads == nil {
 		a.retainedThreads = make(map[acp.SessionId]*retainedRuntimeThread)
 	}
+
+	if a.retainedThreads[id] == nil && len(a.retainedThreads) == retainedRuntimeThreadLimit {
+		return false, false, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "Codex retained thread registry is full",
+			jsonFieldLimit: "retained_threads",
+		})
+	}
+
+	delete(a.sessions, id)
 
 	a.retainedThreads[id] = &retainedRuntimeThread{
 		sessionID:           id,
@@ -990,7 +1313,7 @@ func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *ses
 	session.materializedPath = ""
 	session.materializedRelease = nil
 
-	return true, true
+	return true, true, nil
 }
 
 func (a *Agent) connection() agentClient {

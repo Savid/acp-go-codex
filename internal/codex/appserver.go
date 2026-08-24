@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,7 @@ const (
 	notifyTurnCompleted         = "turn/completed"
 	notifyAccountUpdated        = "account/updated"
 	notifyRateLimitsUpdated     = "account/rateLimits/updated"
+	notifyGuardianWarning       = "guardianWarning"
 
 	itemTypeAgentMessage     = "agentMessage"
 	itemTypeUserMessage      = "userMessage"
@@ -70,9 +72,9 @@ const (
 	itemTypeImageGeneration  = "imageGeneration"
 	itemTypeImageView        = "imageView"
 
+	statusCompleted  = "completed"
 	statusDone       = "done"
-	statusFailed     = "failed"
-	statusErrored    = "errored"
+	statusActive     = "active"
 	valuePlan        = "plan"
 	valueDefault     = "default"
 	valuePlaceholder = "placeholder"
@@ -93,25 +95,74 @@ type AppServerClient struct {
 	eventPumpOnce sync.Once
 	eventDone     chan struct{}
 
-	mu      sync.Mutex
-	closed  bool
-	turns   map[*turnStream]struct{}
-	account Account
+	mu        sync.Mutex
+	closed    bool
+	closeDone chan struct{}
+	closeErr  error
+	threads   map[string]*threadStream
+	// pendingCreates is the number of start/fork calls whose response has not
+	// named the new thread yet. Notifications for such a thread are retained in
+	// pendingThreads until the response performs the exact-ID handoff.
+	pendingCreates    int
+	pendingThreads    map[string]*threadStream
+	pendingEventCount int
+	routingFailure    error
+	account           Account
+	// backgroundTerminalsKnown records that one background-terminal call has
+	// been answered, and backgroundTerminalsOK what it answered. The capability
+	// comes from the app-server's own reply rather than from a version compare,
+	// because the methods are an experimental protocol surface whose first
+	// release this adapter cannot name.
+	backgroundTerminalsKnown bool
+	backgroundTerminalsOK    bool
 }
 
 var _ Client = (*AppServerClient)(nil)
 var _ BackgroundTerminalClient = (*AppServerClient)(nil)
 
-const turnEventBuffer = 1024
+const (
+	threadEventBuffer        = 1024
+	pendingThreadEventBuffer = 1024
+	pendingThreadLimit       = 1024
+)
 
-type turnStream struct {
-	cancel   context.CancelFunc
-	closed   chan struct{}
-	done     <-chan struct{}
-	in       chan Event
+type threadStream struct {
+	mu       sync.Mutex
+	failure  error
+	finished bool
 	threadID string
-	turnID   string
+	claimed  bool
+	count    int
 	out      chan Event
+	done     chan struct{}
+}
+
+func newThreadStream(threadID string) *threadStream {
+	return &threadStream{
+		threadID: threadID,
+		out:      make(chan Event, threadEventBuffer+1),
+		done:     make(chan struct{}),
+	}
+}
+
+func (s *threadStream) claim() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.finished || s.claimed {
+		return false
+	}
+
+	s.claimed = true
+
+	return true
+}
+
+func (s *threadStream) claimedAndLive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.claimed && !s.finished
 }
 
 func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient, error) {
@@ -181,6 +232,8 @@ func (c *AppServerClient) initialize(ctx context.Context) error {
 }
 
 func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartRequest) (Thread, error) {
+	c.ensureEventPump()
+
 	started := time.Now()
 	params := map[string]any{}
 	setNonEmpty(params, "cwd", req.Cwd)
@@ -210,19 +263,38 @@ func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartReques
 		params["config"] = config
 	}
 
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return Thread{}, ctxErr
+	}
+
+	if err := c.beginPendingThread(); err != nil {
+		return Thread{}, err
+	}
+
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodThreadStart, params, &resp); err != nil {
 		observeCodexStartupStage(ctx, c.options, "session", "session", started, err)
 
-		return Thread{}, err
+		return Thread{}, c.finishPendingThread("", err)
 	}
 
 	observeCodexStartupStage(ctx, c.options, "session", "session", started, nil)
 
-	return threadFromResponse(resp), nil
+	thread, decodeErr := threadFromResponse(resp)
+	if decodeErr != nil {
+		return Thread{}, c.finishPendingThread("", decodeErr)
+	}
+
+	if err := c.finishPendingThread(thread.ID, nil); err != nil {
+		return Thread{}, err
+	}
+
+	return thread, nil
 }
 
 func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequest) (Thread, error) {
+	c.ensureEventPump()
+
 	params := map[string]any{}
 	setNonEmpty(params, fieldThreadID, req.ThreadID)
 	setNonEmpty(params, fieldPath, req.Path)
@@ -237,20 +309,43 @@ func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequ
 		params["config"] = config
 	}
 
-	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodThreadResume, params, &resp); err != nil {
-		return Thread{}, normalizeThreadError(err)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return Thread{}, ctxErr
 	}
 
-	thread := threadFromResponse(resp)
-	if thread.ID == "" {
-		thread.ID = req.ThreadID
+	registration, created, err := c.preRegisterThread(req.ThreadID)
+	if err != nil {
+		return Thread{}, err
+	}
+
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodThreadResume, params, &resp); err != nil {
+		err = normalizeThreadError(err)
+
+		return Thread{}, c.abortPreRegisteredThread(registration, created, err)
+	}
+
+	thread, decodeErr := threadFromResponse(resp)
+	if decodeErr != nil {
+		return Thread{}, c.abortPreRegisteredThread(registration, created, decodeErr)
+	}
+
+	if thread.ID != req.ThreadID {
+		err := errors.New("codex thread/resume acknowledged a different thread")
+
+		return Thread{}, c.abortPreRegisteredThread(registration, created, err)
+	}
+
+	if err := c.completePreRegisteredThread(registration); err != nil {
+		return Thread{}, err
 	}
 
 	return thread, nil
 }
 
 func (c *AppServerClient) ForkThread(ctx context.Context, req ThreadForkRequest) (Thread, error) {
+	c.ensureEventPump()
+
 	params := map[string]any{fieldThreadID: req.ThreadID}
 	setNonEmpty(params, "cwd", req.Cwd)
 
@@ -263,12 +358,31 @@ func (c *AppServerClient) ForkThread(ctx context.Context, req ThreadForkRequest)
 		params["config"] = config
 	}
 
-	var resp map[string]any
-	if err := c.rpc.Call(ctx, methodThreadFork, params, &resp); err != nil {
-		return Thread{}, normalizeThreadError(err)
+	if err := ctx.Err(); err != nil {
+		return Thread{}, err
 	}
 
-	return threadFromResponse(resp), nil
+	if err := c.beginPendingThread(); err != nil {
+		return Thread{}, err
+	}
+
+	var resp map[string]any
+	if err := c.rpc.Call(ctx, methodThreadFork, params, &resp); err != nil {
+		err = normalizeThreadError(err)
+
+		return Thread{}, c.finishPendingThread("", err)
+	}
+
+	thread, decodeErr := threadFromResponse(resp)
+	if decodeErr != nil {
+		return Thread{}, c.finishPendingThread("", decodeErr)
+	}
+
+	if err := c.finishPendingThread(thread.ID, nil); err != nil {
+		return Thread{}, err
+	}
+
+	return thread, nil
 }
 
 // threadConfig renders the one adapter-owned thread config: the caller's
@@ -290,7 +404,7 @@ func (c *AppServerClient) ListThreads(ctx context.Context, req ThreadListRequest
 		return nil, err
 	}
 
-	return threadsFromResponse(resp), nil
+	return threadsFromResponse(resp)
 }
 
 func (c *AppServerClient) ReadThread(ctx context.Context, req ThreadReadRequest) (ThreadHistory, error) {
@@ -316,8 +430,13 @@ func (c *AppServerClient) ReadThread(ctx context.Context, req ThreadReadRequest)
 		safeResponse["messages"] = safeItems
 	}
 
+	thread, err := threadFromResponse(resp)
+	if err != nil {
+		return ThreadHistory{}, err
+	}
+
 	return ThreadHistory{
-		Thread: threadFromResponse(resp),
+		Thread: thread,
 		Items:  safeItems,
 		Events: events,
 		Raw:    safeResponse,
@@ -396,8 +515,10 @@ func (c *AppServerClient) ListBackgroundTerminals(
 
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodBackgroundTerminalList, params, &resp); err != nil {
-		return BackgroundTerminalListResponse{}, normalizeThreadError(err)
+		return BackgroundTerminalListResponse{}, c.backgroundTerminalError(err)
 	}
+
+	c.recordBackgroundTerminals(true)
 
 	raw := mapSlice(resp, "data")
 
@@ -441,12 +562,46 @@ func (c *AppServerClient) TerminateBackgroundTerminal(
 		fieldThreadID:  req.ThreadID,
 		fieldProcessID: req.ProcessID,
 	}, &resp); err != nil {
-		return false, normalizeThreadError(err)
+		return false, c.backgroundTerminalError(err)
 	}
+
+	c.recordBackgroundTerminals(true)
 
 	terminated, _ := resp["terminated"].(bool)
 
 	return terminated, nil
+}
+
+// backgroundTerminalError classifies one background-terminal refusal. An
+// app-server that does not implement the method is a capability fact this
+// client latches, not a containment attempt that failed: the two lead to
+// different cancel boundaries, so they are never joined into one error.
+func (c *AppServerClient) backgroundTerminalError(err error) error {
+	if !isMethodNotFound(err) {
+		return normalizeThreadError(err)
+	}
+
+	c.recordBackgroundTerminals(false)
+
+	return fmt.Errorf("%w: %w", ErrBackgroundTerminalsUnsupported, err)
+}
+
+func (c *AppServerClient) recordBackgroundTerminals(supported bool) {
+	c.mu.Lock()
+	c.backgroundTerminalsKnown = true
+	c.backgroundTerminalsOK = supported
+	c.mu.Unlock()
+}
+
+// BackgroundTerminalsSupported reports what the running app-server answered
+// about the thread-scoped background-terminal methods. The second result is
+// false until one call has actually been answered: an unprobed capability is
+// unknown rather than absent.
+func (c *AppServerClient) BackgroundTerminalsSupported() (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.backgroundTerminalsOK, c.backgroundTerminalsKnown
 }
 
 func optionalInt64Value(value map[string]any, key string) *int64 {
@@ -471,12 +626,11 @@ func optionalInt64Value(value map[string]any, key string) *int64 {
 	return &result
 }
 
-func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-chan Event, error) {
+func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (Turn, error) {
 	c.ensureEventPump()
 
-	stream, err := c.registerTurn(ctx, req.ThreadID)
-	if err != nil {
-		return nil, err
+	if err := c.requireClaimedThread(req.ThreadID); err != nil {
+		return Turn{}, err
 	}
 
 	params := map[string]any{
@@ -494,19 +648,67 @@ func (c *AppServerClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-
 
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodTurnStart, params, &resp); err != nil {
-		c.closeTurn(stream)
-
-		return nil, normalizeThreadError(err)
+		return Turn{}, normalizeThreadError(err)
 	}
 
 	turnID := stringValue(mapValue(resp, "turn"), fieldID)
+
+	// The ack is where the dispatcher takes ownership, so it is also where
+	// ownership becomes provable. An ack naming no turn would leave this stream
+	// matching every turn on its thread, which is a wildcard rather than a
+	// filter, so the turn fails closed instead.
 	if turnID == "" {
-		turnID = stringValue(resp, "turnId")
+		return Turn{}, errors.New("codex turn/start accepted a turn without naming it")
 	}
 
-	c.setTurnID(stream, turnID)
+	return Turn{ID: turnID}, nil
+}
 
-	return stream.out, nil
+func (c *AppServerClient) SubscribeThread(ctx context.Context, threadID string) (ThreadEventStream, error) {
+	if err := ctx.Err(); err != nil {
+		return ThreadEventStream{}, err
+	}
+
+	c.mu.Lock()
+
+	stream := c.threads[threadID]
+	if c.closed || stream == nil {
+		c.mu.Unlock()
+
+		return ThreadEventStream{}, errors.New("codex thread event stream is unavailable")
+	}
+
+	stream.mu.Lock()
+	if stream.finished || stream.claimed {
+		stream.mu.Unlock()
+		c.mu.Unlock()
+
+		return ThreadEventStream{}, errors.New("codex thread event stream is already claimed or closed")
+	}
+
+	stream.claimed = true
+	stream.mu.Unlock()
+	c.mu.Unlock()
+
+	var once sync.Once
+
+	release := func() {
+		once.Do(func() {
+			c.releaseThread(stream)
+		})
+	}
+
+	go func() {
+		defer recoverCodexGoroutine(ctx, "Codex thread context watcher")
+
+		select {
+		case <-ctx.Done():
+			release()
+		case <-stream.done:
+		}
+	}()
+
+	return ThreadEventStream{Events: stream.out, Release: release}, nil
 }
 
 func (c *AppServerClient) SteerTurn(ctx context.Context, req TurnSteerRequest) error {
@@ -607,7 +809,12 @@ func (c *AppServerClient) UnsubscribeThread(ctx context.Context, threadID string
 		return nil
 	}
 
-	return normalizeThreadError(c.rpc.Call(ctx, methodThreadUnsubscribe, map[string]any{fieldThreadID: threadID}, nil))
+	err := normalizeThreadError(c.rpc.Call(ctx, methodThreadUnsubscribe, map[string]any{fieldThreadID: threadID}, nil))
+	if err == nil {
+		c.closeThread(threadID)
+	}
+
+	return err
 }
 
 func (c *AppServerClient) DeleteThread(ctx context.Context, req ThreadDeleteRequest) error {
@@ -615,7 +822,12 @@ func (c *AppServerClient) DeleteThread(ctx context.Context, req ThreadDeleteRequ
 		return nil
 	}
 
-	return normalizeThreadError(c.rpc.Call(ctx, methodThreadDelete, map[string]any{fieldThreadID: req.ThreadID}, nil))
+	err := normalizeThreadError(c.rpc.Call(ctx, methodThreadDelete, map[string]any{fieldThreadID: req.ThreadID}, nil))
+	if err == nil {
+		c.closeThread(req.ThreadID)
+	}
+
+	return err
 }
 
 func (c *AppServerClient) ModelList(ctx context.Context) ([]Model, error) {
@@ -680,23 +892,15 @@ func (c *AppServerClient) AccountRead(ctx context.Context) (Account, error) {
 	return account, nil
 }
 
-// RateLimitsSupported reports whether the probed native codex version exposes
-// the account/rateLimits/read request. Older app-servers never carried it, so
-// the fresh-query path is skipped and callers fall back to the cached snapshot.
-func (c *AppServerClient) RateLimitsSupported() bool {
-	return compareSemver(c.nativeVersion, rateLimitsMinVersion) >= 0
-}
-
 // ReadRateLimits performs a fresh account/rateLimits/read request and decodes
-// the returned snapshot. An absent snapshot is not an error: it decodes to an
-// empty snapshot whose HasData reports false.
+// the returned snapshot from its current nested wire shape.
 func (c *AppServerClient) ReadRateLimits(ctx context.Context) (RateLimitSnapshot, error) {
 	var resp map[string]any
 	if err := c.rpc.Call(ctx, methodAccountRateLimitsRead, map[string]any{}, &resp); err != nil {
 		return RateLimitSnapshot{}, err
 	}
 
-	return rateLimitSnapshotFromMap(rateLimitSnapshotPayload(resp)), nil
+	return rateLimitSnapshotFromMap(mapValue(resp, "rateLimits")), nil
 }
 
 func (c *AppServerClient) LoginWithChatGPTTokens(ctx context.Context, tokens ChatGPTAuthTokens) error {
@@ -721,23 +925,77 @@ func (c *AppServerClient) Logout(ctx context.Context) error {
 func (c *AppServerClient) Close(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
+		done := c.closeDone
 		c.mu.Unlock()
 
-		return nil
+		return c.waitClose(ctx, done)
 	}
 
 	c.closed = true
+	c.closeDone = make(chan struct{})
+	done := c.closeDone
 	c.mu.Unlock()
 
-	err := c.rpc.CloseContext(ctx)
-	if done := c.eventPumpDone(); done != nil {
-		<-done
-	} else {
-		c.closeAllTurns()
-	}
+	// #nosec G118 -- containment must outlive the initiating caller's context.
+	go c.finishClose(done)
 
+	return c.waitClose(ctx, done)
+}
+
+func (c *AppServerClient) finishClose(done chan struct{}) {
+	// The launched process is the owned cancellation path for the RPC reader,
+	// writers, server-request handlers, and event pump. Cancel it before joining
+	// those workers so Close never depends on an app-server choosing to exit.
 	if c.procCancel != nil {
 		c.procCancel()
+	}
+
+	err := discardOwnedCloseCancellation(c.rpc.CloseContext(context.Background()))
+	if pumpDone := c.eventPumpDone(); pumpDone != nil {
+		<-pumpDone
+	} else {
+		c.closeAllThreads()
+	}
+
+	c.mu.Lock()
+	c.closeErr = err
+
+	close(done)
+	c.mu.Unlock()
+}
+
+func (c *AppServerClient) waitClose(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+	}
+
+	c.mu.Lock()
+	err := c.closeErr
+	c.mu.Unlock()
+
+	return err
+}
+
+func discardOwnedCloseCancellation(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	type joined interface{ Unwrap() []error }
+
+	if combined, ok := err.(joined); ok {
+		var retained error
+		for _, component := range combined.Unwrap() {
+			retained = errors.Join(retained, discardOwnedCloseCancellation(component))
+		}
+
+		return retained
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return nil
 	}
 
 	return err
@@ -746,8 +1004,8 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 func (c *AppServerClient) ensureEventPump() {
 	c.eventPumpOnce.Do(func() {
 		c.mu.Lock()
-		if c.turns == nil {
-			c.turns = make(map[*turnStream]struct{})
+		if c.threads == nil {
+			c.threads = make(map[string]*threadStream)
 		}
 
 		c.eventDone = make(chan struct{})
@@ -771,14 +1029,14 @@ func (c *AppServerClient) eventPumpDone() <-chan struct{} {
 
 func (c *AppServerClient) runEventPump(done chan<- struct{}) {
 	defer close(done)
-	defer c.closeAllTurns()
+	defer c.closeAllThreads()
 
 	for notification := range c.rpc.Events() {
 		c.dispatchEvent(eventFromRPC(notification))
 	}
 
 	if err := c.rpc.closeError(); err != nil {
-		c.dispatchEvent(Event{Kind: EventError, Err: err})
+		c.dispatchEvent(Event{Kind: EventError, Scope: EventScopeTransportLost, Err: err})
 	}
 }
 
@@ -800,114 +1058,353 @@ func (c *AppServerClient) dispatchEvent(event Event) {
 		}
 	}
 
-	streams := c.matchingTurns(event)
-	for _, stream := range streams {
-		if !stream.send(event) {
-			c.removeTurn(stream)
+	c.dispatchThreadEvent(event)
+}
 
-			continue
+func (c *AppServerClient) beginPendingThread() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return errors.New("codex app-server client is closed")
+	}
+
+	if c.routingFailure != nil {
+		return c.routingFailure
+	}
+
+	c.pendingCreates++
+	if c.pendingThreads == nil {
+		c.pendingThreads = make(map[string]*threadStream)
+	}
+
+	return nil
+}
+
+// finishPendingThread hands every notification retained while a start/fork
+// response was in flight to the broker named by that response. A failed or
+// malformed response cannot prove that native work was never created, so the
+// whole generation fails closed before a late notification can be discarded.
+func (c *AppServerClient) finishPendingThread(threadID string, callErr error) error {
+	c.mu.Lock()
+	if c.pendingCreates > 0 {
+		c.pendingCreates--
+	}
+
+	result := c.routingFailure
+	if callErr == nil && threadID == "" {
+		result = errors.Join(result, errors.New("codex thread response did not name its native thread"))
+	} else if callErr != nil {
+		result = errors.Join(result, callErr)
+	}
+
+	if result == nil {
+		stream := c.pendingThreads[threadID]
+		if stream != nil {
+			delete(c.pendingThreads, threadID)
+			c.pendingEventCount -= stream.count
+		} else {
+			stream = newThreadStream(threadID)
 		}
+
+		if existing := c.threads[threadID]; existing != nil && existing != stream && existing.live() {
+			result = errors.New("codex thread event stream already exists")
+
+			stream.stop()
+			c.failRoutingLocked(result)
+		} else {
+			c.threads[threadID] = stream
+		}
+	}
+
+	if result == nil && c.pendingCreates == 0 && len(c.pendingThreads) > 0 {
+		result = errors.Join(result, errors.New("codex received native thread events without an acknowledged owner"))
+	}
+
+	if result != nil {
+		c.failRoutingLocked(result)
+	}
+	c.mu.Unlock()
+
+	return result
+}
+
+func (c *AppServerClient) preRegisterThread(threadID string) (*threadStream, bool, error) {
+	if threadID == "" {
+		return nil, false, errors.New("codex thread event stream requires the thread it routes for")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, false, errors.New("codex app-server client is closed")
+	}
+
+	if c.routingFailure != nil {
+		return nil, false, c.routingFailure
+	}
+
+	if c.threads == nil {
+		c.threads = make(map[string]*threadStream)
+	}
+
+	if existing := c.threads[threadID]; existing != nil && existing.live() {
+		return existing, false, nil
+	}
+
+	stream := newThreadStream(threadID)
+	c.threads[threadID] = stream
+
+	return stream, true, nil
+}
+
+func (c *AppServerClient) completePreRegisteredThread(stream *threadStream) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.routingFailure != nil {
+		return c.routingFailure
+	}
+
+	if c.threads[stream.threadID] != stream || !stream.live() {
+		return errors.New("codex pre-registered thread event stream was lost before acknowledgement")
+	}
+
+	return nil
+}
+
+func (c *AppServerClient) abortPreRegisteredThread(stream *threadStream, created bool, cause error) error {
+	if stream == nil {
+		return cause
+	}
+
+	if !created {
+		if stream.claimedAndLive() {
+			return cause
+		}
+
+		c.mu.Lock()
+		if c.threads[stream.threadID] == stream {
+			delete(c.threads, stream.threadID)
+		}
+		c.mu.Unlock()
+		stream.stop()
+
+		return cause
+	}
+
+	c.mu.Lock()
+	if stream.eventCount() > 0 {
+		cause = errors.Join(cause, errors.New("codex received native thread events before a failed acknowledgement"))
+	}
+
+	if c.threads[stream.threadID] != stream {
+		stream.fail(Event{Kind: EventError, Scope: EventScopeTransportLost, Err: cause})
+	}
+
+	c.failRoutingLocked(cause)
+	c.mu.Unlock()
+
+	return cause
+}
+
+func (c *AppServerClient) dispatchThreadEvent(event Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.routingFailure != nil {
+		return
+	}
+
+	if event.Scope == EventScopeGeneration {
+		return
+	}
+
+	if event.Scope == EventScopeTransportLost {
+		for _, stream := range c.threads {
+			stream.send(event)
+		}
+
+		for _, stream := range c.pendingThreads {
+			stream.send(event)
+		}
+
+		return
+	}
+
+	stream := c.threads[event.ThreadID]
+	if stream == nil && c.pendingCreates > 0 && event.ThreadID != "" {
+		stream = c.pendingThreads[event.ThreadID]
+		if stream == nil {
+			if len(c.pendingThreads) == pendingThreadLimit {
+				c.failRoutingLocked(codexPendingThreadOverflow())
+
+				return
+			}
+
+			stream = newThreadStream(event.ThreadID)
+			c.pendingThreads[event.ThreadID] = stream
+		}
+
+		if c.pendingEventCount == pendingThreadEventBuffer {
+			c.failRoutingLocked(codexPendingThreadOverflow())
+
+			return
+		}
+
+		c.pendingEventCount++
+	}
+
+	// The app-server broadcasts thread notices for every thread it holds,
+	// including ones this client never subscribed to and ones it has already
+	// deleted. An event with no stream to reach names no live session.
+	if stream == nil {
+		if c.options.Logger != nil {
+			c.options.Logger.DebugContext(
+				context.Background(),
+				"dropped a codex thread notification for a thread this client does not hold",
+				slog.String("method", event.RawMethod),
+				slog.String("thread_id", event.ThreadID),
+			)
+		}
+
+		return
+	}
+
+	if !stream.send(event) && c.threads[event.ThreadID] == stream {
+		delete(c.threads, event.ThreadID)
 	}
 }
 
-func (c *AppServerClient) registerTurn(ctx context.Context, threadID string) (*turnStream, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+func codexPendingThreadOverflow() error {
+	return fmt.Errorf("%w: pre-registration thread event router", ErrTurnEventOverflow)
+}
+
+func (c *AppServerClient) failRoutingLocked(cause error) {
+	if c.routingFailure == nil {
+		c.routingFailure = cause
 	}
 
-	turnCtx, cancel := context.WithCancel(ctx)
-	stream := &turnStream{
-		cancel:   cancel,
-		closed:   make(chan struct{}),
-		done:     turnCtx.Done(),
-		in:       make(chan Event),
-		threadID: threadID,
-		out:      make(chan Event, turnEventBuffer),
+	failure := Event{Kind: EventError, Scope: EventScopeTransportLost, Err: c.routingFailure}
+	for id, stream := range c.threads {
+		delete(c.threads, id)
+		stream.fail(failure)
 	}
+
+	for id, stream := range c.pendingThreads {
+		delete(c.pendingThreads, id)
+		stream.fail(failure)
+	}
+
+	c.pendingCreates = 0
+	c.pendingEventCount = 0
+
+	if c.procCancel != nil {
+		c.procCancel()
+	}
+}
+
+func (c *AppServerClient) registerThread(threadID string) error {
+	if threadID == "" {
+		return errors.New("codex thread event stream requires the thread it routes for")
+	}
+
+	stream := newThreadStream(threadID)
 
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		stream.abort()
 
-		return nil, errors.New("codex app-server client is closed")
+		return errors.New("codex app-server client is closed")
 	}
 
-	if c.turns == nil {
-		c.turns = make(map[*turnStream]struct{})
+	if c.threads == nil {
+		c.threads = make(map[string]*threadStream)
 	}
 
-	c.turns[stream] = struct{}{}
+	if existing := c.threads[threadID]; existing != nil {
+		existing.mu.Lock()
+		live := !existing.finished
+		existing.mu.Unlock()
+
+		if live {
+			c.mu.Unlock()
+
+			return nil
+		}
+	}
+
+	c.threads[threadID] = stream
 	c.mu.Unlock()
 
-	go func() {
-		defer recoverCodexGoroutine(ctx, "Codex turn stream forwarder")
-
-		stream.forward()
-	}()
-	go func() {
-		defer recoverCodexGoroutine(ctx, "Codex turn context watcher")
-
-		c.closeTurnOnContext(stream)
-	}()
-
-	return stream, nil
+	return nil
 }
 
-func (c *AppServerClient) closeTurnOnContext(stream *turnStream) {
-	<-stream.done
-	c.removeTurn(stream)
-}
-
-func (c *AppServerClient) setTurnID(stream *turnStream, turnID string) {
-	if turnID == "" {
-		return
-	}
-
+func (c *AppServerClient) requireClaimedThread(threadID string) error {
 	c.mu.Lock()
-	stream.turnID = turnID
+	stream := c.threads[threadID]
 	c.mu.Unlock()
-}
 
-func (c *AppServerClient) matchingTurns(event Event) []*turnStream {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	streams := make([]*turnStream, 0, len(c.turns))
-	for stream := range c.turns {
-		if event.ThreadID != "" && stream.threadID != "" && event.ThreadID != stream.threadID {
-			continue
-		}
-
-		if event.TurnID != "" && stream.turnID != "" && event.TurnID != stream.turnID {
-			continue
-		}
-
-		streams = append(streams, stream)
+	if stream == nil {
+		return errors.New("codex turn requires an established thread event stream")
 	}
 
-	return streams
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+
+	if stream.finished || !stream.claimed {
+		return errors.New("codex turn requires a live claimed thread event stream")
+	}
+
+	return nil
 }
 
-func (c *AppServerClient) closeTurn(stream *turnStream) {
-	c.removeTurn(stream)
+func (c *AppServerClient) closeThread(threadID string) {
+	c.mu.Lock()
+
+	stream := c.threads[threadID]
+	if stream != nil {
+		delete(c.threads, threadID)
+	}
+	c.mu.Unlock()
+
+	if stream != nil {
+		stream.stop()
+	}
+}
+
+func (c *AppServerClient) releaseThread(stream *threadStream) {
+	c.mu.Lock()
+	stream.mu.Lock()
+	live := !stream.finished
+	stream.mu.Unlock()
+
+	if !c.closed && c.routingFailure == nil && live && c.threads[stream.threadID] == stream {
+		c.threads[stream.threadID] = newThreadStream(stream.threadID)
+	}
+	c.mu.Unlock()
+
 	stream.stop()
 }
 
-func (c *AppServerClient) removeTurn(stream *turnStream) {
-	c.mu.Lock()
-	delete(c.turns, stream)
-	c.mu.Unlock()
-}
-
-func (c *AppServerClient) closeAllTurns() {
+func (c *AppServerClient) closeAllThreads() {
 	c.mu.Lock()
 
-	streams := make([]*turnStream, 0, len(c.turns))
-	for stream := range c.turns {
-		delete(c.turns, stream)
+	streams := make([]*threadStream, 0, len(c.threads)+len(c.pendingThreads))
+	for threadID, stream := range c.threads {
+		delete(c.threads, threadID)
+
 		streams = append(streams, stream)
 	}
+
+	for threadID, stream := range c.pendingThreads {
+		delete(c.pendingThreads, threadID)
+
+		streams = append(streams, stream)
+	}
+
+	c.pendingEventCount = 0
 	c.mu.Unlock()
 
 	for _, stream := range streams {
@@ -925,67 +1422,90 @@ func (c *AppServerClient) setAccount(account Account) {
 	c.mu.Unlock()
 }
 
-func (s *turnStream) send(event Event) bool {
-	select {
-	case <-s.done:
-		return false
-	case <-s.closed:
-		return false
-	default:
-	}
+func (s *threadStream) send(event Event) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	select {
-	case s.in <- event:
-		return true
-	case <-s.done:
-		return false
-	case <-s.closed:
+	if s.finished {
 		return false
 	}
+
+	return s.enqueueLocked(event)
 }
 
-func (s *turnStream) forward() {
-	defer close(s.closed)
-	defer close(s.out)
-	defer s.cancel()
+func (s *threadStream) stop() {
+	s.mu.Lock()
+	s.finishLocked()
+	s.mu.Unlock()
+}
 
-	for {
-		select {
-		case <-s.done:
-			return
-		case event := <-s.in:
-			select {
-			case s.out <- event:
-				if event.Kind == EventCompleted || event.Kind == EventError {
-					return
-				}
+func (s *threadStream) enqueueLocked(event Event) bool {
+	if len(s.out) == threadEventBuffer {
+		s.failOverflowLocked()
 
-				continue
-			default:
-			}
-
-			select {
-			case s.out <- event:
-			case <-s.done:
-				return
-			}
-
-			if event.Kind == EventCompleted || event.Kind == EventError {
-				return
-			}
-		}
+		return false
 	}
+
+	s.out <- event
+
+	s.count++
+
+	if event.Scope == EventScopeTransportLost {
+		s.finishLocked()
+	}
+
+	return true
 }
 
-func (s *turnStream) stop() {
-	s.cancel()
-	<-s.closed
+func (s *threadStream) fail(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.finished {
+		return
+	}
+
+	if len(s.out) <= threadEventBuffer {
+		s.out <- event
+	}
+
+	s.finishLocked()
 }
 
-func (s *turnStream) abort() {
-	s.cancel()
+func (s *threadStream) eventCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.count
+}
+
+func (s *threadStream) live() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return !s.finished
+}
+
+func (s *threadStream) failOverflowLocked() {
+	s.failure = ErrTurnEventOverflow
+	s.out <- Event{
+		Kind:     EventError,
+		Scope:    EventScopeThread,
+		ThreadID: s.threadID,
+		Err:      ErrTurnEventOverflow,
+	}
+
+	s.finishLocked()
+}
+
+func (s *threadStream) finishLocked() {
+	if s.finished {
+		return
+	}
+
+	s.finished = true
 	close(s.out)
-	close(s.closed)
+	close(s.done)
 }
 
 func permissionProfile(additional []string) map[string]any {
@@ -1005,35 +1525,56 @@ func permissionProfile(additional []string) map[string]any {
 	}
 }
 
-func threadFromResponse(resp map[string]any) Thread {
+func threadFromResponse(resp map[string]any) (Thread, error) {
 	rawThread := mapValue(resp, "thread")
-	if rawThread == nil {
-		rawThread = resp
+
+	thread, err := threadFromObject(rawThread)
+	if err != nil {
+		return Thread{}, err
 	}
 
-	return Thread{
-		ID:              firstNonEmpty(stringValue(rawThread, fieldID), stringValue(resp, fieldThreadID)),
-		SessionID:       firstNonEmpty(stringValue(rawThread, "sessionId"), stringValue(rawThread, fieldID), stringValue(resp, fieldThreadID)),
-		Path:            stringValue(rawThread, fieldPath),
-		Cwd:             firstNonEmpty(stringValue(resp, "cwd"), stringValue(rawThread, "cwd")),
-		Model:           firstNonEmpty(stringValue(resp, "model"), stringValue(rawThread, "model")),
-		Provider:        firstNonEmpty(stringValue(resp, "modelProvider"), stringValue(rawThread, "modelProvider")),
-		ReasoningEffort: firstNonEmpty(stringValue(resp, "reasoningEffort"), stringValue(rawThread, "reasoningEffort")),
-		Title:           firstNonEmpty(stringValue(rawThread, fieldName), stringValue(rawThread, fieldTitle), stringValue(rawThread, "preview")),
-		UpdatedAt:       firstNonEmpty(timestampValue(rawThread, "updatedAt"), timestampValue(rawThread, "mtime")),
-		Raw:             rawThread,
-	}
+	thread.Cwd = stringValue(resp, "cwd")
+	thread.Model = stringValue(resp, "model")
+	thread.Provider = stringValue(resp, "modelProvider")
+	thread.ReasoningEffort = stringValue(resp, "reasoningEffort")
+
+	return thread, nil
 }
 
-func threadsFromResponse(resp map[string]any) []Thread {
+func threadFromObject(rawThread map[string]any) (Thread, error) {
+	thread := Thread{
+		ID:              stringValue(rawThread, fieldID),
+		SessionID:       stringValue(rawThread, "sessionId"),
+		Path:            stringValue(rawThread, fieldPath),
+		Cwd:             stringValue(rawThread, "cwd"),
+		Model:           stringValue(rawThread, "model"),
+		Provider:        stringValue(rawThread, "modelProvider"),
+		ReasoningEffort: stringValue(rawThread, "reasoningEffort"),
+		Title:           firstNonEmpty(stringValue(rawThread, fieldName), stringValue(rawThread, "preview")),
+		UpdatedAt:       timestampValue(rawThread, "updatedAt"),
+		Raw:             rawThread,
+	}
+	if thread.ID == "" || thread.SessionID == "" {
+		return Thread{}, errors.New("codex thread response is missing its current native identity")
+	}
+
+	return thread, nil
+}
+
+func threadsFromResponse(resp map[string]any) ([]Thread, error) {
 	raw := mapSlice(resp, "threads", "items", "data")
 
 	threads := make([]Thread, 0, len(raw))
 	for _, item := range raw {
-		threads = append(threads, threadFromResponse(item))
+		thread, err := threadFromObject(item)
+		if err != nil {
+			return nil, err
+		}
+
+		threads = append(threads, thread)
 	}
 
-	return threads
+	return threads, nil
 }
 
 func eventFromRPC(raw rpcEvent) Event {
@@ -1047,6 +1588,11 @@ func eventFromRPC(raw rpcEvent) Event {
 	event.ThreadID = stringValue(params, fieldThreadID)
 	event.TurnID = firstNonEmpty(stringValue(params, "turnId"), stringValue(mapValue(params, "turn"), fieldID))
 	event.ItemID = stringValue(params, "itemId")
+	event.Scope = EventScopeGeneration
+
+	if event.ThreadID != "" {
+		event.Scope = EventScopeThread
+	}
 
 	switch raw.Method {
 	case notifyItemAgentMessageDelta:
@@ -1095,6 +1641,8 @@ func eventFromRPC(raw rpcEvent) Event {
 
 		if event.StopReason == StopReasonError {
 			event.Err = turnFailureFromCompleted(turn, params)
+			event.RawParams = nil
+			event.RawJSON = ""
 		}
 	case notifyAccountUpdated:
 		event.Kind = EventAccountUpdated
@@ -1104,15 +1652,24 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Login = loginCompletionFromParams(params)
 	case notifyRateLimitsUpdated:
 		event.Kind = EventRateLimitsUpdated
-		snapshot := rateLimitSnapshotFromMap(rateLimitSnapshotPayload(params))
+		snapshot := rateLimitSnapshotFromMap(mapValue(params, "rateLimits"))
 		event.RateLimits = &snapshot
-	case "warning", "guardianWarning", "deprecationNotice", "configWarning":
+	case "warning", notifyGuardianWarning, "deprecationNotice", "configWarning":
 		event.Kind = EventWarning
 		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"))
 	case string(EventError):
-		event.Kind = EventError
-		event.Text = errorEventText(params, raw.Params)
-		event.Err = errors.New(event.Text)
+		// An error notification the app-server will retry leaves its turn live,
+		// and the turn's only terminal is `turn/completed`. The body is dropped
+		// either way so no error payload reaches a log or a raw-event journal.
+		event.Kind = EventRaw
+		event.RawParams = nil
+		event.RawJSON = ""
+
+		if willRetry, _ := params["willRetry"].(bool); !willRetry {
+			event.Kind = EventError
+			event.Text = appServerErrorText
+			event.Err = ErrAppServerEvent
+		}
 	case "rawResponseItem/completed":
 		event.Kind = EventRaw
 	default:
@@ -1124,18 +1681,6 @@ func eventFromRPC(raw rpcEvent) Event {
 	}
 
 	return event
-}
-
-func errorEventText(params map[string]any, raw json.RawMessage) string {
-	if text := firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, string(EventError))); text != "" {
-		return text
-	}
-
-	if len(raw) > 0 && string(raw) != "null" {
-		return "Codex app-server error event: " + string(raw)
-	}
-
-	return "Codex app-server emitted error event without details"
 }
 
 func startedItemEvent(event Event, params map[string]any) Event {
@@ -1400,15 +1945,19 @@ func contentText(value any) string {
 	}
 }
 
+// stopReasonFromTurn reads how one native turn ended. The status vocabulary is
+// closed, so a completion carrying anything else is a completion this adapter
+// cannot state as a clean stop: it reports an error rather than defaulting to
+// end_turn, and the caller attaches the native cause.
 func stopReasonFromTurn(turn map[string]any) StopReason {
 	status := strings.ToLower(firstNonEmpty(stringValue(turn, fieldStatus), stringValue(turn, "stopReason")))
 	switch status {
+	case statusCompleted, statusDone:
+		return StopReasonEndTurn
 	case "interrupted", "cancelled", "canceled":
 		return StopReasonCancelled
-	case statusFailed, statusErrored, string(EventError):
-		return StopReasonError
 	default:
-		return StopReasonEndTurn
+		return StopReasonError
 	}
 }
 
@@ -1420,19 +1969,9 @@ func turnFailureFromCompleted(turn map[string]any, params map[string]any) *TurnF
 
 	codexErrorInfo := mapValue(errInfo, "codexErrorInfo")
 
-	message := firstNonEmpty(
-		stringValue(errInfo, fieldMessage),
-		stringValue(codexErrorInfo, fieldMessage),
-		stringValue(turn, "error"),
-		stringValue(params, "error"),
-	)
-	if message == "" {
-		message = "Codex turn failed"
-	}
-
 	return &TurnFailedError{
 		Cause:      CauseProvider,
-		Message:    message,
+		Message:    turnFailedText,
 		StatusCode: int(int64Value(codexErrorInfo, "httpStatusCode")),
 		ProviderCode: firstNonEmpty(
 			stringValue(codexErrorInfo, "code"),
@@ -1507,7 +2046,7 @@ func isZeroUsage(usage Usage) bool {
 
 func planStatusFromString(status string) PlanStepStatus {
 	switch strings.ToLower(status) {
-	case "inprogress", "in_progress", "active", "running":
+	case "inprogress", "in_progress", statusActive, "running":
 		return PlanStepInProgress
 	case string(EventCompleted), "complete", statusDone:
 		return PlanStepCompleted

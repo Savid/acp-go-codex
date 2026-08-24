@@ -21,6 +21,15 @@ The adapter routes the standard ACP method set and adds namespaced
 | `session/delete` | implemented |
 | `session/set_config_option` | implemented |
 
+For `mode`, `effort`, and `personality`, select-option lists are rendering
+menus rather than local allowlists. Any nonempty value is stored as the current
+value and reaches the next native turn; Codex's acceptance, rejection, or
+fallback is authoritative. Empty values, the boolean variant, and unknown
+`configId` values are still rejected as input-shape errors. A native verdict
+does not arrive for all three: an unrecognised `mode` or `personality` fails the
+next turn with Codex's own text, while an `effort` is accepted whatever it says,
+so a value Codex cannot use surfaces during the turn or not at all.
+
 `session/prompt` and active-turn `session/cancel` require the exact version-1
 `acp-go.dev/route` metadata described in [Sessions](/docs/core/sessions#turn-route-identity).
 Missing and stale turn nonces are invalid params; there is no unstamped path.
@@ -79,11 +88,11 @@ no usage. Each window `id` is codex-native (`primary` or `secondary`),
 instant included only when the harness supplies one. `planType` is included only
 when reported.
 
-The adapter resolves the view from harness data in order: a fresh
-`account/rateLimits/read` query against a live session whose native codex version
-supports it (0.142.0 or newer); otherwise the latest snapshot seen on the
-app-server rate-limit update stream (cached agent-level, latest-wins); otherwise
-an empty window set. Absence is never an error.
+The adapter queries `account/rateLimits/read` through a live session on every
+request. The supported Codex CLI floor includes this app-server method, so
+there is no version capability gate or cached snapshot path. With no live
+session, including placeholder-only use, the response contains an empty window
+set. A native read failure fails the extension request.
 
 ## Slash commands
 

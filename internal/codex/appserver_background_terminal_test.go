@@ -92,13 +92,13 @@ func TestAppServerBackgroundTerminalMethodsSurfaceRPCErrors(t *testing.T) {
 		context.Background(),
 		BackgroundTerminalListRequest{ThreadID: "thread"},
 	)
-	require.ErrorContains(t, err, "list failed")
+	require.EqualError(t, err, "codex app-server request failed (code -32000)")
 
 	_, err = client.TerminateBackgroundTerminal(
 		context.Background(),
 		BackgroundTerminalTerminateRequest{ThreadID: "thread", ProcessID: "process"},
 	)
-	require.ErrorContains(t, err, "terminate failed")
+	require.EqualError(t, err, "codex app-server request failed (code -32000)")
 }
 
 func TestOptionalInt64Value(t *testing.T) {

@@ -21,6 +21,8 @@ type promptResult struct {
 // returns success while a command descendant remains alive.
 // Cancellation must synchronously terminate the target thread's descendants,
 // preserve the shared app-server, and keep the logical session usable.
+// Settlement cannot pass that containment boundary, so the cancelled prompt
+// response is itself proof the descendant is already gone.
 func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
 	// The native process runs as the isolated identity, so the fixture tree has
@@ -36,24 +38,21 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	cancelReturned := filepath.Join(shared, "cancel-returned")
 	childSentinel := filepath.Join(shared, "child-sentinel")
 	rolloutPath := filepath.Join(shared, "rollout.jsonl")
-	tailStopped := filepath.Join(shared, "tail-stopped")
 	require.NoError(t, os.MkdirAll(scratch, 0o711))
 
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(testReachableExecutable(t)),
-		WithProcessIsolation(testProcessIsolation()),
-		WithHome(home),
-		WithScratchDir(scratch),
-		WithSessionStore(store),
-		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+		WithProcessIsolation(fakeCodexProcessIsolation(fakeCodexMode{
 			Mode:           fakeCodexCancelTreeMode,
 			ChildStarted:   childStarted,
 			CancelReturned: cancelReturned,
 			ChildSentinel:  childSentinel,
 			RolloutPath:    rolloutPath,
-			TailStopped:    tailStopped,
 		})),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
 	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
@@ -67,6 +66,12 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		rolloutPath,
 		`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
 	))
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: fakeCodexThreadID,
+		Path:     rolloutPath,
+		Cwd:      root,
+	})
+	require.NoError(t, err)
 
 	sessionID := acp.SessionId("cancel-tree-session")
 	session := newSession(
@@ -74,7 +79,7 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		sessionID,
 		root,
 		nil,
-		codex.Thread{ID: fakeCodexThreadID, Path: rolloutPath},
+		thread,
 		client,
 		sessionMeta{},
 		nil,
@@ -98,12 +103,13 @@ func TestCancelTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	result := <-blocking
 	require.NoError(t, result.err)
 	require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
-	require.NoError(t, os.WriteFile(tailStopped, []byte("stopped"), 0o600))
-	require.NoError(t, <-cancelDone)
-	// If the descendant is still alive after Cancel returns, this marker makes
-	// it publish the violation sentinel immediately. Its independent delayed
-	// write catches a survivor that misses the marker race.
+	// If the descendant is still alive when the cancelled response settles,
+	// this marker makes it publish the violation sentinel immediately. Its
+	// independent delayed write catches a survivor that misses the marker race.
+	// The marker is placed before Cancel is awaited on purpose: the response is
+	// the earlier of the two boundaries a host can observe.
 	require.NoError(t, os.WriteFile(cancelReturned, []byte("returned"), 0o600))
+	require.NoError(t, <-cancelDone)
 	time.Sleep(fakeCodexChildObservationWait)
 	require.NoFileExists(t, childSentinel)
 
@@ -143,18 +149,17 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(testReachableExecutable(t)),
-		WithProcessIsolation(testProcessIsolation()),
-		WithHome(home),
-		WithScratchDir(scratch),
-		WithSessionStore(store),
-		WithTurnTimeout(250*time.Millisecond),
-		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+		WithProcessIsolation(fakeCodexProcessIsolation(fakeCodexMode{
 			Mode:           fakeCodexCancelTreeMode,
 			ChildStarted:   childStarted,
 			CancelReturned: timeoutReturned,
 			ChildSentinel:  childSentinel,
 			RolloutPath:    rolloutPath,
 		})),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
+		WithTurnTimeout(250*time.Millisecond),
 	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
@@ -168,6 +173,12 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		rolloutPath,
 		`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
 	))
+	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
+		ThreadID: fakeCodexThreadID,
+		Path:     rolloutPath,
+		Cwd:      root,
+	})
+	require.NoError(t, err)
 
 	sessionID := acp.SessionId("timeout-tree-session")
 	session := newSession(
@@ -175,7 +186,7 @@ func TestTimeoutTerminatesTargetDescendantsBeforeReturn(t *testing.T) {
 		sessionID,
 		root,
 		nil,
-		codex.Thread{ID: fakeCodexThreadID, Path: rolloutPath},
+		thread,
 		client,
 		sessionMeta{},
 		nil,
@@ -226,24 +237,21 @@ func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	cancelReturned := filepath.Join(shared, "cancel-returned")
 	childSentinel := filepath.Join(shared, "child-sentinel")
 	rolloutPath := filepath.Join(shared, "rollout.jsonl")
-	tailStopped := filepath.Join(shared, "tail-stopped")
 	require.NoError(t, os.MkdirAll(scratch, 0o711))
 
 	store := NewInMemorySessionStore()
 	agent := NewAgent(nativeContainmentTestOptions(
 		WithExecutablePath(testReachableExecutable(t)),
-		WithProcessIsolation(testProcessIsolation()),
-		WithHome(home),
-		WithScratchDir(scratch),
-		WithSessionStore(store),
-		WithEnv(fakeCodexModeEnvMap(fakeCodexMode{
+		WithProcessIsolation(fakeCodexProcessIsolation(fakeCodexMode{
 			Mode:           fakeCodexCancelTreeMode,
 			ChildStarted:   childStarted,
 			CancelReturned: cancelReturned,
 			ChildSentinel:  childSentinel,
 			RolloutPath:    rolloutPath,
-			TailStopped:    tailStopped,
 		})),
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithSessionStore(store),
 	)...)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
@@ -284,9 +292,8 @@ func TestCancelThenCloseAndLoadReconcilesFromExplicitStore(t *testing.T) {
 	result := <-blocking
 	require.NoError(t, result.err)
 	require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
-	require.NoError(t, os.WriteFile(tailStopped, []byte("stopped"), 0o600))
-	require.NoError(t, <-cancelDone)
 	require.NoError(t, os.WriteFile(cancelReturned, []byte("returned"), 0o600))
+	require.NoError(t, <-cancelDone)
 	time.Sleep(fakeCodexChildObservationWait)
 	require.NoFileExists(t, childSentinel)
 

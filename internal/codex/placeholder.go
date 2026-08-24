@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 )
 
+const placeholderTurnID = "placeholder-turn"
+
 // PlaceholderClient is a deterministic in-memory client used by unit tests and
 // as an explicit fallback when the real app-server client is not requested.
 type PlaceholderClient struct {
@@ -17,6 +19,7 @@ type PlaceholderClient struct {
 	mu      sync.Mutex
 	closed  bool
 	threads map[string]Thread
+	streams map[string]*threadStream
 }
 
 func NewPlaceholderClient(options Options) *PlaceholderClient {
@@ -25,6 +28,7 @@ func NewPlaceholderClient(options Options) *PlaceholderClient {
 	return &PlaceholderClient{
 		options: options,
 		threads: make(map[string]Thread),
+		streams: make(map[string]*threadStream),
 	}
 }
 
@@ -40,6 +44,14 @@ func (c *PlaceholderClient) StartThread(ctx context.Context, req ThreadStartRequ
 		return Thread{}, errors.New("codex placeholder client is closed")
 	}
 
+	if c.threads == nil {
+		c.threads = make(map[string]Thread)
+	}
+
+	if c.streams == nil {
+		c.streams = make(map[string]*threadStream)
+	}
+
 	id := fmt.Sprintf("codex-thread-%d", c.nextID.Add(1))
 	thread := Thread{
 		ID:        id,
@@ -50,6 +62,7 @@ func (c *PlaceholderClient) StartThread(ctx context.Context, req ThreadStartRequ
 		Title:     "Codex placeholder session",
 	}
 	c.threads[id] = thread
+	c.streams[id] = newThreadStream(id)
 
 	return thread, nil
 }
@@ -66,9 +79,21 @@ func (c *PlaceholderClient) ResumeThread(ctx context.Context, req ThreadResumeRe
 		return Thread{}, errors.New("codex placeholder client is closed")
 	}
 
+	if c.threads == nil {
+		c.threads = make(map[string]Thread)
+	}
+
+	if c.streams == nil {
+		c.streams = make(map[string]*threadStream)
+	}
+
 	id := firstNonEmpty(req.ThreadID, fmt.Sprintf("codex-thread-%d", c.nextID.Add(1)))
 	thread := Thread{ID: id, SessionID: id, Cwd: req.Cwd, Model: firstNonEmpty(c.options.DefaultModel, valueDefault), Provider: valuePlaceholder, Title: "Codex placeholder session"}
+
 	c.threads[id] = thread
+	if c.streams[id] == nil {
+		c.streams[id] = newThreadStream(id)
+	}
 
 	return thread, nil
 }
@@ -138,45 +163,48 @@ func (c *PlaceholderClient) ListTurns(ctx context.Context, req ThreadTurnsListRe
 		return ThreadTurnsListResponse{}, ErrThreadNotFound
 	}
 
-	return ThreadTurnsListResponse{Turns: []map[string]any{{fieldID: "placeholder-turn"}}}, nil
+	return ThreadTurnsListResponse{Turns: []map[string]any{{fieldID: placeholderTurnID}}}, nil
 }
 
-func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (<-chan Event, error) {
+func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (Turn, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return Turn{}, err
 	}
 
 	c.mu.Lock()
 	_, ok := c.threads[req.ThreadID]
+	stream := c.streams[req.ThreadID]
 	closed := c.closed
 	c.mu.Unlock()
 
 	if closed {
-		return nil, errors.New("codex placeholder client is closed")
+		return Turn{}, errors.New("codex placeholder client is closed")
 	}
 
 	if !ok {
-		return nil, ErrThreadNotFound
+		return Turn{}, ErrThreadNotFound
 	}
 
-	events := make(chan Event)
+	if stream == nil || !stream.claimedAndLive() {
+		return Turn{}, errors.New("codex placeholder turn requires a live claimed thread event stream")
+	}
 
 	go func() {
 		defer recoverCodexGoroutine(ctx, "Codex placeholder turn")
-		defer close(events)
 
 		send := func(event Event) bool {
+			event.Scope = EventScopeThread
+
 			event.ThreadID = req.ThreadID
 			if event.TurnID == "" {
-				event.TurnID = "placeholder-turn"
+				event.TurnID = placeholderTurnID
 			}
 
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return false
-			case events <- event:
-				return true
 			}
+
+			return stream.send(event)
 		}
 
 		if !send(Event{Kind: EventPlanUpdated, Plan: []PlanStep{
@@ -197,7 +225,46 @@ func (c *PlaceholderClient) RunTurn(ctx context.Context, req TurnStartRequest) (
 		send(Event{Kind: EventCompleted, StopReason: StopReasonEndTurn})
 	}()
 
-	return events, nil
+	return Turn{ID: placeholderTurnID}, nil
+}
+
+func (c *PlaceholderClient) SubscribeThread(ctx context.Context, threadID string) (ThreadEventStream, error) {
+	if err := ctx.Err(); err != nil {
+		return ThreadEventStream{}, err
+	}
+
+	c.mu.Lock()
+
+	stream := c.streams[threadID]
+	if c.closed || stream == nil || !stream.claim() {
+		c.mu.Unlock()
+
+		return ThreadEventStream{}, errors.New("codex placeholder thread event stream is unavailable")
+	}
+	c.mu.Unlock()
+
+	var once sync.Once
+
+	release := func() {
+		once.Do(func() {
+			c.mu.Lock()
+			if c.streams[threadID] == stream {
+				delete(c.streams, threadID)
+			}
+			c.mu.Unlock()
+			stream.stop()
+		})
+	}
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			release()
+		case <-stream.done:
+		}
+	}()
+
+	return ThreadEventStream{Events: stream.out, Release: release}, nil
 }
 
 func (c *PlaceholderClient) SteerTurn(ctx context.Context, req TurnSteerRequest) error {
@@ -264,7 +331,18 @@ func (c *PlaceholderClient) MCPServerStatusList(context.Context, string) (MCPSer
 	return MCPServerStatusListResponse{Raw: map[string]any{valuePlaceholder: true}}, nil
 }
 
-func (c *PlaceholderClient) UnsubscribeThread(context.Context, string) error { return nil }
+func (c *PlaceholderClient) UnsubscribeThread(_ context.Context, threadID string) error {
+	c.mu.Lock()
+	stream := c.streams[threadID]
+	delete(c.streams, threadID)
+	c.mu.Unlock()
+
+	if stream != nil {
+		stream.stop()
+	}
+
+	return nil
+}
 
 func (c *PlaceholderClient) DeleteThread(_ context.Context, req ThreadDeleteRequest) error {
 	if req.ThreadID == "" {
@@ -280,6 +358,11 @@ func (c *PlaceholderClient) DeleteThread(_ context.Context, req ThreadDeleteRequ
 
 	delete(c.threads, req.ThreadID)
 
+	if stream := c.streams[req.ThreadID]; stream != nil {
+		delete(c.streams, req.ThreadID)
+		stream.stop()
+	}
+
 	return nil
 }
 
@@ -292,10 +375,6 @@ func (c *PlaceholderClient) ModelList(context.Context) ([]Model, error) {
 func (c *PlaceholderClient) AccountRead(context.Context) (Account, error) {
 	return Account{Raw: map[string]any{fieldType: valuePlaceholder}}, nil
 }
-
-// RateLimitsSupported always reports false: the placeholder client has no
-// native app-server and therefore no account/rateLimits/read request.
-func (c *PlaceholderClient) RateLimitsSupported() bool { return false }
 
 // ReadRateLimits returns an empty snapshot: the placeholder client never has
 // harness-reported rate limits.
@@ -314,7 +393,12 @@ func (c *PlaceholderClient) Close(context.Context) error {
 	defer c.mu.Unlock()
 
 	c.closed = true
+
 	c.threads = make(map[string]Thread)
+	for id, stream := range c.streams {
+		delete(c.streams, id)
+		stream.stop()
+	}
 
 	return nil
 }

@@ -44,6 +44,7 @@ func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) 
 	require.NoError(t, err)
 	session := agent.sessionMust(resp.SessionId)
 	_ = session.beginTurn(context.Background(), "active")
+	session.setTurnID("native-turn-active")
 
 	require.Error(t, agent.Cancel(context.Background(), CancelRequest(resp.SessionId, "stale")))
 	require.False(t, session.wasTurnCancelled())

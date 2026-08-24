@@ -590,7 +590,7 @@ func (p *providerAuth) goSafe(name string, fn func()) {
 }
 
 func loggableError(err error) slog.Attr {
-	return slog.String(jsonFieldError, err.Error())
+	return slog.String(jsonFieldError, valueInternalFailure)
 }
 
 func invalidAuthField(path string) error {
@@ -657,6 +657,10 @@ func (a *Agent) authCapabilities() acp.AgentAuthCapabilities {
 }
 
 func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.AuthenticateResponse{}, err
+	}
+
 	if err := a.ensureOpen(); err != nil {
 		return acp.AuthenticateResponse{}, err
 	}
@@ -698,7 +702,11 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	return acp.AuthenticateResponse{Meta: accountResponseMeta(account)}, nil
 }
 
-func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResponse, error) {
+func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+	if err := rejectLifecycleKey(params.Meta); err != nil {
+		return acp.LogoutResponse{}, err
+	}
+
 	if err := a.ensureOpen(); err != nil {
 		return acp.LogoutResponse{}, err
 	}

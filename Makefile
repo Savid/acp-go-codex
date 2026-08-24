@@ -7,7 +7,7 @@ GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$
 
 # Removed public surfaces and forbidden hard-cutover terms. Hex-escaped so the
 # term list never contains a literal forbidden term. Expanded with `printf %b`.
-REMOVED_PUBLIC_TERMS = codex\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|\\b\x4e\x45\x53\\b|SSE\x20MCP|mcpCapabilities\x2eacp|ExportSessio\x6e|ImportSessio\x6e|DeleteSessio\x6e|ParseConfi\x67|CodexSessio\x6e
+REMOVED_PUBLIC_TERMS = codex\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|\x60goa\x6c\x60|"goa\x6c"|ActivityGoa\x6c|\\b\x4e\x45\x53\\b|SSE\x20MCP|mcpCapabilities\x2eacp|ExportSessio\x6e|ImportSessio\x6e|DeleteSessio\x6e|ParseConfi\x67|CodexSessio\x6e
 
 .PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-native-browser test-integration-smoke tidy vuln
 

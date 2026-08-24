@@ -5,14 +5,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
+	"github.com/stretchr/testify/require"
 )
 
 type imagePromptClient struct {
@@ -22,11 +26,21 @@ type imagePromptClient struct {
 	lastStart codex.TurnStartRequest
 }
 
+type turnAndErrorClient struct {
+	*spyCodexClient
+	turn codex.Turn
+	err  error
+}
+
+func (c *turnAndErrorClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	return c.turn, c.err
+}
+
 func (c *imagePromptClient) ModelList(context.Context) ([]codex.Model, error) {
 	return append([]codex.Model(nil), c.models...), nil
 }
 
-func (c *imagePromptClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (<-chan codex.Event, error) {
+func (c *imagePromptClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	c.runCalls++
 	c.lastStart = req
 
@@ -109,7 +123,7 @@ func TestPromptImageModelGatePreparationAndMirrorFailures(t *testing.T) {
 	}
 
 	scratchData, _ := scratchErr.Data.(map[string]any)
-	if scratchData[jsonFieldMessage] != promptImageScratchFailure {
+	if scratchData[jsonFieldMessage] != "Codex transport failed" {
 		t.Fatalf("scratch message=%v", scratchData[jsonFieldMessage])
 	}
 
@@ -273,53 +287,71 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
 	promptSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
+	t.Cleanup(func() { promptSession.fenceSession() })
+	bindClient := func(client *runEventsClient) {
+		previous := promptSession
+		previous.fenceSession()
+		promptSession = &session{
+			agent: previous.agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: client,
+			rawMessages: previous.rawMessages,
+		}
+		require.NoError(t, promptSession.attachNativeEvents())
+	}
 	held := promptSession.turnQueue()
 	held <- struct{}{}
-	if resp, err := promptSession.Prompt(canceledContext(), TextPromptRequest("s", "test-turn", "hi")); err != nil || resp.StopReason != acp.StopReasonCancelled {
+	// The slot was never taken, so no turn opened and there is no terminal to
+	// report: the caller's own context error is the answer, not a response.
+	if resp, err := promptSession.Prompt(canceledContext(), TextPromptRequest("s", "test-turn", "hi")); !errors.Is(err, context.Canceled) ||
+		resp.StopReason != "" {
 		t.Fatalf("canceled acquire resp=%#v err=%v", resp, err)
 	}
 	<-held
 
-	promptSession.client = &runEventsClient{runErr: errors.New("not logged in")}
+	bindClient(&runEventsClient{runErr: errors.New("not logged in")})
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt accepted RunTurn error")
 	}
 
 	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
-	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventAgentMessageDelta, ThreadID: "thread", TurnID: "turn", Text: "hi"}}}
+	bindClient(&runEventsClient{events: []codex.Event{{Kind: codex.EventAgentMessageDelta, ThreadID: "thread", TurnID: "turn", Text: "hi"}}})
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored update error")
 	}
-	promptSession.client = &runEventsClient{events: []codex.Event{{
+	bindClient(&runEventsClient{events: []codex.Event{{
 		Kind:     codex.EventUsageUpdated,
 		ThreadID: "thread",
 		TurnID:   "turn",
 		TokenUsage: codex.TokenUsage{
 			Last: codex.Usage{InputTokens: 1, OutputTokens: 2},
 		},
-	}}}
+	}}})
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored usage update error")
 	}
 
 	agent.setAgentClient(newRecordingAgentClient())
 	promptSession.rawMessages = rawMessageConfig{enabled: true}
-	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventRaw, ThreadID: "thread", TurnID: "turn", RawMethod: "raw", RawParams: json.RawMessage(`{"type":"event_msg"}`)}}}
+	bindClient(&runEventsClient{events: []codex.Event{
+		{Kind: codex.EventRaw, ThreadID: "thread", TurnID: "turn", RawMethod: "raw", RawParams: json.RawMessage(`{"type":"event_msg"}`)},
+		{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn", StopReason: codex.StopReasonEndTurn},
+	}})
 	agent.setAgentClient(&extensionErrorClient{recordingAgentClient: newRecordingAgentClient()})
-	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
-		t.Fatal("Prompt ignored raw extension error")
-	}
+	rawFailures := promptSession.rawEmitFailures
+	_, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi"))
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "extension failed")
+	require.Greater(t, promptSession.rawEmitFailures, rawFailures)
 
 	agent.setAgentClient(newRecordingAgentClient())
 	promptSession.rawMessages = rawMessageConfig{}
 	promptSession.clientDead = false
-	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("boom")}}}
+	bindClient(&runEventsClient{events: []codex.Event{{Kind: codex.EventError, ThreadID: "thread", TurnID: "turn", Err: errors.New("boom")}}})
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored event error")
 	}
 
 	promptSession.clientDead = false
-	promptSession.client = &runEventsClient{}
+	bindClient(&runEventsClient{closeFeed: true})
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); !isTurnFailure(err, codex.CauseTransport) {
 		t.Fatalf("Prompt with closed event stream err=%v, want codex_turn_failed transport", err)
 	}
@@ -328,7 +360,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	promptSession.clientDead = false
 	promptSession.agent = NewAgent(WithSessionStore(NewInMemorySessionStore()))
 	promptSession.agent.setAgentClient(newRecordingAgentClient())
-	promptSession.client = &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"}}}
+	bindClient(&runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"}}})
 	promptSession.rolloutPath = filepath.Join(t.TempDir(), "missing.jsonl")
 	if _, err := promptSession.Prompt(ctx, TextPromptRequest("s", "test-turn", "hi")); err == nil {
 		t.Fatal("Prompt ignored final rollout mirror error")
@@ -380,6 +412,100 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	}
 }
 
+func TestPromptLifecycleAdmissionAndToolRegistryFailuresAreReturned(t *testing.T) {
+	negotiated := lifecycle.Negotiated{Versions: []int{lifecycle.Version}}
+	agent := NewAgent()
+	agent.lifecycle = negotiated
+	agent.setAgentClient(newRecordingAgentClient())
+	s := &session{
+		agent: agent, id: "session", cwd: t.TempDir(), codexThreadID: "thread",
+		client: &runEventsClient{events: []codex.Event{{Kind: codex.EventCompleted, StopReason: codex.StopReasonEndTurn}}},
+	}
+	t.Cleanup(s.fenceSession)
+
+	request := TextPromptRequest(s.id, "nonce", "text")
+	request.Meta[lifecycle.MetaKey] = map[string]any{"version": 2}
+	_, err := s.Prompt(t.Context(), request)
+	require.Error(t, err)
+
+	s.closing = true
+	request.Meta[lifecycle.MetaKey] = map[string]any{
+		"version": 1, "submission": map[string]any{"submissionId": "submission", "clientNonce": "nonce"},
+	}
+	_, err = s.Prompt(t.Context(), request)
+	require.Error(t, err)
+
+	failure := errors.New("permission registry failed")
+	s = &session{permissionTools: permissionToolRegistry{failure: failure}}
+	state := &promptEventState{toolContents: make(map[acp.ToolCallId][]acp.ToolCallContent), imageTools: newImageToolState()}
+	event := codex.Event{Kind: codex.EventToolStarted, Tool: codex.ToolEvent{ID: "tool", Kind: toolKindMcpToolCall}}
+	require.ErrorIs(t, s.emitPromptUpdates(t.Context(), event, event, state), failure)
+}
+
+func TestPromptCloseRaceBufferedFailureAndIncompleteStreamAreContained(t *testing.T) {
+	agent := NewAgent()
+	agent.setAgentClient(newRecordingAgentClient())
+	client := &racingSubscribeClient{
+		spyCodexClient: newSpyCodexClient(), entered: make(chan struct{}), release: make(chan struct{}), released: make(chan struct{}),
+	}
+	s := &session{agent: agent, id: "session", cwd: t.TempDir(), codexThreadID: "thread", client: client}
+	defer s.fenceSession()
+	promptDone := make(chan error, 1)
+	go func() {
+		_, promptErr := s.Prompt(t.Context(), TextPromptRequest(s.id, "nonce", "text"))
+		promptDone <- promptErr
+	}()
+	<-client.entered
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+	close(client.release)
+	require.Error(t, <-promptDone)
+	<-client.released
+
+	newRun := func(runClient codex.Client, preBind []codex.Event, conn agentClient) (*session, *promptIncarnation, promptTurnResult) {
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := &session{agent: agent, id: "session", codexThreadID: "thread", client: runClient}
+		in := &promptIncarnation{
+			session: session, preBind: preBind, events: make(chan codex.Event, sessionNativeEventBuffer+1),
+		}
+		session.incarnation = in
+		result := session.runPromptTurn(t.Context(), t.Context(), promptRun{
+			incarnation: in, submission: lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"},
+		})
+
+		return session, in, result
+	}
+
+	deliveryErr := errors.New("buffered update failed")
+	_, _, result := newRun(
+		&turnAndErrorClient{spyCodexClient: newSpyCodexClient(), err: errors.New("ack failed")},
+		[]codex.Event{{Kind: codex.EventAgentMessageDelta, TurnID: "native", Text: "text"}},
+		&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: deliveryErr},
+	)
+	require.Error(t, result.failure)
+
+	runClient := &turnAndErrorClient{spyCodexClient: newSpyCodexClient(), err: errors.New("ack failed")}
+	s, _, result = newRun(runClient, []codex.Event{{TurnID: "one"}, {TurnID: "two"}}, newRecordingAgentClient())
+	require.Error(t, result.failure)
+	require.True(t, s.clientDead)
+
+	_, _, result = newRun(
+		&turnAndErrorClient{spyCodexClient: newSpyCodexClient(), turn: codex.Turn{ID: "native"}, err: codex.ErrTurnEventOverflow},
+		nil, newRecordingAgentClient(),
+	)
+	require.Error(t, result.failure)
+
+	events := make(chan codex.Event)
+	close(events)
+	standalone := &session{agent: NewAgent()}
+	result = standalone.drivePromptTurn(t.Context(), t.Context(), events, promptTurnResult{
+		state: &promptEventState{agentText: &strings.Builder{}},
+	})
+	require.Error(t, result.failure)
+}
+
 func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	promptSession := &session{agent: NewAgent(), id: "s"}
 	promptSession.setTurnID("")
@@ -391,14 +517,15 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 	if len(promptSession.accountMeta) != 0 {
 		t.Fatal("empty account meta was stored")
 	}
-	if err := (&session{materializedPath: filepath.Join(t.TempDir(), "missing")}).Close(context.Background()); err != nil {
+	missingMaterial := &session{agent: NewAgent(), materializedPath: filepath.Join(t.TempDir(), "missing")}
+	if err := missingMaterial.Close(context.Background()); err != nil {
 		t.Fatalf("close missing materialized path returned error: %v", err)
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "child"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write child: %v", err)
 	}
-	if err := (&session{materializedPath: dir}).Close(context.Background()); err == nil {
+	if err := (&session{agent: NewAgent(), materializedPath: dir}).Close(context.Background()); err == nil {
 		t.Fatal("close ignored materialized remove error")
 	}
 	if update := eventUpdates(codex.Event{Kind: codex.EventWarning, Text: "warn"}); len(update) != 1 || update[0].AgentThoughtChunk == nil {
@@ -605,21 +732,163 @@ func TestPromptPublishesTurnIdentityWithoutAssistantText(t *testing.T) {
 
 type rolloutWritingRunClient struct {
 	runEventsClient
-	path    string
-	entries []SessionStoreEntry
+	path     string
+	entries  []SessionStoreEntry
+	runCalls int
+}
+
+type emptyTurnIDClient struct {
+	*spyCodexClient
+}
+
+type overflowTurnClient struct {
+	*spyCodexClient
+	dispatchFailure bool
+	cancelStarted   chan [2]string
+	cancelRelease   <-chan struct{}
+}
+
+type reclaimingPromptClient struct {
+	*runEventsClient
+	muSubscribe   sync.Mutex
+	subscriptions int
+}
+
+func (c *reclaimingPromptClient) SubscribeThread(
+	ctx context.Context,
+	threadID string,
+) (codex.ThreadEventStream, error) {
+	c.muSubscribe.Lock()
+	c.subscriptions++
+	c.muSubscribe.Unlock()
+
+	return c.runEventsClient.SubscribeThread(ctx, threadID)
+}
+
+func (*emptyTurnIDClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	return codex.Turn{}, nil
+}
+
+func (c *overflowTurnClient) RunTurn(
+	_ context.Context,
+	req codex.TurnStartRequest,
+) (codex.Turn, error) {
+	if c.dispatchFailure {
+		return codex.Turn{ID: "overflow-turn"}, codex.ErrTurnEventOverflow
+	}
+
+	if err := c.publishTurn(req.ThreadID, "overflow-turn", []codex.Event{{
+		Kind: codex.EventError, TurnID: "overflow-turn", Err: codex.ErrTurnEventOverflow,
+	}}); err != nil {
+		return codex.Turn{}, err
+	}
+
+	return codex.Turn{ID: "overflow-turn"}, nil
+}
+
+func (c *overflowTurnClient) CancelTurn(_ context.Context, threadID, turnID string) error {
+	c.cancelStarted <- [2]string{threadID, turnID}
+	<-c.cancelRelease
+
+	return nil
+}
+
+func TestPromptRejectsAcceptedTurnWithoutNativeIdentity(t *testing.T) {
+	agent := NewAgent()
+	session := &session{
+		agent: agent, id: "session", cwd: "/tmp/project",
+		codexThreadID: "thread", client: &emptyTurnIDClient{spyCodexClient: newSpyCodexClient()},
+	}
+
+	_, err := session.Prompt(
+		context.Background(),
+		TextPromptRequest(session.id, "turn-nonce", "hello"),
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "without naming it")
+}
+
+func TestNonLifecyclePromptReclaimsBrokerAcrossInvalidAndMultiplePrompts(t *testing.T) {
+	agent := NewAgent()
+	agent.setAgentClient(newRecordingAgentClient())
+	client := &reclaimingPromptClient{runEventsClient: &runEventsClient{events: []codex.Event{{
+		Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn",
+	}}}}
+	s := &session{
+		agent: agent, id: "session", cwd: t.TempDir(), codexThreadID: "thread", client: client,
+	}
+
+	invalid := acp.PromptRequest{SessionId: s.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}
+	for range 2 {
+		_, err := s.Prompt(t.Context(), invalid)
+		require.Error(t, err)
+		client.ensureSpy().mu.Lock()
+		require.NotContains(t, client.ensureSpy().feeds, "thread")
+		client.ensureSpy().mu.Unlock()
+	}
+
+	response, err := s.Prompt(t.Context(), TextPromptRequest(s.id, "nonce", "hello"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+	client.muSubscribe.Lock()
+	require.Equal(t, 3, client.subscriptions)
+	client.muSubscribe.Unlock()
+	client.ensureSpy().mu.Lock()
+	require.NotContains(t, client.ensureSpy().feeds, "thread")
+	client.ensureSpy().mu.Unlock()
+}
+
+func TestTurnOverflowContainsNativeTurnBeforePromptFailure(t *testing.T) {
+	for _, dispatchFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dispatch_failure_%t", dispatchFailure), func(t *testing.T) {
+			cancelRelease := make(chan struct{})
+			client := &overflowTurnClient{
+				spyCodexClient:  newSpyCodexClient(),
+				dispatchFailure: dispatchFailure,
+				cancelStarted:   make(chan [2]string, 1),
+				cancelRelease:   cancelRelease,
+			}
+			session := &session{
+				agent: NewAgent(), id: "session", cwd: "/tmp/project",
+				codexThreadID: "thread", client: client,
+			}
+			t.Cleanup(session.fenceSession)
+			promptDone := make(chan error, 1)
+			go func() {
+				_, err := session.Prompt(
+					context.Background(),
+					TextPromptRequest(session.id, "turn-nonce", "hello"),
+				)
+				promptDone <- err
+			}()
+
+			require.Equal(t, [2]string{"thread", "overflow-turn"}, <-client.cancelStarted)
+			select {
+			case err := <-promptDone:
+				t.Fatalf("overflow failed prompt before native containment completed: %v", err)
+			default:
+			}
+
+			close(cancelRelease)
+			err := <-promptDone
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), codex.ErrTurnEventOverflow.Error())
+		})
+	}
 }
 
 func (c *rolloutWritingRunClient) RunTurn(
 	ctx context.Context,
 	req codex.TurnStartRequest,
-) (<-chan codex.Event, error) {
+) (codex.Turn, error) {
+	c.runCalls++
 	var content strings.Builder
 	for _, entry := range c.entries {
 		content.Write(entry)
 		content.WriteByte('\n')
 	}
 	if err := os.WriteFile(c.path, []byte(content.String()), 0o600); err != nil {
-		return nil, err
+		return codex.Turn{}, err
 	}
 
 	return c.runEventsClient.RunTurn(ctx, req)
@@ -680,6 +949,7 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 			{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
 		}},
 	}
+	t.Cleanup(usageSession.fenceSession)
 	usageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("usage prompt returned error: %v", err)
@@ -722,6 +992,7 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 		TurnID:   "turn",
 		Usage:    codex.Usage{InputTokens: 1, OutputTokens: 2},
 	}}}
+	require.NoError(t, usageSession.rebindNativeEvents(usageSession.client))
 	completedUsageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("completed usage prompt returned error: %v", err)
@@ -731,183 +1002,6 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 	}
 	if len(completedUsageConn.updates) != 1 || completedUsageConn.updates[0].Update.UsageUpdate == nil {
 		t.Fatalf("completed usage updates = %#v", completedUsageConn.updates)
-	}
-}
-
-func TestSessionPromptRawRolloutTail(t *testing.T) {
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, []byte("\n"+`{"type":"event_msg"}`+"\n"), 0o600); err != nil {
-		t.Fatalf("write rollout: %v", err)
-	}
-	rawSession := &session{agent: NewAgent(), id: "raw", cwd: "/tmp/project", rolloutPath: rollout, rawMessages: rawMessageConfig{enabled: true}}
-	if err := rawSession.mirrorAndEmitRollout(context.Background()); err != nil {
-		t.Fatalf("mirror blank+valid rollout returned error: %v", err)
-	}
-	stop, done := rawSession.startRolloutTail(context.Background(), nil, nil)
-	time.Sleep(150 * time.Millisecond)
-	stop()
-	<-done
-}
-
-func TestPromptUsesRolloutTaskCompleteFallback(t *testing.T) {
-	withRolloutCompletionFallback(t, time.Millisecond)
-
-	agent := NewAgent()
-	conn := newRecordingAgentClient()
-	agent.setAgentClient(conn)
-
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
-		t.Fatalf("write empty rollout: %v", err)
-	}
-	writeErr := make(chan error, 1)
-	time.AfterFunc(20*time.Millisecond, func() {
-		writeErr <- os.WriteFile(rollout, []byte(
-			`{"type":"event_msg","payload":{"type":"task_started","turn_id":"fallback-turn"}}`+"\n"+
-				`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"fallback-message","content":[{"type":"output_text","text":"1 + 1 = 2"}]}}`+"\n"+
-				`{"type":"event_msg","payload":{"type":"agent_message","message":"1 + 1 = 2"}}`+"\n"+
-				`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"fallback-turn"}}`+"\n",
-		), 0o600)
-	})
-	defer func() {
-		if err := <-writeErr; err != nil {
-			t.Fatalf("write rollout rows: %v", err)
-		}
-	}()
-	session := &session{
-		agent:         agent,
-		id:            "fallback",
-		cwd:           "/tmp/project",
-		codexThreadID: "thread",
-		rolloutPath:   rollout,
-		client:        &openRunEventsClient{},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
-	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("fallback prompt resp=%#v err=%v", resp, err)
-	}
-	if len(conn.updates) != 2 || conn.updates[0].Update.AgentMessageChunk == nil {
-		t.Fatalf("fallback updates = %#v", conn.updates)
-	}
-	wantIdentity := nativeTurnIdentity{turnID: "fallback-turn", messageID: "fallback-message"}
-	if got := nativeIdentityFromMeta(resp.Meta); got != wantIdentity {
-		t.Fatalf("fallback response identity = %#v, want %#v", got, wantIdentity)
-	}
-	if got := lastNotificationNativeIdentity(conn.updates); got != wantIdentity {
-		t.Fatalf("fallback update identity = %#v, want %#v", got, wantIdentity)
-	}
-	if session.completionRows != 4 || session.visibleRows != 4 {
-		t.Fatalf("rollout cursors completion=%d visible=%d", session.completionRows, session.visibleRows)
-	}
-}
-
-func TestPromptUsesImmediateRolloutTaskCompleteFallback(t *testing.T) {
-	withRolloutCompletionFallback(t, 0)
-
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
-		t.Fatalf("write empty rollout: %v", err)
-	}
-	writeErr := make(chan error, 1)
-	time.AfterFunc(20*time.Millisecond, func() {
-		writeErr <- os.WriteFile(rollout, []byte(`{"type":"event_msg","payload":{"type":"task_complete"}}`+"\n"), 0o600)
-	})
-	defer func() {
-		if err := <-writeErr; err != nil {
-			t.Fatalf("write rollout rows: %v", err)
-		}
-	}()
-	session := &session{
-		agent:         NewAgent(),
-		id:            "fallback",
-		cwd:           "/tmp/project",
-		codexThreadID: "thread",
-		rolloutPath:   rollout,
-		client:        &openRunEventsClient{},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	resp, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "prove it"))
-	if err != nil || resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("immediate fallback prompt resp=%#v err=%v", resp, err)
-	}
-	if session.completionRows != 1 {
-		t.Fatalf("completion cursor = %d", session.completionRows)
-	}
-}
-
-func TestPromptReturnsRolloutEventUpdateError(t *testing.T) {
-	agent := NewAgent()
-	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
-
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
-		t.Fatalf("write empty rollout: %v", err)
-	}
-	writeErr := make(chan error, 1)
-	time.AfterFunc(20*time.Millisecond, func() {
-		writeErr <- os.WriteFile(rollout, []byte(
-			`{"type":"event_msg","payload":{"type":"agent_message","message":"visible"}}`+"\n",
-		), 0o600)
-	})
-	defer func() {
-		if err := <-writeErr; err != nil {
-			t.Fatalf("write rollout rows: %v", err)
-		}
-	}()
-
-	session := &session{
-		agent:         agent,
-		id:            "fallback",
-		cwd:           "/tmp/project",
-		codexThreadID: "thread",
-		rolloutPath:   rollout,
-		client:        &openRunEventsClient{},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if _, err := session.Prompt(ctx, TextPromptRequest("fallback", "test-turn", "show it")); err == nil {
-		t.Fatal("rollout event update error was ignored")
-	}
-}
-
-func TestPromptReturnsTerminalRolloutIdentityUpdateError(t *testing.T) {
-	withRolloutCompletionFallback(t, time.Millisecond)
-
-	updateErr := errors.New("identity update failed")
-	agent := NewAgent()
-	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
-
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
-		t.Fatalf("write empty rollout: %v", err)
-	}
-	writeErr := make(chan error, 1)
-	time.AfterFunc(20*time.Millisecond, func() {
-		writeErr <- os.WriteFile(rollout, []byte(
-			`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"empty-message","content":[]}}`+"\n"+
-				`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"identity-turn"}}`+"\n",
-		), 0o600)
-	})
-	defer func() {
-		if err := <-writeErr; err != nil {
-			t.Fatalf("write rollout rows: %v", err)
-		}
-	}()
-
-	s := &session{
-		agent: agent, id: "identity-error", cwd: t.TempDir(), codexThreadID: "thread",
-		rolloutPath: rollout, client: &openRunEventsClient{},
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if _, err := s.Prompt(ctx, TextPromptRequest(s.id, "test-turn", "run")); !errors.Is(err, updateErr) {
-		t.Fatalf("Prompt error = %v, want %v", err, updateErr)
 	}
 }
 
@@ -1034,8 +1128,14 @@ func TestEventUpdateEmptyAndFallbackBranches(t *testing.T) {
 	if planStatus(codex.PlanStepPending) != acp.PlanEntryStatusPending {
 		t.Fatal("pending plan status did not map")
 	}
-	if stopReasonFromCodex(codex.StopReasonCancelled) != acp.StopReasonCancelled || stopReasonFromCodex(codex.StopReasonError) != acp.StopReasonEndTurn {
-		t.Fatal("stop reason mapping changed")
+	if stop, clean := promptStopReason(codex.StopReasonCancelled); !clean || stop != acp.StopReasonCancelled {
+		t.Fatalf("cancelled stop reason = %q clean=%v", stop, clean)
+	}
+	if stop, clean := promptStopReason(codex.StopReasonError); clean || stop != "" {
+		t.Fatalf("a native failure reported stop reason %q clean=%v", stop, clean)
+	}
+	if stop, clean := promptStopReason(codex.StopReasonEndTurn); !clean || stop != acp.StopReasonEndTurn {
+		t.Fatalf("end-turn stop reason = %q clean=%v", stop, clean)
 	}
 	if usageFromCodex(codex.Usage{}) != nil {
 		t.Fatal("zero usage emitted usage")
@@ -1103,8 +1203,8 @@ func TestPromptValueHelpers(t *testing.T) {
 	if toolKind(codex.ToolEvent{Kind: "mcpToolCall"}) != acp.ToolKindOther || toolKind(codex.ToolEvent{Kind: "unknown"}) != acp.ToolKindOther {
 		t.Fatal("toolKind special cases failed")
 	}
-	if stopReasonFromCodex(codex.StopReasonCancelled) != acp.StopReasonCancelled || stopReasonFromCodex(codex.StopReasonError) != acp.StopReasonEndTurn {
-		t.Fatal("stopReasonFromCodex special cases failed")
+	if _, clean := promptStopReason(codex.StopReasonError); clean {
+		t.Fatal("a native failure was reported as a clean stop")
 	}
 }
 
@@ -1118,6 +1218,58 @@ func TestRecordRawEmitFailure(t *testing.T) {
 	recordSession.recordRawEmitFailure(context.Background(), errors.New("emit failed"))
 	if recordSession.rawEmitFailures != 1 {
 		t.Fatalf("raw emit failure counter = %d, want 1", recordSession.rawEmitFailures)
+	}
+}
+
+type deliveryContainmentClient struct {
+	*spyCodexClient
+	mu          sync.Mutex
+	cancelCalls int
+}
+
+func (c *deliveryContainmentClient) CancelTurn(ctx context.Context, threadID string, turnID string) error {
+	c.mu.Lock()
+	c.cancelCalls++
+	c.mu.Unlock()
+
+	return c.spyCodexClient.CancelTurn(ctx, threadID, turnID)
+}
+
+func TestAcceptedTurnRequestErrorDeliveryIsContainedAndPreserved(t *testing.T) {
+	deliveryErr := acp.NewInternalError(map[string]any{"error": "host-delivery-sentinel"})
+	agent := NewAgent()
+	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: deliveryErr})
+	client := &deliveryContainmentClient{spyCodexClient: newSpyCodexClient()}
+	s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	turnCtx := s.beginTurn(t.Context(), "nonce")
+	defer s.finishTurn()
+	s.markTurnDispatched()
+	s.stageTurnID("native-turn")
+	s.acceptTurnBinding()
+
+	agentText := &strings.Builder{}
+	result := promptTurnResult{accepted: true, state: &promptEventState{
+		snapshot: s.snapshot(), agentDeltaItems: map[string]struct{}{}, reasoningDeltaItems: map[string]struct{}{},
+		toolContents: make(map[acp.ToolCallId][]acp.ToolCallContent), agentText: agentText,
+		stopReason: acp.StopReasonEndTurn, imageTools: newImageToolState(),
+	}}
+	events := make(chan codex.Event, 1)
+	events <- codex.Event{Kind: codex.EventAgentMessageDelta, Scope: codex.EventScopeThread, ThreadID: "thread", TurnID: "native-turn", Text: "hello"}
+	close(events)
+
+	result = s.drivePromptTurn(t.Context(), turnCtx, events, result)
+	var got *acp.RequestError
+	require.ErrorAs(t, result.failure, &got)
+	require.Same(t, deliveryErr, got)
+	client.mu.Lock()
+	cancelCalls := client.cancelCalls
+	client.mu.Unlock()
+	require.Equal(t, 1, cancelCalls)
+	require.NotNil(t, s.turnContainment)
+	select {
+	case <-s.turnContainment.done:
+	default:
+		t.Fatal("host delivery failure did not complete native containment")
 	}
 }
 
@@ -1152,4 +1304,108 @@ func TestPromptContentFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// heldTurnClient parks inside the native turn until the test releases it, so a
+// second prompt arrives while the first still holds the session's single turn
+// slot.
+type heldTurnClient struct {
+	*spyCodexClient
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *heldTurnClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
+	close(c.started)
+	<-c.release
+
+	return codex.Turn{}, errors.New("native turn released")
+}
+
+// Prompt turns are serialized per session, so a second prompt arriving while one
+// is in flight is answered with the `session_prompt` backpressure invalid
+// request. It is an error and never a response, because the second prompt never
+// opened a turn and so has no terminal to report — a successful `cancelled`
+// there would invent one and hide the only signal the host can retry on.
+func TestConcurrentPromptIsRefusedWithSessionPromptBackpressure(t *testing.T) {
+	client := &heldTurnClient{
+		spyCodexClient: newSpyCodexClient(),
+		started:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return client, nil
+	}))
+	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	require.NoError(t, err)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, promptErr := agent.Prompt(
+			context.Background(),
+			TextPromptRequest(created.SessionId, "first-turn", "hold the slot"),
+		)
+		firstDone <- promptErr
+	}()
+	<-client.started
+
+	resp, err := agent.Prompt(
+		context.Background(),
+		TextPromptRequest(created.SessionId, "second-turn", "concurrent"),
+	)
+	require.Equal(t, acp.PromptResponse{}, resp, "a refused prompt returns no response at all")
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32600, reqErr.Code)
+	require.Equal(t,
+		map[string]any{jsonFieldError: valueBackpressure, jsonFieldLimit: limitSessionPrompt},
+		reqErr.Data,
+	)
+
+	close(client.release)
+	require.Error(t, <-firstDone)
+	require.NoError(t, agent.Close())
+}
+
+// TestPromptSettlementKeepsTheNativeCauseWhenTheCommitAlsoFails pins the wire
+// answer to a double fault. The native turn failed and the durable
+// foreground-prefix commit failed behind it: the host is owed the turn's own
+// cause, because a store fault belongs to the adapter and names nothing a host
+// can classify or decide a retry against.
+func TestPromptSettlementKeepsTheNativeCauseWhenTheCommitAlsoFails(t *testing.T) {
+	ctx := context.Background()
+	promptSession := &session{
+		agent: NewAgent(WithSessionStore(appendErrorStore{})),
+		id:    "s",
+		cwd:   "/tmp/project",
+	}
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(rollout, []byte(`{"type":"event_msg"}`+"\n"), 0o600))
+	promptSession.rolloutPath = rollout
+
+	withRolloutAppendSettings(t, time.Second, []time.Duration{0})
+
+	nativeFailure := promptSession.mapTurnFailure(&codex.TurnFailedError{
+		Cause:   codex.CauseProvider,
+		Message: "provider refused the turn",
+	})
+
+	_, err := promptSession.settlePrompt(ctx, ctx, nil, promptTurnResult{
+		state:    &promptEventState{},
+		failure:  nativeFailure,
+		accepted: true,
+	}, nil)
+	require.ErrorIs(t, err, nativeFailure)
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+
+	data := asType[map[string]any](t, requestErr.Data)
+	require.Equal(t, valueTurnFailed, data[jsonFieldError])
+	require.Equal(t, codex.CauseProvider, data[jsonFieldCause])
+	require.Equal(t, "Codex provider turn failed", data[jsonFieldMessage])
+	require.NotContains(t, err.Error(), "provider refused the turn")
 }

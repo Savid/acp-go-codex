@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	runtimeReadyAttempts      = 5
-	runtimeReadyApprovalNever = "never"
+	runtimeReadyAttempts       = 5
+	runtimeReadyApprovalNever  = "never"
+	retainedRuntimeThreadLimit = 1024
 )
 
 var runtimeReadyDeadline = 2 * time.Minute
@@ -28,6 +29,10 @@ var runtimeUserHomeDir = os.UserHomeDir
 var runtimeRemoveAll = os.RemoveAll
 var runtimeProbeCodexVersion = codex.ProbeVersion
 var errNoRetainedRuntimeThread = errors.New("no retained Codex runtime thread")
+var errSharedRuntimeHasPeers = fmt.Errorf(
+	"%w: cannot fence shared Codex runtime while peer sessions still own it",
+	codex.ErrProcessContainmentIncomplete,
+)
 
 // retainedRuntimeThread is native ownership that outlives an ACP
 // session/close but not the app-server generation that still owns the thread.
@@ -217,6 +222,12 @@ func (a *Agent) claimRetainedRuntimeThreadForStore(
 }
 
 func (a *Agent) storeRetainedRuntimeSession(session *session, retained *retainedRuntimeThread) error {
+	if a.negotiatedLifecycle().Present() {
+		if err := session.attachNativeEvents(); err != nil {
+			return err
+		}
+	}
+
 	a.mu.Lock()
 
 	switch {
@@ -224,6 +235,20 @@ func (a *Agent) storeRetainedRuntimeSession(session *session, retained *retained
 		a.mu.Unlock()
 
 		return newAgentClosedError()
+
+	// A retained resume and a delete of the same id already exclude each other
+	// through the retained-thread claim, so this is belt-and-braces: the fence is
+	// re-read where the wrapper would become reachable, exactly as the started
+	// path does, so no future ordering can register a wrapper behind a delete.
+	case a.deleteFencedLocked(session.id):
+		committed := a.deleteCommittedLocked(session.id)
+		a.mu.Unlock()
+
+		if committed {
+			return newUnknownSession()
+		}
+
+		return newSessionDeleteInProgress()
 	case retained == nil || retained.nativeEnded || !retained.claimed || a.retainedThreads[session.id] != retained:
 		a.mu.Unlock()
 
@@ -628,6 +653,21 @@ func (a *Agent) markRuntimeDead(client codex.Client) {
 // completion proof. A replacement generation cannot start until cleanup has
 // completed, and every logical session remains registered for lazy resume.
 func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Client) error {
+	return a.quiesceRuntime(ctx, expected, nil)
+}
+
+// quiesceRuntimeAfterSessionClose fences a generation only when doing so cannot
+// destroy another logical session's native thread. Unsupported thread-scoped
+// containment is therefore a reported incomplete boundary while peers remain.
+func (a *Agent) quiesceRuntimeAfterSessionClose(
+	ctx context.Context,
+	expected codex.Client,
+	owner *session,
+) error {
+	return a.quiesceRuntime(ctx, expected, owner)
+}
+
+func (a *Agent) quiesceRuntime(ctx context.Context, expected codex.Client, owner *session) error {
 	a.mu.Lock()
 	if closing := a.runtimeClosing; closing != nil {
 		a.mu.Unlock()
@@ -638,6 +678,32 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 		a.mu.Unlock()
 
 		return cleanupErr
+	}
+
+	if owner != nil && expected != nil && a.runtimeClient == expected {
+		for _, candidate := range a.sessions {
+			if candidate == owner || candidate.id == owner.id {
+				continue
+			}
+
+			candidate.mu.Lock()
+			peerOwnsGeneration := candidate.client == expected
+			candidate.mu.Unlock()
+
+			if peerOwnsGeneration {
+				a.mu.Unlock()
+
+				return errSharedRuntimeHasPeers
+			}
+		}
+
+		for _, retained := range a.retainedThreads {
+			if retained.sessionID != owner.id && retained.client == expected && !retained.nativeEnded {
+				a.mu.Unlock()
+
+				return errSharedRuntimeHasPeers
+			}
+		}
 	}
 
 	if expected == nil || a.runtimeClient != expected {
@@ -673,10 +739,30 @@ func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Cl
 	a.runtimeDead = true
 	a.runtimeEpoch++
 
+	fenced := make([]*session, 0, len(a.sessions))
+
 	for _, session := range a.sessions {
 		session.setClientDead(true)
+
+		fenced = append(fenced, session)
+	}
+
+	if owner != nil {
+		// A retained owner is represented only for this containment call, so it
+		// is not necessarily present in a.sessions to receive the generation
+		// fence above. Its later unsubscribe must still recognize that the
+		// closed transport has already been superseded by this proof.
+		owner.setClientDead(true)
 	}
 	a.mu.Unlock()
+
+	// The generation every peer's incarnation was reading is gone, so each of
+	// those incarnations is lost. Fencing them explicitly is what keeps a peer
+	// from continuing an ordered stream against a source that can no longer
+	// produce its terminal; the peer's next prompt opens a fresh incarnation.
+	for _, session := range fenced {
+		session.fenceSession()
+	}
 
 	cleanupErr := a.closeRuntimeGeneration(
 		context.WithoutCancel(ctx), client, release, scratchRoot, scratchRelease, epoch,
@@ -711,17 +797,33 @@ func (a *Agent) resumeRuntimeSession(ctx context.Context, client codex.Client, s
 		})
 	}
 
-	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
-		return codex.Thread{}, err
-	}
-
 	return thread, nil
 }
 
 func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, session *session) error {
-	config := session.threadConfig()
+	return a.runtimeReadyCanaryWithConfig(parent, client, session, session.threadConfig())
+}
+
+func (a *Agent) runtimeReadyCanaryWithConfig(
+	parent context.Context,
+	client codex.Client,
+	session *session,
+	config map[string]any,
+) error {
 	if len(config) == 0 {
 		return nil
+	}
+
+	session.lifecycleMu.Lock()
+	brokerAlreadyAttached := session.nativeEventSource && !session.nativeEventStopping
+	session.lifecycleMu.Unlock()
+
+	if err := session.attachNativeEvents(); err != nil {
+		return fmt.Errorf("attach runtime_ready thread broker: %w", err)
+	}
+
+	if !brokerAlreadyAttached && !a.negotiatedLifecycle().Present() {
+		defer func() { _ = session.prepareNativeEventRebind() }()
 	}
 
 	var nonceBytes [16]byte
@@ -739,7 +841,12 @@ func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, 
 		// Diagnostic only. It must never decide readiness.
 		_, _ = client.MCPServerStatusList(deadlineCtx, threadID)
 
-		events, runErr := client.RunTurn(deadlineCtx, codex.TurnStartRequest{
+		canary, canaryErr := session.beginNativeCanary()
+		if canaryErr != nil {
+			return fmt.Errorf("begin runtime_ready turn: %w", canaryErr)
+		}
+
+		turn, runErr := client.RunTurn(deadlineCtx, codex.TurnStartRequest{
 			ThreadID: threadID,
 			Prompt: []codex.UserInput{{
 				jsonFieldType: jsonFieldText,
@@ -748,26 +855,65 @@ func (a *Agent) runtimeReadyCanary(parent context.Context, client codex.Client, 
 			ApprovalPolicy: runtimeReadyApprovalNever,
 		})
 		if runErr != nil {
+			turnID, rejected := session.rejectNativeCanaryAck(canary, runErr)
+			if turnID != "" {
+				interruptCtx, interruptCancel := context.WithTimeout(context.WithoutCancel(parent), closeTimeout)
+				rejected = errors.Join(rejected, client.CancelTurn(interruptCtx, threadID, turnID))
+
+				interruptCancel()
+			}
+
+			session.endNativeCanary(canary)
+
 			if deadlineCtx.Err() != nil {
 				break
+			}
+
+			if turnID != "" {
+				return fmt.Errorf("codex thread %s failed runtime_ready acknowledgement: %w", threadID, rejected)
 			}
 
 			continue
 		}
 
+		if bindErr := session.bindNativeCanary(canary, turn.ID); bindErr != nil {
+			session.endNativeCanary(canary)
+
+			return fmt.Errorf("bind runtime_ready turn: %w", bindErr)
+		}
+
 		ready := false
+		terminal := false
+		completed := false
 
-		for event := range events {
-			if runtimeReadyEvent(event, nonce) {
-				ready = true
-			}
+		for !terminal {
+			select {
+			case event, open := <-canary.events:
+				if !open {
+					terminal = true
 
-			if event.Kind == codex.EventCompleted || event.Kind == codex.EventError {
-				break
+					continue
+				}
+
+				if runtimeReadyEvent(event, nonce) {
+					ready = true
+				}
+
+				completed = event.Kind == codex.EventCompleted && event.StopReason == codex.StopReasonEndTurn
+				terminal = event.Kind == codex.EventCompleted || event.Kind == codex.EventError
+			case <-deadlineCtx.Done():
+				interruptCtx, interruptCancel := context.WithTimeout(context.WithoutCancel(parent), closeTimeout)
+				_ = client.CancelTurn(interruptCtx, threadID, turn.ID)
+
+				interruptCancel()
+
+				terminal = true
 			}
 		}
 
-		if ready {
+		session.endNativeCanary(canary)
+
+		if ready && completed {
 			return nil
 		}
 

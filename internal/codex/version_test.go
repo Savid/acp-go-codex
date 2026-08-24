@@ -63,15 +63,18 @@ func TestProbeVersionFailureBranches(t *testing.T) {
 	versionStartProcess = startProcess
 	for name, script := range map[string]string{
 		"without stderr": "exit 7",
-		"with stderr":    "echo probe-failed >&2; exit 7",
+		"with stderr":    "echo native-version-secret >&2; exit 7",
 	} {
 		t.Run(name, func(t *testing.T) {
 			versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
 				return exec.Command("/bin/sh", "-c", script), &supervisorProof{}, nil
 			}
 			_, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"}))
-			if err == nil || (name == "with stderr" && !strings.Contains(err.Error(), "probe-failed")) {
+			if err == nil {
 				t.Fatalf("wait error = %v", err)
+			}
+			if strings.Contains(err.Error(), "native-version-secret") {
+				t.Fatalf("raw native stderr reached the version error: %v", err)
 			}
 		})
 	}

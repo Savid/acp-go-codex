@@ -33,6 +33,21 @@ native containment boundary did not complete; an embedding host must keep that
 runtime and its resources quarantined. Absence of the sentinel does not prove
 escaped descendants are absent on Darwin.
 
+## Construction errors
+
+Two exported sentinels classify failures a host has to act on rather than
+retry blindly:
+
+| Sentinel | Meaning |
+| --- | --- |
+| `ErrProcessContainmentIncomplete` | The selected native containment boundary did not complete. Keep the runtime, its scratch root, and its native root quarantined. |
+| `ErrRuntimeLockUnsupported` | The platform carries no writable-home lock primitive, so the Codex home's exclusivity cannot be established. Launching a runtime is refused rather than left unprotected, and no retry against the same home changes that. |
+
+The Codex home is held by a never-unlinked claim lock and a liveness lock, which
+is what keeps two runtimes off one home. `errors.Is` classifies both sentinels
+through the public names above; the wrapped forms the adapter returns name the
+platform or the failing stage alongside them.
+
 ## Agent options
 
 | Option | Purpose |

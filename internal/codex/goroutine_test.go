@@ -1,20 +1,30 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"go.uber.org/goleak"
 )
 
 func TestRecoverCodexGoroutineCatchesPanic(t *testing.T) {
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
 	func() {
 		defer recoverCodexGoroutine(context.Background(), "test goroutine")
-		panic("boom")
+		panic("panic-secret-sentinel")
 	}()
+	if !strings.Contains(buf.String(), "test goroutine") || strings.Contains(buf.String(), "panic-secret-sentinel") {
+		t.Fatalf("panic log = %q", buf.String())
+	}
 }
 
 func TestHandleCodexGoroutinePanicBranches(t *testing.T) {
