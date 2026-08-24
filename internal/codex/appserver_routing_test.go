@@ -438,6 +438,15 @@ func TestThreadBrokerRequiresRegistrationAndOneClaim(t *testing.T) {
 	if _, open := awaitEvent(t, feed.Events); open {
 		t.Fatal("released broker stayed open")
 	}
+	client.dispatchEvent(Event{Kind: EventRaw, Scope: EventScopeThread, ThreadID: "thread", TurnID: "next"})
+	replacement, err := client.SubscribeThread(context.Background(), "thread")
+	if err != nil {
+		t.Fatalf("replacement SubscribeThread returned error: %v", err)
+	}
+	if event, open := awaitEvent(t, replacement.Events); !open || event.TurnID != "next" {
+		t.Fatalf("replacement broker event = %#v, open=%v", event, open)
+	}
+	replacement.Release()
 }
 
 func TestThreadBrokerOverflowIsBoundedAndFailClosed(t *testing.T) {

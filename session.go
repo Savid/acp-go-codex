@@ -1133,6 +1133,13 @@ func (s *session) containThreadOrFenceGeneration(
 	}
 
 	fenceErr := s.agent.quiesceRuntimeAfterSessionClose(ctx, client, s)
+	s.agent.mu.Lock()
+	agentClosed := s.agent.closed
+	s.agent.mu.Unlock()
+
+	if agentClosed && fenceErr == nil {
+		return nil
+	}
 
 	// Where the app-server offers no thread-scoped containment at all, the
 	// generation fence is the boundary rather than a fallback after a failure,

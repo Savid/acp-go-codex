@@ -279,7 +279,7 @@ func TestTurnFailureProcessDeath(t *testing.T) {
 
 	data := turnFailureData(t, promptErr)
 	msg, _ := data[jsonFieldMessage].(string)
-	if msg != "codex app-server process exited" {
+	if msg != "Codex process exited" {
 		t.Fatalf("message = %q, want fixed process-exit classification", msg)
 	}
 

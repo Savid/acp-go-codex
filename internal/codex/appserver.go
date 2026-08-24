@@ -694,8 +694,7 @@ func (c *AppServerClient) SubscribeThread(ctx context.Context, threadID string) 
 
 	release := func() {
 		once.Do(func() {
-			c.removeThread(stream)
-			stream.stop()
+			c.releaseThread(stream)
 		})
 	}
 
@@ -1375,12 +1374,18 @@ func (c *AppServerClient) closeThread(threadID string) {
 	}
 }
 
-func (c *AppServerClient) removeThread(stream *threadStream) {
+func (c *AppServerClient) releaseThread(stream *threadStream) {
 	c.mu.Lock()
-	if c.threads[stream.threadID] == stream {
-		delete(c.threads, stream.threadID)
+	stream.mu.Lock()
+	live := !stream.finished
+	stream.mu.Unlock()
+
+	if !c.closed && c.routingFailure == nil && live && c.threads[stream.threadID] == stream {
+		c.threads[stream.threadID] = newThreadStream(stream.threadID)
 	}
 	c.mu.Unlock()
+
+	stream.stop()
 }
 
 func (c *AppServerClient) closeAllThreads() {
