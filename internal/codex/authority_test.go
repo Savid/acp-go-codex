@@ -1,0 +1,191 @@
+package codex
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+type authorityTestWriteCloser struct{ bytes.Buffer }
+
+func (*authorityTestWriteCloser) Close() error { return nil }
+
+type authorityTestProcess struct {
+	stdin  *authorityTestWriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
+
+	mu      sync.Mutex
+	waits   int
+	revokes int
+}
+
+func newAuthorityTestProcess(stdout string) *authorityTestProcess {
+	return &authorityTestProcess{
+		stdin:  &authorityTestWriteCloser{},
+		stdout: io.NopCloser(bytes.NewBufferString(stdout)),
+		stderr: io.NopCloser(bytes.NewReader(nil)),
+	}
+}
+
+func (p *authorityTestProcess) Stdin() io.WriteCloser { return p.stdin }
+func (p *authorityTestProcess) Stdout() io.ReadCloser { return p.stdout }
+func (p *authorityTestProcess) Stderr() io.ReadCloser { return p.stderr }
+func (p *authorityTestProcess) Wait(context.Context) (NativeResult, error) {
+	p.mu.Lock()
+	p.waits++
+	p.mu.Unlock()
+
+	return NativeResult{}, nil
+}
+func (p *authorityTestProcess) Revoke(context.Context) error {
+	p.mu.Lock()
+	p.revokes++
+	p.mu.Unlock()
+
+	return nil
+}
+
+type authorityTestHost struct {
+	environment map[string]string
+	process     NativeProcess
+	requests    []NativeRequest
+	prepared    []string
+	reclaimed   []string
+}
+
+func (h *authorityTestHost) NativeEnvironment() map[string]string { return h.environment }
+func (h *authorityTestHost) PrepareNativeTree(_ context.Context, path string) error {
+	h.prepared = append(h.prepared, path)
+
+	return nil
+}
+func (h *authorityTestHost) ReclaimNativeTree(_ context.Context, path string) error {
+	h.reclaimed = append(h.reclaimed, path)
+
+	return nil
+}
+func (h *authorityTestHost) StartNative(_ context.Context, request NativeRequest) (NativeProcess, error) {
+	h.requests = append(h.requests, request)
+
+	return h.process, nil
+}
+
+func TestManagedVersionProbeUsesOnlyHostAuthority(t *testing.T) {
+	process := newAuthorityTestProcess("codex-cli 0.144.1\n")
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin", "HOME": "/host/home"}, process: process}
+
+	version, err := ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "host-pinned-codex", HostAuthority: host})
+	require.NoError(t, err)
+	require.Equal(t, "0.144.1", version)
+	require.Equal(t, []NativeRequest{{
+		Executable: "host-pinned-codex",
+		Arguments:  []string{"--version"},
+		Environment: []string{
+			"HOME=/host/home",
+			"PATH=/host/bin",
+		},
+	}}, host.requests)
+	require.Equal(t, 1, process.waits)
+	require.Zero(t, process.revokes)
+}
+
+func TestManagedSelectorRefusesSessionPackageCopyBeforeLaunch(t *testing.T) {
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: newAuthorityTestProcess("")}
+	_, err := ProbeVersion(t.Context(), VersionProbeOptions{
+		CLIPath:       "/tmp/session/node_modules/@openai/codex/bin/codex.js",
+		HostAuthority: host,
+	})
+	require.ErrorContains(t, err, "staged and pinned by the host before adapter initialization")
+	require.Empty(t, host.requests)
+}
+
+func TestIncompleteManagedStdioIsRevokedAndWaited(t *testing.T) {
+	process := newAuthorityTestProcess("")
+	process.stderr = nil
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
+
+	transport, version, nativePath, err := launchAppServer(t.Context(), Options{
+		CLIPath: "host-pinned-codex", NativeVersion: "0.144.1", HostAuthority: host,
+	})
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.Nil(t, transport)
+	require.Empty(t, version)
+	require.Empty(t, nativePath)
+	require.Equal(t, 1, process.revokes)
+	require.Equal(t, 1, process.waits)
+}
+
+func TestManagedAccountCommandUsesHostAuthorityAndReclaimsTrees(t *testing.T) {
+	originalProbe := accountProbeVersion
+	originalScratchParent := accountScratchParent
+	t.Cleanup(func() {
+		accountProbeVersion = originalProbe
+		accountScratchParent = originalScratchParent
+	})
+	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return "0.144.1", nil }
+	scratch := t.TempDir()
+	accountScratchParent = func(string) (string, error) { return scratch, nil }
+
+	process := newAuthorityTestProcess("")
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin", "HOME": "/host/home"}, process: process}
+	home := t.TempDir()
+	err := RunAccountCommand(t.Context(), AccountCommandOptions{
+		CLIPath: "host-pinned-codex", CodexHome: home, Mode: accountCommandLogout, HostAuthority: host,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{home}, host.prepared)
+	require.Equal(t, []string{home}, host.reclaimed)
+	require.Len(t, host.requests, 1)
+	require.Equal(t, "host-pinned-codex", host.requests[0].Executable)
+	require.Equal(t, []string{accountCommandLogout}, host.requests[0].Arguments)
+}
+
+type orderedAuthorityProcess struct {
+	stdin  *orderedWriteCloser
+	done   chan struct{}
+	calls  *[]string
+	result NativeResult
+}
+
+type orderedWriteCloser struct{ calls *[]string }
+
+func (w *orderedWriteCloser) Write(value []byte) (int, error) { return len(value), nil }
+func (w *orderedWriteCloser) Close() error {
+	*w.calls = append(*w.calls, "stdin-close")
+
+	return nil
+}
+
+func (p *orderedAuthorityProcess) Stdin() io.WriteCloser { return p.stdin }
+func (*orderedAuthorityProcess) Stdout() io.ReadCloser   { return io.NopCloser(bytes.NewReader(nil)) }
+func (*orderedAuthorityProcess) Stderr() io.ReadCloser   { return io.NopCloser(bytes.NewReader(nil)) }
+func (p *orderedAuthorityProcess) Wait(context.Context) (NativeResult, error) {
+	<-p.done
+	*p.calls = append(*p.calls, "wait")
+
+	return p.result, nil
+}
+func (p *orderedAuthorityProcess) Revoke(context.Context) error {
+	*p.calls = append(*p.calls, "revoke")
+	close(p.done)
+
+	return nil
+}
+
+func TestManagedProcessCloseGracefullyClosesThenRevokesAndWaits(t *testing.T) {
+	originalGrace := processCloseGrace
+	processCloseGrace = 0
+	t.Cleanup(func() { processCloseGrace = originalGrace })
+
+	calls := []string{}
+	native := &orderedAuthorityProcess{done: make(chan struct{}), calls: &calls}
+	native.stdin = &orderedWriteCloser{calls: &calls}
+	managed := &process{native: native, stdin: native.stdin, stdout: native.Stdout()}
+	require.NoError(t, managed.Close())
+	require.Equal(t, []string{"stdin-close", "revoke", "wait"}, calls)
+}

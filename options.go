@@ -2,8 +2,10 @@ package codexacp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -13,27 +15,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+const managedHomeEnv = "HOME"
+
 // Option configures the Codex ACP agent.
 type Option func(*Options)
-
-// ProcessIsolation defines an explicit operating-system identity and complete
-// base environment for every native Codex process.
-type ProcessIdentityLockCapability interface {
-	Duplicate() (*os.File, error)
-}
-
-type ProcessIsolation struct {
-	UID                 uint32
-	GID                 uint32
-	BaseEnvironment     map[string]string
-	StandaloneOwnerID   string
-	StandaloneStateRoot string
-	// IdentityLock is an optional trusted-supervisor descriptor for the
-	// host-global UID lock. Linux supervisors validate it and never expose it to
-	// the native Codex process. Standalone embeddings should leave it nil.
-	IdentityLock    ProcessIdentityLockCapability
-	AuthorityDomain ProcessIdentityLockCapability
-}
 
 // ChatGPTAuthTokens are externally supplied ChatGPT auth credentials for Codex.
 type ChatGPTAuthTokens struct {
@@ -64,25 +49,6 @@ const (
 
 const minSupportedCodexVersion = "0.144.1"
 
-type RuntimeProcessKind string
-
-const (
-	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
-	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
-)
-
-type RuntimeContainmentMode string
-
-const (
-	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
-	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity reports ordinary execution as the
-	// adapter's current identity. It carries no provider-descendant inventory,
-	// whole-tree quiescence, or credential-separation claim.
-	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
-	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
-)
-
 type RuntimeStartupStage string
 
 const (
@@ -96,12 +62,8 @@ const (
 // adapter-created scratch roots at their exact lifetime boundaries. A nil
 // callback selects standalone, sibling-owned unbounded accounting.
 type RuntimeResourceHooks struct {
-	AcquireNativeRoot      func(context.Context, RuntimeResourceKind) (release func(), err error)
-	ReserveScratchRoot     func(context.Context, RuntimeResourceKind) (release func(), err error)
-	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
-	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
-	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
-	ObserveContainment     func(context.Context, RuntimeContainmentMode)
+	ReserveScratchRoot  func(context.Context, RuntimeResourceKind) (release func(), err error)
+	ObserveStartupStage func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
 }
 
 // Options configures the ACP agent process and Codex sessions it starts.
@@ -127,9 +89,9 @@ type Options struct {
 	// Env is merged into launched Codex process environments. Managed config
 	// and identity root variables are rejected.
 	Env map[string]string
-	// ProcessIsolation is an optional hardening boundary for native launches.
-	// Nil runs Codex as the adapter's current identity.
-	ProcessIsolation *ProcessIsolation
+	// HostAuthority delegates managed native execution and tree ownership to the
+	// embedding host. Nil runs Codex as the adapter's current identity.
+	HostAuthority HostAuthority
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
 	Logger *slog.Logger
@@ -187,13 +149,9 @@ type Options struct {
 	// RuntimeResourceHooks account for native roots and scratch roots at their
 	// exact creation/deletion boundaries.
 	RuntimeResourceHooks RuntimeResourceHooks
-	// DarwinBestEffortContainment explicitly accepts process-group containment
-	// on Darwin, including its escaped-descendant and numeric-PGID-reuse risks.
-	DarwinBestEffortContainment bool
-
-	clientFactory       func(context.Context, codex.Options) (codex.Client, error)
-	customClientFactory bool
-	implicitEnvironment map[string]string
+	clientFactory        func(context.Context, codex.Options) (codex.Client, error)
+	customClientFactory  bool
+	implicitEnvironment  map[string]string
 }
 
 func applyOptions(opts []Option) Options {
@@ -270,14 +228,11 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation explicitly hardens every native process with the
-// supplied uid/gid and no supplementary groups. BaseEnvironment is the
-// complete native environment base; the adapter never overlays os.Environ.
-func WithProcessIsolation(isolation ProcessIsolation) Option {
+// WithHostAuthority delegates every native launch and native-tree ownership
+// transition to authority. The authority is borrowed and is never closed.
+func WithHostAuthority(authority HostAuthority) Option {
 	return func(options *Options) {
-		cloned := isolation
-		cloned.BaseEnvironment = cloneStringMap(isolation.BaseEnvironment)
-		options.ProcessIsolation = &cloned
+		options.HostAuthority = authority
 	}
 }
 
@@ -348,18 +303,66 @@ func WithProviderAuthDirectHome(path string) Option {
 	}
 }
 
-// WithDarwinBestEffortContainment explicitly accepts Darwin process-group containment.
-func WithDarwinBestEffortContainment() Option {
-	return func(options *Options) {
-		options.DarwinBestEffortContainment = true
-	}
-}
-
 // WithDefaultModel selects a Codex model for newly created sessions.
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
 		options.DefaultModel = model
 	}
+}
+
+func validateHostAuthority(authority HostAuthority) error {
+	if authority == nil {
+		return nil
+	}
+
+	value := reflect.ValueOf(authority)
+	if (value.Kind() == reflect.Chan || value.Kind() == reflect.Func || value.Kind() == reflect.Interface ||
+		value.Kind() == reflect.Map || value.Kind() == reflect.Pointer || value.Kind() == reflect.Slice) && value.IsNil() {
+		return ErrHostAuthorityUnavailable
+	}
+
+	environment := authority.NativeEnvironment()
+	if environment == nil {
+		return ErrHostAuthorityUnavailable
+	}
+
+	for key, value := range environment {
+		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
+			return ErrHostAuthorityUnavailable
+		}
+	}
+
+	return nil
+}
+
+func validateRuntimeEnvironment(environment map[string]string) error {
+	for key, value := range environment {
+		upperKey := strings.ToUpper(key)
+		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
+			return errors.New("invalid Codex environment entry")
+		}
+
+		if strings.HasPrefix(upperKey, "ACP_GO_CODEX_INTERNAL_") || managedCodexRootEnvKey(upperKey) {
+			return errors.New("codex environment contains a reserved key")
+		}
+	}
+
+	return nil
+}
+
+func managedCodexRootEnvKey(key string) bool {
+	switch strings.ToUpper(key) {
+	case "CODEX_HOME", "HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+		return true
+	default:
+		return false
+	}
+}
+
+func reservedCodexEnvKey(key string) bool {
+	upperKey := strings.ToUpper(key)
+
+	return strings.HasPrefix(upperKey, "ACP_GO_CODEX_INTERNAL_") || managedCodexRootEnvKey(upperKey)
 }
 
 // WithLogger configures structured diagnostic logging.
@@ -369,10 +372,8 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// WithEnv merges environment variables into launched Codex sessions. Managed
-// config and identity roots, adapter process-management keys, and Darwin
-// correlation keys are reserved and rejected case-insensitively before a
-// native lifecycle starts.
+// WithEnv merges environment variables into launched Codex sessions. Native
+// root variables and adapter-private keys are rejected before launch.
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = make(map[string]string, len(env))

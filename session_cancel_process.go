@@ -7,10 +7,8 @@ import (
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
-// containCancelledTurn proves that a cancelled native turn cannot keep writing
-// through a background terminal. The normal path is scoped to one Codex
-// thread; a failed interrupt or scoped proof exceptionally fences the shared
-// generation so an uncontained native process cannot escape the turn epoch.
+// containCancelledTurn completes only the cancelled thread's protocol cleanup.
+// The app-server is runtime-owned, so a session boundary never revokes it.
 func (s *session) containCancelledTurn(
 	ctx context.Context,
 	client codex.Client,
@@ -25,34 +23,17 @@ func (s *session) containCancelledTurnWithPolicy(
 	client codex.Client,
 	threadID string,
 	interruptErr error,
-	protectPeers bool,
+	_ bool,
 ) error {
 	containCtx, cancelContain := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	containErr := terminateThreadBackgroundTerminals(containCtx, client, threadID)
 
 	cancelContain()
 
-	var fenceErr error
-
-	if interruptErr != nil || containErr != nil {
-		// Targeted containment could not be proved, so the boundary widens to
-		// the generation the target lives in. Every incarnation it serves is
-		// fenced explicitly rather than left running against a dead source; each
-		// peer recovers on a new stream when its next prompt relaunches.
-		fenceCtx, cancelFence := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-		if protectPeers {
-			fenceErr = s.agent.quiesceRuntimeAfterSessionClose(fenceCtx, client, s)
-		} else {
-			fenceErr = s.agent.quiesceRuntimeAfterCancel(fenceCtx, client)
-		}
-
-		cancelFence()
-	}
-
 	// Native cleanup can finish the rollout after the event terminal. Read it
-	// only after targeted containment or its generation-wide fallback so no
-	// process can append behind the durable mirror.
+	// only after targeted protocol cleanup so no thread event can append behind
+	// the durable mirror.
 	mirrorErr := s.mirrorAndEmitRollout(context.WithoutCancel(ctx))
 
-	return errors.Join(interruptErr, containErr, fenceErr, mirrorErr)
+	return errors.Join(interruptErr, containErr, mirrorErr)
 }

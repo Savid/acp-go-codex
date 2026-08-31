@@ -22,6 +22,8 @@ type session struct {
 	rolloutPath           string
 	materializedPath      string
 	materializedRelease   func()
+	materializedBytes     int64
+	materializedEpoch     uint64
 	title                 string
 	updatedAt             string
 	model                 string
@@ -936,24 +938,22 @@ func (s *session) releaseMaterialized() error {
 	s.mu.Lock()
 	materializedPath := s.materializedPath
 	materializedRelease := s.materializedRelease
+	materializedBytes := s.materializedBytes
+	materializedEpoch := s.materializedEpoch
 	s.mu.Unlock()
 
-	if materializedPath != "" {
-		if err := removeMaterializedRollout(materializedPath); err != nil {
-			return err
-		}
+	if err := s.agent.retireMaterializedRolloutAtEpoch(materializedPath, materializedBytes, materializedRelease, materializedEpoch); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
 	if s.materializedPath == materializedPath {
 		s.materializedPath = ""
 		s.materializedRelease = nil
+		s.materializedBytes = 0
+		s.materializedEpoch = 0
 	}
 	s.mu.Unlock()
-
-	if materializedRelease != nil {
-		materializedRelease()
-	}
 
 	return nil
 }
@@ -1093,12 +1093,8 @@ func (s *session) waitForSettleGate() {
 	defer s.settleGate.Unlock() //nolint:gocritic // Deliberate synchronization barrier.
 }
 
-// containSession finishes this session's containment boundary. The thread-scoped
-// background-terminal sweep is the only targeted containment the app-server
-// offers; when it cannot be proved — because the app-server does not carry those
-// methods, or because a terminal outlived the sweep — the shared generation is
-// fenced only when no peer owns it. Otherwise close reports an incomplete
-// boundary without destroying a sibling session.
+// containSession finishes this session's protocol boundary without taking
+// ownership of the shared app-server runtime.
 func (s *session) containSession(ctx context.Context) error {
 	client, codexThreadID, clientDead := s.closeState()
 
@@ -1110,51 +1106,14 @@ func (s *session) containSession(ctx context.Context) error {
 	}
 
 	if clientDead {
-		return s.agent.quiesceRuntimeAfterSessionClose(closeCtx, client, s)
+		return s.stopNativeEventsContext(closeCtx)
 	}
 
-	if err := s.containThreadOrFenceGeneration(closeCtx, client, codexThreadID); err != nil {
+	if err := terminateThreadBackgroundTerminals(closeCtx, client, codexThreadID); err != nil {
 		return err
 	}
 
 	return s.unsubscribeContainedThread(closeCtx, client, codexThreadID)
-}
-
-// containThreadOrFenceGeneration proves this thread's background terminals gone,
-// or fences the generation they live in when it cannot.
-func (s *session) containThreadOrFenceGeneration(
-	ctx context.Context,
-	client codex.Client,
-	codexThreadID string,
-) error {
-	containErr := terminateThreadBackgroundTerminals(ctx, client, codexThreadID)
-	if containErr == nil {
-		return nil
-	}
-
-	fenceErr := s.agent.quiesceRuntimeAfterSessionClose(ctx, client, s)
-	s.agent.mu.Lock()
-	agentClosed := s.agent.closed
-	s.agent.mu.Unlock()
-
-	if agentClosed && fenceErr == nil && errors.Is(containErr, codex.ErrConnectionClosed) {
-		return nil
-	}
-
-	// Where the app-server offers no thread-scoped containment at all, the
-	// generation fence is the boundary rather than a fallback after a failure,
-	// so its result is the boundary's result. A sweep that was offered and did
-	// not prove the thread contained is a failure in its own right, and both are
-	// reported.
-	if errors.Is(containErr, codex.ErrBackgroundTerminalsUnsupported) {
-		if fenceErr != nil {
-			return errors.Join(containErr, fenceErr)
-		}
-
-		return fenceErr
-	}
-
-	return errors.Join(containErr, fenceErr)
 }
 
 func (s *session) unsubscribeContainedThread(
@@ -1171,18 +1130,6 @@ func (s *session) unsubscribeContainedThread(
 	unsubscribeErr := client.UnsubscribeThread(ctx, codexThreadID)
 	if unsubscribeErr == nil {
 		return nil
-	}
-
-	// Cancellation or agent shutdown may retire the generation concurrently with unsubscribe.
-	// Once that transition owns the client, its containment proof supersedes a
-	// connection-closed unsubscribe result.
-	current, _, nowDead := s.closeState()
-	s.agent.mu.Lock()
-	agentClosed := s.agent.closed
-	s.agent.mu.Unlock()
-
-	if current == client && (nowDead || (agentClosed && errors.Is(unsubscribeErr, codex.ErrConnectionClosed))) {
-		return s.agent.quiesceRuntimeAfterCancel(ctx, client)
 	}
 
 	return unsubscribeErr

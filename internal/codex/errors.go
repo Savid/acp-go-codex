@@ -16,8 +16,6 @@ var (
 	// it is a different fact from a containment attempt that failed.
 	ErrBackgroundTerminalsUnsupported = errors.New("codex app-server does not expose thread background terminals")
 	ErrThreadNotFound                 = errors.New("codex thread not found")
-	ErrProcessContainmentIncomplete   = errors.New("codex process containment incomplete")
-	ErrPackageStageCleanupIncomplete  = errors.New("codex package stage cleanup incomplete")
 )
 
 const (

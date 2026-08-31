@@ -8,10 +8,7 @@ import (
 )
 
 // negotiateLifecycle answers the host's reserved offer with the facts this
-// configuration proves. An absent offer and an empty version intersection are
-// both answered by omitting the key; a non-empty intersection is answered, even
-// though every fact in it is negative, because the answer is what makes the
-// version-1 foreground stream reachable at all.
+// configuration proves. An absent offer is answered by omitting the key.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, error) {
 	offer, present, refusal := lifecycle.DecodeOffer(meta)
 	if refusal != nil {
@@ -38,14 +35,7 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 	return negotiated, nil
 }
 
-// provenLifecycleFacts states what the active configuration can actually prove,
-// resolved on the agent that enforces containment rather than compiled in once
-// for the package.
-//
-// These facts do not turn on the containment mode:
-// the mode changes which identity the app-server runs under and which vacancy
-// the adapter can prove about it, and neither reaches these answers. Each
-// answer holds under every mode this adapter can select:
+// provenLifecycleFacts states what the active configuration can prove.
 //
 //   - `updatesOutsidePrompt` is true because a session claims one exact native
 //     thread broker and keeps its lifecycle stream across prompt settlement.
@@ -57,15 +47,7 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 //     names a source.
 //   - `activityKinds` is empty because Codex activity reaches ACP as ordinary
 //     tool-call updates and this adapter reads no structured native activity
-//     registry. That is a native-surface fact, identical under every mode.
-//
-// A fact is upgraded — and the branch on `a.ContainmentMode()` that upgrading it
-// requires appears here — only when a deterministic fixture in this repository
-// proves both the native source it reads and the ordering it claims. Until then
-// stating one answer is the honest shape; a table of identical rows would
-// advertise a differentiation this adapter does not have. Negotiating version 1
-// still obligates the complete ordered foreground stream whatever these fields
-// say.
+//     registry.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	return lifecycle.Negotiated{
 		UpdatesOutsidePrompt:    true,

@@ -11,8 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func assertTurnFailureParse(t *testing.T) {
@@ -179,8 +177,7 @@ func TestAppServerClientModelAndAccountMethods(t *testing.T) {
 }
 
 func TestNewAppServerClientLaunchesCLI(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
-	script := filepath.Join(testTraversableTempDir(t), "codex")
+	script := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo codex-cli 0.144.1
@@ -190,14 +187,13 @@ read line || exit 0
 echo '{"jsonrpc":"2.0","id":1,"result":{}}'
 read line || true
 while read line; do :; done
-`), nativeScriptMode); err != nil {
+`), 0o700); err != nil {
 		t.Fatalf("write codex script: %v", err)
 	}
 	client, err := NewAppServerClient(context.Background(), Options{
-		CLIPath: script, CodexHome: testNativeOwnedTempDir(t), SupervisorRoot: testTraversableTempDir(t),
-		SupervisorParent: os.TempDir(),
-		NativeVersion:    minCodexVersion, LaunchTimeout: 5 * time.Second,
-		ProcessIsolation: testProcessIsolation(),
+		CLIPath: script, CodexHome: t.TempDir(), Scratch: t.TempDir(),
+		ScratchParent: os.TempDir(),
+		NativeVersion: minCodexVersion, LaunchTimeout: 5 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
@@ -1033,7 +1029,7 @@ func TestAppServerLifecycleMappingEdges(t *testing.T) {
 		t.Fatal("NewAppServerClient accepted missing CLI")
 	}
 
-	initErrorScript := filepath.Join(testTraversableTempDir(t), "codex-init-error")
+	initErrorScript := filepath.Join(t.TempDir(), "codex-init-error")
 	if err := os.WriteFile(initErrorScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo codex-cli 0.144.1
@@ -1042,13 +1038,13 @@ fi
 read line || exit 0
 echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"init failed"}}'
 while read line; do :; done
-`), nativeScriptMode); err != nil {
+`), 0o700); err != nil {
 		t.Fatalf("write init error script: %v", err)
 	}
 	if _, err := NewAppServerClient(context.Background(), Options{
-		CLIPath: initErrorScript, CodexHome: t.TempDir(), SupervisorRoot: testTraversableTempDir(t),
-		SupervisorParent: os.TempDir(),
-		NativeVersion:    minCodexVersion, LaunchTimeout: time.Second,
+		CLIPath: initErrorScript, CodexHome: t.TempDir(), Scratch: t.TempDir(),
+		ScratchParent: os.TempDir(),
+		NativeVersion: minCodexVersion, LaunchTimeout: time.Second,
 	}); err == nil {
 		t.Fatal("NewAppServerClient accepted initialize failure")
 	}
@@ -1271,11 +1267,10 @@ func TestIntegrationAppServerSmoke(t *testing.T) {
 		codexPath = "codex"
 	}
 	client, err := NewAppServerClient(ctx, Options{
-		CLIPath:          codexPath,
-		CodexHome:        t.TempDir(),
-		SupervisorRoot:   t.TempDir(),
-		DarwinBestEffort: true,
-		NativeVersion:    minCodexVersion,
+		CLIPath:       codexPath,
+		CodexHome:     t.TempDir(),
+		Scratch:       t.TempDir(),
+		NativeVersion: minCodexVersion,
 	})
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
@@ -1373,41 +1368,5 @@ func TestDispatchEventForwardsRuntimeErrors(t *testing.T) {
 	client.dispatchEvent(Event{Kind: EventError, Err: errors.New("runtime failed")})
 	if !called {
 		t.Fatal("runtime error was not forwarded to the event handler")
-	}
-}
-
-func TestAppServerCloseOwnedCancellationJoinsAllConcurrentCallers(t *testing.T) {
-	transport := &manualTransport{recv: make(chan rpcMessage, 2)}
-	handlerStarted := make(chan struct{})
-	handlerExited := make(chan struct{})
-	rpc := newRPCConn(transport, func(ctx context.Context, _ ServerRequest) (any, error) {
-		close(handlerStarted)
-		<-ctx.Done()
-		close(handlerExited)
-
-		return nil, ctx.Err()
-	})
-	var cancelOnce sync.Once
-	processCancelled := make(chan struct{})
-	client := &AppServerClient{
-		rpc: rpc,
-		procCancel: func() {
-			cancelOnce.Do(func() { close(processCancelled) })
-		},
-	}
-	client.ensureEventPump()
-	transport.recv <- rpcMessage{JSONRPC: jsonRPCVersion, ID: json.RawMessage("1"), Method: RequestCommandApproval, Params: json.RawMessage(`{}`)}
-	<-handlerStarted
-
-	const callers = 32
-	results := make(chan error, callers)
-	for range callers {
-		go func() { results <- client.Close(t.Context()) }()
-	}
-
-	<-processCancelled
-	<-handlerExited
-	for range callers {
-		require.NoError(t, <-results)
 	}
 }

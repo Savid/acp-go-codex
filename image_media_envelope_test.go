@@ -220,7 +220,7 @@ func TestInitializeAdvertisesHandoffOnlyWhenRootIsSet(t *testing.T) {
 	require.NotContains(t, initializeCapabilityMeta(t), handoffMetaKey)
 
 	meta := initializeCapabilityMeta(t, WithInputHandoffRoot(t.TempDir()))
-	require.Equal(t, map[string]any{handoffVersionsKey: []any{float64(handoffVersion)}}, meta[handoffMetaKey])
+	require.Equal(t, map[string]any{handoffVersionKey: float64(handoffVersion)}, meta[handoffMetaKey])
 
 	// The media envelope is advertised either way.
 	require.Contains(t, meta, mediaEnvelopeMetaKey)
