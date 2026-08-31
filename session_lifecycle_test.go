@@ -84,7 +84,7 @@ func TestLifecycleDeliveryQueueBoundsAndUnavailableConnection(t *testing.T) {
 }
 
 func TestPromptAndAutonomousForegroundAreMutuallyExclusive(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	newFixture := func(t *testing.T) *session {
 		t.Helper()
 
@@ -151,7 +151,7 @@ func TestPromptAndAutonomousForegroundAreMutuallyExclusive(t *testing.T) {
 }
 
 func TestPromptAcceptanceQueuesPreAckPrefixBeforeLifecycleDeliveryUnlock(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	agent := NewAgent()
 	agent.lifecycle = negotiated
 	agent.setAgentClient(newRecordingAgentClient())
@@ -476,7 +476,7 @@ func TestLifecyclePermissionActionFailureBoundaries(t *testing.T) {
 	for _, failAt := range []int{1, 3} {
 		agent, s, _, turnCtx := newStrictPermissionSession(t)
 		agent.setAgentClient(nil)
-		in, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}})
+		in, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}})
 		require.NoError(t, err)
 		require.NoError(t, in.accept(turnCtx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 		emitNativePermissionToolEvent(t, s, turnCtx, codex.Event{
@@ -498,7 +498,7 @@ func TestLifecycleMCPElicitationActionFailureBoundaries(t *testing.T) {
 	for _, failAt := range []int{1, 3} {
 		agent, s, _, turnCtx := newStrictPermissionSession(t)
 		agent.setAgentClient(nil)
-		in, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}})
+		in, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}})
 		require.NoError(t, err)
 		require.NoError(t, in.accept(turnCtx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 		params := map[string]any{"turnId": "native-permission-turn", "serverName": "wagie", "_meta": map[string]any{"tool_name": "execute"}}
@@ -526,7 +526,7 @@ func TestLifecycleServerElicitationActionFailureBoundaries(t *testing.T) {
 		for _, failAt := range []int{1, 3} {
 			agent, s, _, turnCtx := newStrictPermissionSession(t)
 			agent.setAgentClient(nil)
-			in, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}})
+			in, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}})
 			require.NoError(t, err)
 			require.NoError(t, in.accept(turnCtx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 			conn := &nthFailLifecycleClient{recordingAgentClient: newRecordingAgentClient(), failAt: failAt}
@@ -641,7 +641,7 @@ func TestValidatedCancelTerminalizesAPendingActionAsCancelled(t *testing.T) {
 	conn := &blockingPermissionClient{recordingAgentClient: newRecordingAgentClient(), entered: make(chan struct{})}
 	agent.setAgentClient(conn)
 
-	incarnation, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}})
+	incarnation, err := s.openIncarnation(turnCtx, lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}})
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(turnCtx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 	emitNativePermissionToolEvent(t, s, turnCtx, codex.Event{
@@ -711,7 +711,7 @@ func TestPromptIncarnationLifecycleAndActionSettlement(t *testing.T) {
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	s := &session{agent: agent, id: "session"}
-	negotiated := lifecycle.Negotiated{Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{}}
 
 	incarnation, err := s.openIncarnation(ctx, negotiated)
 	require.NoError(t, err)
@@ -768,7 +768,7 @@ func TestPromptIncarnationLifecycleAndActionSettlement(t *testing.T) {
 
 func TestLifecycleActionOwnerNeverBorrowsCurrentNonce(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1}
 	agent.setAgentClient(newRecordingAgentClient())
 	s := &session{agent: agent, id: "session"}
 	in, err := s.openIncarnation(t.Context(), agent.lifecycle)
@@ -792,7 +792,7 @@ func TestPromptIncarnationResumesOnlyAfterLastForegroundBlocker(t *testing.T) {
 	agent.setAgentClient(newRecordingAgentClient())
 	s := &session{agent: agent, id: "session"}
 	incarnation, err := s.openIncarnation(ctx, lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(ctx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"}))
@@ -818,7 +818,7 @@ func TestSessionLifecycleRoutesAgentOriginBetweenPromptsAndContinues(t *testing.
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	s := &session{agent: agent, id: "session", codexThreadID: "thread"}
-	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 
 	first, err := s.openIncarnation(ctx, negotiated)
 	require.NoError(t, err)
@@ -902,7 +902,7 @@ func TestPromptUsesTheNativeThreadFeedWithoutLifecycleNegotiation(t *testing.T) 
 
 func TestSessionLifecycleBetweenPromptFailureEOFAndBoundsFailClosed(t *testing.T) {
 	ctx := context.Background()
-	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 
 	t.Run("provider turn failure is terminal and continuation stays open", func(t *testing.T) {
 		agent := NewAgent()
@@ -1007,7 +1007,7 @@ func TestLifecycleInactiveFailureAndCorrelationHelpers(t *testing.T) {
 	active := &promptIncarnation{
 		session: s,
 		stream: lifecycle.NewStream("stream", lifecycle.Negotiated{
-			Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+			Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 		}),
 		cycleID: "cycle", turnID: "turn",
 	}
@@ -1086,7 +1086,7 @@ func TestNativeEventAttachmentRejectsInvalidAndRacingOwners(t *testing.T) {
 
 func TestSessionRegistrationPropagatesLifecycleBrokerAttachmentFailure(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{lifecycle.Version}}
+	agent.lifecycle = lifecycle.Negotiated{Version: lifecycle.Version}
 	failure := errors.New("subscribe failed")
 	client := &failingSubscribeClient{spyCodexClient: newSpyCodexClient(), err: failure}
 	candidate := &session{agent: agent, id: "session", codexThreadID: "thread", client: client}
@@ -1313,7 +1313,7 @@ func TestNativeEventRebindAdmissionAndReplayAreExact(t *testing.T) {
 	active := &session{incarnation: &promptIncarnation{}}
 	require.ErrorContains(t, active.prepareNativeEventRebind(), "native lifecycle is active")
 
-	negotiated := lifecycle.Negotiated{Versions: []int{1}}
+	negotiated := lifecycle.Negotiated{Version: 1}
 	agent := NewAgent()
 	agent.lifecycle = negotiated
 	agent.setAgentClient(newRecordingAgentClient())
@@ -1357,7 +1357,7 @@ func TestNativeEventRebindAdmissionAndReplayAreExact(t *testing.T) {
 }
 
 func TestLifecycleEstablishmentAndStreamOpenFailClosedAtEveryBoundary(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{}}
 	newLifecycleSession := func() *session {
 		agent := NewAgent()
 		agent.lifecycle = negotiated
@@ -1624,7 +1624,7 @@ func TestSettledNativeTurnTrailingEventsAreDropped(t *testing.T) {
 			agent := NewAgent()
 			agent.setAgentClient(newRecordingAgentClient())
 			s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
-			require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+			require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Version: 1}))
 			s.rememberTerminalNativeTurnLocked("settled")
 
 			event := tc.event
@@ -1824,7 +1824,7 @@ func TestServerRequestTurnClaimExemptsOnlyTurnlessElicitations(t *testing.T) {
 		agent := NewAgent()
 		agent.setAgentClient(newRecordingAgentClient())
 		s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
-		require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+		require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Version: 1}))
 
 		return s
 	}
@@ -1865,7 +1865,7 @@ func TestLifecycleTurnClaimFailsClosedAcrossEveryOwnershipBoundary(t *testing.T)
 		agent := NewAgent()
 		agent.setAgentClient(newRecordingAgentClient())
 		s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
-		require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+		require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Version: 1}))
 
 		return s
 	}
@@ -1999,7 +1999,7 @@ func TestAutonomousRoutingDropsTerminalAndRejectsConcurrentTurns(t *testing.T) {
 		agent := NewAgent()
 		agent.setAgentClient(newRecordingAgentClient())
 		s := &session{agent: agent, id: "session", codexThreadID: "thread", nativeEventOpened: true}
-		require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
+		require.NoError(t, s.openLifecycleStream(t.Context(), lifecycle.Negotiated{Version: 1}))
 
 		return s
 	}
@@ -2038,7 +2038,7 @@ func TestAutonomousRoutingDropsTerminalAndRejectsConcurrentTurns(t *testing.T) {
 }
 
 func TestPromptLifecycleAcceptanceActionAndSettlementFailureBoundaries(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{}}
 	newActive := func(conn agentClient) (*session, *promptIncarnation) {
 		agent := NewAgent()
 		agent.lifecycle = negotiated
@@ -2198,7 +2198,7 @@ func TestAutonomousEventHandlingAndShutdownFailClosedAtEveryBoundary(t *testing.
 }
 
 func TestLifecycleRebindSettlementAdmissionAndCloseRemainBounded(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{}}
 
 	active := &session{incarnation: &promptIncarnation{}}
 	require.ErrorContains(t, active.rebindNativeEvents(newSpyCodexClient()), "native lifecycle is active")
@@ -2341,12 +2341,12 @@ func TestLifecycleAdvertisementAnswersOfferAndOpensForegroundStream(t *testing.T
 	agent.setAgentClient(recorder)
 
 	initialized, err := agent.Initialize(ctx, acp.InitializeRequest{
-		Meta: map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1.0}}},
+		Meta: map[string]any{lifecycle.MetaKey: map[string]any{"version": 1}},
 	})
 	require.NoError(t, err)
 	require.JSONEq(
 		t,
-		`{"acp-go.dev/lifecycle":{"versions":[1],"updatesOutsidePrompt":true,`+
+		`{"acp-go.dev/lifecycle":{"version":1,"updatesOutsidePrompt":true,`+
 			`"authoritativeQuiescence":false,"activityKinds":[]}}`,
 		requireJSON(t, initialized.Meta),
 	)
@@ -2413,7 +2413,7 @@ func TestLifecycleOpensForegroundStreamForFullWireSessionParams(t *testing.T) {
 	conn := &localAgentConnection{agent: agent}
 
 	initializeResult, reqErr := conn.handle(ctx, acp.AgentMethodInitialize, json.RawMessage(
-		`{"protocolVersion":1,"_meta":{"acp-go.dev/lifecycle":{"versions":[1]}}}`,
+		`{"protocolVersion":1,"_meta":{"acp-go.dev/lifecycle":{"version":1}}}`,
 	))
 	require.Nil(t, reqErr)
 
@@ -2488,7 +2488,7 @@ func TestLifecycleFailedOutcomeOmitsStopReason(t *testing.T) {
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	s := &session{agent: agent, id: "failure"}
-	in, err := s.openIncarnation(context.Background(), lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}})
+	in, err := s.openIncarnation(context.Background(), lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}})
 	require.NoError(t, err)
 	require.NoError(t, in.accept(context.Background(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "n"}))
 	require.NoError(t, in.settle(context.Background(), acp.StopReasonEndTurn, lifecycle.OutcomeFailed))
@@ -2498,7 +2498,7 @@ func TestLifecycleFailedOutcomeOmitsStopReason(t *testing.T) {
 
 func TestLifecyclePromptCorrelationAndSettlementBranches(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	s := &session{agent: agent, id: "s"}
 	_, err := s.Prompt(context.Background(), acp.PromptRequest{SessionId: "s", Meta: inboundRouteMeta("turn")})
 	require.Error(t, err, "negotiated prompts require correlation before dispatch")
@@ -2524,7 +2524,7 @@ func TestLifecyclePromptCorrelationAndSettlementBranches(t *testing.T) {
 
 func TestLifecyclePromptDispatchAndSettlementFailures(t *testing.T) {
 	ctx := context.Background()
-	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	correlatedMeta := inboundRouteMeta("route")
 	correlatedMeta[lifecycle.MetaKey] = map[string]any{
 		"version":    1,
@@ -2591,7 +2591,7 @@ func TestLifecycleAcceptanceDeliveryFailureContainsExactAcknowledgedTurn(t *test
 	for _, failAt := range []int{2, 3} {
 		t.Run(fmt.Sprintf("lifecycle_delivery_%d", failAt), func(t *testing.T) {
 			agent := NewAgent()
-			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+			agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 			agent.setAgentClient(&nthFailLifecycleClient{
 				recordingAgentClient: newRecordingAgentClient(), failAt: failAt,
 			})
@@ -2645,7 +2645,7 @@ func TestPostRunningTypedDeliveryFailuresContainBeforeSettlement(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := newRecordingAgentClient()
 			agent := NewAgent()
-			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+			agent.lifecycle = lifecycle.Negotiated{Version: 1}
 			agent.setAgentClient(&nthFailSessionUpdateClient{recordingAgentClient: recorder, failAt: test.failAt})
 			client := &exactCancelRunClient{
 				runEventsClient: &runEventsClient{events: []codex.Event{
@@ -2688,7 +2688,7 @@ func TestForegroundCommitFailureFencesTurnAndPreventsRedispatch(t *testing.T) {
 		return commitErr
 	}}
 	agent := NewAgent(WithSessionStore(store))
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	agent.setAgentClient(newRecordingAgentClient())
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	require.NoError(t, os.WriteFile(rollout, nil, 0o600))
@@ -2734,7 +2734,7 @@ func TestLifecycleActionRegistryFailsClosedAtFixedBound(t *testing.T) {
 	agent := NewAgent()
 	agent.setAgentClient(newRecordingAgentClient())
 	s := &session{agent: agent, id: "session"}
-	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	require.NoError(t, s.openLifecycleStream(t.Context(), negotiated))
 	in, err := s.openIncarnation(t.Context(), negotiated)
 	require.NoError(t, err)
@@ -2765,7 +2765,7 @@ func TestLifecyclePreBindFailedOrMalformedAckIsContainedExactly(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			client := newFailedAckThreadFeedClient(test.malformed)
 			agent := NewAgent()
-			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+			agent.lifecycle = lifecycle.Negotiated{Version: 1}
 			updates := newRecordingAgentClient()
 			agent.setAgentClient(updates)
 			s := &session{
@@ -2879,7 +2879,7 @@ func TestCancelRoutesBeforeItRefusesTheReservedKey(t *testing.T) {
 // refusal reaches a native frame.
 func TestPromptRoutesBeforeItReadsTheLifecycleValue(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	client := newSpyCodexClient()
 	s := &session{agent: agent, id: "s", client: client, codexThreadID: "thread"}
 	t.Cleanup(s.fenceSession)
@@ -2951,7 +2951,7 @@ func closeBoundaryFixture(t *testing.T, opts ...Option) (*Agent, *session, *reco
 		func(context.Context, codex.Options) (codex.Client, error) { return client, nil },
 	))...)
 	cleanupSessionNativePumps(t, agent)
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -3567,7 +3567,7 @@ type agentOriginFixture struct {
 func newAgentOriginFixture(t *testing.T) *agentOriginFixture {
 	t.Helper()
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	client := &agentOriginControlClient{spyCodexClient: newSpyCodexClient()}
@@ -3880,7 +3880,7 @@ func TestAgentOriginCloseCancelsBlockedHostUpdateBeforeOwningSettlement(t *testi
 
 func TestAgentOriginCloseContainsBlockedServerRequestOpening(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	client := &agentOriginControlClient{spyCodexClient: newSpyCodexClient()}
@@ -3924,7 +3924,7 @@ func TestAgentOriginCloseContainsBlockedServerRequestOpening(t *testing.T) {
 
 func TestAgentOriginCloseGatePreventsLaterTurnAdmission(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, newSpyCodexClient(), sessionMeta{}, nil)

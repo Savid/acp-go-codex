@@ -79,7 +79,7 @@ func TestLifecycleMetaRejectionsCarryTheUniformUnsupportedShape(t *testing.T) {
 		"approval mode is not accepted":   {meta: options(map[string]any{metaMCPToolApprovalModeKey: "bad"}), field: "_meta.codex.options.mcpToolApprovalMode"},
 		"env is not an object":            {meta: options(map[string]any{metaEnvKey: "bad"}), field: "_meta.codex.options.env"},
 		"env value is not a string":       {meta: options(map[string]any{metaEnvKey: map[string]any{"A": 1}}), field: "_meta.codex.options.env.A"},
-		"env claims a reserved key":       {meta: options(map[string]any{metaEnvKey: map[string]string{managedCodexHomeEnv: "/x"}}), field: "_meta.codex.options.env." + managedCodexHomeEnv},
+		"env claims a reserved key":       {meta: options(map[string]any{metaEnvKey: map[string]string{managedHomeEnv: "/x"}}), field: "_meta.codex.options.env." + managedHomeEnv},
 		"output schema is not an object":  {meta: options(map[string]any{metaOutputSchemaKey: "bad"}), field: outputSchemaConfigPath},
 		"output schema is empty":          {meta: options(map[string]any{metaOutputSchemaKey: map[string]any{}}), field: outputSchemaConfigPath},
 		"output schema is not encodable":  {meta: options(map[string]any{metaOutputSchemaKey: map[string]any{"bad": func() {}}}), field: outputSchemaConfigPath},

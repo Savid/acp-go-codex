@@ -42,22 +42,3 @@ func signalProcess(cmd *exec.Cmd, signal syscall.Signal) error {
 
 	return err
 }
-
-func processCloseError(err error) error {
-	if err == nil {
-		return nil
-	}
-
-	if errors.Is(err, ErrProcessContainmentIncomplete) {
-		return err
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			return nil
-		}
-	}
-
-	return err
-}

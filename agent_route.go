@@ -13,7 +13,6 @@ const (
 	routeVersion           = 1
 	routeTurnNonceMaxBytes = 4 * 1024
 	routeVersionKey        = "version"
-	routeVersionsKey       = "versions"
 	routeTurnNonceKey      = "turnNonce"
 	routeToolCallIDKey     = "toolCallId"
 	routeRequestIDKey      = "requestId"

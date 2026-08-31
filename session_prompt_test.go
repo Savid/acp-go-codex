@@ -413,7 +413,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 }
 
 func TestPromptLifecycleAdmissionAndToolRegistryFailuresAreReturned(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Versions: []int{lifecycle.Version}}
+	negotiated := lifecycle.Negotiated{Version: lifecycle.Version}
 	agent := NewAgent()
 	agent.lifecycle = negotiated
 	agent.setAgentClient(newRecordingAgentClient())

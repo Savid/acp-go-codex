@@ -231,10 +231,10 @@ func TestFakeAppServerResolvesThreadWagie(t *testing.T) {
 		t.Skip("marker executable fixture uses a POSIX shell")
 	}
 
-	originalCommand := execCommandContext
-	t.Cleanup(func() { execCommandContext = originalCommand })
-	execCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFakeAppServerResolvesThreadWagie$")
+	originalCommand := ordinaryExecCommand
+	t.Cleanup(func() { ordinaryExecCommand = originalCommand })
+	ordinaryExecCommand = func(_ string, _ ...string) *exec.Cmd {
+		return exec.Command(os.Args[0], "-test.run=^TestFakeAppServerResolvesThreadWagie$")
 	}
 
 	nativeDir := writeWagieMarker(t, "native")
@@ -247,8 +247,8 @@ func TestFakeAppServerResolvesThreadWagie(t *testing.T) {
 			"PATH":              nativeDir,
 			fakeWagieCarrierEnv: "1",
 		},
-		skipSupervisor: true,
-		LaunchTimeout:  time.Second * 5,
+		skipGuardian:  true,
+		LaunchTimeout: time.Second * 5,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Close(context.Background())) })
@@ -330,7 +330,7 @@ func writeWagieMarker(t *testing.T, marker string) string {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wagie")
 	contents := fmt.Sprintf("#!/bin/sh\nprintf '%s|%%s' \"$WAGIE_API_TOKEN\"\n", marker)
-	require.NoError(t, os.WriteFile(path, []byte(contents), nativeScriptMode))
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o700))
 
 	return dir
 }

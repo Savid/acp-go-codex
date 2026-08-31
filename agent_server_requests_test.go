@@ -1036,7 +1036,7 @@ func TestDirectServerElicitationRequiresExactLifecycleTurnOwner(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	enableClientElicitation(agent, true, true)
-	require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{lifecycle.Version}}))
+	require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Version: lifecycle.Version}))
 
 	_, err := agent.handleCodexToolUserInput(t.Context(), codex.ServerRequest{
 		ID: json.RawMessage(`1`), Params: json.RawMessage(`{"threadId":"` + session.codexThreadID +

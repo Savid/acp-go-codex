@@ -32,9 +32,7 @@ var (
 	validateFS     = validateLockFilesystem
 )
 
-// Lock owns one or more never-unlinked writable-home lock files. Supervisor
-// processes deliberately acquire claim and liveness independently so neither
-// descriptor is inherited by native provider work.
+// Lock owns the never-unlinked writable-home lock files used by ordinary mode.
 type Lock struct {
 	files []*os.File
 	once  sync.Once
@@ -57,14 +55,12 @@ func Acquire(home string) (*Lock, error) {
 	return &Lock{files: append(claim.files, liveness.files...)}, nil
 }
 
-// AcquireClaim takes the primary guardian's claim lock.
+// AcquireClaim takes the writable-home claim lock.
 func AcquireClaim(home string) (*Lock, error) {
 	return acquire(home, ClaimFileName, "claim Codex writable home")
 }
 
-// AcquireLiveness takes the native supervisor's independent liveness lock. It
-// is held until that supervisor has reaped the native root and completed the
-// selected containment boundary.
+// AcquireLiveness takes the ordinary launcher's independent liveness lock.
 func AcquireLiveness(home string) (*Lock, error) {
 	return acquire(home, LivenessFileName, "claim Codex home liveness")
 }

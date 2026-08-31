@@ -151,7 +151,7 @@ func TestLifecycleNegotiationOmitsNonInterruptibleCarrier(t *testing.T) {
 	params, err := json.Marshal(map[string]any{
 		"protocolVersion":    1,
 		"clientCapabilities": map[string]any{},
-		"_meta":              map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1}}},
+		"_meta":              map[string]any{lifecycle.MetaKey: map[string]any{"version": 1}},
 	})
 	require.NoError(t, err)
 	result, reqErr := conn.handle(t.Context(), acp.AgentMethodInitialize, params)

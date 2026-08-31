@@ -14,7 +14,7 @@ import (
 func TestInitializeAdvertisesExactRouteEnvelopeCapability(t *testing.T) {
 	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
 	require.NoError(t, err)
-	require.Equal(t, map[string]any{routeVersionsKey: []int{routeVersion}}, resp.AgentCapabilities.Meta[routeMetaKey])
+	require.Equal(t, map[string]any{routeVersionKey: routeVersion}, resp.AgentCapabilities.Meta[routeMetaKey])
 	require.NotContains(t, resp.Meta, routeMetaKey)
 }
 

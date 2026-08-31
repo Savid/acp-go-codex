@@ -22,7 +22,6 @@ const (
 	handoffMetaKey      = "acp-go.dev/handoff"
 	handoffVersion      = 1
 	handoffVersionKey   = "version"
-	handoffVersionsKey  = "versions"
 	handoffDigestKey    = "digest"
 	handoffSizeBytesKey = "sizeBytes"
 	handoffURIScheme    = "file"

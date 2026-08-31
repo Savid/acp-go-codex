@@ -121,31 +121,30 @@ type Agent struct {
 	optionsErr   error
 	providerAuth *providerAuth
 
-	mu                sync.Mutex
-	closed            bool
-	closeDone         chan struct{}
-	closeErr          error
-	conn              agentClient
-	sessions          map[acp.SessionId]*session
-	deleted           map[acp.SessionId]struct{}
-	deleting          map[acp.SessionId]int
-	clientCalls       chan struct{}
-	lifecycleCalls    chan struct{}
-	authTokens        *ChatGPTAuthTokens
-	providerProcesses *providerProcessSnapshotTracker
-	containmentMode   RuntimeContainmentMode
-
+	mu                    sync.Mutex
+	closed                bool
+	closeDone             chan struct{}
+	closeErr              error
+	conn                  agentClient
+	sessions              map[acp.SessionId]*session
+	deleted               map[acp.SessionId]struct{}
+	deleting              map[acp.SessionId]int
+	clientCalls           chan struct{}
+	lifecycleCalls        chan struct{}
+	authTokens            *ChatGPTAuthTokens
 	runtimeClient         codex.Client
 	runtimeEpoch          uint64
 	runtimeDead           bool
 	runtimeStarting       chan struct{}
 	runtimeStartCancel    context.CancelFunc
 	runtimeClosing        chan struct{}
-	runtimeNativeRelease  func()
+	runtimeNativeRelease  func() error
 	runtimeScratchRoot    string
 	runtimeScratchRelease func()
 	runtimeCleanupErr     error
 	retainedThreads       map[acp.SessionId]*retainedRuntimeThread
+	retiredResidences     []retiredNativeResidence
+	retiredResidenceBytes int64
 
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -177,15 +176,14 @@ var (
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 
-	homeErr := normalizeStandaloneHome(&options)
 	if options.SessionStore == nil {
 		options.SessionStore = NewInMemorySessionStore()
 	}
 
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
-	optionsErr = errors.Join(optionsErr, homeErr)
 	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
-	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
+	optionsErr = errors.Join(optionsErr, validateHostAuthority(options.HostAuthority))
+	optionsErr = errors.Join(optionsErr, validateRuntimeEnvironment(options.Env))
 	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
 	optionsErr = errors.Join(optionsErr, validateInputHandoffRoot(options.InputHandoffRoot))
 	optionsErr = errors.Join(optionsErr, validateProviderAuthOptions(options))
@@ -208,32 +206,17 @@ func NewAgent(opts ...Option) *Agent {
 		Version:        options.AgentVersion,
 	})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-	mode := containmentMode(options)
-
-	providerProcesses := newProviderProcessSnapshotTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
-	if options.RuntimeResourceHooks.ObserveContainment != nil {
-		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
-	}
-
-	if mode == RuntimeContainmentBestEffort {
-		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
-			slog.String("containment", string(mode)),
-		)
-	}
-
 	agent := &Agent{
-		options:           options,
-		log:               log,
-		optionsErr:        optionsErr,
-		observe:           observe,
-		sessions:          make(map[acp.SessionId]*session),
-		deleted:           make(map[acp.SessionId]struct{}),
-		deleting:          make(map[acp.SessionId]int),
-		clientCalls:       make(chan struct{}, clientCallLimit),
-		lifecycleCalls:    make(chan struct{}, 1),
-		providerProcesses: providerProcesses,
-		containmentMode:   mode,
-		retainedThreads:   make(map[acp.SessionId]*retainedRuntimeThread),
+		options:         options,
+		log:             log,
+		optionsErr:      optionsErr,
+		observe:         observe,
+		sessions:        make(map[acp.SessionId]*session),
+		deleted:         make(map[acp.SessionId]struct{}),
+		deleting:        make(map[acp.SessionId]int),
+		clientCalls:     make(chan struct{}, clientCallLimit),
+		lifecycleCalls:  make(chan struct{}, 1),
+		retainedThreads: make(map[acp.SessionId]*retainedRuntimeThread),
 	}
 
 	if optionsErr == nil {
@@ -241,14 +224,6 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	return agent
-}
-
-func (a *Agent) ContainmentMode() RuntimeContainmentMode {
-	if a == nil {
-		return RuntimeContainmentUnavailable
-	}
-
-	return a.containmentMode
 }
 
 // codexReservedConfigRoots names the app-server config roots the adapter
@@ -481,7 +456,12 @@ func (a *Agent) optionsError() error {
 		return nil
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: valueInternalFailure})
+	wireErr := acp.NewInternalError(map[string]any{jsonFieldError: valueInternalFailure})
+	if errors.Is(a.optionsErr, ErrHostAuthorityUnavailable) {
+		return errors.Join(a.optionsErr, wireErr)
+	}
+
+	return wireErr
 }
 
 // Initialize implements ACP initialize.
@@ -574,17 +554,9 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	}, nil
 }
 
-func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, supervisorRoot string, nativeVersion string) (codex.Client, error) {
+func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, scratchRoot string, nativeVersion string) (codex.Client, error) {
 	env := a.staticRuntimeEnv()
 	home := a.resolvedCodexHomeForEnv(env)
-
-	if a.options.ProcessIsolation != nil && len(a.options.SeedFiles) > 0 {
-		return nil, errors.New("codex seed files are unsupported with process isolation")
-	}
-
-	if err := validateNativeOwnedDirectory(home, a.options.ProcessIsolation); err != nil {
-		return nil, err
-	}
 
 	factory := a.options.clientFactory
 	if factory == nil {
@@ -594,11 +566,6 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 	}
 
 	configurationStarted := time.Now()
-	if err := writeSeedFiles(a.options.Home, a.options.SeedFiles); err != nil {
-		observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, err)
-
-		return nil, err
-	}
 
 	otelConfig, err := a.codexOTELConfig(env)
 	if err != nil {
@@ -618,14 +585,13 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 		CLIPath:             a.options.ExecutablePath,
 		CodexHome:           home,
 		WritableHome:        home,
-		SupervisorRoot:      supervisorRoot,
-		SupervisorParent:    filepath.Dir(supervisorRoot),
-		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
+		Scratch:             scratchRoot,
+		ScratchParent:       filepath.Dir(scratchRoot),
 		NativeVersion:       nativeVersion,
 		DefaultModel:        a.options.DefaultModel,
 		Env:                 a.observe.InjectTraceEnv(ctx, env),
 		ImplicitEnvironment: cloneStringMap(a.options.implicitEnvironment),
-		ProcessIsolation:    codexProcessIsolation(a.options.ProcessIsolation),
+		HostAuthority:       adaptHostAuthority(a.options.HostAuthority),
 		Config:              a.codexConfig(),
 		ExtraArgs:           extraArgs,
 		Logger:              a.log,
@@ -633,10 +599,6 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 		RequestHandler: func(ctx context.Context, req codex.ServerRequest) (any, error) {
 			return a.handleCodexServerRequestForEpoch(ctx, epoch, req)
 		},
-		ObserveProcess: func(processCtx context.Context, kind string, delta int64) {
-			observeRuntimeProcess(processCtx, a.options.RuntimeResourceHooks, RuntimeProcessKind(kind), delta)
-		},
-		NewProcessSnapshotObserver: a.newProcessSnapshotObserver,
 		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
 			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
 			if observe != nil {
@@ -666,18 +628,6 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, superviso
 	}
 
 	return client, nil
-}
-
-func codexProcessIsolation(value *ProcessIsolation) *codex.ProcessIsolation {
-	if value == nil {
-		return nil
-	}
-
-	return &codex.ProcessIsolation{
-		UID: value.UID, GID: value.GID, BaseEnvironment: cloneStringMap(value.BaseEnvironment),
-		StandaloneOwnerID: value.StandaloneOwnerID, StandaloneStateRoot: value.StandaloneStateRoot,
-		IdentityLock: value.IdentityLock, AuthorityDomain: value.AuthorityDomain,
-	}
 }
 
 func (a *Agent) codexConfig() map[string]any {
@@ -1309,9 +1259,12 @@ func (a *Agent) finishSessionCloseRetainingThread(id acp.SessionId, session *ses
 		epoch:               a.runtimeEpoch,
 		materializedPath:    session.materializedPath,
 		materializedRelease: session.materializedRelease,
+		materializedBytes:   session.materializedBytes,
 	}
 	session.materializedPath = ""
 	session.materializedRelease = nil
+	session.materializedBytes = 0
+	session.materializedEpoch = 0
 
 	return true, true, nil
 }

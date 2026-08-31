@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -30,12 +29,11 @@ func TestCodexNativeTwoThreadMCPRebindIsolation(t *testing.T) {
 	codexPath := integrationCodexPath(t)
 	launch := func() *codex.AppServerClient {
 		client, err := codex.NewAppServerClient(ctx, codex.Options{
-			NativeVersion:    "0.144.1",
-			CLIPath:          codexPath,
-			CodexHome:        home,
-			SupervisorRoot:   t.TempDir(),
-			Logger:           integrationLogger,
-			DarwinBestEffort: runtime.GOOS == "darwin",
+			NativeVersion: "0.144.1",
+			CLIPath:       codexPath,
+			CodexHome:     home,
+			Scratch:       t.TempDir(),
+			Logger:        integrationLogger,
 		})
 		require.NoError(t, err)
 

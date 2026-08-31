@@ -537,12 +537,6 @@ func TestRPCTransportAndPendingCallErrors(t *testing.T) {
 	if err != nil || string(raw) != `{"ok":true}` {
 		t.Fatalf("marshal raw = %s err=%v", raw, err)
 	}
-	if err := processCloseError(errors.New("close failed")); err == nil {
-		t.Fatal("processCloseError ignored plain error")
-	}
-	if err := processCloseError(ErrProcessContainmentIncomplete); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("processCloseError lost process-tree proof sentinel: %v", err)
-	}
 }
 
 func TestRPCDoneEdges(t *testing.T) {
