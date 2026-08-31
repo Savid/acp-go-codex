@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,29 +12,125 @@ func TestDecodeOfferReadsWhatTheHostAsked(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name    string
-		meta    map[string]any
-		present bool
-		field   string
+		name     string
+		meta     map[string]any
+		present  bool
+		versions []int
+		field    string
 	}{
 		{name: "absent offer asks for nothing"},
-		{name: "wire float version", meta: map[string]any{MetaKey: map[string]any{"version": float64(1)}}, present: true},
-		{name: "embedded int version", meta: map[string]any{MetaKey: map[string]any{"version": 1}}, present: true},
-		{name: "json number version", meta: map[string]any{MetaKey: map[string]any{"version": json.Number("1")}}, present: true},
+		{
+			name:     "wire float versions",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{float64(1)}}},
+			present:  true,
+			versions: []int{1},
+		},
+		{
+			name:     "embedded int versions",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{1}}},
+			present:  true,
+			versions: []int{1},
+		},
+		{
+			name:     "json number versions",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{json.Number("1")}}},
+			present:  true,
+			versions: []int{1},
+		},
+		{
+			name:     "an unordered offer still intersects",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{float64(2), float64(1)}}},
+			present:  true,
+			versions: []int{2, 1},
+		},
 		{
 			name:  "a non-object offer",
 			meta:  map[string]any{MetaKey: []any{1}},
 			field: MetaPath,
 		},
 		{
-			name:  "an unknown member beside version",
-			meta:  map[string]any{MetaKey: map[string]any{"version": float64(1), "extra": true}},
+			name:  "an unknown member beside versions",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{float64(1)}, "extra": true}},
 			field: MetaPath + ".extra",
 		},
-		{name: "a missing version", meta: map[string]any{MetaKey: map[string]any{}}, field: MetaPath + ".version"},
-		{name: "a fractional version", meta: map[string]any{MetaKey: map[string]any{"version": 1.5}}, field: MetaPath + ".version"},
-		{name: "an unsupported version", meta: map[string]any{MetaKey: map[string]any{"version": 2}}, field: MetaPath + ".version"},
-		{name: "a non-numeric version", meta: map[string]any{MetaKey: map[string]any{"version": "1"}}, field: MetaPath + ".version"},
+		{
+			name:  "an empty version array",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "versions is not an array",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": 1}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a fractional version",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{1.5}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a non-numeric version",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{"1"}}},
+			field: MetaPath + ".versions",
+		},
+		// The test is what the value lost, not how large it is. 2^54 is one
+		// float64 and one int64 naming the same integer exactly, so it decodes as
+		// that integer and is then simply a version this package does not speak.
+		{
+			name:     "a large version that is still exactly this integer",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{float64(1 << 54)}}},
+			present:  true,
+			versions: []int{1 << 54},
+		},
+		{
+			name:     "a negative version that is still exactly this integer",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{-float64(1 << 54)}}},
+			present:  true,
+			versions: []int{-(1 << 54)},
+		},
+		{
+			name:     "the most negative integer this platform holds",
+			meta:     map[string]any{MetaKey: map[string]any{"versions": []any{float64(math.MinInt)}}},
+			present:  true,
+			versions: []int{math.MinInt},
+		},
+		// 1e300 is integral in the only sense a float64 can be — it has no
+		// fractional part — and it still names no integer: the magnitude is past
+		// everything this platform can hold, so accepting it would negotiate a
+		// version number the host never wrote.
+		{
+			name:  "a version too large to name an integer at all",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{1e300}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a version one past the integer range",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{-float64(math.MinInt)}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a positive infinity",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{math.Inf(1)}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a negative infinity",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{math.Inf(-1)}}},
+			field: MetaPath + ".versions",
+		},
+		{
+			name:  "a NaN",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{math.NaN()}}},
+			field: MetaPath + ".versions",
+		},
+		// A json.Number offer is refused whole on this surface: the pinned SDK
+		// pre-decodes `_meta`, so a number that reached here as a lexeme did not
+		// come off the wire this decoder answers for.
+		{
+			name:  "a json number past the integer range",
+			meta:  map[string]any{MetaKey: map[string]any{"versions": []any{json.Number("9223372036854775808")}}},
+			field: MetaPath + ".versions",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -51,24 +148,22 @@ func TestDecodeOfferReadsWhatTheHostAsked(t *testing.T) {
 
 			require.Nil(t, refusal)
 			require.Equal(t, tc.present, present)
-			if tc.present {
-				require.Equal(t, Version, offer.Version)
-			}
+			require.Equal(t, tc.versions, offer.Versions)
 		})
 	}
 }
 
-func TestAnswerAcceptsOnlyCurrentVersion(t *testing.T) {
+func TestAnswerIntersectsTheOffer(t *testing.T) {
 	t.Parallel()
 
 	proven := Negotiated{ActivityKinds: []ActivityKind{}}
 
-	answer, ok := Offer{Version: 1}.Answer(proven)
+	answer, ok := Offer{Versions: []int{2, 1, 1}}.Answer(proven)
 	require.True(t, ok)
-	require.Equal(t, 1, answer.Version)
+	require.Equal(t, []int{1}, answer.Versions)
 	require.Equal(t, 1, answer.NegotiatedVersion())
 
-	_, ok = Offer{Version: 2}.Answer(proven)
+	_, ok = Offer{Versions: []int{2}}.Answer(proven)
 	require.False(t, ok)
 
 	require.Equal(t, 0, Negotiated{}.NegotiatedVersion())
@@ -78,16 +173,16 @@ func TestAnswerAcceptsOnlyCurrentVersion(t *testing.T) {
 func TestAdvertisementRendersOnlyProvenFacts(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Version: 1, ActivityKinds: []ActivityKind{}}.Advertisement()
+	degenerate := Negotiated{Versions: []int{1}, ActivityKinds: []ActivityKind{}}.Advertisement()
 	require.Equal(t, map[string]any{
-		"version":                 1,
+		"versions":                []int{1},
 		"updatesOutsidePrompt":    false,
 		"authoritativeQuiescence": false,
 		"activityKinds":           []string{},
 	}, degenerate)
 
 	proven := Negotiated{
-		Version:                 1,
+		Versions:                []int{1},
 		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,
@@ -113,7 +208,7 @@ func TestRejectKeyRefusesTheLiteralByName(t *testing.T) {
 func TestDecodePromptCorrelationStrictness(t *testing.T) {
 	t.Parallel()
 
-	negotiated := Negotiated{Version: 1}
+	negotiated := Negotiated{Versions: []int{1}}
 	submission := func(members map[string]any) map[string]any {
 		return map[string]any{MetaKey: map[string]any{"version": float64(1), "submission": members}}
 	}

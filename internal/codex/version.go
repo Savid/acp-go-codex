@@ -6,94 +6,111 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 )
 
 const codexVersionArgument = "--version"
 
+// VersionProbeOptions describes one independently contained Codex discovery
+// root. Scratch is a fresh generation owned only by this probe.
 type VersionProbeOptions struct {
 	CLIPath             string
 	CodexHome           string
+	WritableHome        string
 	Scratch             string
 	ScratchParent       string
+	DarwinBestEffort    bool
 	Env                 map[string]string
 	ImplicitEnvironment map[string]string
-	HostAuthority       HostAuthority
+	ProcessIsolation    *ProcessIsolation
 }
 
-func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, error) {
-	providerOptions := Options{
-		CLIPath: options.CLIPath, CodexHome: options.CodexHome, WritableHome: options.CodexHome,
-		Scratch: options.Scratch, ScratchParent: options.ScratchParent,
-		Env: options.Env, ImplicitEnvironment: options.ImplicitEnvironment, HostAuthority: options.HostAuthority,
-	}
+var versionSupervisorCommand = supervisorCommand
+var versionStartProcess = startProcess
 
-	nativeEnv, err := buildMergedEnv(providerOptions)
+// ProbeVersion runs codex --version through the configured process backend.
+func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, error) {
+	nativeEnv, err := buildMergedEnv(Options{
+		CodexHome: options.CodexHome, Env: options.Env, ImplicitEnvironment: options.ImplicitEnvironment,
+		ProcessIsolation: options.ProcessIsolation,
+	})
 	if err != nil {
 		return "", err
 	}
 
-	selector := strings.TrimSpace(options.CLIPath)
-	if selector == "" {
-		selector = defaultCodexExecutable
-	}
-
-	if options.HostAuthority == nil {
-		selector, err = resolveOrdinaryProcessExecutable(selector, nativeEnv)
-		if err != nil {
-			return "", err
-		}
-	} else if selectorErr := validateManagedSelector(selector); selectorErr != nil {
-		return "", selectorErr
-	}
-
-	request := NativeRequest{Executable: selector, Arguments: []string{codexVersionArgument}, Environment: nativeEnv}
-
-	var native NativeProcess
-	if options.HostAuthority != nil {
-		native, err = options.HostAuthority.StartNative(ctx, request)
-	} else {
-		native, err = startOrdinaryNative(ctx, request, providerOptions)
-	}
-
+	path, err := resolveCodexPath(options.CLIPath, nativeEnv, options.ProcessIsolation)
 	if err != nil {
-		return "", fmt.Errorf("start codex CLI version probe: %w", err)
+		return "", err
 	}
 
-	if native == nil || native.Stdin() == nil || native.Stdout() == nil || native.Stderr() == nil {
-		if native != nil {
-			_ = native.Revoke(context.Background())
-			_, _ = native.Wait(context.Background())
-		}
-
-		return "", fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable)
+	lockRoot, err := HomeLockRoot(options.ScratchParent, options.WritableHome)
+	if err != nil {
+		return "", err
 	}
 
-	_ = native.Stdin().Close()
+	cmd, proof, err := versionSupervisorCommand(ctx, supervisorConfig{
+		NativePath:       path,
+		NativeArgs:       []string{codexVersionArgument},
+		NativeEnv:        nativeEnv,
+		Isolation:        options.ProcessIsolation,
+		Home:             lockRoot,
+		Scratch:          options.Scratch,
+		ScratchParent:    options.ScratchParent,
+		LifecycleKind:    lifecycleDiscovery,
+		DarwinBestEffort: options.DarwinBestEffort,
+		FramedInput:      true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("prepare codex CLI version probe: %w", err)
+	}
 
 	var stdout bytes.Buffer
 
-	stdoutDone := make(chan error, 1)
-	stderrDone := make(chan error, 1)
-
-	go func() { _, copyErr := io.Copy(&stdout, native.Stdout()); stdoutDone <- copyErr }()
-	go func() { _, copyErr := io.Copy(io.Discard, native.Stderr()); stderrDone <- copyErr }()
-
-	result, waitErr := native.Wait(ctx)
-	if ctx.Err() != nil {
-		revokeErr := native.Revoke(context.Background())
-		_, terminalErr := native.Wait(context.Background())
-
-		return "", errors.Join(ctx.Err(), revokeErr, terminalErr)
+	// The supervisor reads a hangup on its control input as caller death and
+	// abandons agent identity acquisition. This probe sends no control data, so
+	// it owns the write end for the probe's lifetime rather than handing the
+	// guardian a channel that is already closed before it starts.
+	controlRead, controlWrite, err := supervisorPipe()
+	if err != nil {
+		return "", errors.Join(
+			fmt.Errorf("open codex CLI version probe control input: %w", err),
+			proof.closeInherited(),
+			proof.releaseOrdinaryHomeLock(),
+		)
 	}
 
-	copyErr := errors.Join(<-stdoutDone, <-stderrDone)
-	if waitErr != nil || result.ExitCode != 0 || result.Signal != 0 {
-		return "", fmt.Errorf("check codex CLI version: %w", errors.Join(waitErr, copyErr))
+	defer controlRead.Close()
+	defer controlWrite.Close()
+
+	cmd.Stdin = controlRead
+	cmd.Stdout = &stdout
+	cmd.Stderr = io.Discard
+
+	waiter, err := versionStartProcess(cmd)
+	if err != nil {
+		return "", errors.Join(
+			fmt.Errorf("start codex CLI version probe: %w", err),
+			proof.closeInherited(),
+			proof.releaseOrdinaryHomeLock(),
+		)
 	}
 
-	if copyErr != nil {
-		return "", copyErr
+	if err := proof.closeInherited(); err != nil {
+		_ = cmd.Process.Kill()
+
+		waiter.start()
+		<-waiter.result()
+
+		return "", errors.Join(
+			fmt.Errorf("close inherited supervisor config: %w", err),
+			proof.releaseOrdinaryHomeLock(),
+		)
+	}
+
+	waiter.start()
+	waitErr, containmentErr := proof.awaitCommand(waiter.result())
+
+	if waitErr != nil || containmentErr != nil {
+		return "", fmt.Errorf("check codex CLI version: %w", errors.Join(waitErr, containmentErr))
 	}
 
 	return validateCodexVersionOutput(stdout.String())

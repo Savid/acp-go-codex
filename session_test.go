@@ -352,7 +352,7 @@ func TestEnsureLiveClientRelaunchFailures(t *testing.T) {
 	resumeFails.agent.sessions[resumeFails.id] = resumeFails
 	resumeFails.agent.runtimeClient = old
 	resumeFails.agent.runtimeDead = true
-	resumeFails.agent.runtimeNativeRelease = func() error { return nil }
+	resumeFails.agent.runtimeNativeRelease = func() {}
 	if err := resumeFails.ensureLiveClient(ctx); !errors.Is(err, resumeErr) {
 		t.Fatalf("ensureLiveClient resume error = %v", err)
 	}
@@ -607,8 +607,8 @@ func TestSessionContainmentAcceptsConcurrentRuntimeRetirementProof(t *testing.T)
 	active.setClientDead(true)
 	close(client.release)
 
-	require.EqualError(t, <-done, "retired connection")
-	require.False(t, agent.runtimeDead)
+	require.NoError(t, <-done)
+	require.True(t, agent.runtimeDead)
 }
 
 func TestSessionTurnAndCloseOperationsFailClosedAtOwnershipBoundaries(t *testing.T) {

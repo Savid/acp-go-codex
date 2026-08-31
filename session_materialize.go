@@ -13,50 +13,37 @@ func (a *Agent) materializeStoredRollout(
 	ctx context.Context,
 	sessionID acp.SessionId,
 	entries []SessionStoreEntry,
-) (string, func(), int64, error) {
+) (string, func(), error) {
 	if len(entries) == 0 {
-		return "", func() {}, 0, nil
+		return "", func() {}, nil
 	}
-
-	bytes := materializedRolloutBytes(entries)
 
 	hydrated, err := a.hydrateStoredImageArtifacts(ctx, sessionID, entries)
 	if err != nil {
-		return "", nil, 0, err
+		return "", nil, err
 	}
 
 	release, err := a.reserveScratchRoot(ctx, RuntimeResourceSession)
 	if err != nil {
-		return "", nil, 0, err
+		return "", nil, err
 	}
 
 	path, err := materializeRollout(a.options.ScratchDir, hydrated)
 	if err != nil {
 		release()
 
-		return "", nil, 0, err
+		return "", nil, err
 	}
 
-	if a.options.HostAuthority != nil {
-		if err := a.options.HostAuthority.PrepareNativeTree(ctx, filepath.Dir(path)); err != nil {
-			_ = removeMaterializedRollout(path)
+	if err := handoffGeneratedNativeTree(filepath.Dir(path), a.options.ProcessIsolation); err != nil {
+		_ = removeMaterializedRollout(path)
 
-			release()
+		release()
 
-			return "", nil, 0, err
-		}
+		return "", nil, err
 	}
 
-	return path, release, bytes, nil
-}
-
-func materializedRolloutBytes(entries []SessionStoreEntry) int64 {
-	var bytes int64
-	for _, entry := range entries {
-		bytes += int64(len(entry) + 1)
-	}
-
-	return bytes
+	return path, release, nil
 }
 
 type materializedRolloutFile interface {

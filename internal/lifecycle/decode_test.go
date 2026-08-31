@@ -9,7 +9,7 @@ import (
 
 func negotiatedForDecode() Negotiated {
 	return Negotiated{
-		Version:                 1,
+		Versions:                []int{1},
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,
 		ActivityKinds:           []ActivityKind{ActivityTask},

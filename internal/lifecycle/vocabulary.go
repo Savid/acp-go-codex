@@ -249,7 +249,9 @@ const (
 // set and a false UpdatesOutsidePrompt are truthful answers for a configuration
 // whose boundaries prove nothing more.
 type Negotiated struct {
-	Version                 int            `json:"version"`
+	// Versions is the intersection of the host's offer and the versions this
+	// configuration implements. The connection speaks the highest member.
+	Versions                []int          `json:"versions"`
 	UpdatesOutsidePrompt    bool           `json:"updatesOutsidePrompt"`
 	AuthoritativeQuiescence bool           `json:"authoritativeQuiescence"`
 	QuiescenceSource        ProofClass     `json:"quiescenceSource,omitempty"`
@@ -259,20 +261,21 @@ type Negotiated struct {
 // Present reports whether the configuration answered the lifecycle key at all.
 // An absent answer makes every envelope, correlation value, and lifecycle fact
 // illegal on the connection.
-func (n Negotiated) Present() bool { return n.Version == Version }
+func (n Negotiated) Present() bool { return len(n.Versions) > 0 }
 
-// SupportsVersion reports whether a value is the negotiated version.
+// SupportsVersion reports whether a version is inside the negotiated set.
 func (n Negotiated) SupportsVersion(version int) bool {
-	return n.Version == Version && version == Version
+	return slices.Contains(n.Versions, version)
 }
 
-// NegotiatedVersion is the integer every envelope and correlation value carries.
+// NegotiatedVersion is the single integer every envelope and correlation value
+// on the connection carries: the highest member of the intersection.
 func (n Negotiated) NegotiatedVersion() int {
 	if !n.Present() {
 		return 0
 	}
 
-	return n.Version
+	return slices.Max(n.Versions)
 }
 
 // DeclaresActivityKind reports whether the answer advertised an activity kind. A
@@ -291,7 +294,7 @@ func (n Negotiated) Advertisement() map[string]any {
 	}
 
 	advertisement := map[string]any{
-		fieldVersion:                 n.Version,
+		fieldVersions:                slices.Clone(n.Versions),
 		fieldUpdatesOutsidePrompt:    n.UpdatesOutsidePrompt,
 		fieldAuthoritativeQuiescence: n.AuthoritativeQuiescence,
 		fieldActivityKinds:           kinds,

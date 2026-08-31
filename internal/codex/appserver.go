@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -83,8 +84,8 @@ const (
 type AppServerClient struct {
 	options       Options
 	rpc           *rpcConn
-	proc          *process
-	cancelProcess func()
+	cmd           *exec.Cmd
+	procCancel    context.CancelFunc
 	nativeVersion string
 	// nativePath is the exact search path of the environment this app-server
 	// process was launched with. Every thread's derived PATH is composed
@@ -173,16 +174,25 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 		defer cancel()
 	}
 
-	transport, version, nativePath, err := launchAppServer(launchCtx, options)
+	// The codex app-server process must outlive the request that created the
+	// session: exec.CommandContext SIGKILLs the process when its context is
+	// done, so the process is bound to a dedicated context that is only
+	// cancelled by Close. The request ctx still bounds the launch handshake
+	// (version check and initialize) below.
+	procCtx, procCancel := context.WithCancel(context.Background())
+
+	transport, cmd, version, nativePath, err := launchAppServer(launchCtx, procCtx, options)
 	if err != nil {
+		procCancel()
+
 		return nil, err
 	}
 
 	client := &AppServerClient{
 		options:       options,
 		rpc:           newRPCConn(transport, options.RequestHandler),
-		proc:          transport.proc,
-		cancelProcess: func() { _ = transport.proc.Close() },
+		cmd:           cmd,
+		procCancel:    procCancel,
 		nativeVersion: version,
 		nativePath:    nativePath,
 	}
@@ -198,6 +208,7 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 	}
 
 	observeCodexStartupStage(ctx, options, "runtime", "readiness", readinessStarted, nil)
+	transport.proc.markSupervisorsReady(ctx)
 
 	return client, nil
 }
@@ -932,6 +943,13 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 }
 
 func (c *AppServerClient) finishClose(done chan struct{}) {
+	// The launched process is the owned cancellation path for the RPC reader,
+	// writers, server-request handlers, and event pump. Cancel it before joining
+	// those workers so Close never depends on an app-server choosing to exit.
+	if c.procCancel != nil {
+		c.procCancel()
+	}
+
 	err := discardOwnedCloseCancellation(c.rpc.CloseContext(context.Background()))
 	if pumpDone := c.eventPumpDone(); pumpDone != nil {
 		<-pumpDone
@@ -1282,8 +1300,8 @@ func (c *AppServerClient) failRoutingLocked(cause error) {
 	c.pendingCreates = 0
 	c.pendingEventCount = 0
 
-	if c.cancelProcess != nil {
-		go c.cancelProcess()
+	if c.procCancel != nil {
+		c.procCancel()
 	}
 }
 

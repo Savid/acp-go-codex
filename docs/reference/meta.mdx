@@ -97,7 +97,7 @@ in `agentCapabilities._meta`:
 {
   "agentCapabilities": {
     "_meta": {
-      "acp-go.dev/route": {"version": 1}
+      "acp-go.dev/route": {"versions": [1]}
     }
   }
 }
@@ -176,7 +176,7 @@ is configured, initialize also advertises the local handoff input transport:
 {
   "agentCapabilities": {
     "_meta": {
-      "acp-go.dev/handoff": {"version": 1}
+      "acp-go.dev/handoff": {"versions": [1]}
     }
   }
 }
@@ -190,13 +190,13 @@ documented with the [handoff input form](/docs/core/prompt-streaming).
 ## Lifecycle negotiation
 
 `acp-go.dev/lifecycle` is settled on `initialize` itself rather than through a
-capability object. The client offers the current version on
+capability object. The client offers the versions it implements on
 `InitializeRequest._meta`:
 
 ```json
 {
   "_meta": {
-    "acp-go.dev/lifecycle": {"version": 1}
+    "acp-go.dev/lifecycle": {"versions": [1]}
   }
 }
 ```
@@ -209,7 +209,7 @@ the facts this adapter's own configuration proves:
 {
   "_meta": {
     "acp-go.dev/lifecycle": {
-      "version": 1,
+      "versions": [1],
       "updatesOutsidePrompt": true,
       "authoritativeQuiescence": false,
       "activityKinds": []
@@ -220,12 +220,13 @@ the facts this adapter's own configuration proves:
 
 | Field | Value | Why |
 | --- | --- | --- |
-| `version` | `1` | The current lifecycle envelope version. |
+| `versions` | `[1]` | The intersection of the offer with the one version this adapter implements. |
 | `updatesOutsidePrompt` | `true` | A session owns one exact app-server thread stream for its native incarnation, so native events between prompts open and settle agent-origin lifecycle turns without loss. |
 | `authoritativeQuiescence` | `false` | Nothing here proves one session's descendants gone while the app-server generation they live in keeps serving its peers, so no quiescence proof class is claimed and no `quiescenceSource` is named. |
 | `activityKinds` | `[]` | Codex work reaches ACP as ordinary tool-call updates; this adapter reads no structured native activity registry, so it emits no `activity_update`. |
 
-An absent offer is answered by omitting the key from the response, and such a connection emits no lifecycle envelope at
+An absent offer and an empty version intersection are both answered by omitting
+the key from the response, and such a connection emits no lifecycle envelope at
 all. `Serve` also omits the answer unless its output is an `*os.File`, exposes a
 write deadline, or implements `InterruptWrite() error`, because other carriers
 cannot guarantee that shutdown interrupts and joins a stalled lifecycle

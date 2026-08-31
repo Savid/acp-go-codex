@@ -17,7 +17,7 @@ const (
 // caseInsensitiveEnvKeys reports whether the running platform treats
 // environment names case insensitively. Windows does, so "Path" owns the same
 // value as "PATH" there; elsewhere only the exact name does.
-var caseInsensitiveEnvKeys = runtime.GOOS == platformWindows
+var caseInsensitiveEnvKeys = runtime.GOOS == "windows"
 
 func isPathEnvKey(key string) bool {
 	return key == pathEnvKey || (caseInsensitiveEnvKeys && strings.EqualFold(key, pathEnvKey))

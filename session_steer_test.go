@@ -131,7 +131,7 @@ func TestExactRouteSteerConsumesNativeTurnSteerForPromptAndAutonomousTurns(t *te
 			nonce := "prompt-nonce"
 			turnID := "prompt-turn"
 			if autonomous {
-				agent.lifecycle = lifecycle.Negotiated{Version: 1}
+				agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
 				require.NoError(t, s.openLifecycleStream(t.Context(), agent.lifecycle))
 				s.lifecycleMu.Lock()
 				in, err := s.openAutonomousTurnLocked(t.Context(), "autonomous-turn")

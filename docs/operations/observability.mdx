@@ -1,10 +1,78 @@
 ---
 title: "Observability"
-description: "OpenTelemetry signals emitted by the adapter."
+description: "Wire OpenTelemetry and debug logs for the adapter, and forward native Codex OTEL, without leaking prompt or tool content."
 ---
 
-Use `WithTracerProvider`, `WithMeterProvider`, and `WithTextMapPropagator` to
-connect adapter traces and metrics to the host. Prompt and tool contents are not
-recorded by default. Runtime startup observations cover configuration,
-process start, readiness, and session readiness without exposing native process
-inventories.
+`acp-go-codex` has two telemetry layers: adapter telemetry from ACP requests,
+sessions, the MCP bridge, session-store work, and Codex process lifecycle; and
+native Codex app-server telemetry from each launched `codex app-server`.
+
+## How telemetry flows
+
+Embedded hosts pass caller-owned OpenTelemetry providers directly:
+
+```go
+agent := codexacp.NewAgent(
+	codexacp.WithTracerProvider(tracerProvider),
+	codexacp.WithMeterProvider(meterProvider),
+	codexacp.WithTextMapPropagator(propagator),
+)
+```
+
+The package never configures global providers and never shuts down
+caller-supplied ones — embedded hosts own construction, sampling, exporter
+configuration, and shutdown. The standalone binary instead configures adapter
+exporters from standard `OTEL_*` environment variables and flushes them with a
+bounded timeout before exit.
+
+Adapter spans cover ACP requests (`acp.request`), prompt turns
+(`session.prompt`), Codex app-server client operations, session-store work, and
+the MCP bridge. Metrics stay low-cardinality — request counts and durations,
+active sessions, prompt duration, cancellations, Codex process starts, and
+`gen_ai.client.*` token usage — and prompt text, rollout rows, tool payloads,
+and diff bodies are never metric attributes.
+
+Runtime containment selection is the integer gauge
+`acp_go_codex.runtime.containment`, recorded with value `1` and exactly one
+`containment=authoritative`, `containment=best_effort`,
+`containment=shared_identity`, or
+`containment=unavailable` attribute. It is a mode signal, not a process count or
+quiescence proof. Ordinary `shared_identity` and best-effort Darwin publish no
+provider-descendant snapshot, including no zero. Best-effort Darwin's structured
+Agent warning and unconditional standalone stderr warning carry
+`containment=best_effort` instead.
+
+<Warning>
+stdout is the ACP JSON-RPC transport. `-debug` writes adapter diagnostics to
+stderr only; never point a logger or an OpenTelemetry console exporter at
+stdout. When `OTEL_LOGS_EXPORTER` is set, standalone mode also ships adapter
+logs through the log exporter, while `-debug` stays stderr-only and additive.
+</Warning>
+
+## Native Codex OTEL
+
+Beyond adapter telemetry, the adapter maps safe standard `OTEL_*` process
+environment into Codex's native `-c otel.*` config when it launches an
+app-server, starting it with `--analytics-default-enabled`. Codex then emits its
+own telemetry as `service.name=codex-app-server`. `OTEL_SERVICE_NAME` applies to
+the adapter process only — Codex owns its provider service name.
+
+The generic `OTEL_EXPORTER_OTLP_ENDPOINT` enables adapter and native traces and
+metrics; logs additionally require an explicit `OTEL_LOGS_EXPORTER=otlp` and a
+logs endpoint. Protocols map as `http/protobuf → otlp-http` (binary),
+`http/json → otlp-http` (json), and `grpc → otlp-grpc`; signal-specific
+protocol, endpoint, and TLS-certificate variables override the generic ones, and
+client certificate/key pairs apply only on the gRPC path. Inbound ACP `_meta`
+W3C trace context (`traceparent`/`tracestate`/`baggage`) is extracted for
+adapter spans and injected into launched Codex processes as `TRACEPARENT`,
+`TRACESTATE`, and `BAGGAGE`. Set the Codex environment tag with
+`CODEX_OTEL_ENVIRONMENT` (or `deployment.environment[.name]` in
+`OTEL_RESOURCE_ATTRIBUTES`).
+
+## What is not recorded
+
+Telemetry and logs never carry rollout JSONL rows, MCP payload bodies, diffs,
+terminal output, auth tokens, network-intermediary credentials, authorization
+headers, or raw prompt text by default. Native prompt logging is off by default;
+the only opt-in is `CODEX_OTEL_LOG_USER_PROMPT=1`, and only when your telemetry
+backend may store raw prompt text.

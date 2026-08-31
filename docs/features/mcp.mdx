@@ -1,11 +1,63 @@
 ---
 title: "MCP"
-description: "Thread-scoped MCP server configuration."
+description: "Attach MCP servers to a session and set their tool trust level."
 ---
 
-The adapter accepts stdio and streamable HTTP MCP servers. Configuration is
-thread-scoped and is re-supplied when a logical session resumes on a replacement
-app-server. SSE and ACP transports are rejected.
+The adapter accepts MCP servers on a session and converts them into `codex
+app-server` thread configuration. Two transports are supported: stdio and
+streamable HTTP.
 
-MCP environment variables may not claim Codex home/XDG roots or the adapter's
-private `ACP_GO_CODEX_INTERNAL_` namespace.
+The adapter sends each session's servers only through
+`thread/start.config.mcp_servers` and re-supplies the same config through
+`thread/resume.config.mcp_servers`. It never converts session MCP into
+process-global `-c mcp_servers.*` arguments. HTTP headers and stdio environment
+values therefore stay inside the app-server JSON-RPC stream instead of process
+arguments, the app-server environment, the workspace, or the rollout store.
+The process config override API rejects the complete `mcp_servers` keyspace.
+
+## Configure MCP servers
+
+Attach one or more servers when you build the session request. Use
+`StdioMCPServer` for a locally launched process and `HTTPMCPServer` for a
+streamable-HTTP endpoint:
+
+```go
+req := codexacp.NewSessionRequest("/workspace/project",
+	codexacp.WithSessionMCPServers(
+		codexacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
+		codexacp.HTTPMCPServer("remote", "https://mcp.example/v1", map[string]string{
+			"Authorization": "Bearer token",
+		}),
+	),
+	codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+		codexacp.WithCodexMCPToolApprovalMode("approve"),
+	)),
+)
+```
+
+| Constructor | Transport | Arguments |
+| --- | --- | --- |
+| `StdioMCPServer` | stdio | name, command, args, env |
+| `HTTPMCPServer` | streamable HTTP | name, url, headers |
+
+## Tool approval
+
+`mcpToolApprovalMode` sets the trust level applied to every MCP server in the
+session. It accepts exactly `auto`, `prompt`, or `approve`, and maps to Codex's
+`default_tools_approval_mode` config for each server — Codex owns what each value
+does. Any other value is rejected with invalid params.
+
+<Note>
+  MCP server names must be non-empty, unique, and non-whitespace, and only stdio
+  and streamable-HTTP transports are accepted. Any other transport is rejected
+  with an invalid-params error at session start. Stdio MCP environment names
+  also reject `ACP_GO_CODEX_INTERNAL_*`, `ACP_GO_CODEX_RUNTIME_ID`, and
+  `ACP_GO_CODEX_SCRATCH_ROOT` case-insensitively so an MCP child cannot spoof
+  adapter process-management or Darwin correlation markers.
+</Note>
+
+After native-process replacement, only the addressed thread is resumed. Its own
+MCP configuration is attached before it runs the bounded `runtime_ready`
+canary; other logical sessions remain unavailable until independently used.
+This keeps threads with the same MCP server name but different endpoints or
+credentials isolated, and a stale peer cannot block recovery.

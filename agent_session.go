@@ -741,30 +741,30 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return resp, resumeErr
 	}
 
+	path, scratchRelease, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
 	if err != nil {
+		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
+
 		return acp.ResumeSessionResponse{}, err
 	}
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
-	if capacityErr := a.ensureRetiredResidenceCapacity(ctx, materializedRolloutBytes(entries)); capacityErr != nil {
-		return acp.ResumeSessionResponse{}, capacityErr
-	}
-
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
+		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
+
 		return acp.ResumeSessionResponse{}, err
 	}
-
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, err
-	}
-
-	a.mu.Lock()
-	materializedEpoch := a.runtimeEpoch
-	a.mu.Unlock()
 
 	threadID := firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))
 
@@ -777,7 +777,9 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
-		_ = a.retireMaterializedRolloutAtEpoch(path, materializedBytes, scratchRelease, materializedEpoch)
+		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
 
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
 	}
@@ -793,8 +795,6 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 
 	session.materializedPath = path
 	session.materializedRelease = scratchRelease
-	session.materializedBytes = materializedBytes
-	session.materializedEpoch = materializedEpoch
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1304,30 +1304,30 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse(resp), nil
 	}
 
+	path, scratchRelease, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
 	if err != nil {
+		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
+
 		return acp.LoadSessionResponse{}, err
 	}
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
-	if capacityErr := a.ensureRetiredResidenceCapacity(ctx, materializedRolloutBytes(entries)); capacityErr != nil {
-		return acp.LoadSessionResponse{}, capacityErr
-	}
-
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
+		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
+
 		return acp.LoadSessionResponse{}, err
 	}
-
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
-	if err != nil {
-		return acp.LoadSessionResponse{}, err
-	}
-
-	a.mu.Lock()
-	materializedEpoch := a.runtimeEpoch
-	a.mu.Unlock()
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
@@ -1338,7 +1338,9 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
-		_ = a.retireMaterializedRolloutAtEpoch(path, materializedBytes, scratchRelease, materializedEpoch)
+		_ = removeMaterializedRollout(path)
+
+		scratchRelease()
 
 		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil)
 	}
@@ -1354,8 +1356,6 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	session.materializedPath = path
 	session.materializedRelease = scratchRelease
-	session.materializedBytes = materializedBytes
-	session.materializedEpoch = materializedEpoch
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1554,7 +1554,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 		return acp.UnstableForkSessionResponse{}, errors.Join(
 			errors.New("codex fork acknowledgement omitted its child thread identity"),
-			a.retireRuntimeGeneration(cleanupCtx, client),
+			a.quiesceRuntimeAfterCancel(cleanupCtx, client),
 		)
 	}
 
@@ -1584,7 +1584,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		cleanupErr := a.cleanupUnregisteredFork(ctx, client, childThreadID, nil)
 		childOwned = false
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-		fenceErr := a.retireRuntimeGeneration(cleanupCtx, client)
+		fenceErr := a.quiesceRuntimeAfterCancel(cleanupCtx, client)
 
 		cancel()
 
@@ -1652,7 +1652,7 @@ func (a *Agent) cleanupUnregisteredFork(
 	cleanupErr = errors.Join(cleanupErr, deleteErr)
 
 	if deleteErr != nil {
-		cleanupErr = errors.Join(cleanupErr, a.retireRuntimeGeneration(cleanupCtx, client))
+		cleanupErr = errors.Join(cleanupErr, a.quiesceRuntimeAfterCancel(cleanupCtx, client))
 	}
 
 	return cleanupErr

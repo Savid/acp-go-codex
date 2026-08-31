@@ -1017,7 +1017,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 				return &errorCodexClient{
 					spyCodexClient: newSpyCodexClient(),
-					closeErr:       errors.Join(errors.New("close failed"), codex.ErrContainmentIncomplete),
+					closeErr:       errors.Join(errors.New("close failed"), codex.ErrProcessContainmentIncomplete),
 				}, nil
 			}),
 		)
@@ -1033,10 +1033,10 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	_ = c2aW.Close()
 	_ = a2cR.Close()
 	serveErr := <-errCh
-	if !errors.Is(serveErr, ErrContainmentIncomplete) {
-		t.Fatalf("Serve close-error returned %v, want ErrContainmentIncomplete", serveErr)
+	if !errors.Is(serveErr, ErrProcessContainmentIncomplete) {
+		t.Fatalf("Serve close-error returned %v, want ErrProcessContainmentIncomplete", serveErr)
 	}
-	if !errors.Is(ErrContainmentIncomplete, codex.ErrContainmentIncomplete) {
+	if !errors.Is(ErrProcessContainmentIncomplete, codex.ErrProcessContainmentIncomplete) {
 		t.Fatalf("public process-tree error does not preserve internal identity")
 	}
 	_ = c2aR.Close()
@@ -1090,7 +1090,7 @@ func TestServeJoinsIncompleteRuntimeLaunchBeforeReturning(t *testing.T) {
 
 				return &errorCodexClient{
 					spyCodexClient: newSpyCodexClient(),
-					closeErr:       codex.ErrContainmentIncomplete,
+					closeErr:       codex.ErrProcessContainmentIncomplete,
 				}, nil
 			}),
 		)
@@ -1118,8 +1118,8 @@ func TestServeJoinsIncompleteRuntimeLaunchBeforeReturning(t *testing.T) {
 	close(releaseFactory)
 	select {
 	case err := <-serveErr:
-		if !errors.Is(err, ErrContainmentIncomplete) {
-			t.Fatalf("Serve error = %v, want ErrContainmentIncomplete", err)
+		if !errors.Is(err, ErrProcessContainmentIncomplete) {
+			t.Fatalf("Serve error = %v, want ErrProcessContainmentIncomplete", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not join the incomplete runtime launch")
@@ -1432,6 +1432,24 @@ func decodeFakeCodexMode(raw string) fakeCodexMode {
 	return mode
 }
 
+func fakeCodexModeEnvMap(mode fakeCodexMode) map[string]string {
+	raw, err := json.Marshal(mode)
+	if err != nil {
+		panic(err)
+	}
+
+	return map[string]string{fakeCodexModeEnv: string(raw)}
+}
+
+func fakeCodexProcessIsolation(mode fakeCodexMode) ProcessIsolation {
+	isolation := testProcessIsolation()
+	for key, value := range fakeCodexModeEnvMap(mode) {
+		isolation.BaseEnvironment[key] = value
+	}
+
+	return isolation
+}
+
 // runFakeCodexAppServer speaks just enough of the codex app-server JSON-RPC
 // protocol to complete the launch handshake, then dies mid-turn on turn/start so
 // the transport observes a real process exit (exit status 1 + stderr tail).
@@ -1632,6 +1650,17 @@ func appendFakeCodexRolloutRow(path string, row string) error {
 	}
 	defer file.Close()
 
+	// The fake native process appends to this rollout as the isolated identity,
+	// so a file the test creates has to belong to that identity too. Only a
+	// privileged runner can hand it over; an unprivileged one holds a single
+	// identity and never launches the fake process as a second one.
+	uid, gid := testIsolationIdentity()
+	if os.Geteuid() == 0 && (uid != uint32(os.Getuid()) || gid != uint32(os.Getgid())) {
+		if err = file.Chown(int(uid), int(gid)); err != nil {
+			return err
+		}
+	}
+
 	_, err = fmt.Fprintln(file, row)
 
 	return err
@@ -1807,6 +1836,25 @@ func TestServeReturnsImmediatelyOnCanceledContext(t *testing.T) {
 	err := Serve(canceledContext(), strings.NewReader(""), io.Discard)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Serve with canceled context = %v, want context.Canceled", err)
+	}
+}
+
+func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
+	base := map[string]string{"CANARY": "base"}
+	policy := &ProcessIsolation{
+		UID: 12, GID: 34, BaseEnvironment: base,
+		StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "/var/lib/codex",
+	}
+
+	converted := codexProcessIsolation(policy)
+	base["CANARY"] = "mutated"
+
+	if converted.UID != 12 || converted.GID != 34 || converted.BaseEnvironment["CANARY"] != "base" ||
+		converted.StandaloneOwnerID != "deployment-1" || converted.StandaloneStateRoot != "/var/lib/codex" {
+		t.Fatalf("converted isolation = %#v", converted)
+	}
+	if codexProcessIsolation(nil) != nil {
+		t.Fatal("nil isolation did not remain nil")
 	}
 }
 

@@ -4,7 +4,13 @@ package codex
 
 import "os/exec"
 
-func configureProcess(*exec.Cmd) {}
+func startProcess(cmd *exec.Cmd) (*supervisorWaiter, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return newSupervisorWaiter(cmd, true), nil
+}
 
 func killProcess(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
@@ -18,4 +24,8 @@ func killProcess(cmd *exec.Cmd) error {
 // equivalent for console child processes.
 func terminateProcess(cmd *exec.Cmd) error {
 	return killProcess(cmd)
+}
+
+func processCloseError(err error) error {
+	return err
 }

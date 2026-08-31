@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -484,18 +483,6 @@ func (s *session) preparePromptImages(ctx context.Context, images []decodedPromp
 		return preparedPromptImages{images: native, release: func() {}}, nil
 	}
 
-	var residenceBytes int64
-
-	for _, image := range images {
-		if base64.StdEncoding.EncodedLen(len(image.data))+len(image.mimeType)+13 > codexInlineImageEnvelopeSize {
-			residenceBytes += int64(len(image.data))
-		}
-	}
-
-	if err := s.agent.ensureRetiredResidenceCapacity(ctx, residenceBytes); err != nil {
-		return preparedPromptImages{}, err
-	}
-
 	reservation, err := s.agent.reserveScratchRoot(ctx, RuntimeResourcePrompt)
 	if err != nil {
 		return preparedPromptImages{}, err
@@ -529,28 +516,6 @@ func (s *session) preparePromptImages(ctx context.Context, images []decodedPromp
 		}
 
 		native[index].LocalPath = path
-	}
-
-	if s.agent.options.HostAuthority != nil {
-		if err := s.agent.options.HostAuthority.PrepareNativeTree(ctx, dir); err != nil {
-			release()
-
-			return preparedPromptImages{}, err
-		}
-
-		s.agent.mu.Lock()
-		epoch := s.agent.runtimeEpoch
-		s.agent.mu.Unlock()
-
-		var once sync.Once
-
-		release = func() {
-			once.Do(func() {
-				_ = s.agent.retireNativeResidenceAtEpoch(
-					dir, dir, residenceBytes, reservation, epoch, removePromptImageDir,
-				)
-			})
-		}
 	}
 
 	return preparedPromptImages{images: native, release: release}, nil

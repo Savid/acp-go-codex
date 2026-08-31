@@ -7,6 +7,7 @@ import "encoding/json"
 // rule and the emitter's construction cannot drift apart.
 const (
 	fieldVersion  = "version"
+	fieldVersions = "versions"
 	fieldStreamID = "streamId"
 	fieldSequence = "sequence"
 	fieldEvent    = "event"

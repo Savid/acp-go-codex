@@ -645,7 +645,7 @@ func TestPermissionServerRequestsFailClosedOutsideTurn(t *testing.T) {
 func TestMCPUserElicitationCanonicalizesPublishedToolIdentity(t *testing.T) {
 	agent, session, _, turnCtx := newStrictPermissionSession(t)
 	agent.setAgentClient(newRecordingAgentClient())
-	incarnation, err := session.openIncarnation(turnCtx, lifecycle.Negotiated{Version: 1})
+	incarnation, err := session.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}})
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(turnCtx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"}))
 	emitNativePermissionToolEvent(t, session, turnCtx, codex.Event{
@@ -720,7 +720,7 @@ func TestPermissionAndElicitationReleaseToolLeaseBeforeHostResponseAtOneClientCa
 				requestStarted: make(chan json.RawMessage, 1), releaseRequest: make(chan struct{}),
 			}
 			agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
-			agent.lifecycle = lifecycle.Negotiated{Version: 1}
+			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
 			conn := newLocalAgentConnection(agent, wire, inputR)
 			agent.setAgentClient(conn)
 			client := newSpyCodexClient()
@@ -806,7 +806,7 @@ func TestPermissionAndElicitationReleaseToolLeaseBeforeHostResponseAtOneClientCa
 func TestPermissionHostWaitDoesNotBlockNativeToolDelta(t *testing.T) {
 	agent, session, _, turnCtx := newStrictPermissionSession(t)
 	agent.setAgentClient(newRecordingAgentClient())
-	incarnation, err := session.openIncarnation(turnCtx, lifecycle.Negotiated{Version: 1})
+	incarnation, err := session.openIncarnation(turnCtx, lifecycle.Negotiated{Versions: []int{1}})
 	require.NoError(t, err)
 	require.NoError(t, incarnation.accept(turnCtx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "nonce"}))
 	emitNativePermissionToolEvent(t, session, turnCtx, codex.Event{
@@ -957,7 +957,7 @@ func TestAutonomousTurnAdmissionRotatesPermissionRegistry(t *testing.T) {
 	agent := NewAgent()
 	agent.setAgentClient(newRecordingAgentClient())
 	session := &session{agent: agent, id: "session", codexThreadID: "thread"}
-	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
 	require.NoError(t, session.openLifecycleStream(t.Context(), negotiated))
 
 	session.permissionTools.mu.Lock()
@@ -1183,7 +1183,7 @@ func TestPermissionToolRequestsFailClosedAtRegistryAndLifecycleBoundaries(t *tes
 		agent, session, _, turnCtx := newStrictPermissionSession(t)
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
-		require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Version: 1}))
+		require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
 		_, requested, err := session.requestPermissionForTool(turnCtx, conn, request("lifecycle"), permissionToolCommand)
 		require.False(t, requested)
 		require.ErrorContains(t, err, "exact native turn")
@@ -1235,7 +1235,7 @@ func TestPermissionToolRequestsFailClosedAtRegistryAndLifecycleBoundaries(t *tes
 		record.startSettled = true
 		session.permissionTools.tools = map[acp.ToolCallId]*permissionToolRecord{record.id: record}
 		session.permissionTools.aliases = map[string]acp.ToolCallId{"native": record.id}
-		require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Version: 1}))
+		require.NoError(t, session.openLifecycleStream(t.Context(), lifecycle.Negotiated{Versions: []int{1}}))
 		requested, err := elicitation(session, turnCtx, conn, "native")
 		require.False(t, requested)
 		require.ErrorContains(t, err, "exact native turn")

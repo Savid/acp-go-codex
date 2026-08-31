@@ -46,11 +46,11 @@ func mediaEnvelope(limits ImageLimits) map[string]any {
 func (a *Agent) capabilityMeta(codexMeta map[string]any) map[string]any {
 	meta := map[string]any{
 		codexMetaKey:         codexMeta,
-		routeMetaKey:         map[string]any{routeVersionKey: routeVersion},
+		routeMetaKey:         map[string]any{routeVersionsKey: []int{routeVersion}},
 		mediaEnvelopeMetaKey: mediaEnvelope(a.options.ImageLimits),
 	}
 	if a.options.InputHandoffRoot != "" {
-		meta[handoffMetaKey] = map[string]any{handoffVersionKey: handoffVersion}
+		meta[handoffMetaKey] = map[string]any{handoffVersionsKey: []int{handoffVersion}}
 	}
 
 	return meta

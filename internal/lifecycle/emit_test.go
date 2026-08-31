@@ -10,7 +10,7 @@ import (
 
 func provenNegotiation() Negotiated {
 	return Negotiated{
-		Version:                 1,
+		Versions:                []int{1},
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,
 		ActivityKinds:           []ActivityKind{ActivityTask},
@@ -20,7 +20,7 @@ func provenNegotiation() Negotiated {
 func TestStreamClaimsASequenceBeforeDelivery(t *testing.T) {
 	t.Parallel()
 
-	stream := NewStream("strm-1", Negotiated{Version: 1})
+	stream := NewStream("strm-1", Negotiated{Versions: []int{1}})
 	require.Equal(t, "strm-1", stream.ID())
 
 	opening, err := stream.Emit(SnapshotEvent("cycle-1", QuiescenceFact{}))
@@ -40,7 +40,7 @@ func TestStreamClaimsASequenceBeforeDelivery(t *testing.T) {
 func TestStreamRefusesAnEventItCannotState(t *testing.T) {
 	t.Parallel()
 
-	stream := NewStream("strm-1", Negotiated{Version: 1})
+	stream := NewStream("strm-1", Negotiated{Versions: []int{1}})
 	_, err := stream.Emit(IdleEvent("cycle-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.ErrorIs(t, err, &ViolationError{Kind: ViolationDeltaBeforeSnapshot})
 }
@@ -52,7 +52,7 @@ func TestStreamRefusesAnEventItCannotState(t *testing.T) {
 func TestFencedStreamEmitsNothingFurther(t *testing.T) {
 	t.Parallel()
 
-	stream := NewStream("strm-1", Negotiated{Version: 1})
+	stream := NewStream("strm-1", Negotiated{Versions: []int{1}})
 	_, err := stream.Emit(SnapshotEvent("cycle-1", QuiescenceFact{}))
 	require.NoError(t, err)
 
@@ -164,7 +164,7 @@ func TestEmittedEndingIdleRecordsHowItSettled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			stream := NewStream("strm-1", Negotiated{Version: 1})
+			stream := NewStream("strm-1", Negotiated{Versions: []int{1}})
 			_, err := stream.Emit(SnapshotEvent("cycle-1", QuiescenceFact{}))
 			require.NoError(t, err)
 			_, err = stream.Emit(AcceptedEvent(Submission{SubmissionID: "s", ClientNonce: "n"}, "turn-1"))

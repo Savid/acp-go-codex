@@ -27,7 +27,7 @@ jobs:
         run: go build ./...
 
       - name: Test and coverage gate
-        run: make coverage-check
+        run: .github/scripts/run-privileged-suite.sh coverage-check
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tee coverage-summary.txt
@@ -50,3 +50,44 @@ jobs:
           path: |
             coverage.out
             coverage-summary.txt
+
+  trusted-supervisor:
+    runs-on: [self-hosted]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      - name: Trusted supervisor security suite
+        run: .github/scripts/run-privileged-suite.sh test-trusted-supervisor
+
+  windows-behavior:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Windows behavior proof
+        shell: bash
+        run: .github/scripts/run-windows-behavior-proof.sh
+
+  native-browser:
+    runs-on: [self-hosted]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      - name: Native browser containment canary
+        run: .github/scripts/with-privileged-lock.sh make test-integration-native-browser

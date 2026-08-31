@@ -8,5 +8,12 @@ import (
 )
 
 func configureProcess(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Darwin has no Pdeathsig equivalent; parent-death cleanup is best-effort
+	// via process-group signalling.
+	var credential *syscall.Credential
+	if cmd.SysProcAttr != nil {
+		credential = cmd.SysProcAttr.Credential
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: credential}
 }

@@ -567,7 +567,7 @@ func TestCloseFencesUnknownTurnDispatchOutcome(t *testing.T) {
 	require.ErrorContains(t, err, "dispatch outcome is unknown")
 	require.ErrorContains(t, <-promptDone, "dispatch outcome is unknown")
 	client.mu.Lock()
-	require.False(t, client.closed, "session close must not retire the shared runtime")
+	require.True(t, client.closed, "unknown dispatch must fence the sole generation")
 	client.mu.Unlock()
 	require.NoError(t, agent.Close())
 }
@@ -2079,7 +2079,7 @@ func TestSameFingerprintResumeAndLoadShareActiveTurnAdmission(t *testing.T) {
 					foregroundCleanup = beginTestPromptTurn(t, s, "live-foreground", "foreground-turn")
 					defer foregroundCleanup()
 				} else {
-					agent.lifecycle = lifecycle.Negotiated{Version: 1}
+					agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
 					require.NoError(t, s.openLifecycleStream(t.Context(), agent.lifecycle))
 					s.lifecycleMu.Lock()
 					var err error
@@ -2257,7 +2257,7 @@ func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
 		}
 
 		agent := NewAgent()
-		agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
+		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
 		s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread-active"}, newSpyCodexClient(), sessionMeta{}, nil)
 		require.Error(t, s.beginActiveNativeRebind(t.Context()), "an unopened negotiated lifecycle is pending establishment work")
 	})
@@ -2265,7 +2265,7 @@ func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
 	t.Run("agent event wins", func(t *testing.T) {
 		agent := NewAgent()
 		agent.options.SessionStore = nil
-		agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
+		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
 		agent.setAgentClient(newRecordingAgentClient())
 		client := newSpyCodexClient()
 		s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread-active"}, client, sessionMeta{}, nil)
@@ -2306,7 +2306,7 @@ func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
 
 		agent := NewAgent()
 		agent.options.SessionStore = nil
-		agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
+		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
 		recorder := newRecordingAgentClient()
 		agent.setAgentClient(recorder)
 		s := newSession(agent, "session", t.TempDir(), nil, client.thread, client, sessionMeta{}, nil)
@@ -3207,7 +3207,7 @@ func boundEstablishmentContext(t *testing.T) context.Context {
 }
 
 func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}`)}
 
 	t.Run("new", func(t *testing.T) {
@@ -3279,7 +3279,7 @@ func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
 func TestRetainedResumeRollbackJoinsLifecycleRebindFailure(t *testing.T) {
 	client := &ambiguousCanaryFailureClient{runtimeRecordingClient: newRuntimeRecordingClient()}
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
 	agent.runtimeClient = client
 	retained := &retainedRuntimeThread{sessionID: "stored", threadID: "thread", client: client, claimed: true}
 	agent.retainedThreads[retained.sessionID] = retained

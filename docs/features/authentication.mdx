@@ -1,16 +1,273 @@
 ---
 title: "Authentication"
-description: "Codex account and provider authentication surfaces."
+description: "Log in through Codex, refresh external ChatGPT tokens, gate logout, and broker provider logins."
 ---
 
-ACP account reads and shared app-server authentication use the Agent-owned
-runtime. Terminal `login` and `logout` require an explicit canonical Codex home
-as their mutation-consent boundary.
+Authentication is owned by the Codex CLI. The adapter never manages Codex
+credentials on its own — it advertises the auth methods a client can use and,
+optionally, refreshes external ChatGPT tokens on the app-server's behalf.
 
-Embedded managed hosts use the same `HostAuthority` for version probes, account
-commands, browser shims, and app-server launches. Each helper uses host stdio and
-has no direct-process fallback.
+Codex authentication is process-global. Authenticate and logout therefore
+require a quiescent shared runtime: authentication is rejected while any ACP
+session is loaded, and logout first releases every loaded thread before
+mutating the account and closing the runtime. No thread can switch accounts
+independently.
 
-Provider authentication remains gated by `WithProviderAuthRoot` and
-`WithProviderAuthDirectHome`; the ledger contains coordination metadata, not
-credential values.
+## Explicit-isolation credential input
+
+The explicit-isolation root supervisor never forwards its ambient environment.
+To pass `OPENAI_API_KEY`, name each variable explicitly in the
+`inheritEnvironment` array of the root-owned
+`-process-isolation-config` policy. The value must be set in the supervisor
+environment or startup fails; identity, path, loader, XDG/native-home, and
+adapter-private variables cannot be inherited. File-backed or provider-broker
+credentials must live only in the explicit target-owned native home described
+by the adapter. No standalone path reads root `HOME`, root native config, or
+an unlisted root credential. When isolation is omitted, the agent instead uses
+the environment captured at construction, after managed-home precedence and
+private-variable scrubbing.
+
+## Terminal login
+
+The `login` and `logout` subcommands delegate to `codex`:
+
+```sh
+acp-go-codex login
+acp-go-codex login -codex-device-auth
+acp-go-codex logout
+```
+
+Terminal account commands use the same portable claim/liveness exclusion and
+selected process backend as app-server runtimes. They fail immediately when
+another cooperating process owns the selected `CODEX_HOME`, and they return
+after the directly owned command completes. Explicit authoritative Linux
+isolation additionally proves all descendants quiescent. Opted-in Darwin proves
+only direct-child reaping plus absence of the captured original process group;
+a descendant that escapes with `setsid` may survive. The command therefore
+cannot mutate credentials alongside an active cooperating app-server. Codex
+CLI 0.144.1 or newer and a supported local writable-home filesystem are
+required.
+
+`login` also runs with every browser launcher neutralised. The Codex child
+receives a private scratch directory of no-op `open`, `xdg-open`,
+`x-www-browser`, `www-browser`, and `sensible-browser` programs ahead of every
+other `PATH` entry, plus `BROWSER` pointed at one of them, because a launcher
+that execs `open` directly never reads `BROWSER`. Without both, `codex login`
+opens a tab on the operator's desktop that reaches its loopback listener and
+completes a grant with no further action. The directory is removed with the
+command's scratch. On Windows the launch cannot be shadowed this way, so
+`login` refuses rather than opening a browser. Ordinary Windows `logout` is
+available: it opens nothing and keeps the environment it would otherwise have
+had. Explicit isolation remains Linux-only.
+
+During ACP initialize, the terminal auth method is advertised only when the
+client declares terminal auth support. The agent auth method
+`codex-chatgpt-auth-tokens` is always advertised.
+
+## Embedded token refresh
+
+An embedded host can supply external ChatGPT tokens on demand, so the
+app-server refreshes auth without a terminal login:
+
+```go
+agent := codexacp.NewAgent(
+	codexacp.WithCodexChatGPTAuthTokenRefresher(func(ctx context.Context) (codexacp.ChatGPTAuthTokens, error) {
+		return codexacp.ChatGPTAuthTokens{AccessToken: "token"}, nil
+	}),
+)
+```
+
+## Logout boundary
+
+<Warning>
+  ACP logout is refused unless the adapter is started with
+  `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. Enable it
+  only with an explicit adapter-owned `-home` or `WithHome`; otherwise a client could clear the
+  credentials of the operator's normal Codex install. When enabled, ACP logout
+  clears only adapter-owned session state and the Codex account.
+</Warning>
+
+## Provider auth
+
+A host that wants to sign a worker in to the Codex account without a terminal
+drives the `_codex/auth/*` extension methods listed in
+[ACP methods](/docs/reference/acp-methods). The adapter is a broker: Codex
+mints, exchanges, refreshes, and stores every credential, and the adapter never
+acts as an OAuth client.
+
+### Turning the surface on
+
+Six legs are advertised while `WithProviderAuthRoot` (`-provider-auth-root`) is
+configured: an absolute, durable, host-owned directory holding the adapter's
+values-free ledger. It sits outside session scratch and outlives every session
+and native generation. Unset — or set to a path that cannot be created, is not a
+directory, or is not writable — the capability key is absent and every leg
+returns method-not-found.
+
+`credential` and `disconnect` read and clear credentials in the operator's own
+`CODEX_HOME`, so both are additionally gated on `WithProviderAuthDirectHome`
+(`-provider-auth-direct-home`) being set **and** resolving to the same directory
+as `WithHome`. The gate authorizes exactly that home — never a parent, a child,
+or a symlink target — and it is independent of `WithCodexAllowAccountLogout`,
+which governs ACP `logout` instead. Without it codex advertises six legs rather
+than eight.
+
+Consent is granted over the directory, not over the name that reached it. The
+adapter opens that directory when it starts and reads the credential store
+through it, so a link planted under the home cannot point the harvest at a store
+outside it. `disconnect` drives an account-level logout the app-server resolves
+`CODEX_HOME` for itself, so it additionally checks that the configured path still
+reaches the directory consent was granted over and answers `policy` when it does
+not.
+
+### The catalog
+
+`_codex/auth/methods` publishes two pinned entries against one provider
+(`openai`), with an opaque `generation` token naming that exact result:
+
+| Method id | Type | Interaction |
+| --- | --- | --- |
+| `chatgptDeviceCode` | `oauth` | `wait` |
+| `apiKey` | `api` | `secret` |
+
+Method ids are Codex's own login type names, which are stable. Three of Codex's
+five native login variants never appear: `chatgpt` mints a loopback
+`redirect_uri` the owner's browser cannot reach, `amazonBedrock` is an unstable
+internal surface, and `chatgptAuthTokens` installs an already-held credential
+rather than driving a login — that arrives through the
+`codex-chatgpt-auth-tokens` ACP auth method above.
+
+Codex has no paste-back leg, so it never returns `callbackInput`. Its device
+login is `wait` and only its API-key login submits through
+`_codex/auth/callback`.
+
+### The flow
+
+1. `_codex/auth/methods` returns the catalog and its `generation` token.
+2. `_codex/auth/authorize` starts one flow per `(sessionId, providerId)`,
+   carrying that token and a caller-minted `authorizeRequestId` idempotency key.
+   A repeat of the same `authorizeRequestId` replays the recorded presentation
+   verbatim with no native call. The device method returns the verification URL
+   and user code; the API-key method returns nothing to visit.
+3. `_codex/auth/callback` submits the API key for a `secret` flow. A device flow
+   expects no submission and rejects one.
+4. `_codex/auth/status` reports the flow state. It drives the `account/read`
+   backstop no faster than once every five seconds and serves the cached state
+   in between, so consumer poll cadence never reaches the provider. Its
+   `expiresAt` is **credential** expiry, never flow expiry.
+5. `_codex/auth/cancel` abandons a flow. It never claims provider-side
+   cancellation — an issued device code stays valid at OpenAI until it expires
+   there.
+6. `_codex/auth/inventory` answers residence from the ledger **and** a probe of
+   the account the harness reports.
+7. `_codex/auth/credential` harvests the completed login once, from the
+   credential store the home is configured to use.
+8. `_codex/auth/disconnect` bumps the binding generation, clears the account,
+   and verifies absence. It promises no provider-side revocation.
+
+A ChatGPT-side gating refusal is protocol-silent — the client is never told —
+so a native call that never answers is reported as `cause: "timeout"` rather
+than left to hang.
+
+### Legs that arrive at once
+
+Every ACP request runs concurrently, so a host may have two legs in flight
+against one flow, one session, or one account. The adapter admits one writer at
+each of those, and the loser is answered rather than queued behind the harness
+forever:
+
+- Two `_codex/auth/authorize` calls carrying one `authorizeRequestId` produce
+  one flow and one native mint. The second is answered from the first's
+  presentation, exactly as a later repeat is.
+- A second `_codex/auth/callback` submitted while the first is still writing is
+  refused with `cause: "flow_state"`. The key that lands is the claimant's, and
+  never whichever native write happened to finish last.
+- `_codex/auth/disconnect` and any login completing into the same account run
+  in some order, never interleaved. A login that finds the binding generation
+  already bumped is refused with `cause: "binding_conflict"` **before** it
+  writes, so a cleared account stays cleared.
+- A fresh `_codex/auth/authorize` derives its revision and binding generation
+  from the entry the provider already holds, and it does that in the same order
+  as a removal rather than across one. It cannot record an entry at a generation
+  a removal has already released, nor write over the record that says so.
+- A leg still waiting for one of these when its own request is abandoned answers
+  `cause: "timeout"` and touches nothing.
+
+`session/close` and agent shutdown cancel every flow the session owns. A leg
+admitted just before that is refused when it goes to register its flow, so it
+never starts a login against a session the host has already closed; it answers
+as though the session were unknown, because by then it is.
+
+### Which credential store the harvest reads
+
+Codex's credential store is a configured choice rather than a platform fact.
+The harvest reads `cli_auth_credentials_store` from the home's own
+`config.toml`, or from a `-codex-config` override, and behaves per mode:
+
+| Mode | Harvest |
+| --- | --- |
+| `file` (the default) | reads `$CODEX_HOME/auth.json` |
+| `keyring` | reads the `Codex Auth` keystore item for this home |
+| `auto` | **fails closed** — the authoritative store is whichever answers first, so the adapter cannot establish which one it read |
+| `ephemeral` | fails closed — nothing is written anywhere, so the connection needs a fresh login |
+
+The harvest emits the `oauth` variant and nothing else. A home holding an
+applied API key rather than a ChatGPT login has no reinjectable OAuth material,
+so the leg fails closed there too.
+
+`accessExpiresAt` is derived at harvest time. Codex's store records no absolute
+access-token expiry — only an ISO-8601 `last_refresh`, with the exact value
+inside a token this surface never decodes — so the adapter anchors the expiry at
+the moment of the read using the pinned access-token lifetime. The value errs
+early: a credential treated as expiring slightly sooner than it does causes a
+harmless early refresh, never a stale-credential call.
+
+### What the ledger holds
+
+The ledger under `ProviderAuthRoot` is values-free and its content is closed:
+provider slot identity, connection id, revision, binding generation, flow id,
+`authorizeRequestId`, state, and timestamps. It never holds credential material,
+authorization URLs, user codes, prompt answers, or native text. Entries are
+written atomically and durably — write-temp, fsync, rename, fsync-dir — with
+files `0600` under a `0700` root, and no session lifecycle ever sweeps it.
+
+The authorize presentation an idempotent repeat replays lives only in the
+session-scoped in-memory flow record. It never reaches the ledger and never
+reaches the session store.
+
+### Bounds and validation
+
+Native presentation text crosses on two fields only, and each is NFC-normalised
+before it is measured, checked, relayed, and stored:
+
+| Field | Bound |
+| --- | --- |
+| `url` | at most 2048 bytes, scheme exactly `https`, no userinfo, no fragment |
+| `userCode` | at most 64 bytes, fully matching `[A-Za-z0-9-]+` |
+
+The catalog's `label` is adapter-owned rather than native, and it is measured on
+the same terms: at most 256 bytes, restricted to Unicode categories L, N, P, S,
+and Zs. The authorize presentation's `message` is that same label, so it carries
+the label's bound and no native message ever reaches it.
+
+A field violating its bound is dropped rather than truncated: on a flow leg the
+call then fails closed, while on `methods` only the offending catalog entry is
+omitted.
+
+No advertised method carries a prompt, so `authorize.inputs` must be absent or
+empty; an answer for a prompt nobody published is invalid params. The API key a
+`secret` flow submits is at most 1024 bytes of control-free, newline-free UTF-8,
+and a rejected value is never persisted, logged, or echoed.
+
+Native error text never crosses. Every leg failure is the closed
+`codex_auth_failed` error (JSON-RPC `-32000`) carrying a `cause` from a fixed
+enum and no native message.
+
+### No injection key
+
+`agentCapabilities._meta.codex.providerAuth` carries no `injectionKey`, and
+`_meta.codex.options.providerAuth` is an unsupported option field that fails
+session start with its path. A brokered ChatGPT credential returns to Codex
+through the `codex-chatgpt-auth-tokens` ACP auth method and
+`WithCodexChatGPTAuthTokenRefresher` documented above — a second path for the
+identical credential would be one path too many.

@@ -1,18 +1,80 @@
 ---
 title: "Install"
-description: "Install acp-go-codex and connect it to Codex CLI."
+description: "Install the ACP adapter and point it at Codex CLI."
 ---
+
+## Install the CLI
+
+Install the standalone ACP agent binary:
 
 ```sh
 go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
 ```
 
-For embedded use:
+For embedded use, add the package to your module:
 
 ```sh
 go get github.com/savid/acp-go-codex
 ```
 
-Codex CLI `0.144.1` or newer must be available through the configured selector.
-Standalone mode resolves it in the current environment. Managed hosts configure
-a selector they can pin and launch through `HostAuthority`.
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+	codexacp.WithExecutablePath("/usr/local/bin/codex"),
+	codexacp.WithHome("/var/lib/my-host/codex"),
+)
+```
+
+## Point at Codex
+
+The adapter launches the local `codex` CLI on demand. Select which executable
+and home it uses:
+
+| Setting | CLI flag | Go option |
+| --- | --- | --- |
+| Codex executable | `-path` | `WithExecutablePath` |
+| Codex home (`CODEX_HOME`) | `-home` | `WithHome` |
+
+When `-path` is unset the adapter resolves `codex` from `PATH`. When `-home` is
+unset each launched Codex process uses the operator's default Codex home.
+
+## Authenticate
+
+Authentication is owned by Codex, not the adapter. Log in through the terminal
+helpers, which delegate to `codex`:
+
+```sh
+acp-go-codex login -codex-device-auth
+acp-go-codex logout
+```
+
+ACP logout is refused unless the adapter is started with
+`-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`, so a
+misbehaving client can never clear the credentials of an operator-owned Codex
+home. See [Authentication](/docs/features/authentication) for the full flow.
+
+## Provision explicit Linux identity authority
+
+Installations that supply a Linux process-isolation policy must persist the
+cross-process identity-authority root:
+
+```sh
+sudo install -d -o root -g root -m 0700 \
+  /var/lib/acp-go /var/lib/acp-go/agent-identities
+```
+
+Mount that exact local-lock volume into every service or container that can use
+the same numeric UID pool, with identical user-namespace UID/GID mappings and
+authoritative PID visibility. Otherwise use disjoint pools. Network, FUSE,
+pseudo, read-only, and unknown authority filesystems are rejected. Files named
+`<uid>.lock` are permanent and must never be unlinked, renamed, or replaced.
+
+Provision a dedicated durable provider state root such as `/var/lib/acp-go-codex`,
+outside and not beneath the authority root. Its ancestors must be root-owned
+and not group/world writable; the final directory must be owned by the target
+UID:GID with mode `0700`. Keep its device/inode stable.
+Set that exact path as both `standaloneStateRoot` in the isolation policy and
+the native `-home`; assign a stable nonsecret deployment identity as
+`standaloneOwnerId`. The authority's `domain.lock`, `owners.lock`, UID
+locks, affinity locks, and owner records are permanent coordination state.
+Deleting or reconstructing one beside retained records is corruption, not
+routine cleanup.
