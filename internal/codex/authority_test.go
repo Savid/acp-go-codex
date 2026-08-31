@@ -56,6 +56,7 @@ type authorityTestHost struct {
 	requests    []NativeRequest
 	prepared    []string
 	reclaimed   []string
+	reclaimErrs []error
 }
 
 func (h *authorityTestHost) NativeEnvironment() map[string]string { return h.environment }
@@ -66,6 +67,12 @@ func (h *authorityTestHost) PrepareNativeTree(_ context.Context, path string) er
 }
 func (h *authorityTestHost) ReclaimNativeTree(_ context.Context, path string) error {
 	h.reclaimed = append(h.reclaimed, path)
+	if len(h.reclaimErrs) != 0 {
+		err := h.reclaimErrs[0]
+		h.reclaimErrs = h.reclaimErrs[1:]
+
+		return err
+	}
 
 	return nil
 }

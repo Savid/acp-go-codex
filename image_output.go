@@ -454,7 +454,7 @@ func (s *session) readAllowedImageFile(path string) ([]byte, string, error) {
 
 func (s *session) allowedImageRoots() []string {
 	roots := []string{s.cwd}
-	if scratch := s.agent.options.ScratchDir; scratch != "" {
+	if scratch := s.agent.scratchDir; scratch != "" {
 		roots = append(roots, scratch)
 	}
 

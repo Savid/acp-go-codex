@@ -170,7 +170,7 @@ func metaOptionString(optionsMap map[string]any, key string) (string, error) {
 }
 
 // nonEmptyMetaOptionString distinguishes an omitted option from a present
-// empty select value. The former leaves native defaults intact; the latter has
+// empty select value. An omitted value leaves native defaults intact; an empty value has
 // no value to pass through and is an input-shape error.
 func nonEmptyMetaOptionString(optionsMap map[string]any, key string) (string, error) {
 	value, err := metaOptionString(optionsMap, key)
@@ -260,7 +260,7 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 }
 
 // validatedSessionEnv rejects the two classes of session environment key the
-// adapter owns: its own process-management names, and PATH. The thread PATH is
+// adapter owns: its private names and PATH. The thread PATH is
 // derived from extraPathDirs plus the app-server's native PATH, so a raw
 // session PATH would be a second, silently losing owner of the same value.
 func validatedSessionEnv(env map[string]string) (map[string]string, error) {

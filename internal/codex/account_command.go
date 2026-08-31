@@ -17,7 +17,7 @@ const (
 type AccountCommandOptions struct {
 	CLIPath             string
 	CodexHome           string
-	ScratchDir          string
+	Scratch             string
 	Mode                string
 	DeviceAuth          bool
 	Stdin               io.Reader
@@ -50,7 +50,7 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return errors.New("codex scratch parent resolver is not configured")
 	}
 
-	scratchParent, err := accountScratchParent(options.ScratchDir)
+	scratchParent, err := accountScratchParent(options.Scratch)
 	if err != nil {
 		return err
 	}
@@ -99,14 +99,18 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 			}
 
 			if prepareErr := options.HostAuthority.PrepareNativeTree(ctx, tree); prepareErr != nil {
-				return errors.Join(prepareErr, reclaimAccountTrees(options.HostAuthority, prepared), shim.remove())
+				if errors.Is(prepareErr, ErrContainmentIncomplete) {
+					prepared = append(prepared, tree)
+				}
+
+				return errors.Join(prepareErr, cleanupAccountTrees(options.HostAuthority, prepared, shim))
 			}
 
 			prepared = append(prepared, tree)
 		}
 	}
 	defer func() {
-		returnErr = errors.Join(returnErr, reclaimAccountTrees(options.HostAuthority, prepared), shim.remove())
+		returnErr = errors.Join(returnErr, cleanupAccountTrees(options.HostAuthority, prepared, shim))
 	}()
 
 	if _, probeErr := accountProbeVersion(ctx, VersionProbeOptions{
@@ -129,50 +133,104 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		return err
 	}
 
-	if native == nil || native.Stdin() == nil || native.Stdout() == nil || native.Stderr() == nil {
-		if native != nil {
-			_ = native.Revoke(context.Background())
-			_, _ = native.Wait(context.Background())
-		}
+	return runAccountNative(ctx, options, native)
+}
 
-		return fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable)
+func runAccountNative(ctx context.Context, options AccountCommandOptions, native NativeProcess) error {
+	if native == nil {
+		return ErrHostAuthorityUnavailable
 	}
 
-	copyDone := make(chan error, 3)
+	if native.Stdin() == nil || native.Stdout() == nil || native.Stderr() == nil {
+		revokeErr := native.Revoke(context.Background())
+		_, waitErr := native.Wait(context.Background())
+
+		var cleanupErr error
+		if waitErr != nil {
+			cleanupErr = errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
+		}
+
+		return errors.Join(
+			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
+			cleanupErr,
+		)
+	}
+
+	copyDone := make(chan error, 2)
 
 	go func() {
-		_, copyErr := io.Copy(native.Stdin(), readerOrEmpty(options.Stdin))
+		_, _ = io.Copy(native.Stdin(), readerOrEmpty(options.Stdin))
 		_ = native.Stdin().Close()
-
-		copyDone <- copyErr
 	}()
 	go func() { _, copyErr := io.Copy(writerOrDiscard(options.Stdout), native.Stdout()); copyDone <- copyErr }()
 	go func() { _, copyErr := io.Copy(writerOrDiscard(options.Stderr), native.Stderr()); copyDone <- copyErr }()
 
-	waitDone := make(chan error, 1)
+	type waitResult struct {
+		err      error
+		terminal bool
+	}
+
+	waitDone := make(chan waitResult, 1)
 
 	go func() {
 		result, waitErr := native.Wait(context.WithoutCancel(ctx))
-		if waitErr == nil && (result.ExitCode != 0 || result.Signal != 0) {
+
+		terminal := waitErr == nil
+		if terminal && (result.ExitCode != 0 || result.Signal != 0) {
 			waitErr = fmt.Errorf("codex account command exited with status %d signal %d", result.ExitCode, result.Signal)
 		}
 
-		waitDone <- waitErr
+		waitDone <- waitResult{err: waitErr, terminal: terminal}
 	}()
 
-	select {
-	case waitErr := <-waitDone:
-		return errors.Join(waitErr, <-copyDone, <-copyDone, <-copyDone)
-	case <-ctx.Done():
-		_ = native.Revoke(context.Background())
-		waitErr := <-waitDone
+	signals := options.Signals
 
-		return errors.Join(ctx.Err(), waitErr)
-	case <-options.Signals:
-		_ = native.Revoke(context.Background())
+	for {
+		select {
+		case wait := <-waitDone:
+			_ = native.Stdin().Close()
 
-		return <-waitDone
+			return errors.Join(wait.err, <-copyDone, <-copyDone)
+		case <-ctx.Done():
+			revokeErr := native.Revoke(context.Background())
+			wait := <-waitDone
+			_ = native.Stdin().Close()
+
+			if wait.terminal {
+				revokeErr = nil
+			} else {
+				revokeErr = errors.Join(ErrContainmentIncomplete, revokeErr)
+			}
+
+			return errors.Join(ctx.Err(), revokeErr, wait.err)
+		case _, ok := <-signals:
+			if !ok {
+				signals = nil
+
+				continue
+			}
+
+			revokeErr := native.Revoke(context.Background())
+			wait := <-waitDone
+			_ = native.Stdin().Close()
+
+			if wait.terminal {
+				revokeErr = nil
+			} else {
+				revokeErr = errors.Join(ErrContainmentIncomplete, revokeErr)
+			}
+
+			return errors.Join(revokeErr, wait.err)
+		}
 	}
+}
+
+func cleanupAccountTrees(authority HostAuthority, trees []string, shim *browserShim) error {
+	if err := reclaimAccountTrees(authority, trees); err != nil {
+		return err
+	}
+
+	return shim.remove()
 }
 
 func reclaimAccountTrees(authority HostAuthority, trees []string) error {
@@ -184,7 +242,13 @@ func reclaimAccountTrees(authority HostAuthority, trees []string) error {
 
 	for index := len(trees) - 1; index >= 0; index-- {
 		if err := authority.ReclaimNativeTree(context.Background(), trees[index]); err != nil {
-			result = errors.Join(result, fmt.Errorf("%w: %v", ErrContainmentIncomplete, err))
+			if errors.Is(err, ErrNativeTreeBusy) {
+				result = errors.Join(result, err)
+
+				continue
+			}
+
+			result = errors.Join(result, fmt.Errorf("%w: %w", ErrContainmentIncomplete, err))
 		}
 	}
 

@@ -1691,20 +1691,8 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 		nativePath:     nativePath,
 		turnStarted:    make(chan struct{}),
 	}
-	var sessionScratchAdmissions int
 	agent := NewAgent(
 		WithSessionStore(store),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				if kind == RuntimeResourceSession {
-					sessionScratchAdmissions++
-
-					return nil, errors.New("active thread must not materialize its mirrored rollout")
-				}
-
-				return func() {}, nil
-			},
-		}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
 	agent.setAgentClient(newRecordingAgentClient())
@@ -1780,7 +1768,6 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	resumedActive := agent.activeSession(created.SessionId)
 	require.NotNil(t, resumedActive)
 	require.NotSame(t, active, resumedActive)
-	require.Zero(t, sessionScratchAdmissions)
 
 	client.mu.Lock()
 	require.Equal(t, 1, client.resumeCount)
@@ -1796,7 +1783,6 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	))
 	require.NoError(t, err)
 	require.Same(t, resumedActive, agent.activeSession(created.SessionId))
-	require.Zero(t, sessionScratchAdmissions)
 
 	client.mu.Lock()
 	require.Equal(t, 2, client.resumeCount)

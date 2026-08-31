@@ -1,21 +1,77 @@
 ---
 title: "CLI"
-description: "Standalone acp-go-codex command flags and account commands."
+description: "Every flag and subcommand the acp-go-codex command accepts, with defaults."
 ---
 
 ```sh
 acp-go-codex [flags]
-acp-go-codex login -home /absolute/codex-home
-acp-go-codex logout -home /absolute/codex-home
 ```
 
-The main command serves ACP JSON-RPC on stdin/stdout and launches Codex as the
-current user. Common flags select the Codex executable (`-path`), Codex home
-(`-home`), scratch parent (`-scratch-dir`), default model (`-model`), and
-OpenTelemetry settings. Run `acp-go-codex -help` for the current complete list.
-Provider-auth hosts configure the durable ledger with `-provider-auth-root` and
-may explicitly permit direct home writes with `-provider-auth-direct-home`.
-Use `-debug` for diagnostic logging and `-version` to print the adapter version.
+The standalone command serves ACP JSON-RPC on stdin/stdout and launches Codex as
+the current user. Managed execution is an embedding API selected with
+`WithHostAuthority`; the CLI has no authority flags.
 
-Managed execution is an embedding API: a Go host passes `WithHostAuthority`.
-The standalone CLI has no authority configuration flags.
+## Serve flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-path` | `codex` on `PATH` | Codex CLI executable selector. |
+| `-home` | operator default | Codex home passed as `CODEX_HOME`. |
+| `-scratch-dir` | system temp | Parent for private runtime, rollout, hydration, and image scratch. |
+| `-provider-auth-root` | unset | Durable values-free provider-auth ledger; empty omits the surface. |
+| `-provider-auth-direct-home` | unset | Exact home consent for the credential and disconnect legs. |
+| `-model` | unset | Default model preference. |
+| `-debug` | `false` | Write adapter diagnostics to stderr. |
+| `-version` | `false` | Print the adapter version and exit. |
+| `-codex-allow-account-logout` | `false` | Permit ACP logout inside an explicit adapter-owned home. |
+| `-seed-file` | unset | Repeatable `<relpath>=<hostpath>` seed written under an explicit home. |
+| `-codex-config` | unset | Repeatable app-server `<key>=<value>` override. |
+
+## Codex config
+
+Override Codex config directly on the app-server (repeat `-codex-config` per key).
+Dotted keys set nested config, string values are TOML-quoted automatically, and
+nothing is written to disk — so `-home` can point at the operator's real Codex
+dir and its `config.toml`/auth stay untouched. The `mcp_servers` and
+`shell_environment_policy` roots are reserved whole — including every dotted
+child such as `shell_environment_policy.set.FOO` — because a process-global
+override would apply to every thread at once, outside the per-thread ownership
+that authors those sections. Supplying either makes `initialize` fail closed
+with `-32603`. Point Codex at a LiteLLM gateway:
+
+```sh
+acp-go-codex \
+  -codex-config model=gpt-5.5 \
+  -codex-config model_provider=litellm \
+  -codex-config model_providers.litellm.name=LiteLLM \
+  -codex-config model_providers.litellm.base_url=https://litellm.example/v1 \
+  -codex-config model_providers.litellm.env_key=LITELLM_API_KEY \
+  -codex-config model_providers.litellm.wire_api=responses
+```
+
+Seed Codex config from host files (repeat `-seed-file` per file). Each host
+file's contents are written to the relative path under `CODEX_HOME`, so requires
+an explicit `-home`. Codex loads configuration from `CODEX_HOME/config.toml`,
+which is the same keyspace `-codex-config` reaches, so seeding that file with
+the reserved `mcp_servers` or `shell_environment_policy` root is refused in
+every TOML spelling.
+
+
+## Subcommands
+
+Terminal helpers delegate to the ordinary Codex CLI process:
+
+```sh
+acp-go-codex login -home DIR [-path PATH] [-scratch-dir DIR] [-codex-device-auth]
+acp-go-codex logout -home DIR [-path PATH] [-scratch-dir DIR]
+```
+
+Both require Codex CLI 0.144.1 or newer and an explicit canonical `-home`.
+The writable-home lock excludes a cooperating app-server or other account
+command. `login` places private no-op browser launchers ahead of the native
+search path and removes the shim after terminal process settlement. Windows
+supports `logout` but refuses `login`, because the browser-launch shadowing
+boundary is unavailable there.
+
+See [Authentication](/docs/features/authentication) for account and provider
+flows.

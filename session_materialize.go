@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,26 +12,18 @@ import (
 
 func (a *Agent) materializeStoredRollout(
 	ctx context.Context,
-	sessionID acp.SessionId,
 	entries []SessionStoreEntry,
+	release func(),
 ) (string, func(), int64, error) {
 	if len(entries) == 0 {
+		release()
+
 		return "", func() {}, 0, nil
 	}
 
 	bytes := materializedRolloutBytes(entries)
 
-	hydrated, err := a.hydrateStoredImageArtifacts(ctx, sessionID, entries)
-	if err != nil {
-		return "", nil, 0, err
-	}
-
-	release, err := a.reserveScratchRoot(ctx, RuntimeResourceSession)
-	if err != nil {
-		return "", nil, 0, err
-	}
-
-	path, err := materializeRollout(a.options.ScratchDir, hydrated)
+	path, err := materializeRollout(a.scratchDir, entries)
 	if err != nil {
 		release()
 
@@ -39,6 +32,15 @@ func (a *Agent) materializeStoredRollout(
 
 	if a.options.HostAuthority != nil {
 		if err := a.options.HostAuthority.PrepareNativeTree(ctx, filepath.Dir(path)); err != nil {
+			if errors.Is(err, ErrContainmentIncomplete) {
+				a.mu.Lock()
+				epoch := a.runtimeEpoch
+				a.mu.Unlock()
+				_ = a.retireMaterializedRolloutAtEpoch(path, bytes, release, epoch)
+
+				return "", nil, 0, err
+			}
+
 			_ = removeMaterializedRollout(path)
 
 			release()
@@ -48,6 +50,19 @@ func (a *Agent) materializeStoredRollout(
 	}
 
 	return path, release, bytes, nil
+}
+
+func (a *Agent) hydrateStoredRollout(
+	ctx context.Context,
+	sessionID acp.SessionId,
+	entries []SessionStoreEntry,
+) ([]SessionStoreEntry, int64, error) {
+	hydrated, err := a.hydrateStoredImageArtifacts(ctx, sessionID, entries)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return hydrated, materializedRolloutBytes(hydrated), nil
 }
 
 func materializedRolloutBytes(entries []SessionStoreEntry) int64 {

@@ -3,23 +3,142 @@ title: "Security"
 description: "Native execution and filesystem trust boundaries."
 ---
 
-Omitting `WithHostAuthority` runs Codex as the adapter's current user. On Linux,
-the ordinary launcher retains only process-group guardianship and a writable-home
-lock outside prepared trees.
+## Native execution modes
 
-An embedded host selects managed execution with `WithHostAuthority`. The host
-supplies the native environment, prepares every tree before Codex can read it,
-starts each native process, revokes the runtime lease, waits for terminal proof,
-and reclaims each tree. A nil or unusable supplied authority fails before a tree
-is changed or a process is launched.
+Omitting `WithHostAuthority` runs Codex as the adapter's current user. The
+ordinary launcher owns its process handle and writable-home lock, and shutdown
+waits for the launched process. It does not claim an independent security
+boundary between the adapter and Codex.
 
-The shared app-server belongs to the Agent. Session cancel and close use only
-thread protocol operations and never revoke that shared process. Runtime
-retirement fences new admission, shuts down the protocol, calls `Revoke` and
-`Wait`, and only then reclaims and removes retired rollout and prompt-input
-residences. Count and byte bounds force retirement before another residence is
+An embedded host selects managed execution with `WithHostAuthority`. A supplied
+authority must provide a usable native environment before initialization can
+succeed. It prepares every native-readable tree, launches every version probe,
+app-server, account helper, and browser-shim command, and later reclaims those
+trees. An explicit nil, typed nil, panic, incomplete process, or launch refusal
+fails closed; managed execution never retries through the ordinary launcher.
+
+The standalone CLI intentionally exposes only ordinary execution. Hosts that
+need a stronger boundary embed the Go package and implement the authority
+contract themselves.
+
+## Prepared-tree lifecycle
+
+The adapter completes all directory creation, seed writes, hydration, and
+validation before `PrepareNativeTree`. After preparation it treats the tree as
+opaque: only the host-launched native process may use paths inside it. Cleanup
+follows one order:
+
+1. close the app-server protocol and stop new admission;
+2. revoke native work when graceful shutdown does not settle it;
+3. wait for terminal native-process proof;
+4. reclaim each prepared tree;
+5. remove adapter scratch and release its reservation.
+
+`ErrNativeTreeBusy` means reclaim was attempted before the authority could
+prove the tree idle. It is retryable, leaves the tree and reservation intact,
+and is not classified as `ErrContainmentIncomplete`.
+`ErrContainmentIncomplete` means terminal ownership could not be proved; the
+tree stays quarantined and the Agent refuses another runtime generation.
+`ErrHostAuthorityUnavailable` classifies an unusable authority boundary.
+
+The Codex app-server is Agent-owned and shared by sessions. Session cancellation
+uses Codex protocol operations and does not revoke the shared process. Rollout
+and large prompt-image trees prepared while a runtime is live remain registered
+until that runtime generation reaches its terminal boundary. Count and exact
+hydrated-byte limits force retirement before another prepared residence is
 admitted.
 
-Managed executable selectors must be configured for host pinning. The adapter
-refuses session-created `node_modules` Codex copies with guidance to stage and
-pin the executable before initialization.
+Managed executable selectors containing a `node_modules` path segment are
+refused during initialization, before filesystem inspection or mutation. A host
+must stage and pin packaged Codex itself.
+
+## Home and account boundary
+
+`CODEX_HOME` is a mutable account and configuration boundary. Seed files are
+written before host preparation and are confined to relative paths under the
+resolved home. Terminal `login` and `logout` require an explicit canonical
+home. Browser launchers are replaced by a private no-op shim for ordinary login;
+Windows login is refused because that shim cannot provide the same behavior.
+
+Provider-auth extension methods are ordinary-mode features. When
+`WithHostAuthority` is supplied, their capability is omitted, every
+`_codex/auth/*` request receives method-not-found, and no provider ledger path
+is created. The standard ACP auth methods and Agent runtime remain usable.
+
+## MCP and raw-event data
+
+The adapter accepts only stdio and streamable-HTTP
+[MCP servers](/docs/features/mcp); any other transport is rejected with invalid
+params. Stdio MCP environment entries cannot use adapter-reserved environment
+names.
+
+Session MCP is serialized only into thread-scoped app-server requests. Bearer
+headers do not ride process arguments or process-wide environment variables and
+are not written to the workspace or rollout store.
+
+[Raw events](/docs/features/raw-events) can contain unredacted Codex rollout
+JSON. Enable `_codex/rawEvent` only when the host is prepared to receive and
+protect that data. Telemetry never carries rollout rows, prompt text, or tool
+payloads by default; see [Observability](/docs/operations/observability) for the
+privacy defaults.
+
+Prompt images are read from the base64 bytes in the ACP request, and an embedded
+block's image URI is never followed. Large validated inputs are materialized as
+mode-0600 files in an adapter-owned scratch directory and removed when the prompt
+call returns. Native image output paths are accepted only when their resolved
+target is a regular file inside the workspace, adapter scratch roots, the Codex
+`generated_images` directory, or the operating-system temporary directory —
+the roots the harness sandbox already lets a turn write to. The roots stop
+accidental reads of arbitrary paths; they are not an exfiltration boundary
+against a shell-capable agent, which can copy any readable file into the
+workspace. Every accepted path is still resolved through its symlinks,
+required to be a regular file, and read under the per-image byte bound. A
+refused path fails that tool call and returns fixed guidance; it does not end
+the turn. Raw image events redact base64 and expose only path basenames.
+
+[`WithInputHandoffRoot`](/docs/reference/go-api#agent-options) is the one option
+that lets a prompt name a local file to read, and it is off unless a host
+configures it. Its guarantees are deliberately narrow:
+
+- **One root, bounded by the kernel.** The path a block names is opened relative
+  to the configured root through a confined directory handle, so the open itself
+  cannot leave the root: a name that climbs out, an absolute symlink, or a link
+  whose target is outside is `path_not_allowed`, and so is a target that opens
+  but is not a regular file. A name inside the root that does not exist, or a
+  relative link whose target has been removed, is `missing_file`. No other prompt
+  field can widen the root, and the root itself must be an absolute path or agent
+  construction fails.
+- **Bytes are verified, not trusted.** Every read is bounded at one byte more
+  than the block declared, and the bytes read must match the sha256 and size the
+  block declares. A mismatch is `handoff_digest_mismatch` and fails the turn;
+  there is no fallback that would forward unverified bytes, and no size reported
+  by the filesystem takes part in any verdict. Bounding the read by the
+  declaration rather than by the limit means the host cannot commit the adapter
+  to reading more than it stood behind: a declared size past the per-image limit
+  is `too_large` with nothing opened, and a file larger than its declaration is
+  refused after reading only as far as the declaration went.
+- **A malformed request never reaches the filesystem.** The envelope, the URI,
+  the declared media type, and the declared size are all judged before anything
+  is opened. A block that fails any of them is answered without a syscall, so it
+  cannot be used to probe which paths under the root exist.
+- **Bounded work, not just bounded bytes.** One prompt reads at most 64
+  handoff-form blocks. The block that crosses the cap is `too_large` and is never
+  read, so a host cannot turn one small request into unbounded file reads by
+  disabling the per-prompt byte limit.
+- **The root is read-only.** The adapter never creates, modifies, or removes
+  anything under it.
+- **The host's path does not propagate.** Verified bytes are copied into the
+  adapter's own scratch directory before reaching Codex, so the handoff path
+  appears in no native request and nothing that outlives validation. Refusals
+  carry fixed messages that name the stage that refused and never a path, a
+  filename, an observed digest, or an observed byte count.
+
+The root bounds what a *host* can name, and the declared sha256 is what proves
+the right bytes arrived. The two are not the same guarantee, and the second is
+the one that carries the trust: the harness runs as the same user as the adapter,
+so anything running under that user can read what the adapter can read, can place
+a hardlink to an outside file inside the root, and can replace a file between the
+moment a host describes it and the moment the adapter reads it. None of that lets
+unverified bytes reach Codex, because a substituted file fails the digest. Point
+the root at a directory only the host writes, and treat it as a delivery
+location rather than as a security boundary.

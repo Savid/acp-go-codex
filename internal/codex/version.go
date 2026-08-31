@@ -61,12 +61,21 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	}
 
 	if native == nil || native.Stdin() == nil || native.Stdout() == nil || native.Stderr() == nil {
+		var cleanupErr error
+
 		if native != nil {
-			_ = native.Revoke(context.Background())
-			_, _ = native.Wait(context.Background())
+			revokeErr := native.Revoke(context.Background())
+
+			_, waitErr := native.Wait(context.Background())
+			if waitErr != nil {
+				cleanupErr = errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
+			}
 		}
 
-		return "", fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable)
+		return "", errors.Join(
+			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
+			cleanupErr,
+		)
 	}
 
 	_ = native.Stdin().Close()
@@ -82,7 +91,13 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	result, waitErr := native.Wait(ctx)
 	if ctx.Err() != nil {
 		revokeErr := native.Revoke(context.Background())
+
 		_, terminalErr := native.Wait(context.Background())
+		if terminalErr == nil {
+			revokeErr = nil
+		} else {
+			revokeErr = errors.Join(ErrContainmentIncomplete, revokeErr)
+		}
 
 		return "", errors.Join(ctx.Err(), revokeErr, terminalErr)
 	}

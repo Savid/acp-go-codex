@@ -1,6 +1,6 @@
 ---
 title: "Run modes"
-description: "Run acp-go-codex as a stdio process or embedded Go agent."
+description: "Run acp-go-codex as a stdio ACP agent or embedded Go adapter."
 ---
 
 ## Standalone
@@ -9,17 +9,43 @@ description: "Run acp-go-codex as a stdio process or embedded Go agent."
 acp-go-codex -path codex -home /absolute/codex-home -model gpt-5.5
 ```
 
-Standalone mode runs native work as the current user and speaks ACP over
-stdin/stdout.
+The command launches Codex as its current user and speaks ACP JSON-RPC over
+stdin/stdout. Diagnostics go to stderr. It supports the full session, MCP,
+image, lifecycle, and standard auth surface; provider auth is enabled only when
+a ledger root is configured.
 
-## Embedded
+| Flag | Purpose |
+| --- | --- |
+| `-path` | Codex CLI executable selector. |
+| `-home` | `CODEX_HOME` for launched Codex processes. |
+| `-scratch-dir` | Parent for private adapter materialization. |
+| `-model` | Default model preference. |
+| `-debug` | Write adapter diagnostics to stderr. |
+| `-version` | Print the adapter version and exit. |
+| `-codex-allow-account-logout` | Permit ACP logout inside an explicit home boundary. |
+
+## Login helpers
+
+```sh
+acp-go-codex login -path /usr/local/bin/codex -home /var/lib/acp-go-codex -codex-device-auth
+acp-go-codex logout -path /usr/local/bin/codex -home /var/lib/acp-go-codex
+```
+
+These ordinary commands share the writable-home exclusion used by the
+app-server. Login neutralizes native browser launchers; Windows login is refused
+while logout remains available.
+
+## Embedded Go
 
 ```go
-err := codexacp.Serve(ctx, input, output,
+err := codexacp.Serve(ctx, stdin, stdout,
 	codexacp.WithExecutablePath("host-pinned-codex"),
+	codexacp.WithHome("/srv/codex"),
 	codexacp.WithHostAuthority(authority),
 )
 ```
 
 Omit `WithHostAuthority` for ordinary same-user behavior. Supply it when the
-embedding host owns native leases and prepared-tree transitions.
+host owns native environments, prepared-tree transitions, and process leases.
+All managed version probes and app-server launches use that authority. Provider
+auth extensions are omitted in managed mode.

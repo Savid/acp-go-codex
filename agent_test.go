@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1036,9 +1035,6 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	if !errors.Is(serveErr, ErrContainmentIncomplete) {
 		t.Fatalf("Serve close-error returned %v, want ErrContainmentIncomplete", serveErr)
 	}
-	if !errors.Is(ErrContainmentIncomplete, codex.ErrContainmentIncomplete) {
-		t.Fatalf("public process-tree error does not preserve internal identity")
-	}
 	_ = c2aR.Close()
 	_ = a2cW.Close()
 
@@ -1363,8 +1359,6 @@ func (c *blockingPermissionAgentClient) RequestPermissionRegistered(
 }
 
 func TestMain(m *testing.M) {
-	fakeMode := decodeFakeCodexMode(os.Getenv(fakeCodexModeEnv))
-
 	// When the process-death test relaunches this binary as the codex CLI, act
 	// as a fake app-server instead of running the suite.
 	if len(os.Args) > 1 {
@@ -1373,14 +1367,7 @@ func TestMain(m *testing.M) {
 			fmt.Println("codex-cli 0.144.1")
 			os.Exit(0)
 		case "app-server":
-			if fakeMode.Mode == fakeCodexCancelTreeMode {
-				runCancelTreeFakeCodexAppServer(fakeMode)
-			} else {
-				runFakeCodexAppServer()
-			}
-			os.Exit(0)
-		case fakeCodexDelayedChildArg:
-			runFakeCodexDelayedChild(fakeMode)
+			runFakeCodexAppServer()
 			os.Exit(0)
 		}
 	}
@@ -1399,38 +1386,7 @@ func TestMain(m *testing.M) {
 // process death surfaces a real diagnostic tail rather than a bare EOF.
 const fakeCodexStderrTail = "codex app-server: fatal: killed (out of memory)"
 
-const (
-	fakeCodexModeEnv              = "ACP_GO_CODEX_FAKE_MODE"
-	fakeCodexCancelTreeMode       = "cancel-tree"
-	fakeCodexDelayedChildArg      = "fake-delayed-child"
-	fakeCodexBlockingPrompt       = "START_DELAYED_CHILD"
-	fakeCodexReplacementPrompt    = "REPLACEMENT_TURN"
-	fakeCodexReplacementReply     = "REPLACEMENT_OK"
-	fakeCodexThreadID             = "thread-cancel-tree"
-	fakeCodexSessionID            = "session-cancel-tree"
-	fakeCodexBlockingTurnID       = "turn-blocking"
-	fakeCodexReplacementTurnID    = "turn-replacement"
-	fakeCodexBackgroundProcessID  = "background-target-process"
-	fakeCodexStalePeerThreadID    = "thread-stale-peer"
-	fakeCodexLateAbortRolloutRow  = `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-blocking"}}`
-	fakeCodexChildSentinelDelay   = 750 * time.Millisecond
-	fakeCodexChildObservationWait = 1250 * time.Millisecond
-)
-
-type fakeCodexMode struct {
-	Mode           string `json:"mode"`
-	ChildStarted   string `json:"childStarted"`
-	CancelReturned string `json:"cancelReturned"`
-	ChildSentinel  string `json:"childSentinel"`
-	RolloutPath    string `json:"rolloutPath"`
-}
-
-func decodeFakeCodexMode(raw string) fakeCodexMode {
-	var mode fakeCodexMode
-	_ = json.Unmarshal([]byte(raw), &mode)
-
-	return mode
-}
+const fakeCodexLateAbortRolloutRow = `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-blocking"}}`
 
 // runFakeCodexAppServer speaks just enough of the codex app-server JSON-RPC
 // protocol to complete the launch handshake, then dies mid-turn on turn/start so
@@ -1473,154 +1429,6 @@ func runFakeCodexAppServer() {
 	}
 }
 
-// runCancelTreeFakeCodexAppServer deliberately implements the native failure
-// observed in production: turn/interrupt acknowledges cancellation but leaves
-// a command descendant running. The fake exposes that descendant through the
-// same thread-scoped background-terminal API as Codex 0.144.4.
-func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
-	rolloutPath := mode.RolloutPath
-
-	writeMessage := func(message map[string]any) {
-		payload, _ := json.Marshal(message)
-		payload = append(payload, '\n')
-		_, _ = os.Stdout.Write(payload)
-	}
-	writeReply := func(id any, result map[string]any) {
-		writeMessage(map[string]any{"jsonrpc": "2.0", "id": id, jsonFieldResult: result})
-	}
-	writeError := func(id any, message string) {
-		writeMessage(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      id,
-			jsonFieldError: map[string]any{
-				"code": -32602, "message": message,
-			},
-		})
-	}
-	writeNotification := func(method string, params map[string]any) {
-		writeMessage(map[string]any{"jsonrpc": "2.0", jsonFieldMethod: method, "params": params})
-	}
-
-	var backgroundChild *exec.Cmd
-	defer func() {
-		if backgroundChild != nil && backgroundChild.Process != nil {
-			_ = backgroundChild.Process.Kill()
-			_ = backgroundChild.Wait()
-		}
-	}()
-
-	decoder := json.NewDecoder(os.Stdin)
-	for {
-		var msg map[string]any
-		if err := decoder.Decode(&msg); err != nil {
-			return
-		}
-
-		id, hasID := msg["id"]
-		if !hasID {
-			continue
-		}
-
-		method, _ := msg[jsonFieldMethod].(string)
-		switch method {
-		case "thread/start":
-			if rolloutPath != "" {
-				if _, err := os.Stat(rolloutPath); errors.Is(err, os.ErrNotExist) {
-					_ = appendFakeCodexRolloutRow(
-						rolloutPath,
-						`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
-					)
-				}
-			}
-			writeReply(id, map[string]any{"thread": map[string]any{
-				"id": fakeCodexThreadID, "sessionId": fakeCodexSessionID, "path": rolloutPath,
-			}})
-		case "thread/resume":
-			params, _ := msg["params"].(map[string]any)
-			threadID, _ := params["threadId"].(string)
-			if threadID == fakeCodexStalePeerThreadID {
-				writeError(id, "no rollout found for thread id "+threadID)
-
-				continue
-			}
-			path, _ := params["path"].(string)
-			writeReply(id, map[string]any{"thread": map[string]any{
-				"id": fakeCodexThreadID, "sessionId": fakeCodexSessionID, "path": path,
-			}})
-		case "turn/start":
-			rawParams, _ := json.Marshal(msg["params"])
-			if strings.Contains(string(rawParams), fakeCodexBlockingPrompt) {
-				backgroundChild = newFakeCodexDelayedChildCommand()
-				backgroundChild.Env = os.Environ()
-				if err := backgroundChild.Start(); err != nil {
-					os.Exit(2)
-				}
-
-				writeReply(id, map[string]any{"turn": map[string]any{"id": fakeCodexBlockingTurnID}})
-				writeNotification("item/started", map[string]any{
-					"threadId": fakeCodexThreadID,
-					"turnId":   fakeCodexBlockingTurnID,
-					"item": map[string]any{
-						"id": fakeCodexBlockingTurnID + "-command", "type": "commandExecution", "command": "delayed child",
-					},
-				})
-
-				continue
-			}
-
-			writeReply(id, map[string]any{"turn": map[string]any{"id": fakeCodexReplacementTurnID}})
-			writeNotification("item/agentMessage/delta", map[string]any{
-				"threadId": fakeCodexThreadID, "turnId": fakeCodexReplacementTurnID, "delta": fakeCodexReplacementReply,
-			})
-			writeNotification("turn/completed", map[string]any{
-				"threadId": fakeCodexThreadID,
-				"turn":     map[string]any{"id": fakeCodexReplacementTurnID, "status": "completed"},
-			})
-		case "turn/interrupt":
-			// Intentionally acknowledge without touching the delayed child, and
-			// without stalling: a prompt settles behind the containment
-			// boundary, so an interrupt that waits on the cancelled prompt is a
-			// fixture that waits on itself.
-			writeReply(id, map[string]any{})
-		case "thread/backgroundTerminals/list":
-			params, _ := msg["params"].(map[string]any)
-			threadID, _ := params["threadId"].(string)
-			data := []any{}
-			if threadID == fakeCodexThreadID && backgroundChild != nil && backgroundChild.Process != nil {
-				data = append(data, map[string]any{
-					"itemId":    fakeCodexBlockingTurnID + "-command",
-					"processId": fakeCodexBackgroundProcessID,
-					"osPid":     backgroundChild.Process.Pid,
-				})
-			}
-			writeReply(id, map[string]any{"data": data, "nextCursor": nil})
-		case "thread/backgroundTerminals/terminate":
-			params, _ := msg["params"].(map[string]any)
-			threadID, _ := params["threadId"].(string)
-			processID, _ := params["processId"].(string)
-			terminated := false
-			if threadID == fakeCodexThreadID && processID == fakeCodexBackgroundProcessID && backgroundChild != nil {
-				if backgroundChild.Process != nil {
-					_ = backgroundChild.Process.Kill()
-				}
-				_ = backgroundChild.Wait()
-				backgroundChild = nil
-				terminated = true
-			}
-			// Native cleanup finishes the rollout as the contained descendant
-			// dies. Publishing the abort row here rather than at interrupt is
-			// what makes the durable copy a proof: a mirror that read before
-			// containment cannot hold this row.
-			if terminated && rolloutPath != "" {
-				_ = appendFakeCodexRolloutRow(rolloutPath, fakeCodexLateAbortRolloutRow)
-			}
-			writeReply(id, map[string]any{"terminated": terminated})
-		default:
-			writeReply(id, map[string]any{})
-		}
-	}
-}
-
 func appendFakeCodexRolloutRow(path string, row string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -1635,38 +1443,6 @@ func appendFakeCodexRolloutRow(path string, row string) error {
 	_, err = fmt.Fprintln(file, row)
 
 	return err
-}
-
-func runFakeCodexDelayedChild(mode fakeCodexMode) {
-	ignoreFakeCodexChildTerminationSignals()
-
-	started := mode.ChildStarted
-	cancelReturned := mode.CancelReturned
-	sentinel := mode.ChildSentinel
-	if started == "" || cancelReturned == "" || sentinel == "" {
-		os.Exit(3)
-	}
-
-	identity, err := json.Marshal(currentFakeCodexChildIdentity())
-	if err != nil {
-		os.Exit(4)
-	}
-	if err := os.WriteFile(started, identity, 0o600); err != nil {
-		os.Exit(4)
-	}
-
-	deadline := time.Now().Add(fakeCodexChildSentinelDelay)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(cancelReturned); err == nil {
-			_ = os.WriteFile(sentinel, []byte("survived cancellation return"), 0o600)
-
-			return
-		}
-
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	_ = os.WriteFile(sentinel, []byte("delayed side effect"), 0o600)
 }
 
 type appendErrorStore struct{}

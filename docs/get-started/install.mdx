@@ -1,18 +1,64 @@
 ---
 title: "Install"
-description: "Install acp-go-codex and connect it to Codex CLI."
+description: "Install the ACP adapter and point it at Codex CLI."
 ---
+
+## Install the CLI
+
+Install the standalone ACP agent binary:
 
 ```sh
 go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
 ```
 
-For embedded use:
+For embedded use, add the package to your module:
 
 ```sh
 go get github.com/savid/acp-go-codex
 ```
 
-Codex CLI `0.144.1` or newer must be available through the configured selector.
-Standalone mode resolves it in the current environment. Managed hosts configure
-a selector they can pin and launch through `HostAuthority`.
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+	codexacp.WithExecutablePath("/usr/local/bin/codex"),
+	codexacp.WithHome("/var/lib/my-host/codex"),
+	codexacp.WithHostAuthority(authority),
+)
+```
+
+## Point at Codex
+
+The adapter launches the local `codex` CLI on demand. Select which executable
+and home it uses:
+
+| Setting | CLI flag | Go option |
+| --- | --- | --- |
+| Codex executable | `-path` | `WithExecutablePath` |
+| Codex home (`CODEX_HOME`) | `-home` | `WithHome` |
+
+When `-path` is unset the standalone adapter resolves `codex` from `PATH`. When
+`-home` is unset it uses the operator's default Codex home. Embedded managed
+hosts pass the executable selector to `HostAuthority.StartNative` and should
+stage and pin it before construction.
+
+## Authenticate
+
+Authentication is owned by Codex, not the adapter. Log in through the terminal
+helpers, which delegate to `codex`:
+
+```sh
+acp-go-codex login -codex-device-auth
+acp-go-codex logout
+```
+
+ACP logout is refused unless the adapter is started with
+`-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`, so a
+misbehaving client can never clear the credentials of an operator-owned Codex
+home. See [Authentication](/docs/features/authentication) for the full flow.
+
+## Embed a host authority
+
+Implement `HostAuthority` when the host owns native process leases and tree
+access. The authority supplies the native environment, makes a materialized
+tree available to native work, launches each command, proves terminal process
+state, and restores adapter access during reclaim. See
+[Security](/docs/operations/security) for the exact ordering.

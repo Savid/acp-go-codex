@@ -1,13 +1,166 @@
 ---
 title: "Models and Config"
-description: "Codex model, session option, and configuration controls."
+description: "Model, mode, thought level, and model config options."
 ---
 
-Set a default model with `-model` or `WithDefaultModel`. Session metadata can
-select model, reasoning effort, service tier, personality, environment, and
-extra path directories for that thread.
+## Model and mode options
 
-`WithCodexConfigOverrides` supplies app-server configuration values. Roots
-owned by thread configuration are reserved. `WithSeedFiles` writes validated
-relative files into the resolved Codex home before a managed tree is prepared
-or an ordinary process is launched.
+Set a default model for new sessions:
+
+```sh
+acp-go-codex -model gpt-5.5
+```
+
+```go
+codexacp.WithDefaultModel("gpt-5.5")
+```
+
+Session metadata can set Codex-specific options:
+
+```go
+codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(
+	codexacp.WithCodexModel("gpt-5.5"),
+	codexacp.WithCodexEffort("high"),
+	codexacp.WithCodexServiceTier("flex"),
+	codexacp.WithCodexPersonality("pragmatic"),
+))
+```
+
+ACP config categories are:
+
+| Config | Category |
+| --- | --- |
+| `model` | `model` |
+| `mode` | `mode` |
+| `effort` | `thought_level` |
+| `serviceTier` | `model_config` |
+| `personality` | `model_config` |
+
+The values in each select option are a host-facing menu, not the set of values
+the adapter accepts. A nonempty `mode`, `effort`, or `personality` value outside
+that menu is retained, reported as the option's current value, and sent to
+Codex. Codex remains the authority that accepts the value, rejects it, or
+applies its own fallback; that native result surfaces when the relevant thread
+or turn starts.
+
+The three do not fail alike. Codex checks `mode` and `personality` against its
+own variant set when the request carrying them starts — `personality` at thread
+start, both at turn start — and refuses an unrecognised value there, so the
+native rejection text reaches the host as that session or turn failure. `effort`
+is checked at neither door: Codex accepts any effort string and starts the turn.
+The `effort` current value a host reads back is therefore the value the host
+sent rather than a value Codex has confirmed, and a rejection of it surfaces
+during the turn if it surfaces at all.
+
+Lifecycle metadata can establish `effort` and `personality`. Change any of the
+three values after session start with `session/set_config_option`; `mode` has no
+lifecycle-metadata key and is established through that method. Wrong-typed and
+explicitly empty values remain invalid input, as does an unknown `configId`.
+Approval and sandbox options are separate safety authorities and are not value
+menus.
+
+Prompt-image admission uses the currently selected model on every turn. When
+Codex model discovery supplies `inputModalities`, a list containing `image`
+accepts validated image input and a list without it rejects the prompt before
+`turn/start`. If the selected model or its modality field is absent, the
+adapter forwards the validated image and lets Codex decide. Model config
+metadata does not publish a separate inferred feature list.
+
+## Seed files
+
+`WithSeedFiles` (CLI `-seed-file <relpath>=<hostpath>`) writes config files into
+the resolved `CODEX_HOME` before each Codex process launches, so Codex reads
+them as its own config — for example to point it at a
+[LiteLLM](https://docs.litellm.ai/) gateway.
+
+Seed files require an explicit home (`WithHome` / `-home`). If seed files are set
+but no home is configured, session start fails closed with the uniform invalid
+error — seeding never writes into the operator's default `~/.codex`. Paths are
+relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
+keys are rejected.
+
+A seeded `CODEX_HOME/config.toml` is loaded into the same app-server config as
+`-codex-config`, so it is held to the same reservation: the `mcp_servers` and
+`shell_environment_policy` roots are refused, and seeding fails closed with the
+uniform invalid error before anything is written. The check reads the file's
+TOML line structure, so every spelling of a reserved root is caught — table
+headers (`[shell_environment_policy]`, `[[...]]`, quoted, spaced, indented),
+dotted assignments, and quoted or escaped keys — including one nested under
+another table. It is deliberately strict rather than exact: a reserved root name
+appearing in a key position anywhere in the file is refused, even inside a
+multi-line string value. Only `config.toml` at the root of `CODEX_HOME` is
+checked, because it is the only file Codex loads configuration from there.
+
+Seed writes go through an ownership manifest (`.seed-manifest.json` in the
+seed root). A seeded file the adapter already owns is overwritten in place (the
+prior bytes are kept in a `<relpath>.seed.bak` sidecar when the content
+changes), but if a seed target already exists and the adapter did not create it,
+the write fails closed and touches nothing — an operator-authored `config.toml`
+is never clobbered.
+
+Keep secrets out of the seeded file: set the API key with `WithEnv` or supply it
+through `HostAuthority.NativeEnvironment`, then reference it with `env_key`.
+
+`WithEnv` configures the static environment used to launch the shared Codex
+app-server. Session builders use `WithCodexEnv` for cloned values installed only
+on that session's thread through `shell_environment_policy.set`; concurrent
+threads on one app-server may carry different values without crossing.
+`WithCodexExtraPathDirs` supplies the session's ordered search-path prefix. Its
+absolute directories, including duplicates, stay in caller order ahead of the
+exact native app-server `PATH`. Session `env` cannot set `PATH` directly.
+
+Both environment surfaces reject the adapter-reserved
+`ACP_GO_CODEX_INTERNAL_*` namespace, case-insensitively. Session
+values also reject managed home and XDG root names. New, load, resume, and fork
+requests apply their own carrier to the addressed thread; an active resume
+rebind replaces the saved carrier, and runtime recovery uses that latest
+snapshot.
+
+## Config overrides
+
+`WithCodexConfigOverrides` (CLI `-codex-config <key>=<value>`, repeatable) passes TOML
+config overrides to `codex app-server` as `-c key=value`. Keys may be dotted
+paths that set nested config, string values are TOML-quoted automatically, and
+**nothing is written to disk** — so it is non-destructive and safe against a real
+`~/.codex`. This is the config mechanism for the app-server, which has no
+config-file overlay flag.
+
+The `mcp_servers` key and its dotted children are reserved for session-scoped
+MCP configuration. The `shell_environment_policy` key and its dotted children —
+`set`, `inherit`, `exclude`, and `ignore_default_excludes` — are reserved for
+the thread that owns the session environment, because a process config override
+would apply to every thread of the app-server at once. Supplying either root as
+a process config override makes ACP initialization fail closed with `-32603`.
+
+Point Codex at a [LiteLLM](https://docs.litellm.ai/) gateway entirely through
+overrides:
+
+```go
+codexacp.WithEnv(map[string]string{"LITELLM_API_KEY": "sk-..."})
+codexacp.WithCodexConfigOverrides(map[string]any{
+	"model":                            "gpt-5.5",
+	"model_provider":                   "litellm",
+	"model_providers.litellm.name":     "LiteLLM",
+	"model_providers.litellm.base_url": "https://litellm.example/v1",
+	"model_providers.litellm.env_key":  "LITELLM_API_KEY",
+	"model_providers.litellm.wire_api": "responses",
+})
+```
+
+```sh
+acp-go-codex \
+  -codex-config model=gpt-5.5 \
+  -codex-config model_provider=litellm \
+  -codex-config model_providers.litellm.name=LiteLLM \
+  -codex-config model_providers.litellm.base_url=https://litellm.example/v1 \
+  -codex-config model_providers.litellm.env_key=LITELLM_API_KEY \
+  -codex-config model_providers.litellm.wire_api=responses
+```
+
+The overrides point Codex at a LiteLLM gateway: `base_url` ends in `/v1`,
+`env_key` names the environment variable holding the key, and
+`wire_api = "responses"` selects the OpenAI Responses wire protocol. Because the
+values route through app-server config flags rather than a file, `home` can point
+at the operator's real Codex dir and its `config.toml` and auth stay untouched.
+Keep the API key out of the overrides: set it with `WithEnv` (or the process
+environment) and reference it with `env_key`.

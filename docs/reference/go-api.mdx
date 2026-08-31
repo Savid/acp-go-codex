@@ -3,25 +3,179 @@ title: "Go API"
 description: "Public Go API for embedding acp-go-codex."
 ---
 
-`Serve` runs the ACP connection on caller-owned streams. `NewAgent` builds an
-Agent for a host that owns connection setup.
+The complete signatures and doc comments are indexed on
+[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-codex). This page maps
+the main construction and request surfaces.
+
+## Serve and embed
+
+`Serve` runs ACP on caller-owned streams and closes the Agent before returning.
+`NewAgent` builds an Agent for hosts that own connection setup.
 
 ```go
 agent := codexacp.NewAgent(
-	codexacp.WithExecutablePath("codex"),
+	codexacp.WithExecutablePath("host-pinned-codex"),
 	codexacp.WithHome("/srv/codex"),
 	codexacp.WithHostAuthority(authority),
 )
 ```
 
-`HostAuthority` provides `NativeEnvironment`, `PrepareNativeTree`,
-`ReclaimNativeTree`, and `StartNative`. `StartNative` receives a `NativeRequest`
-and returns a `NativeProcess` with host-provided stdio plus `Wait` and `Revoke`.
-The stable errors are `ErrHostAuthorityUnavailable`,
-`ErrContainmentIncomplete`, and `ErrNativeTreeBusy`.
+Omit `WithHostAuthority` for ordinary same-user execution. A supplied authority
+owns the native environment, prepared-tree transitions, and every native
+process launch. Managed launch failures never fall back to ordinary execution.
 
-Omit `WithHostAuthority` for ordinary same-user execution. Other public options
-configure the executable selector, Codex home, scratch parent, model, session
-store, concurrency and image limits, provider authentication, telemetry, seed
-files, and Codex configuration overrides. See
-[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-codex) for signatures.
+`HostAuthority` provides `NativeEnvironment`, `PrepareNativeTree`,
+`ReclaimNativeTree`, and `StartNative`. `StartNative` receives
+`NativeRequest` and returns a `NativeProcess` with stdio, `Wait`, and
+`Revoke`. Cleanup closes the protocol, revokes if necessary, waits, reclaims,
+then removes adapter materialization.
+
+## Construction and cleanup errors
+
+| Sentinel | Meaning |
+| --- | --- |
+| `ErrHostAuthorityUnavailable` | A supplied authority, environment, process, or launch seam is unusable. |
+| `ErrContainmentIncomplete` | Terminal ownership could not be proved. Keep native and scratch trees quarantined. |
+| `ErrNativeTreeBusy` | Reclaim reached a still-live lease. Keep the tree intact and retry after terminal settlement. |
+
+Use `errors.Is` for classification. Explicit `WithHostAuthority(nil)` is an
+unavailable authority; omitting the option selects ordinary execution.
+
+## Agent options
+
+| Option | Purpose |
+| --- | --- |
+| `WithExecutablePath(path)` | Codex CLI selector. Ordinary mode resolves it from `PATH`; managed mode passes it to the host unchanged. |
+| `WithHome(path)` | `CODEX_HOME` for version probes and the shared app-server. |
+| `WithScratchDir(dir)` | Parent for private runtime, rollout, hydration, and image materialization. |
+| `WithHostAuthority(authority)` | Select host-managed native execution and prepared-tree ownership. |
+| `WithDefaultModel(model)` | Default model preference for new sessions. |
+| `WithEnv(env)` | Process environment overrides after reserved root and adapter-private names are rejected. |
+| `WithLogger(logger)` | Structured adapter diagnostics. |
+| `WithSessionStore(store)` | Replace the default in-memory rollout store. |
+| `WithSessionStoreLoadTimeout(d)` | Bound store-backed load and list operations. |
+| `WithConcurrencyLimits(limits)` | Bound active sessions and concurrent client work. |
+| `WithTurnTimeout(d)` | Bound one prompt turn; zero disables the deadline. |
+| `WithImageLimits(limits)` | Bound decoded prompt and emitted image bytes. |
+| `WithInputHandoffRoot(dir)` | Enable digest-verified local image handoff under one read-only absolute root. |
+| `WithProviderAuthRoot(path)` | Enable the ordinary-mode values-free provider-auth ledger. |
+| `WithProviderAuthDirectHome(path)` | Consent to ordinary provider-auth credential read and disconnect at one exact home. |
+| `WithSeedFiles(files)` | Write confined relative files before native preparation. |
+| `WithCodexConfigOverrides(overrides)` | Pass app-server `-c key=value` configuration without writing a config file. |
+| `WithCodexChatGPTAuthTokenRefresher(fn)` | Supply external ChatGPT token refresh. |
+| `WithCodexAllowAccountLogout(enabled)` | Permit ACP logout inside an explicit home boundary. |
+| `WithAgentName` / `WithAgentTitle` / `WithAgentVersion` | Override advertised implementation metadata. |
+| `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | Connect caller-owned OpenTelemetry providers. |
+
+Provider-auth extension methods are unavailable whenever `WithHostAuthority`
+is supplied. The Agent, standard ACP auth methods, and app-server remain usable.
+
+`WithSeedFiles` writes config files into the resolved `CODEX_HOME` before each
+Codex process launches, so Codex reads them as its own config. Paths are
+relative and confined to `CODEX_HOME`; absolute paths, `..` escapes, and empty
+keys fail closed at session start. `WithHome` must be set explicitly — seeding
+never writes into the operator's default `~/.codex`. A seeded
+`CODEX_HOME/config.toml` feeds the same app-server keyspace as
+`WithCodexConfigOverrides`, so it carries the same reservation: a file
+declaring the `mcp_servers` or `shell_environment_policy` root in any TOML
+spelling fails closed before any file is written. Writes are tracked in a
+`.seed-manifest.json` ownership manifest: a managed file is overwritten in
+place (prior bytes kept in a `<relpath>.seed.bak` sidecar when content changes),
+while an existing file the adapter does not own fails closed and is never
+clobbered. Keep secrets in `WithEnv` and reference them from seeded files by
+Codex `env_key` indirection.
+
+`WithCodexConfigOverrides` reaches a LiteLLM gateway with no file on disk: dotted
+keys set nested config, string values are TOML-quoted automatically, and nothing
+is written to disk, so `WithHome` can point at the operator's real Codex dir and
+its `config.toml` and auth stay untouched. `codex app-server` has no config-file
+overlay flag, so this is the config mechanism for the app-server.
+
+```go
+err := codexacp.Serve(ctx, stdin, stdout,
+	codexacp.WithEnv(map[string]string{"LITELLM_API_KEY": "sk-..."}),
+	codexacp.WithCodexConfigOverrides(map[string]any{
+		"model":                            "gpt-5.5",
+		"model_provider":                   "litellm",
+		"model_providers.litellm.name":     "LiteLLM",
+		"model_providers.litellm.base_url": "https://litellm.example/v1",
+		"model_providers.litellm.env_key":  "LITELLM_API_KEY",
+		"model_providers.litellm.wire_api": "responses",
+	}),
+)
+```
+
+## Session helpers
+
+| Helper | Purpose |
+| --- | --- |
+| `NewSessionRequest` | Build `session/new`. |
+| `LoadSessionRequest` | Build `session/load`. |
+| `ResumeSessionRequest` | Build `session/resume`. |
+| `ForkSessionRequest` | Build `_codex/session/fork` params. |
+| `CallForkSession` | Call `_codex/session/fork`. |
+| `RateLimitsMethod` | Method name for `_codex/rateLimits`. |
+| `RateLimitsResponse` | Decode the `_codex/rateLimits` reply (`Windows`, `PlanType`). |
+| `RateLimitWindow` | One rate-limit window (`ID`, `UsedPercent`, `ResetsAt`). |
+| `StdioMCPServer` | Construct a stdio MCP server; adapter-reserved environment names are rejected case-insensitively. |
+| `HTTPMCPServer` | Construct a streamable-HTTP MCP server. |
+| `WithSessionMCPServers` | Attach MCP servers to a session. |
+| `WithSessionRawEvents` | Enable `_codex/rawEvent`. |
+| `WithSessionOutputSchema` | Configure structured output. |
+| `WithSessionCodexOptions` | Merge `_meta.codex.options`. |
+| `WithCodexEnv` | Set cloned environment values on this session's Codex thread through `shell_environment_policy.set`. A raw `PATH` and adapter-reserved or managed-home names fail closed. |
+| `WithCodexExtraPathDirs` | Set cloned, ordered absolute directories that prefix the app-server's native `PATH` for this session's Codex thread. Order and duplicates are preserved. |
+| `PromptRequest` / `TextPromptRequest` | Build a prompt with mandatory route version and a nonblank turn nonce of at most 4096 bytes; invalid input omits route metadata so the agent rejects it. |
+| `CancelRequest` | Build an active-turn cancellation with the same bounded route; invalid input likewise fails closed. |
+
+`ImageLimits` has four decoded-byte fields:
+
+```go
+type ImageLimits struct {
+	MaxInputBytesPerImage     int64
+	MaxInputBytesPerPrompt    int64
+	MaxOutputBytesPerImage    int64
+	MaxOutputBytesPerToolCall int64
+}
+```
+
+Negative values make initialization fail with an internal error. The prompt total
+is across every image in one request. The tool-call total is across the
+complete image content snapshot for one native image tool call.
+
+## Store constants
+
+```go
+const SessionStoreFormat = "codex-rollout-jsonl-v1"
+const SessionStoreMainSubpath = ""
+```
+
+## Provider-auth types
+
+The `_codex/auth/credential` leg returns the harvested login through these
+exported shapes. They are the only public Go types a brokered credential
+crosses in, and they are the same shapes the wire carries.
+
+```go
+type ProviderCredentialType string
+
+const ProviderCredentialOAuth ProviderCredentialType = "oauth"
+
+type ProviderOAuthCredential struct {
+	Refresh         string `json:"refresh"`
+	Access          string `json:"access"`
+	AccessExpiresAt int64  `json:"accessExpiresAt"`
+	AccountID       string `json:"accountId,omitempty"`
+	EnterpriseURL   string `json:"enterpriseUrl,omitempty"`
+}
+
+type ProviderCredential struct {
+	Type  ProviderCredentialType
+	OAuth *ProviderOAuthCredential
+}
+```
+
+`ProviderCredential` marshals to one flat object whose `type` selects the
+variant. Decoding is strict: an unknown field, a duplicate field, an empty
+required string, and any variant this adapter does not emit are rejected rather
+than partially decoded. `AccessExpiresAt` is Unix epoch milliseconds.

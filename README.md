@@ -113,10 +113,10 @@ ChatGPT token refresh, guarded logout, and OpenTelemetry providers.
   replaceable by a host-provided durable store; stored rows are Codex rollout
   JSONL keyed by `{SessionID, Subpath}`, and residual native threads are never
   listed, loaded, or resumed without those rows.
-- Same-user native execution by default, or host-managed native leases and
-  prepared-tree ownership through `WithHostAuthority`. Runtime retirement
-  fences admission, shuts down the protocol, revokes and waits for the native
-  lease, then reclaims retired rollout and prompt-input residences.
+- Ordinary same-user native execution when `WithHostAuthority` is omitted, and
+  host-managed environment, prepared-tree, launch, wait, revoke, and reclaim
+  seams when it is supplied. Managed failures never fall back to ordinary
+  execution; see [Security](docs/operations/security.mdx).
 - Optional raw Codex rollout extension notifications through `_codex/rawEvent`,
   plus OpenTelemetry adapter telemetry and native Codex app-server OTLP mapping
   that record no prompt or tool secrets by default.

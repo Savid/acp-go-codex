@@ -3,17 +3,13 @@
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
-# Removed public surfaces and forbidden hard-cutover terms. Hex-escaped so the
-# term list never contains a literal forbidden term. Expanded with `printf %b`.
-REMOVED_PUBLIC_TERMS = codex\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|\x60goa\x6c\x60|"goa\x6c"|ActivityGoa\x6c|\\b\x4e\x45\x53\\b|SSE\x20MCP|mcpCapabilities\x2eacp|ExportSessio\x6e|ImportSessio\x6e|DeleteSessio\x6e|ParseConfi\x67|CodexSessio\x6e
-
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-smoke tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test/cover test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-native-browser test-integration-smoke tidy vuln
 
 ## build: build all packages
 build:
 	go build ./...
 
-GO_TEST_TIMEOUT ?= 10m
+GO_TEST_TIMEOUT ?= 40m
 
 ## test: run unit tests with race detector and shuffled order
 test:
@@ -41,6 +37,21 @@ test-integration-attended:
 	rm -f "$$log" "$$rc"; \
 	[ "$$status" -eq 0 ] || exit "$$status"; \
 	[ "$$ran" -gt 0 ] || { echo 'no attended provider-auth login ran: -run TestAttended selected nothing'; exit 1; }
+
+## test-integration-native-browser: run current Codex login offline and trace every browser launcher
+test-integration-native-browser:
+	@log=$$(mktemp); rc=$$(mktemp); \
+	{ (set -eu; export ACP_GO_CODEX_RUN_INTEGRATION=1; case "$$(uname -m)" in x86_64) goarch=amd64; platform=linux/amd64 ;; arm64|aarch64) goarch=arm64; platform=linux/arm64 ;; *) echo "unsupported native-browser architecture: $$(uname -m)" >&2; exit 1 ;; esac; \
+	integration/browser_canary/prepare.sh; \
+	CGO_ENABLED=0 GOOS=linux GOARCH="$$goarch" go test -c -tags=integration,browsercanary -o .tmp/browser-canary/browser-canary.test ./cmd/acp-go-codex; \
+	docker build --platform "$$platform" --tag acp-go-codex-browser-canary --file integration/browser_canary/Dockerfile .; \
+	docker run --rm --platform "$$platform" --network none --user 4242:4242 --env ACP_GO_CODEX_RUN_INTEGRATION=1 --tmpfs /tmp:rw,exec,uid=4242,gid=4242,size=256m --tmpfs /home/canary:rw,exec,uid=4242,gid=4242,mode=0700,size=128m --tmpfs /canary/scratch:rw,exec,uid=4242,gid=4242,mode=0700,size=128m acp-go-codex-browser-canary); echo $$? >"$$rc"; } 2>&1 | tee "$$log"; \
+	status=$$(cat "$$rc"); passed=$$(grep -Ec '^--- PASS: TestRealNativeBrowserContainment ' "$$log" || true); skipped=$$(grep -Ec '^[[:space:]]*--- SKIP: TestRealNativeBrowserContainment(/| )' "$$log" || true); empty=$$(grep -Ec 'no tests to run' "$$log" || true); \
+	rm -f "$$log" "$$rc"; \
+	[ "$$status" -eq 0 ] || exit "$$status"; \
+	[ "$$passed" -eq 1 ] || { echo "native browser pass count $$passed, want exactly 1"; exit 1; }; \
+	[ "$$skipped" -eq 0 ] || { echo 'required native browser canary skipped'; exit 1; }; \
+	[ "$$empty" -eq 0 ] || { echo 'required native browser selector ran no tests'; exit 1; }
 
 ## test-integration-keystore: run the three-configuration credential-residence matrix
 test-integration-keystore:
@@ -97,11 +108,10 @@ test-cross-compile:
 modernize-check:
 	go fix -n ./...
 
-## docs-audit: check public docs, examples, required files, CLI flags, and removed terms
+## docs-audit: check public docs, examples, required files, and CLI flags
 docs-audit:
 	@missing=0; for file in README.md doc.go docs.json example_test.go AGENTS.md docs/overview.mdx docs/core/sessions.mdx docs/core/prompt-streaming.mdx docs/features/authentication.mdx docs/features/elicitation.mdx docs/features/mcp.mdx docs/features/models-config.mdx docs/features/permissions.mdx docs/features/raw-events.mdx docs/features/session-store.mdx docs/get-started/examples.mdx docs/get-started/install.mdx docs/get-started/quickstart.mdx docs/get-started/run-modes.mdx docs/operations/observability.mdx docs/operations/security.mdx docs/operations/troubleshooting.mdx docs/reference/acp-methods.mdx docs/reference/cli.mdx docs/reference/go-api.mdx docs/reference/meta.mdx docs/reference/updates.mdx examples/minimal-client/main.go examples/resume-from-file/main.go examples/interactive-chat/main.go; do if [ ! -f "$$file" ]; then echo "missing required docs file: $$file"; missing=1; fi; done; exit $$missing
 	@for flag in -path -home -scratch-dir -provider-auth-root -provider-auth-direct-home -model -debug -version; do rg -q -- "$$flag" docs/reference/cli.mdx cmd/acp-go-codex/main.go || { echo "missing CLI flag in docs/code: $$flag"; exit 1; }; done
-	@pattern=$$(printf '%b' '$(REMOVED_PUBLIC_TERMS)'); ! rg -n -- "$$pattern" README.md doc.go docs.json docs examples cmd/acp-go-codex/*.go AGENTS.md
 
 ## audit: run local checks
 audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit

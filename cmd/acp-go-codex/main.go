@@ -267,7 +267,7 @@ func runCodexCLIWithSignals(
 	options := codex.AccountCommandOptions{
 		CLIPath:    codexPath,
 		CodexHome:  home,
-		ScratchDir: scratchDir,
+		Scratch:    scratchDir,
 		Mode:       mode,
 		DeviceAuth: deviceAuth,
 		Stdin:      stdin,

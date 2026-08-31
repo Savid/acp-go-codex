@@ -5,16 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-
-	"github.com/savid/acp-go-codex/internal/homelock"
 )
 
 const defaultCodexExecutable = "codex"
@@ -44,13 +40,20 @@ func launchAppServer(
 		selector = defaultCodexExecutable
 	}
 
+	var packageCleanup func() error
+	defer func() {
+		if returnErr != nil && packageCleanup != nil {
+			returnErr = errors.Join(returnErr, packageCleanup())
+		}
+	}()
+
 	if options.HostAuthority == nil {
 		selector, err = resolveOrdinaryProcessExecutable(selector, nativeEnv)
 		if err != nil {
 			return nil, "", "", fmt.Errorf("find codex CLI: %w", err)
 		}
 
-		selector, nativeEnv, err = stagePackagedCodex(selector, nativeEnv, options.Scratch)
+		selector, nativeEnv, packageCleanup, err = stagePackagedCodex(selector, nativeEnv, options.Scratch)
 		if err != nil {
 			return nil, "", "", err
 		}
@@ -92,15 +95,22 @@ func launchAppServer(
 
 	stdin, stdout, stderr := native.Stdin(), native.Stdout(), native.Stderr()
 	if stdin == nil || stdout == nil || stderr == nil {
-		if native != nil {
-			_ = native.Revoke(context.Background())
-			_, _ = native.Wait(context.Background())
+		revokeErr := native.Revoke(context.Background())
+		_, waitErr := native.Wait(context.Background())
+
+		var cleanupErr error
+		if waitErr != nil {
+			cleanupErr = errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
 		}
 
-		return nil, "", "", fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable)
+		return nil, "", "", errors.Join(
+			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
+			cleanupErr,
+		)
 	}
 
-	proc := &process{native: native, stdin: stdin, stdout: stdout}
+	proc := &process{native: native, stdin: stdin, stdout: stdout, packageCleanup: packageCleanup}
+	packageCleanup = nil
 
 	go func() {
 		_, _ = io.Copy(io.Discard, stderr)
@@ -114,8 +124,10 @@ func filepathSlash(path string) string {
 }
 
 func validateManagedSelector(selector string) error {
-	if strings.Contains(filepathSlash(selector), "/node_modules/") {
-		return errors.New("managed Codex executable must be staged and pinned by the host before adapter initialization")
+	for _, segment := range strings.Split(filepathSlash(strings.TrimSpace(selector)), "/") {
+		if segment == "node_modules" {
+			return errors.New("managed Codex executable must be staged and pinned by the host before adapter initialization")
+		}
 	}
 
 	return nil
@@ -232,6 +244,10 @@ type process struct {
 	waitDone chan struct{}
 	result   NativeResult
 	waitErr  error
+
+	packageCleanup     func() error
+	packageCleanupOnce sync.Once
+	packageCleanupErr  error
 }
 
 func (p *process) beginWait() {
@@ -256,6 +272,21 @@ func (p *process) exited(grace time.Duration) bool {
 	}
 }
 
+func (p *process) waitTerminal() error {
+	p.beginWait()
+	<-p.waitDone
+
+	if p.waitErr != nil {
+		return errors.Join(ErrContainmentIncomplete, p.waitErr)
+	}
+
+	if p.result.ExitCode != 0 || p.result.Signal != 0 {
+		return fmt.Errorf("codex app-server exited with status %d signal %d", p.result.ExitCode, p.result.Signal)
+	}
+
+	return nil
+}
+
 func (p *process) Close() error {
 	if p == nil {
 		return nil
@@ -266,166 +297,45 @@ func (p *process) Close() error {
 	}
 
 	if p.native == nil {
-		return nil
+		return p.cleanupPackage()
 	}
 
 	p.beginWait()
 
 	select {
 	case <-p.waitDone:
-		return p.waitErr
+		return errors.Join(p.waitTerminal(), p.cleanupPackage())
 	case <-time.After(processCloseGrace):
 	}
 
 	revokeErr := p.native.Revoke(context.Background())
-	<-p.waitDone
+	waitErr := p.waitTerminal()
 
-	return errors.Join(revokeErr, p.waitErr)
+	if p.waitErr != nil && revokeErr != nil {
+		revokeErr = errors.Join(ErrContainmentIncomplete, revokeErr)
+	} else {
+		revokeErr = nil
+	}
+
+	return errors.Join(revokeErr, waitErr, p.cleanupPackage())
+}
+
+func (p *process) cleanupPackage() error {
+	if p == nil {
+		return nil
+	}
+
+	p.packageCleanupOnce.Do(func() {
+		if p.packageCleanup != nil {
+			p.packageCleanupErr = p.packageCleanup()
+		}
+	})
+
+	return p.packageCleanupErr
 }
 
 func observeCodexStartupStage(ctx context.Context, options Options, lifecycle, stage string, started time.Time, err error) {
 	if options.ObserveStartupStage != nil {
 		options.ObserveStartupStage(ctx, lifecycle, stage, time.Since(started), err)
-	}
-}
-
-type ordinaryNativeProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr io.ReadCloser
-	lock   *homelock.Lock
-
-	waitOnce sync.Once
-	done     chan struct{}
-	result   NativeResult
-	waitErr  error
-	revoked  bool
-	mu       sync.Mutex
-}
-
-func startOrdinaryNative(ctx context.Context, request NativeRequest, options Options) (NativeProcess, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	cmd := ordinaryExecCommand(request.Executable, request.Arguments...)
-	cmd.Env = append([]string(nil), request.Environment...)
-	cmd.Dir = request.WorkingDirectory
-	configureProcess(cmd)
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-
-		return nil, err
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-
-		return nil, err
-	}
-
-	var lock *homelock.Lock
-	if !options.skipGuardian {
-		lockRoot, lockErr := HomeLockRoot(options.ScratchParent, firstNonEmpty(options.WritableHome, options.CodexHome))
-		if lockErr != nil {
-			return nil, lockErr
-		}
-
-		lock, err = homelock.Acquire(lockRoot)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if err := cmd.Start(); err != nil {
-		_ = lock.Release()
-
-		return nil, err
-	}
-
-	return &ordinaryNativeProcess{
-		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, lock: lock, done: make(chan struct{}),
-	}, nil
-}
-
-func (p *ordinaryNativeProcess) Stdin() io.WriteCloser { return p.stdin }
-func (p *ordinaryNativeProcess) Stdout() io.ReadCloser { return p.stdout }
-func (p *ordinaryNativeProcess) Stderr() io.ReadCloser { return p.stderr }
-
-func (p *ordinaryNativeProcess) beginWait() {
-	p.waitOnce.Do(func() {
-		go func() {
-			err := p.cmd.Wait()
-
-			result := NativeResult{}
-			if p.cmd.ProcessState != nil {
-				result.ExitCode = p.cmd.ProcessState.ExitCode()
-				if status, ok := p.cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-					result.Signal = int(status.Signal())
-				}
-			}
-
-			p.mu.Lock()
-			result.Revoked = p.revoked
-			p.result = result
-			p.waitErr = err
-			p.mu.Unlock()
-			_ = p.lock.Release()
-			close(p.done)
-		}()
-	})
-}
-
-func (p *ordinaryNativeProcess) Wait(ctx context.Context) (NativeResult, error) {
-	p.beginWait()
-
-	select {
-	case <-ctx.Done():
-		return NativeResult{}, ctx.Err()
-	case <-p.done:
-		p.mu.Lock()
-		defer p.mu.Unlock()
-
-		return p.result, p.waitErr
-	}
-}
-
-func (p *ordinaryNativeProcess) Revoke(ctx context.Context) error {
-	p.mu.Lock()
-	select {
-	case <-p.done:
-		p.mu.Unlock()
-
-		return nil
-	default:
-		p.revoked = true
-	}
-	p.mu.Unlock()
-
-	p.beginWait()
-
-	_ = terminateProcess(p.cmd)
-	select {
-	case <-p.done:
-		return nil
-	case <-time.After(processCloseGrace):
-		_ = killProcess(p.cmd)
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-p.done:
-		return nil
 	}
 }

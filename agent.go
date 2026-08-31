@@ -120,6 +120,7 @@ type Agent struct {
 	observe      *observer.Observer
 	optionsErr   error
 	providerAuth *providerAuth
+	scratchDir   string
 
 	mu                    sync.Mutex
 	closed                bool
@@ -144,6 +145,7 @@ type Agent struct {
 	runtimeCleanupErr     error
 	retainedThreads       map[acp.SessionId]*retainedRuntimeThread
 	retiredResidences     []retiredNativeResidence
+	nativeResidenceCount  int
 	retiredResidenceBytes int64
 
 	clientCapabilities acp.ClientCapabilities
@@ -182,7 +184,16 @@ func NewAgent(opts ...Option) *Agent {
 
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateCodexConfigOverrides(options.Config))
-	optionsErr = errors.Join(optionsErr, validateHostAuthority(options.HostAuthority))
+
+	normalizedAuthority, authorityErr := normalizeHostAuthority(options.HostAuthority, options.hostAuthoritySupplied)
+	options.HostAuthority = normalizedAuthority
+
+	optionsErr = errors.Join(optionsErr, authorityErr)
+
+	if options.HostAuthority != nil {
+		optionsErr = errors.Join(optionsErr, validateManagedExecutableSelector(options.ExecutablePath))
+	}
+
 	optionsErr = errors.Join(optionsErr, validateRuntimeEnvironment(options.Env))
 	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
 	optionsErr = errors.Join(optionsErr, validateInputHandoffRoot(options.InputHandoffRoot))
@@ -205,12 +216,12 @@ func NewAgent(opts ...Option) *Agent {
 		TracerProvider: options.TracerProvider,
 		Version:        options.AgentVersion,
 	})
-	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
 	agent := &Agent{
 		options:         options,
 		log:             log,
 		optionsErr:      optionsErr,
 		observe:         observe,
+		scratchDir:      resolveScratchDir(options),
 		sessions:        make(map[acp.SessionId]*session),
 		deleted:         make(map[acp.SessionId]struct{}),
 		deleting:        make(map[acp.SessionId]int),
@@ -219,7 +230,7 @@ func NewAgent(opts ...Option) *Agent {
 		retainedThreads: make(map[acp.SessionId]*retainedRuntimeThread),
 	}
 
-	if optionsErr == nil {
+	if optionsErr == nil && options.HostAuthority == nil {
 		agent.providerAuth = newProviderAuth(agent)
 	}
 
@@ -328,7 +339,15 @@ func (a *Agent) Close() error {
 		closeErr := a.closeErr
 		a.mu.Unlock()
 
-		return closeErr
+		if errors.Is(closeErr, ErrNativeTreeBusy) {
+			closeErr = a.closeSharedRuntime(context.Background())
+
+			a.mu.Lock()
+			a.closeErr = closeErr
+			a.mu.Unlock()
+		}
+
+		return toPublicAuthorityError(closeErr)
 	}
 
 	closeDone := make(chan struct{})
@@ -399,17 +418,24 @@ func (a *Agent) Close() error {
 		_ = interrupter.InterruptTransport()
 	}
 
-	var err error
+	var sessionErr error
 
 	for range sessions {
-		err = errors.Join(err, <-results)
+		sessionErr = errors.Join(sessionErr, <-results)
 	}
 
-	err = errors.Join(err, <-runtimeResult)
+	runtimeErr := <-runtimeResult
+	if runtimeErr == nil && errors.Is(sessionErr, codex.ErrConnectionClosed) &&
+		!errors.Is(sessionErr, codex.ErrContainmentIncomplete) {
+		sessionErr = nil
+	}
+
+	err := errors.Join(sessionErr, runtimeErr)
 
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 
 	a.mu.Lock()
+	err = toPublicAuthorityError(err)
 	a.closeErr = err
 
 	close(closeDone)
@@ -569,7 +595,7 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, scratchRo
 
 	otelConfig, err := a.codexOTELConfig(env)
 	if err != nil {
-		observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, err)
+		a.observe.ObserveStartupStage(ctx, "runtime", "configuration", time.Since(configurationStarted), err)
 
 		return nil, err
 	}
@@ -579,7 +605,7 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, scratchRo
 	a.observe.RecordCodexProcessStart(ctx)
 	eventSink := &codexClientEventSink{agent: a, epoch: epoch}
 
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceRuntime, RuntimeStartupConfiguration, configurationStarted, nil)
+	a.observe.ObserveStartupStage(ctx, "runtime", "configuration", time.Since(configurationStarted), nil)
 
 	client, err := factory(ctx, codex.Options{
 		CLIPath:             a.options.ExecutablePath,
@@ -600,10 +626,7 @@ func (a *Agent) launchRuntimeClient(ctx context.Context, epoch uint64, scratchRo
 			return a.handleCodexServerRequestForEpoch(ctx, epoch, req)
 		},
 		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
-			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
-			if observe != nil {
-				observe(stageCtx, RuntimeResourceKind(lifecycle), RuntimeStartupStage(stage), elapsed, stageErr)
-			}
+			a.observe.ObserveStartupStage(stageCtx, lifecycle, stage, elapsed, stageErr)
 		},
 	})
 	if err != nil {

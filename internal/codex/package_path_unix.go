@@ -44,15 +44,15 @@ var (
 	npmCodexRuntimeGOARCH     = runtime.GOARCH
 )
 
-func stagePackagedCodex(path string, nativeEnv []string, scratch string) (string, []string, error) {
+func stagePackagedCodex(path string, nativeEnv []string, scratch string) (string, []string, func() error, error) {
 	source, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve packaged Codex executable: %w", err)
+		return "", nil, nil, fmt.Errorf("resolve packaged Codex executable: %w", err)
 	}
 
 	npmSource, recognizedNPM, err := resolveNPMCodexExecutable(source)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve npm packaged Codex executable: %w", err)
+		return "", nil, nil, fmt.Errorf("resolve npm packaged Codex executable: %w", err)
 	}
 
 	if recognizedNPM {
@@ -65,20 +65,24 @@ func stagePackagedCodex(path string, nativeEnv []string, scratch string) (string
 	packagePath := filepath.Join(packageRoot, codexPackagePathDir)
 
 	if filepath.Base(sourceBin) != codexPackageBin || !regularFile(metadata) || !directory(packagePath) {
-		return path, nativeEnv, nil
+		return path, nativeEnv, func() error { return nil }, nil
 	}
 
 	if scratch == "" {
-		return "", nil, errors.New("stage packaged Codex executable: runtime scratch is required")
+		return "", nil, nil, errors.New("stage packaged Codex executable: runtime scratch is required")
 	}
 
 	stageRoot, err := stagePackagedCodexMkdir(scratch, "codex-package-")
 	if err != nil {
-		return "", nil, fmt.Errorf("create packaged Codex stage: %w", err)
+		return "", nil, nil, fmt.Errorf("create packaged Codex stage: %w", err)
 	}
 
+	cleanup := func() error { return os.RemoveAll(stageRoot) }
+
 	if chmodErr := stagePackagedCodexChmod(stageRoot, 0o755); chmodErr != nil {
-		return "", nil, fmt.Errorf("make packaged Codex stage traversable: %w", chmodErr)
+		return "", nil, nil, errors.Join(
+			fmt.Errorf("make packaged Codex stage traversable: %w", chmodErr), cleanup(),
+		)
 	}
 
 	stagedCodex, stageBin, stageErr := stagePackagedCodexContents(
@@ -88,17 +92,19 @@ func stagePackagedCodex(path string, nativeEnv []string, scratch string) (string
 		stageRoot,
 	)
 	if stageErr != nil {
-		return "", nil, stageErr
+		return "", nil, nil, errors.Join(stageErr, cleanup())
 	}
 
 	if err := os.WriteFile(filepath.Join(stageRoot, codexPackageMetadata), []byte("{}\n"), 0o600); err != nil {
-		return "", nil, fmt.Errorf("write staged Codex package metadata: %w", err)
+		return "", nil, nil, errors.Join(
+			fmt.Errorf("write staged Codex package metadata: %w", err), cleanup(),
+		)
 	}
 
 	values := environmentMap(nativeEnv)
 	values[pathEnvKey] = composeSearchPath([]string{stageBin}, values[pathEnvKey])
 
-	return stagedCodex, environmentList(values), nil
+	return stagedCodex, environmentList(values), cleanup, nil
 }
 
 func stagePackagedCodexContents(

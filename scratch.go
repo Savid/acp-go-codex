@@ -10,9 +10,10 @@ func init() {
 	codex.SetScratchParentResolver(ensureScratchParent)
 }
 
-// scratchParent resolves the parent directory for all ephemeral on-disk
-// materialization: dir when set, else the system temp directory. This is the
-// only place in the module allowed to consult the system temp directory.
+func resolveScratchDir(options Options) string {
+	return options.ScratchDir
+}
+
 func scratchParent(dir string) string {
 	if dir == "" {
 		return os.TempDir()
@@ -21,8 +22,6 @@ func scratchParent(dir string) string {
 	return dir
 }
 
-// ensureScratchParent resolves the scratch parent and creates it 0700 when
-// missing.
 func ensureScratchParent(dir string) (string, error) {
 	parent := scratchParent(dir)
 	if err := os.MkdirAll(parent, 0o700); err != nil {

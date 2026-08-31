@@ -20,8 +20,8 @@ const (
 // cancelled turn. The app-server is shared, so cleanup must never cross the
 // owning thread boundary or close the runtime generation that serves peers.
 //
-// A failed sweep is returned to the session caller and never widened into
-// shared-runtime revocation.
+// A failed offered sweep is incomplete containment. An unsupported sweep is
+// left distinct so a sole owner can retire the shared runtime instead.
 func terminateThreadBackgroundTerminals(
 	ctx context.Context,
 	client codex.Client,
@@ -29,10 +29,14 @@ func terminateThreadBackgroundTerminals(
 ) error {
 	err := sweepThreadBackgroundTerminals(ctx, client, threadID)
 	if err == nil || errors.Is(err, codex.ErrBackgroundTerminalsUnsupported) {
-		return nil
+		return err
 	}
 
-	return fmt.Errorf("terminate Codex background terminals: %w", err)
+	return errors.Join(
+		ErrContainmentIncomplete,
+		codex.ErrContainmentIncomplete,
+		fmt.Errorf("terminate Codex background terminals: %w", err),
+	)
 }
 
 func sweepThreadBackgroundTerminals(

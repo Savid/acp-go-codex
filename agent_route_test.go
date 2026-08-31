@@ -11,6 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRouteCapabilityScalar(t *testing.T) {
+	response, err := NewAgent().Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	route, ok := response.AgentCapabilities.Meta["acp-go.dev/route"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 1, route["version"])
+}
+
 func TestInitializeAdvertisesExactRouteEnvelopeCapability(t *testing.T) {
 	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
 	require.NoError(t, err)

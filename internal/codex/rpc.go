@@ -122,6 +122,10 @@ func (t *lineTransport) readError(err error) error {
 		return err
 	}
 
+	if errors.Is(err, io.EOF) {
+		return &ProcessExitError{Err: errors.Join(err, t.proc.waitTerminal())}
+	}
+
 	if !t.proc.exited(t.grace) {
 		return err
 	}

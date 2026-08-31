@@ -26,5 +26,5 @@ type Options struct {
 	LaunchTimeout       time.Duration
 	ObserveStartupStage func(context.Context, string, string, time.Duration, error)
 
-	skipGuardian bool
+	skipHomeLock bool
 }

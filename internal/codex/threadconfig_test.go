@@ -247,7 +247,7 @@ func TestFakeAppServerResolvesThreadWagie(t *testing.T) {
 			"PATH":              nativeDir,
 			fakeWagieCarrierEnv: "1",
 		},
-		skipGuardian:  true,
+		skipHomeLock:  true,
 		LaunchTimeout: time.Second * 5,
 	})
 	require.NoError(t, err)

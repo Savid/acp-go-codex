@@ -1106,14 +1106,43 @@ func (s *session) containSession(ctx context.Context) error {
 	}
 
 	if clientDead {
-		return s.stopNativeEventsContext(closeCtx)
+		return errors.Join(
+			s.agent.retireRuntimeGenerationOwned(closeCtx, client, s),
+			s.stopNativeEventsContext(closeCtx),
+		)
 	}
 
-	if err := terminateThreadBackgroundTerminals(closeCtx, client, codexThreadID); err != nil {
+	if err := s.containThreadOrRetireRuntime(closeCtx, client, codexThreadID); err != nil {
 		return err
 	}
 
 	return s.unsubscribeContainedThread(closeCtx, client, codexThreadID)
+}
+
+func (s *session) containThreadOrRetireRuntime(
+	ctx context.Context,
+	client codex.Client,
+	codexThreadID string,
+) error {
+	containErr := terminateThreadBackgroundTerminals(ctx, client, codexThreadID)
+	if containErr == nil {
+		return nil
+	}
+
+	retireErr := s.agent.retireRuntimeGenerationOwned(ctx, client, s)
+	s.agent.mu.Lock()
+	agentClosed := s.agent.closed
+	s.agent.mu.Unlock()
+
+	if agentClosed && retireErr == nil && errors.Is(containErr, codex.ErrConnectionClosed) {
+		return nil
+	}
+
+	if errors.Is(containErr, codex.ErrBackgroundTerminalsUnsupported) && retireErr == nil {
+		return nil
+	}
+
+	return errors.Join(containErr, retireErr)
 }
 
 func (s *session) unsubscribeContainedThread(
@@ -1130,6 +1159,16 @@ func (s *session) unsubscribeContainedThread(
 	unsubscribeErr := client.UnsubscribeThread(ctx, codexThreadID)
 	if unsubscribeErr == nil {
 		return nil
+	}
+
+	current, _, _ := s.closeState()
+	if current == client && errors.Is(unsubscribeErr, codex.ErrConnectionClosed) {
+		retireErr := s.agent.retireRuntimeGenerationOwned(ctx, client, s)
+		if retireErr == nil {
+			return nil
+		}
+
+		return errors.Join(unsubscribeErr, retireErr)
 	}
 
 	return unsubscribeErr

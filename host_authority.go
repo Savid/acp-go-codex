@@ -2,15 +2,14 @@ package codexacp
 
 import (
 	"context"
+	"errors"
 	"io"
-
-	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 var (
-	ErrHostAuthorityUnavailable = codex.ErrHostAuthorityUnavailable
-	ErrContainmentIncomplete    = codex.ErrContainmentIncomplete
-	ErrNativeTreeBusy           = codex.ErrNativeTreeBusy
+	ErrHostAuthorityUnavailable = errors.New("host authority unavailable")
+	ErrContainmentIncomplete    = errors.New("native containment incomplete")
+	ErrNativeTreeBusy           = errors.New("native tree has live lease processes")
 )
 
 type HostAuthority interface {
@@ -39,35 +38,4 @@ type NativeResult struct {
 	ExitCode int
 	Signal   int
 	Revoked  bool
-}
-
-type hostAuthorityAdapter struct{ HostAuthority }
-
-func adaptHostAuthority(authority HostAuthority) codex.HostAuthority {
-	if authority == nil {
-		return nil
-	}
-
-	return hostAuthorityAdapter{HostAuthority: authority}
-}
-
-func (a hostAuthorityAdapter) StartNative(ctx context.Context, request codex.NativeRequest) (codex.NativeProcess, error) {
-	process, err := a.HostAuthority.StartNative(ctx, NativeRequest(request))
-	if err != nil {
-		return nil, err
-	}
-
-	if process == nil {
-		return nil, ErrHostAuthorityUnavailable
-	}
-
-	return nativeProcessAdapter{NativeProcess: process}, nil
-}
-
-type nativeProcessAdapter struct{ NativeProcess }
-
-func (p nativeProcessAdapter) Wait(ctx context.Context) (codex.NativeResult, error) {
-	result, err := p.NativeProcess.Wait(ctx)
-
-	return codex.NativeResult(result), err
 }

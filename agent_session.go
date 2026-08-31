@@ -748,16 +748,24 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
-	if capacityErr := a.ensureRetiredResidenceCapacity(ctx, materializedRolloutBytes(entries)); capacityErr != nil {
+	hydrated, materializedBytes, err := a.hydrateStoredRollout(ctx, params.SessionId, entries)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	residenceRelease, capacityErr := a.reserveNativeResidenceCapacity(ctx, materializedBytes)
+	if capacityErr != nil {
 		return acp.ResumeSessionResponse{}, capacityErr
 	}
 
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
+		residenceRelease()
+
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -1311,16 +1319,24 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
-	if capacityErr := a.ensureRetiredResidenceCapacity(ctx, materializedRolloutBytes(entries)); capacityErr != nil {
+	hydrated, materializedBytes, err := a.hydrateStoredRollout(ctx, params.SessionId, entries)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	residenceRelease, capacityErr := a.reserveNativeResidenceCapacity(ctx, materializedBytes)
+	if capacityErr != nil {
 		return acp.LoadSessionResponse{}, capacityErr
 	}
 
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
+		residenceRelease()
+
 		return acp.LoadSessionResponse{}, err
 	}
 
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}

@@ -21,6 +21,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHandoffCapabilityScalar(t *testing.T) {
+	without, err := NewAgent().Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	require.NotContains(t, without.AgentCapabilities.Meta, "acp-go.dev/handoff")
+
+	with, err := NewAgent(WithInputHandoffRoot(t.TempDir())).Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	handoff, ok := with.AgentCapabilities.Meta["acp-go.dev/handoff"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 1, handoff["version"])
+}
+
 // handoffFixture writes bytes into a handoff root and returns the block a host
 // would send for them.
 func handoffFixture(t *testing.T, root string, name string, data []byte) acp.ContentBlock {

@@ -492,16 +492,12 @@ func (s *session) preparePromptImages(ctx context.Context, images []decodedPromp
 		}
 	}
 
-	if err := s.agent.ensureRetiredResidenceCapacity(ctx, residenceBytes); err != nil {
-		return preparedPromptImages{}, err
-	}
-
-	reservation, err := s.agent.reserveScratchRoot(ctx, RuntimeResourcePrompt)
+	reservation, err := s.agent.reserveNativeResidenceCapacity(ctx, residenceBytes)
 	if err != nil {
 		return preparedPromptImages{}, err
 	}
 
-	dir, err := createPromptImageTempDir(s.agent.options.ScratchDir, promptImageTempDirPrefix)
+	dir, err := createPromptImageTempDir(s.agent.scratchDir, promptImageTempDirPrefix)
 	if err != nil {
 		reservation()
 
@@ -533,6 +529,17 @@ func (s *session) preparePromptImages(ctx context.Context, images []decodedPromp
 
 	if s.agent.options.HostAuthority != nil {
 		if err := s.agent.options.HostAuthority.PrepareNativeTree(ctx, dir); err != nil {
+			if errors.Is(err, ErrContainmentIncomplete) {
+				s.agent.mu.Lock()
+				epoch := s.agent.runtimeEpoch
+				s.agent.mu.Unlock()
+				_ = s.agent.retireNativeResidenceAtEpoch(
+					dir, dir, residenceBytes, reservation, epoch, removePromptImageDir,
+				)
+
+				return preparedPromptImages{}, err
+			}
+
 			release()
 
 			return preparedPromptImages{}, err

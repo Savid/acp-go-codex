@@ -2,10 +2,8 @@ package codexacp
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
@@ -35,36 +33,7 @@ type ConcurrencyLimits struct {
 	MaxConcurrentClientCalls int
 }
 
-// RuntimeResourceKind identifies the reason an adapter-owned native process or
-// scratch root is being acquired. Hosts use it to enforce independent global
-// resource bounds without coupling the adapter to a particular registry.
-type RuntimeResourceKind string
-
-const (
-	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
-	RuntimeResourceSession   RuntimeResourceKind = "session"
-	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
-	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
-)
-
 const minSupportedCodexVersion = "0.144.1"
-
-type RuntimeStartupStage string
-
-const (
-	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
-	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
-	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
-	RuntimeStartupSession       RuntimeStartupStage = "session"
-)
-
-// RuntimeResourceHooks let an embedding host account for native roots and
-// adapter-created scratch roots at their exact lifetime boundaries. A nil
-// callback selects standalone, sibling-owned unbounded accounting.
-type RuntimeResourceHooks struct {
-	ReserveScratchRoot  func(context.Context, RuntimeResourceKind) (release func(), err error)
-	ObserveStartupStage func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
-}
 
 // Options configures the ACP agent process and Codex sessions it starts.
 type Options struct {
@@ -145,13 +114,11 @@ type Options struct {
 	// MeterProvider receives OpenTelemetry metrics. If nil, metrics are no-op.
 	MeterProvider metric.MeterProvider
 	// TextMapPropagator extracts ACP trace metadata and injects Codex process env.
-	TextMapPropagator propagation.TextMapPropagator
-	// RuntimeResourceHooks account for native roots and scratch roots at their
-	// exact creation/deletion boundaries.
-	RuntimeResourceHooks RuntimeResourceHooks
-	clientFactory        func(context.Context, codex.Options) (codex.Client, error)
-	customClientFactory  bool
-	implicitEnvironment  map[string]string
+	TextMapPropagator     propagation.TextMapPropagator
+	clientFactory         func(context.Context, codex.Options) (codex.Client, error)
+	customClientFactory   bool
+	hostAuthoritySupplied bool
+	implicitEnvironment   map[string]string
 }
 
 func applyOptions(opts []Option) Options {
@@ -233,6 +200,7 @@ func WithExecutablePath(path string) Option {
 func WithHostAuthority(authority HostAuthority) Option {
 	return func(options *Options) {
 		options.HostAuthority = authority
+		options.hostAuthoritySupplied = true
 	}
 }
 
@@ -310,61 +278,6 @@ func WithDefaultModel(model string) Option {
 	}
 }
 
-func validateHostAuthority(authority HostAuthority) error {
-	if authority == nil {
-		return nil
-	}
-
-	value := reflect.ValueOf(authority)
-	if (value.Kind() == reflect.Chan || value.Kind() == reflect.Func || value.Kind() == reflect.Interface ||
-		value.Kind() == reflect.Map || value.Kind() == reflect.Pointer || value.Kind() == reflect.Slice) && value.IsNil() {
-		return ErrHostAuthorityUnavailable
-	}
-
-	environment := authority.NativeEnvironment()
-	if environment == nil {
-		return ErrHostAuthorityUnavailable
-	}
-
-	for key, value := range environment {
-		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
-			return ErrHostAuthorityUnavailable
-		}
-	}
-
-	return nil
-}
-
-func validateRuntimeEnvironment(environment map[string]string) error {
-	for key, value := range environment {
-		upperKey := strings.ToUpper(key)
-		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
-			return errors.New("invalid Codex environment entry")
-		}
-
-		if strings.HasPrefix(upperKey, "ACP_GO_CODEX_INTERNAL_") || managedCodexRootEnvKey(upperKey) {
-			return errors.New("codex environment contains a reserved key")
-		}
-	}
-
-	return nil
-}
-
-func managedCodexRootEnvKey(key string) bool {
-	switch strings.ToUpper(key) {
-	case "CODEX_HOME", "HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
-		return true
-	default:
-		return false
-	}
-}
-
-func reservedCodexEnvKey(key string) bool {
-	upperKey := strings.ToUpper(key)
-
-	return strings.HasPrefix(upperKey, "ACP_GO_CODEX_INTERNAL_") || managedCodexRootEnvKey(upperKey)
-}
-
 // WithLogger configures structured diagnostic logging.
 func WithLogger(logger *slog.Logger) Option {
 	return func(options *Options) {
@@ -413,14 +326,6 @@ func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 func WithTurnTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.TurnTimeout = timeout
-	}
-}
-
-// WithRuntimeResourceHooks configures exact-lifetime native-root and scratch-
-// root accounting for an embedding host. Rejection is propagated fail closed.
-func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
-	return func(options *Options) {
-		options.RuntimeResourceHooks = hooks
 	}
 }
 
