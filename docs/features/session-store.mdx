@@ -69,6 +69,14 @@ explicit values remain intentional lifecycle inputs. A missing record,
 mismatched identity, revision gap, or malformed carrier refuses recovery before
 Codex is called.
 
+<Warning>
+The persisted session environment can contain bearer tokens, API keys, and
+other credential-bearing values. Treat the session store as a credential
+store: restrict access to the intended principal, protect data in transit and
+at rest, avoid logging entries, and apply an appropriate deletion and retention
+policy.
+</Warning>
+
 Every loaded rollout row is one closed JSON object containing `type`, `payload`,
 and an optional non-empty string `timestamp`. `type` must be a non-empty string,
 `payload` must be an object, and duplicate keys at any depth, unknown top-level
