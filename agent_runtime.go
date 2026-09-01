@@ -201,9 +201,12 @@ func (a *Agent) reclaimRetiredResidences(ctx context.Context, epoch uint64) erro
 
 	var result error
 
+	reclaimCtx, cancelReclaim := context.WithTimeout(context.WithoutCancel(ctx), runtimeNativeTreeTimeout)
+	defer cancelReclaim()
+
 	for _, residence := range candidates {
 		if !residence.reclaimed {
-			if err := a.options.HostAuthority.ReclaimNativeTree(ctx, residence.tree); err != nil {
+			if err := a.options.HostAuthority.ReclaimNativeTree(reclaimCtx, residence.tree); err != nil {
 				if errors.Is(err, ErrNativeTreeBusy) {
 					result = errors.Join(result, err)
 
@@ -812,10 +815,10 @@ func runtimeHomeReleaser(authority HostAuthority, home string) func() error {
 			return reclaimErr
 		}
 
-		reclaimCtx, cancel := context.WithTimeout(context.Background(), runtimeNativeTreeTimeout)
+		reclaimCtx, cancelReclaim := context.WithTimeout(context.Background(), runtimeNativeTreeTimeout)
 		err := authority.ReclaimNativeTree(reclaimCtx, home)
 
-		cancel()
+		cancelReclaim()
 
 		if err != nil {
 			if errors.Is(err, ErrNativeTreeBusy) {

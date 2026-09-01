@@ -870,6 +870,12 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 	deadlineRelease := runtimeHomeReleaser(deadlineAuthority, "/home")
 	require.ErrorIs(t, deadlineRelease(), ErrContainmentIncomplete)
 	require.ErrorIs(t, deadlineRelease(), context.DeadlineExceeded)
+	deadlineAgent := NewAgent(WithHostAuthority(deadlineAuthority))
+	deadlineAgent.retiredResidences = []retiredNativeResidence{{epoch: 1, tree: "/rollout", path: "/rollout/row"}}
+	err = deadlineAgent.reclaimRetiredResidences(ctx, 1)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.False(t, deadlineAgent.retiredResidences[0].reclaimed)
 
 	require.Equal(t, filepath.Clean("/native/codex"), NewAgent(WithHostAuthority(authorityCoverageHost{
 		environment: func() map[string]string { return map[string]string{"CODEX_HOME": "/native/codex"} },
