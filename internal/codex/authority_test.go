@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -55,6 +56,7 @@ type authorityTestHost struct {
 	process     NativeProcess
 	requests    []NativeRequest
 	prepared    []string
+	prepareErrs []error
 	reclaimed   []string
 	reclaimErrs []error
 }
@@ -62,6 +64,12 @@ type authorityTestHost struct {
 func (h *authorityTestHost) NativeEnvironment() map[string]string { return h.environment }
 func (h *authorityTestHost) PrepareNativeTree(_ context.Context, path string) error {
 	h.prepared = append(h.prepared, path)
+	if len(h.prepareErrs) != 0 {
+		err := h.prepareErrs[0]
+		h.prepareErrs = h.prepareErrs[1:]
+
+		return err
+	}
 
 	return nil
 }
@@ -150,6 +158,33 @@ func TestManagedAccountCommandUsesHostAuthorityAndReclaimsTrees(t *testing.T) {
 	require.Len(t, host.requests, 1)
 	require.Equal(t, "host-pinned-codex", host.requests[0].Executable)
 	require.Equal(t, []string{accountCommandLogout}, host.requests[0].Arguments)
+}
+
+func TestManagedAccountPrepareFailureLeavesAttemptedTreeOpaque(t *testing.T) {
+	originalProbe := accountProbeVersion
+	originalScratchParent := accountScratchParent
+	t.Cleanup(func() {
+		accountProbeVersion = originalProbe
+		accountScratchParent = originalScratchParent
+	})
+	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return "0.144.1", nil }
+	scratch := t.TempDir()
+	accountScratchParent = func(string) (string, error) { return scratch, nil }
+
+	injected := errors.New("shim prepare failed after transfer")
+	host := &authorityTestHost{
+		environment: map[string]string{"PATH": "/host/bin", "HOME": "/host/home"},
+		process:     newAuthorityTestProcess(""), prepareErrs: []error{nil, injected},
+	}
+	home := t.TempDir()
+	err := RunAccountCommand(t.Context(), AccountCommandOptions{
+		CLIPath: "host-pinned-codex", CodexHome: home, Mode: accountCommandLogin, HostAuthority: host,
+	})
+	require.ErrorIs(t, err, injected)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Len(t, host.prepared, 2)
+	require.Equal(t, []string{home}, host.reclaimed)
+	require.DirExists(t, host.prepared[1])
 }
 
 type orderedAuthorityProcess struct {

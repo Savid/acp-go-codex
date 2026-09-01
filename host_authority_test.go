@@ -396,23 +396,69 @@ func TestHostAuthorityRejectsRelativeNodeModulesSelectorBeforeMutation(t *testin
 	require.Empty(t, authority.events())
 }
 
-func TestHostAuthorityIncompletePrepareQuarantinesTreeUntilReclaim(t *testing.T) {
+func TestHostAuthorityPrepareFailureRemainsOpaque(t *testing.T) {
 	root := t.TempDir()
 	authority := newTraceAuthority(root)
-	authority.prepareErr = ErrContainmentIncomplete
+	injected := errors.New("prepare transferred ownership then failed")
+	authority.prepareErr = injected
 	agent := NewAgent(WithHostAuthority(authority), WithHome(filepath.Join(root, "home")))
 
 	_, err := agent.sharedRuntime(t.Context())
+	require.ErrorIs(t, err, injected)
 	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.ErrorIs(t, agent.runtimeCleanupErr, ErrContainmentIncomplete)
 	_, err = os.Stat(filepath.Join(root, "home"))
 	require.ErrorIs(t, err, os.ErrNotExist)
-	require.NotNil(t, agent.runtimeNativeRelease)
+	require.Nil(t, agent.runtimeNativeRelease)
+	require.Empty(t, agent.runtimeScratchRoot)
 
 	authority.prepareErr = nil
-	require.NoError(t, agent.runtimeNativeRelease())
-	_, err = os.Stat(filepath.Join(root, "home"))
+	_, err = agent.sharedRuntime(t.Context())
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, []string{"prepare:" + filepath.Join(root, "home")}, authority.events())
+}
+
+func TestHostAuthorityRolloutPrepareFailureRemainsOpaque(t *testing.T) {
+	root := t.TempDir()
+	authority := newTraceAuthority(root)
+	injected := errors.New("rollout prepare failed after transfer")
+	authority.prepareErr = injected
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
+
+	release, err := agent.reserveNativeResidenceCapacity(t.Context(), 3)
 	require.NoError(t, err)
+	path, returnedRelease, _, err := agent.materializeStoredRollout(
+		t.Context(), []SessionStoreEntry{[]byte(`{}`)}, release,
+	)
+	require.Empty(t, path)
+	require.Nil(t, returnedRelease)
+	require.ErrorIs(t, err, injected)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, 1, agent.nativeResidenceCount)
+	require.Len(t, authority.events(), 1)
+	require.True(t, strings.HasPrefix(authority.events()[0], "prepare:"))
+	require.NotContains(t, strings.Join(authority.events(), "\n"), "reclaim:")
+	_, err = agent.reserveNativeResidenceCapacity(t.Context(), 1)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+}
+
+func TestHostAuthorityPromptImagePrepareFailureRemainsOpaque(t *testing.T) {
+	root := t.TempDir()
+	authority := newTraceAuthority(root)
+	injected := errors.New("image prepare failed after transfer")
+	authority.prepareErr = injected
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
+	active := &session{agent: agent}
+
+	_, err := active.preparePromptImages(t.Context(), []decodedPromptImage{{
+		data: make([]byte, codexInlineImageEnvelopeSize), mimeType: mimeImagePNG,
+	}})
+	require.ErrorIs(t, err, injected)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, 1, agent.nativeResidenceCount)
+	require.Len(t, authority.events(), 1)
+	require.True(t, strings.HasPrefix(authority.events()[0], "prepare:"))
+	require.NotContains(t, strings.Join(authority.events(), "\n"), "reclaim:")
 }
 
 func TestNativeTreeBusyBlocksAdmissionUntilReclaimRetry(t *testing.T) {

@@ -2,7 +2,6 @@ package codexacp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,20 +31,7 @@ func (a *Agent) materializeStoredRollout(
 
 	if a.options.HostAuthority != nil {
 		if err := a.options.HostAuthority.PrepareNativeTree(ctx, filepath.Dir(path)); err != nil {
-			if errors.Is(err, ErrContainmentIncomplete) {
-				a.mu.Lock()
-				epoch := a.runtimeEpoch
-				a.mu.Unlock()
-				_ = a.retireMaterializedRolloutAtEpoch(path, bytes, release, epoch)
-
-				return "", nil, 0, err
-			}
-
-			_ = removeMaterializedRollout(path)
-
-			release()
-
-			return "", nil, 0, err
+			return "", nil, 0, a.retainOpaqueNativeTree(err)
 		}
 	}
 

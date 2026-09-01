@@ -94,6 +94,12 @@ func (a *Agent) reserveNativeResidenceCapacity(ctx context.Context, additionalBy
 
 	for {
 		a.mu.Lock()
+		if a.runtimeCleanupErr != nil {
+			cleanupErr := a.runtimeCleanupErr
+			a.mu.Unlock()
+
+			return nil, toPublicAuthorityError(cleanupErr)
+		}
 
 		withinLimit := a.nativeResidenceCount < retiredResidenceCountLimit &&
 			a.retiredResidenceBytes+additionalBytes <= retiredResidenceByteLimit
@@ -281,6 +287,34 @@ func latchRuntimeCleanup(err error) bool {
 func retainRuntimeResources(err error) bool {
 	return errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, codex.ErrContainmentIncomplete) ||
 		errors.Is(err, ErrNativeTreeBusy) || errors.Is(err, codex.ErrNativeTreeBusy)
+}
+
+func (a *Agent) retainOpaqueNativeTree(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	opaqueErr := errors.Join(err, ErrContainmentIncomplete, codex.ErrContainmentIncomplete)
+
+	a.mu.Lock()
+	if a.runtimeCleanupErr == nil {
+		a.runtimeCleanupErr = opaqueErr
+	}
+
+	a.runtimeDead = true
+
+	fenced := make([]*session, 0, len(a.sessions))
+	for _, active := range a.sessions {
+		active.setClientDead(true)
+		fenced = append(fenced, active)
+	}
+	a.mu.Unlock()
+
+	for _, active := range fenced {
+		active.fenceSession()
+	}
+
+	return opaqueErr
 }
 
 func (a *Agent) claimRetainedRuntimeThreadForStore(
@@ -689,9 +723,14 @@ func (a *Agent) startRuntimeGeneration(ctx context.Context, epoch uint64) (runti
 
 	resources.nativeRelease, err = a.prepareRuntimeHome(ctx)
 	if err != nil {
-		return resources, finalizeRuntimeResources(
-			err, resources.nativeRelease, resources.scratchRoot, resources.scratchRelease,
-		)
+		removeErr := runtimeRemoveAll(resources.scratchRoot)
+		if removeErr == nil {
+			resources.scratchRelease()
+			resources.scratchRoot = ""
+			resources.scratchRelease = nil
+		}
+
+		return resources, errors.Join(err, removeErr)
 	}
 
 	nativeVersion := minSupportedCodexVersion
@@ -749,11 +788,7 @@ func (a *Agent) prepareRuntimeHome(ctx context.Context) (func() error, error) {
 	}
 
 	if err := a.options.HostAuthority.PrepareNativeTree(ctx, home); err != nil {
-		if errors.Is(err, ErrContainmentIncomplete) {
-			return runtimeHomeReleaser(a.options.HostAuthority, home), err
-		}
-
-		return nil, err
+		return nil, a.retainOpaqueNativeTree(err)
 	}
 
 	return runtimeHomeReleaser(a.options.HostAuthority, home), nil

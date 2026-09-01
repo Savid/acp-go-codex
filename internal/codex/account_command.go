@@ -99,11 +99,12 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 			}
 
 			if prepareErr := options.HostAuthority.PrepareNativeTree(ctx, tree); prepareErr != nil {
-				if errors.Is(prepareErr, ErrContainmentIncomplete) {
-					prepared = append(prepared, tree)
+				cleanupErr := reclaimAccountTrees(options.HostAuthority, prepared)
+				if tree != shimDirectory(shim) {
+					cleanupErr = errors.Join(cleanupErr, shim.remove())
 				}
 
-				return errors.Join(prepareErr, cleanupAccountTrees(options.HostAuthority, prepared, shim))
+				return errors.Join(prepareErr, ErrContainmentIncomplete, cleanupErr)
 			}
 
 			prepared = append(prepared, tree)

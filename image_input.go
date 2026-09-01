@@ -529,20 +529,7 @@ func (s *session) preparePromptImages(ctx context.Context, images []decodedPromp
 
 	if s.agent.options.HostAuthority != nil {
 		if err := s.agent.options.HostAuthority.PrepareNativeTree(ctx, dir); err != nil {
-			if errors.Is(err, ErrContainmentIncomplete) {
-				s.agent.mu.Lock()
-				epoch := s.agent.runtimeEpoch
-				s.agent.mu.Unlock()
-				_ = s.agent.retireNativeResidenceAtEpoch(
-					dir, dir, residenceBytes, reservation, epoch, removePromptImageDir,
-				)
-
-				return preparedPromptImages{}, err
-			}
-
-			release()
-
-			return preparedPromptImages{}, err
+			return preparedPromptImages{}, s.agent.retainOpaqueNativeTree(err)
 		}
 
 		s.agent.mu.Lock()
