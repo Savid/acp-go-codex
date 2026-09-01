@@ -607,9 +607,10 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 
 	t.Run("early request returns after successful registration write", func(t *testing.T) {
 		writer := newRequestRegistrationWriter(io.Discard)
+		observedCtx := &observedDoneContext{Context: t.Context(), observed: make(chan struct{})}
 		done := make(chan registeredActionResult[int], 1)
 		go func() {
-			value, callErr := registeredActionRequest[int](t.Context(), writer, "success", nil, nil, func(context.Context) (int, error) {
+			value, callErr := registeredActionRequest[int](observedCtx, writer, "success", nil, nil, func(context.Context) (int, error) {
 				return 13, errors.New("early")
 			})
 			done <- registeredActionResult[int]{value: value, err: callErr}
@@ -620,6 +621,7 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 
 			return writer.pending["success"] != nil
 		}, time.Second, time.Millisecond)
+		<-observedCtx.observed
 		_, err := writer.Write(wirePayload("success"))
 		require.NoError(t, err)
 		result := <-done
