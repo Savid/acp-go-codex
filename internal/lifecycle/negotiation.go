@@ -42,12 +42,8 @@ func RejectKey(meta map[string]any) *ParamError {
 	return paramError()
 }
 
-// Offer is the host's `initialize` offer. It carries exactly one member, so a later
-// version adds its own members inside its own version's shape rather than breaking
-// a version-1 sibling.
-type Offer struct {
-	Version int
-}
+// Offer is the current initialize-offer marker returned by DecodeOffer.
+type Offer struct{}
 
 // DecodeOffer reads the offer from `InitializeRequest._meta`. An absent offer is
 // reported as not present rather than as a refusal: the host asked for nothing, and
@@ -75,19 +71,15 @@ func DecodeOffer(meta map[string]any) (Offer, bool, *ParamError) {
 		return Offer{}, false, paramError(fieldVersion)
 	}
 
-	return Offer{Version: version}, true, nil
+	return Offer{}, true, nil
 }
 
-// Answer accepts the current scalar version and carries the facts the active
+// Answer stamps the accepted current version onto the facts the active
 // configuration proved.
-func (o Offer) Answer(proven Negotiated) (Negotiated, bool) {
-	if o.Version != Version {
-		return Negotiated{}, false
-	}
-
+func (Offer) Answer(proven Negotiated) Negotiated {
 	proven.Version = Version
 
-	return proven, true
+	return proven
 }
 
 // Submission names one accepted client prompt. The client nonce is the host's own

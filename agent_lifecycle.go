@@ -27,12 +27,7 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (lifecycle.Negotiated, e
 		return lifecycle.Negotiated{}, nil
 	}
 
-	negotiated, answered := offer.Answer(a.provenLifecycleFacts())
-	if !answered {
-		return lifecycle.Negotiated{}, nil
-	}
-
-	return negotiated, nil
+	return offer.Answer(a.provenLifecycleFacts()), nil
 }
 
 // provenLifecycleFacts states what the active configuration can prove.

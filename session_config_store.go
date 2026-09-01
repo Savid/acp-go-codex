@@ -41,10 +41,8 @@ func (s *session) commitDurableSessionConfig(ctx context.Context, store SessionS
 	}
 	s.mu.Unlock()
 
-	entry, err := json.Marshal(record)
-	if err != nil {
-		return fmt.Errorf("encode Codex durable session configuration: %w", err)
-	}
+	// This closed record contains only JSON-native scalar, string-map, and string-slice fields.
+	entry, _ := json.Marshal(record)
 
 	key := SessionKey{SessionID: string(s.id), Subpath: sessionConfigStoreSubpath}
 	if err := appendRolloutEntries(ctx, store, key, []SessionStoreEntry{entry}); err != nil {

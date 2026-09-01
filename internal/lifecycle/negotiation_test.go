@@ -51,25 +51,23 @@ func TestDecodeOfferReadsWhatTheHostAsked(t *testing.T) {
 
 			require.Nil(t, refusal)
 			require.Equal(t, tc.present, present)
-			if tc.present {
-				require.Equal(t, Version, offer.Version)
-			}
+			require.Equal(t, Offer{}, offer)
 		})
 	}
 }
 
-func TestAnswerAcceptsOnlyCurrentVersion(t *testing.T) {
+func TestAnswerCarriesCurrentVersion(t *testing.T) {
 	t.Parallel()
 
 	proven := Negotiated{ActivityKinds: []ActivityKind{}}
 
-	answer, ok := Offer{Version: 1}.Answer(proven)
-	require.True(t, ok)
+	offer, present, refusal := DecodeOffer(map[string]any{MetaKey: map[string]any{"version": Version}})
+	require.True(t, present)
+	require.Nil(t, refusal)
+
+	answer := offer.Answer(proven)
 	require.Equal(t, 1, answer.Version)
 	require.Equal(t, 1, answer.NegotiatedVersion())
-
-	_, ok = Offer{Version: 2}.Answer(proven)
-	require.False(t, ok)
 
 	require.Equal(t, 0, Negotiated{}.NegotiatedVersion())
 	require.False(t, Negotiated{}.Present())

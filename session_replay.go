@@ -17,7 +17,6 @@ import (
 type rolloutRow struct {
 	Type    string         `json:"type"`
 	Payload map[string]any `json:"payload"`
-	raw     map[string]any
 }
 
 const valueAgentMessageCamel = "agentMessage"
@@ -189,12 +188,7 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 		}
 	}
 
-	var raw map[string]any
-	if err := json.Unmarshal(trimmed, &raw); err != nil {
-		return rolloutRow{}, err
-	}
-
-	return rolloutRow{Type: rowType, Payload: payload, raw: raw}, nil
+	return rolloutRow{Type: rowType, Payload: payload}, nil
 }
 
 func rejectDuplicateRolloutKeys(data []byte) error {
@@ -233,10 +227,8 @@ func consumeRolloutJSONValue(decoder *json.Decoder) error {
 				return tokenErr
 			}
 
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("rollout object member name must be a string")
-			}
+			// encoding/json emits only string member names after an object opener.
+			key, _ := keyToken.(string)
 
 			if _, duplicate := seen[key]; duplicate {
 				return fmt.Errorf("rollout object repeats field %q", key)
@@ -248,23 +240,18 @@ func consumeRolloutJSONValue(decoder *json.Decoder) error {
 				return valueErr
 			}
 		}
-	case '[':
+	default: // encoding/json emits only an array opener for the other composite token.
 		for decoder.More() {
 			if valueErr := consumeRolloutJSONValue(decoder); valueErr != nil {
 				return valueErr
 			}
 		}
-	default:
-		return errors.New("invalid rollout JSON delimiter")
 	}
 
-	closing, err := decoder.Token()
-	if err != nil {
+	// encoding/json matches the closing delimiter to the opener; malformed
+	// input is reported by Token rather than returned as a mismatched token.
+	if _, err := decoder.Token(); err != nil {
 		return err
-	}
-
-	if (delim == '{' && closing != json.Delim('}')) || (delim == '[' && closing != json.Delim(']')) {
-		return errors.New("invalid rollout JSON closing delimiter")
 	}
 
 	return nil

@@ -144,10 +144,7 @@ func rolloutNativeTerminalIdentity(entries []SessionStoreEntry) nativeTurnIdenti
 			continue
 		}
 
-		turnID := firstNonEmpty(
-			rolloutIdentityString(row.raw, codexTurnIDMetaKey, "turn_id", "turnID"),
-			rolloutIdentityString(row.Payload, codexTurnIDMetaKey, "turn_id", "turnID"),
-		)
+		turnID := rolloutIdentityString(row.Payload, codexTurnIDMetaKey, "turn_id", "turnID")
 		if turnID != "" {
 			if identity.turnID != "" && turnID != identity.turnID {
 				identity = nativeTurnIdentity{}

@@ -87,7 +87,7 @@ func (s *session) mirrorRolloutLocked(ctx context.Context) error {
 		return nil
 	}
 
-	clean, _, err := validateSessionImportEntries(entries)
+	clean, err := validateSessionImportEntries(entries)
 	if err != nil {
 		return s.latchCaptureFailure(store, err)
 	}
@@ -114,21 +114,31 @@ func (s *session) mirrorRolloutLocked(ctx context.Context) error {
 	return nil
 }
 
-func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, int, error) {
+func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, error) {
+	clean, _, err := validateSessionImportRows(entries)
+
+	return clean, err
+}
+
+func validateSessionImportRows(entries []SessionStoreEntry) ([]SessionStoreEntry, []rolloutRow, error) {
 	clean := make([]SessionStoreEntry, 0, len(entries))
+
+	rows := make([]rolloutRow, 0, len(entries))
 	for index, entry := range entries {
-		if _, err := decodeRolloutRow(entry); err != nil {
-			return nil, index, fmt.Errorf("entry %d is not a valid rollout row: %w", index, err)
+		row, err := decodeRolloutRow(entry)
+		if err != nil {
+			return nil, nil, fmt.Errorf("entry %d is not a valid rollout row: %w", index, err)
 		}
 
 		clean = append(clean, cloneStoreEntry(entry))
+		rows = append(rows, row)
 	}
 
-	return clean, len(clean), nil
+	return clean, rows, nil
 }
 
 func validateStoredRolloutEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, error) {
-	clean, _, err := validateSessionImportEntries(entries)
+	clean, rows, err := validateSessionImportRows(entries)
 	if err != nil {
 		return nil, err
 	}
@@ -138,12 +148,7 @@ func validateStoredRolloutEntries(entries []SessionStoreEntry) ([]SessionStoreEn
 		sessionMetaIndex = -1
 	)
 
-	for index, entry := range clean {
-		row, err := decodeRolloutRow(entry)
-		if err != nil {
-			return nil, err
-		}
-
+	for index, row := range rows {
 		if row.Type != "session_meta" {
 			continue
 		}
