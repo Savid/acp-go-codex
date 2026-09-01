@@ -1624,6 +1624,222 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	}
 }
 
+func TestSessionDurabilityAndMaterializationErrorCoverage(t *testing.T) {
+	ctx := t.Context()
+	injected := errors.New("injected")
+	entries := func(id string) []SessionStoreEntry {
+		return []SessionStoreEntry{SessionStoreEntry(
+			`{"type":"session_meta","payload":{"id":"thread-` + id + `"}}`,
+		)}
+	}
+	newStore := func(id string) *coverageSessionStore {
+		return &coverageSessionStore{configurableStore: &configurableStore{
+			entries: entries(id), configPresent: true,
+		}}
+	}
+	newFactory := func(client codex.Client) Option {
+		return withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil })
+	}
+
+	activeError := func(id string, forLoad bool, configErr error, appendErr error, env map[string]string) error {
+		store := newStore(id)
+		store.configErr = configErr
+		store.appendErr = appendErr
+		client := newSpyCodexClient()
+		agent := NewAgent(WithSessionStore(store), newFactory(client))
+		meta := sessionMeta{Env: env, EnvPresent: true, ExtraPathDirs: []string{}, ExtraPathDirsPresent: true}
+		active := newSession(agent, acp.SessionId(id), "/tmp/project", nil,
+			codex.Thread{ID: "thread-" + id}, client, meta, nil)
+		active.fingerprint = codexSessionStartFingerprint(codexSessionStart{Cwd: "/tmp/project", ResumeID: id, Meta: meta})
+		if appendErr != nil {
+			active.durableConfigRevision = 1
+			active.durableConfigCommitted = false
+		}
+		require.NoError(t, agent.storeStartedSession(active))
+		t.Cleanup(active.fenceSession)
+		if forLoad {
+			_, err := agent.LoadSession(ctx, LoadSessionRequest(acp.SessionId(id), "/tmp/project"))
+
+			return err
+		}
+		_, err := agent.ResumeSession(ctx, ResumeSessionRequest(acp.SessionId(id), "/tmp/project"))
+
+		return err
+	}
+
+	require.ErrorIs(t, activeError("active-config-load", true, injected, nil, nil), injected)
+	require.Error(t, activeError("active-mismatch", true, nil, nil, map[string]string{"TOKEN": "active"}))
+	require.ErrorIs(t, activeError("active-load-commit", true, nil, injected, map[string]string{"TOKEN": "active"}), injected)
+	require.ErrorIs(t, activeError("active-resume-commit", false, nil, injected, nil), injected)
+
+	mcpAgent := NewAgent(WithSessionStore(newStore("mcp")), newFactory(newSpyCodexClient()))
+	_, err := mcpAgent.resumeMaterializedSession(ctx, ResumeSessionRequest(
+		"mcp", "/tmp/project", WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}),
+	), entries("mcp"))
+	require.Error(t, err)
+	_, err = mcpAgent.loadMaterializedSession(ctx, LoadSessionRequest(
+		"mcp-load", "/tmp/project", WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}),
+	), entries("mcp-load"))
+	require.Error(t, err)
+
+	hydrateEntries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-hydrate"}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"image_generation_call","result":{"artifactSubpath":"missing"}}}`),
+	}
+	hydrateStore := newStore("hydrate")
+	hydrateStore.entries = hydrateEntries
+	hydrateAgent := NewAgent(WithSessionStore(hydrateStore), newFactory(newSpyCodexClient()))
+	_, err = hydrateAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("hydrate", "/tmp/project"), hydrateEntries)
+	require.Error(t, err)
+
+	capacityStore := newStore("capacity")
+	capacityAgent := NewAgent(WithSessionStore(capacityStore), WithHostAuthority(newTraceAuthority(t.TempDir())), newFactory(newSpyCodexClient()))
+	capacityAgent.runtimeCleanupErr = ErrContainmentIncomplete
+	_, err = capacityAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("capacity", "/tmp/project"), entries("capacity"))
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	loadCapacityStore := newStore("capacity-load")
+	loadCapacityAgent := NewAgent(WithSessionStore(loadCapacityStore), WithHostAuthority(newTraceAuthority(t.TempDir())), newFactory(newSpyCodexClient()))
+	loadCapacityAgent.runtimeCleanupErr = ErrContainmentIncomplete
+	_, err = loadCapacityAgent.loadMaterializedSession(ctx, LoadSessionRequest("capacity-load", "/tmp/project"), entries("capacity-load"))
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+
+	factoryStore := newStore("factory")
+	factoryAgent := NewAgent(WithSessionStore(factoryStore), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return nil, injected
+	}))
+	_, err = factoryAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("factory", "/tmp/project"), entries("factory"))
+	require.ErrorIs(t, err, injected)
+	loadFactoryStore := newStore("factory-load")
+	loadFactoryAgent := NewAgent(WithSessionStore(loadFactoryStore), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return nil, injected
+	}))
+	_, err = loadFactoryAgent.loadMaterializedSession(ctx, LoadSessionRequest("factory-load", "/tmp/project"), entries("factory-load"))
+	require.ErrorIs(t, err, injected)
+
+	originalCreate := createMaterializedRolloutTemp
+	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) { return nil, injected }
+	materializeStore := newStore("materialize")
+	materializeAgent := NewAgent(WithSessionStore(materializeStore), newFactory(newSpyCodexClient()))
+	_, err = materializeAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("materialize", "/tmp/project"), entries("materialize"))
+	require.ErrorIs(t, err, injected)
+	loadMaterializeStore := newStore("materialize-load")
+	loadMaterializeAgent := NewAgent(WithSessionStore(loadMaterializeStore), newFactory(newSpyCodexClient()))
+	_, err = loadMaterializeAgent.loadMaterializedSession(ctx, LoadSessionRequest("materialize-load", "/tmp/project"), entries("materialize-load"))
+	require.ErrorIs(t, err, injected)
+	createMaterializedRolloutTemp = originalCreate
+
+	limitedStore := newStore("limited")
+	limited := NewAgent(WithSessionStore(limitedStore), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), newFactory(newSpyCodexClient()))
+	require.NoError(t, limited.storeStartedSession(newSession(limited, "occupied", "/tmp/project", nil, codex.Thread{ID: "occupied"}, newSpyCodexClient(), sessionMeta{}, nil)))
+	_, err = limited.resumeMaterializedSession(ctx, ResumeSessionRequest("limited", "/tmp/project"), entries("limited"))
+	require.Error(t, err)
+	loadLimitedStore := newStore("limited-load")
+	loadLimited := NewAgent(WithSessionStore(loadLimitedStore), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), newFactory(newSpyCodexClient()))
+	require.NoError(t, loadLimited.storeStartedSession(newSession(loadLimited, "occupied", "/tmp/project", nil, codex.Thread{ID: "occupied"}, newSpyCodexClient(), sessionMeta{}, nil)))
+	_, err = loadLimited.loadMaterializedSession(ctx, LoadSessionRequest("limited-load", "/tmp/project"), entries("limited-load"))
+	require.Error(t, err)
+
+	replayStore := newStore("replay")
+	replayAgent := NewAgent(WithSessionStore(replayStore), newFactory(newSpyCodexClient()))
+	replayAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: injected})
+	replayEntries := append(entries("replay"), SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}`))
+	_, err = replayAgent.loadMaterializedSession(ctx, LoadSessionRequest("replay", "/tmp/project"), replayEntries)
+	require.ErrorIs(t, err, injected)
+
+	pendingMetaOption := WithSessionCodexOptions(NewCodexOptions(WithCodexEnv(map[string]string{"TOKEN": "new"})))
+	resumePendingStore := newStore("resume-pending")
+	resumePendingStore.appendErr = injected
+	resumePending := NewAgent(WithSessionStore(resumePendingStore), newFactory(newSpyCodexClient()))
+	_, err = resumePending.resumeMaterializedSession(ctx, ResumeSessionRequest(
+		"resume-pending", "/tmp/project", pendingMetaOption,
+	), entries("resume-pending"))
+	require.ErrorIs(t, err, injected)
+
+	loadPendingStore := newStore("load-pending")
+	loadPendingStore.appendErr = injected
+	loadPending := NewAgent(WithSessionStore(loadPendingStore), newFactory(newSpyCodexClient()))
+	_, err = loadPending.loadMaterializedSession(ctx, LoadSessionRequest(
+		"load-pending", "/tmp/project", pendingMetaOption,
+	), entries("load-pending"))
+	require.ErrorIs(t, err, injected)
+
+	activeStore := newStore("active-rebind")
+	activeStore.appendErr = injected
+	activeClient := newSpyCodexClient()
+	activeClient.thread.ID = "thread-active-rebind"
+	activeAgent := NewAgent(WithSessionStore(activeStore), newFactory(activeClient))
+	activeAgent.runtimeClient = activeClient
+	active := newSession(activeAgent, "active-rebind", "/tmp/project", nil,
+		codex.Thread{ID: "thread-active-rebind"}, activeClient, sessionMeta{}, nil)
+	require.NoError(t, activeAgent.storeStartedSession(active))
+	t.Cleanup(active.fenceSession)
+	_, err = activeAgent.loadMaterializedSession(ctx, LoadSessionRequest(
+		"active-rebind", "/tmp/project", pendingMetaOption,
+	), entries("active-rebind"))
+	require.ErrorIs(t, err, injected)
+
+	retainedStore := newStore("retained-pending")
+	retainedStore.appendErr = injected
+	retainedClient := newSpyCodexClient()
+	retainedAgent := NewAgent(WithSessionStore(retainedStore), newFactory(retainedClient))
+	retainedAgent.runtimeClient = retainedClient
+	retained := &retainedRuntimeThread{
+		sessionID: "retained-pending", threadID: "thread-retained-pending", client: retainedClient,
+		epoch: retainedAgent.runtimeEpoch, claimed: true,
+	}
+	retainedAgent.retainedThreads[retained.sessionID] = retained
+	_, _, err = retainedAgent.resumeRetainedRuntimeSession(
+		ctx,
+		ResumeSessionRequest("retained-pending", "/tmp/project", pendingMetaOption),
+		sessionMeta{Env: map[string]string{"TOKEN": "new"}, EnvPresent: true, ExtraPathDirs: []string{}, ExtraPathDirsPresent: true},
+		retained,
+		loadedSessionPersistence{config: durableSessionConfig{
+			Revision: 1, Env: map[string]string{}, ExtraPathDirs: []string{},
+		}, matches: false},
+	)
+	require.ErrorIs(t, err, injected)
+}
+
+func TestMaterializedAndForkRuntimeCanaryFailures(t *testing.T) {
+	injected := errors.New("canary randomness failed")
+	originalRead := runtimeRandRead
+	runtimeRandRead = func([]byte) (int, error) { return 0, injected }
+	t.Cleanup(func() { runtimeRandRead = originalRead })
+	server := HTTPMCPServer("marker", "https://example.test/mcp", nil)
+	entries := func(id string) []SessionStoreEntry {
+		return []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-` + id + `"}}`)}
+	}
+	newAgent := func(id string) *Agent {
+		return NewAgent(
+			WithSessionStore(&configurableStore{entries: entries(id), configPresent: true}),
+			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
+		)
+	}
+
+	resume := newAgent("resume-canary")
+	_, err := resume.resumeMaterializedSession(t.Context(), ResumeSessionRequest(
+		"resume-canary", "/tmp/project", WithSessionMCPServers(server),
+	), entries("resume-canary"))
+	require.ErrorIs(t, err, injected)
+
+	load := newAgent("load-canary")
+	_, err = load.loadMaterializedSession(t.Context(), LoadSessionRequest(
+		"load-canary", "/tmp/project", WithSessionMCPServers(server),
+	), entries("load-canary"))
+	require.ErrorIs(t, err, injected)
+
+	client := newSpyCodexClient()
+	forkAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+	forkAgent.runtimeClient = client
+	parent := newSession(forkAgent, "parent", "/tmp/project", nil, codex.Thread{ID: "parent-thread"}, client, sessionMeta{}, nil)
+	require.NoError(t, forkAgent.storeStartedSession(parent))
+	t.Cleanup(parent.fenceSession)
+	_, err = forkAgent.forkSession(t.Context(), ForkSessionRequest(
+		parent.id, "/tmp/project", WithSessionMCPServers(server),
+	))
+	require.ErrorIs(t, err, injected)
+}
+
 type activeRolloutPathClient struct {
 	*spyCodexClient
 
@@ -3559,6 +3775,24 @@ type configurableStore struct {
 	loadErr       error
 	listErr       error
 	deleteErr     error
+}
+
+type coverageSessionStore struct {
+	*configurableStore
+	configErr error
+	appendErr error
+}
+
+func (s *coverageSessionStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	if key.Subpath == sessionConfigStoreSubpath && s.configErr != nil {
+		return nil, s.configErr
+	}
+
+	return s.configurableStore.Load(ctx, key)
+}
+
+func (s *coverageSessionStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
+	return s.appendErr
 }
 
 type blockingDeleteSessionStore struct {

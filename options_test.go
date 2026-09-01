@@ -76,3 +76,15 @@ func TestOptionsSetters(t *testing.T) {
 		t.Fatal("default client factory accepted missing codex path")
 	}
 }
+
+func TestCaptureAmbientEnvironmentFallsBackToUserHome(t *testing.T) {
+	t.Setenv(managedHomeEnv, "")
+	original := runtimeUserHomeDir
+	runtimeUserHomeDir = func() (string, error) { return "/fallback/home", nil }
+	t.Cleanup(func() { runtimeUserHomeDir = original })
+
+	environment := captureAmbientEnvironment()
+	if environment[managedHomeEnv] != "/fallback/home" {
+		t.Fatalf("HOME = %q", environment[managedHomeEnv])
+	}
+}

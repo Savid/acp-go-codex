@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -587,6 +588,29 @@ func TestHostAuthorityPromptImagePrepareFailureRemainsOpaque(t *testing.T) {
 	require.Zero(t, removeCalls)
 }
 
+func TestHostAuthorityPromptImageResidenceRelease(t *testing.T) {
+	root := t.TempDir()
+	authority := newTraceAuthority(root)
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
+	active := &session{agent: agent}
+
+	prepared, err := active.preparePromptImages(t.Context(), []decodedPromptImage{{
+		data: make([]byte, codexInlineImageEnvelopeSize), mimeType: mimeImagePNG,
+	}})
+	require.NoError(t, err)
+	prepared.release()
+	prepared.release()
+	require.NoError(t, agent.reclaimRetiredResidences(t.Context(), agent.runtimeEpoch))
+	require.Zero(t, agent.nativeResidenceCount)
+
+	blocked := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
+	blocked.runtimeCleanupErr = ErrContainmentIncomplete
+	_, err = (&session{agent: blocked}).preparePromptImages(t.Context(), []decodedPromptImage{{
+		data: make([]byte, codexInlineImageEnvelopeSize), mimeType: mimeImagePNG,
+	}})
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+}
+
 func TestNativeTreeBusyBlocksAdmissionUntilReclaimRetry(t *testing.T) {
 	root := t.TempDir()
 	authority := newTraceAuthority(root)
@@ -622,4 +646,199 @@ func TestNativeTreeBusyBlocksAdmissionUntilReclaimRetry(t *testing.T) {
 	require.Nil(t, agent.runtimeClient)
 	_, err = os.Stat(path)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+type authorityCoverageHost struct {
+	environment func() map[string]string
+	prepare     func() error
+	reclaim     func() error
+	start       func() (NativeProcess, error)
+}
+
+func (h authorityCoverageHost) NativeEnvironment() map[string]string {
+	return h.environment()
+}
+
+func (h authorityCoverageHost) PrepareNativeTree(context.Context, string) error {
+	return h.prepare()
+}
+
+func (h authorityCoverageHost) ReclaimNativeTree(context.Context, string) error {
+	return h.reclaim()
+}
+
+func (h authorityCoverageHost) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
+	return h.start()
+}
+
+type authorityCoverageProcess struct {
+	stdin  func() io.WriteCloser
+	stdout func() io.ReadCloser
+	stderr func() io.ReadCloser
+	wait   func() (NativeResult, error)
+	revoke func() error
+}
+
+func (p authorityCoverageProcess) Stdin() io.WriteCloser                      { return p.stdin() }
+func (p authorityCoverageProcess) Stdout() io.ReadCloser                      { return p.stdout() }
+func (p authorityCoverageProcess) Stderr() io.ReadCloser                      { return p.stderr() }
+func (p authorityCoverageProcess) Wait(context.Context) (NativeResult, error) { return p.wait() }
+func (p authorityCoverageProcess) Revoke(context.Context) error               { return p.revoke() }
+
+func TestHostAuthorityDefensiveWrappers(t *testing.T) {
+	panicNow := func() { panic("host panic") }
+	process := authorityCoverageProcess{
+		stdin: func() io.WriteCloser {
+			panicNow()
+
+			return nil
+		},
+		stdout: func() io.ReadCloser {
+			panicNow()
+
+			return nil
+		},
+		stderr: func() io.ReadCloser {
+			panicNow()
+
+			return nil
+		},
+		wait: func() (NativeResult, error) {
+			panicNow()
+
+			return NativeResult{}, nil
+		},
+		revoke: func() error {
+			panicNow()
+
+			return nil
+		},
+	}
+	host := authorityCoverageHost{
+		environment: func() map[string]string { return map[string]string{"SAFE": "value"} },
+		prepare: func() error {
+			panicNow()
+
+			return nil
+		},
+		reclaim: func() error {
+			panicNow()
+
+			return nil
+		},
+		start: func() (NativeProcess, error) { return process, nil },
+	}
+
+	normalized, err := normalizeHostAuthority(host, true)
+	require.NoError(t, err)
+	guarded, ok := normalized.(*guardedHostAuthority)
+	require.True(t, ok)
+	require.Equal(t, map[string]string{"SAFE": "value"}, guarded.NativeEnvironment())
+	require.ErrorIs(t, guarded.PrepareNativeTree(t.Context(), "tree"), ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, guarded.ReclaimNativeTree(t.Context(), "tree"), ErrHostAuthorityUnavailable)
+
+	started, err := guarded.StartNative(t.Context(), NativeRequest{})
+	require.NoError(t, err)
+	require.Nil(t, started.Stdin())
+	require.Nil(t, started.Stdout())
+	require.Nil(t, started.Stderr())
+	_, err = started.Wait(t.Context())
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, started.Revoke(t.Context()), ErrHostAuthorityUnavailable)
+
+	panicHost := host
+	panicHost.environment = func() map[string]string {
+		panicNow()
+
+		return nil
+	}
+	_, err = normalizeHostAuthority(panicHost, true)
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+
+	panicHost = host
+	panicHost.start = func() (NativeProcess, error) {
+		panicNow()
+
+		return nil, nil //nolint:nilnil // The panic prevents a return.
+	}
+	panicGuarded, err := normalizeHostAuthority(panicHost, true)
+	require.NoError(t, err)
+	_, err = panicGuarded.StartNative(t.Context(), NativeRequest{})
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+}
+
+func TestHostAuthorityValidationAndAdapters(t *testing.T) {
+	require.False(t, nilable(reflect.Int))
+	require.True(t, interfaceNil(nil))
+	require.Nil(t, adaptHostAuthority(nil))
+
+	base := authorityCoverageHost{
+		environment: func() map[string]string { return map[string]string{"SAFE": "value"} },
+		prepare:     func() error { return ErrContainmentIncomplete },
+		reclaim:     func() error { return ErrNativeTreeBusy },
+		start:       func() (NativeProcess, error) { return nil, ErrHostAuthorityUnavailable },
+	}
+	adapter := adaptHostAuthority(base)
+	require.ErrorIs(t, adapter.PrepareNativeTree(t.Context(), "tree"), codex.ErrContainmentIncomplete)
+	require.ErrorIs(t, adapter.ReclaimNativeTree(t.Context(), "tree"), codex.ErrNativeTreeBusy)
+	_, err := adapter.StartNative(t.Context(), codex.NativeRequest{})
+	require.ErrorIs(t, err, codex.ErrHostAuthorityUnavailable)
+
+	base.start = func() (NativeProcess, error) {
+		return nil, nil //nolint:nilnil // Exercises an invalid host result.
+	}
+	adapter = adaptHostAuthority(base)
+	_, err = adapter.StartNative(t.Context(), codex.NativeRequest{})
+	require.ErrorIs(t, err, codex.ErrHostAuthorityUnavailable)
+
+	want := NativeResult{ExitCode: 7}
+	base.start = func() (NativeProcess, error) {
+		return authorityCoverageProcess{
+			stdin: func() io.WriteCloser { return nil }, stdout: func() io.ReadCloser { return nil },
+			stderr: func() io.ReadCloser { return nil },
+			wait:   func() (NativeResult, error) { return want, ErrNativeTreeBusy },
+			revoke: func() error { return nil },
+		}, nil
+	}
+	adapter = adaptHostAuthority(base)
+	internalProcess, err := adapter.StartNative(t.Context(), codex.NativeRequest{})
+	require.NoError(t, err)
+	result, err := internalProcess.Wait(t.Context())
+	require.Equal(t, codex.NativeResult(want), result)
+	require.ErrorIs(t, err, codex.ErrNativeTreeBusy)
+
+	for _, pair := range []struct {
+		internal error
+		public   error
+	}{
+		{codex.ErrHostAuthorityUnavailable, ErrHostAuthorityUnavailable},
+		{codex.ErrContainmentIncomplete, ErrContainmentIncomplete},
+		{codex.ErrNativeTreeBusy, ErrNativeTreeBusy},
+	} {
+		require.ErrorIs(t, toPublicAuthorityError(pair.internal), pair.public)
+		require.ErrorIs(t, toPublicAuthorityError(pair.public), pair.public)
+	}
+	injected := errors.New("injected")
+	require.Same(t, injected, toInternalAuthorityError(injected))
+	require.Same(t, injected, toPublicAuthorityError(injected))
+
+	for _, environment := range []map[string]string{
+		{"": "value"}, {"BAD=KEY": "value"}, {"BAD\x00KEY": "value"}, {"KEY": "bad\x00value"},
+		{"acp_go_codex_internal_test": "value"}, {"xdg_cache_home": "/tmp"},
+	} {
+		require.Error(t, validateRuntimeEnvironment(environment))
+	}
+	require.NoError(t, validateRuntimeEnvironment(map[string]string{"SAFE": "value"}))
+	require.True(t, reservedCodexEnvKey("codex_home"))
+	require.False(t, reservedCodexEnvKey("safe"))
+
+	for _, environment := range []map[string]string{
+		{"": "value"}, {"BAD=KEY": "value"}, {"KEY": "bad\x00value"},
+	} {
+		invalid := base
+		invalid.environment = func() map[string]string { return environment }
+		_, err := normalizeHostAuthority(invalid, true)
+		require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	}
 }

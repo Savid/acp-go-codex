@@ -641,3 +641,18 @@ func TestSessionTurnAndCloseOperationsFailClosedAtOwnershipBoundaries(t *testing
 	s = &session{nativeEventDone: make(chan struct{})}
 	require.ErrorIs(t, s.unsubscribeContainedThread(ctx, newSpyCodexClient(), "thread"), context.Canceled)
 }
+
+func TestUnsubscribeContainedThreadJoinsRetirementFailure(t *testing.T) {
+	client := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(), unsubscribeErr: codex.ErrConnectionClosed,
+	}
+	agent := NewAgent()
+	agent.runtimeClient = client
+	agent.runtimeNativeRelease = func() error { return ErrContainmentIncomplete }
+	s := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	agent.sessions[s.id] = s
+
+	err := s.unsubscribeContainedThread(t.Context(), client, "thread")
+	require.ErrorIs(t, err, codex.ErrConnectionClosed)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+}

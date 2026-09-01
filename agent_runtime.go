@@ -29,6 +29,7 @@ var runtimeReadyDeadline = 2 * time.Minute
 var runtimeRandRead = rand.Read
 var runtimeUserHomeDir = os.UserHomeDir
 var runtimeRemoveAll = os.RemoveAll
+var runtimeStat = os.Stat
 var runtimeProbeCodexVersion = codex.ProbeVersion
 var errNoRetainedRuntimeThread = errors.New("no retained Codex runtime thread")
 var errSharedRuntimeHasPeers = errors.Join(
@@ -774,7 +775,7 @@ func (a *Agent) prepareRuntimeHome(ctx context.Context) (func() error, error) {
 		return nil, err
 	}
 
-	info, err := os.Stat(home)
+	info, err := runtimeStat(home)
 	if err != nil {
 		return nil, fmt.Errorf("validate Codex home before native preparation: %w", err)
 	}

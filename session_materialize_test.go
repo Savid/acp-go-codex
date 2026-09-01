@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -98,6 +99,23 @@ func TestMaterializeRolloutRejectsInvalidScratchDir(t *testing.T) {
 	}
 	if _, err := materializeRollout(blocked, []SessionStoreEntry{SessionStoreEntry(`{"x":1}`)}); err == nil {
 		t.Fatal("materializeRollout accepted invalid scratch dir")
+	}
+}
+
+func TestMaterializeStoredRolloutReleasesReservationOnWriteFailure(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatalf("write blocking scratch file: %v", err)
+	}
+	released := false
+	agent := NewAgent(WithScratchDir(blocked))
+	path, release, bytes, err := agent.materializeStoredRollout(
+		context.Background(),
+		[]SessionStoreEntry{SessionStoreEntry(`{"x":1}`)},
+		func() { released = true },
+	)
+	if err == nil || path != "" || release != nil || bytes != 0 || !released {
+		t.Fatalf("path=%q releaseNil=%v bytes=%d released=%v err=%v", path, release == nil, bytes, released, err)
 	}
 }
 

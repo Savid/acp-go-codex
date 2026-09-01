@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
@@ -182,6 +184,24 @@ func TestDurableRolloutEntriesSkipsMirroredRows(t *testing.T) {
 	}
 }
 
+func TestCommitRolloutEntriesAndSyncErrorBranches(t *testing.T) {
+	injected := errors.New("append failed")
+	store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
+		return injected
+	}}
+	s := &session{
+		agent:                  NewAgent(WithSessionStore(store)),
+		id:                     "session",
+		durableConfigCommitted: true,
+	}
+	require.ErrorIs(t, s.commitRolloutEntries(t.Context(), store, []SessionStoreEntry{[]byte(`{}`)}, 1), injected)
+	require.Len(t, s.unsyncedEntries, 1)
+
+	withoutStore := &session{agent: NewAgent()}
+	withoutStore.agent.options.SessionStore = nil
+	require.NoError(t, withoutStore.ensureMirrorSynced(t.Context()))
+}
+
 func TestValidateStoredRolloutEntriesRequiresOneNativeIdentity(t *testing.T) {
 	valid := []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread"}}`),
@@ -193,6 +213,7 @@ func TestValidateStoredRolloutEntriesRequiresOneNativeIdentity(t *testing.T) {
 	}
 
 	for _, invalid := range [][]SessionStoreEntry{
+		{SessionStoreEntry(`not-json`)},
 		{SessionStoreEntry(`{"type":"event_msg","payload":{}}`)},
 		{SessionStoreEntry(`{"type":"session_meta","payload":{}}`)},
 		{

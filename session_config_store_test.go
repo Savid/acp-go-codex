@@ -72,6 +72,7 @@ func TestDurableSessionConfigRoundTripAndStrictReader(t *testing.T) {
 	}
 
 	require.NoError(t, session.commitDurableSessionConfig(t.Context(), store))
+	require.NoError(t, session.commitDurableSessionConfig(t.Context(), store))
 	require.True(t, session.durableConfigCommitted)
 	require.Equal(t, 1, session.durableConfigRevision)
 
@@ -81,6 +82,8 @@ func TestDurableSessionConfigRoundTripAndStrictReader(t *testing.T) {
 	require.Equal(t, session.extraPathDirs, stored.ExtraPathDirs)
 
 	for _, invalid := range []string{
+		`1`,
+		`{"version":"one","sessionId":"session","revision":1,"env":{},"extraPathDirs":[]}`,
 		`{"version":1,"sessionId":"session","revision":1,"env":{},"extraPathDirs":[],"extra":true}`,
 		`{"Version":1,"sessionId":"session","revision":1,"env":{},"extraPathDirs":[]}`,
 		`{"version":1,"SessionId":"session","revision":1,"env":{},"extraPathDirs":[]}`,
@@ -98,6 +101,45 @@ func TestDurableSessionConfigRoundTripAndStrictReader(t *testing.T) {
 		_, err := decodeDurableSessionConfig(SessionStoreEntry(invalid))
 		require.Error(t, err, invalid)
 	}
+}
+
+type durableConfigLoadErrorStore struct {
+	*appendFuncStore
+	err error
+}
+
+func (s durableConfigLoadErrorStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
+	return nil, s.err
+}
+
+type durableConfigFixedStore struct {
+	*appendFuncStore
+	entries []SessionStoreEntry
+}
+
+func (s durableConfigFixedStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
+	return s.entries, nil
+}
+
+func TestDurableSessionConfigStorageFailures(t *testing.T) {
+	injected := errors.New("injected")
+	failedCommit := &session{agent: NewAgent(), id: "session"}
+	require.ErrorIs(t, failedCommit.commitDurableSessionConfig(t.Context(), &appendFuncStore{
+		append: func(context.Context, SessionKey, []SessionStoreEntry) error { return injected },
+	}), injected)
+	require.False(t, failedCommit.durableConfigCommitted)
+
+	loadAgent := NewAgent(WithSessionStore(durableConfigLoadErrorStore{
+		appendFuncStore: &appendFuncStore{}, err: injected,
+	}))
+	_, err := loadAgent.loadDurableSessionConfig(t.Context(), "session")
+	require.ErrorIs(t, err, injected)
+
+	invalidAgent := NewAgent(WithSessionStore(durableConfigFixedStore{
+		appendFuncStore: &appendFuncStore{}, entries: []SessionStoreEntry{[]byte(`1`)},
+	}))
+	_, err = invalidAgent.loadDurableSessionConfig(t.Context(), "session")
+	require.ErrorContains(t, err, "session configuration entry 0")
 }
 
 func TestLoadDurableSessionConfigRejectsIdentityAndRevisionDrift(t *testing.T) {

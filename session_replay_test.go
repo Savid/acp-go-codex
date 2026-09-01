@@ -1,7 +1,9 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRolloutReplayResponseItemVariants(t *testing.T) {
@@ -155,6 +158,13 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	errorSession := &session{agent: errorAgent, id: "s"}
 	if err := errorSession.replayRollout(context.Background(), []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}`)}); !errors.Is(err, updateErr) {
 		t.Fatalf("replayRollout update error = %v", err)
+	}
+}
+
+func TestConsumeRolloutJSONValueMalformedComposites(t *testing.T) {
+	for _, input := range []string{"{", "{1:2}", "[!", "]"} {
+		decoder := json.NewDecoder(bytes.NewBufferString(input))
+		require.Error(t, consumeRolloutJSONValue(decoder), input)
 	}
 }
 

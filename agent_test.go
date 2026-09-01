@@ -399,6 +399,9 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	}
 
 	sink := &codexClientEventSink{agent: agent}
+	staleSink := &codexClientEventSink{agent: agent, epoch: agent.runtimeEpoch + 1}
+	staleSink.Handle(context.Background(), codex.Event{Kind: codex.EventAccountUpdated})
+	require.Empty(t, staleSink.pending)
 	sink.Handle(context.Background(), codex.Event{Kind: codex.EventRaw})
 	sink.Handle(context.Background(), codex.Event{
 		Kind:     codex.EventAccountUpdated,
@@ -440,6 +443,49 @@ func TestCodexClientEventSinkStartupRetentionIsBoundedAndFailsClosed(t *testing.
 	sink.mu.Unlock()
 	require.ErrorIs(t, sink.SetClient(client), codex.ErrTurnEventOverflow)
 	require.False(t, agent.runtimeDead)
+}
+
+func TestAgentCloseRetriesBusyRuntimeAndNormalizesClosedSession(t *testing.T) {
+	busy := NewAgent()
+	busy.runtimeClient = newSpyCodexClient()
+	reclaims := 0
+	busy.runtimeNativeRelease = func() error {
+		reclaims++
+		if reclaims == 1 {
+			return ErrNativeTreeBusy
+		}
+
+		return nil
+	}
+	require.ErrorIs(t, busy.Close(), ErrNativeTreeBusy)
+	require.NoError(t, busy.Close())
+	require.Equal(t, 2, reclaims)
+
+	closedClient := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(), unsubscribeErr: codex.ErrConnectionClosed,
+	}
+	normalized := NewAgent()
+	normalized.runtimeClient = closedClient
+	active := newSession(normalized, "session", "/tmp/project", nil,
+		codex.Thread{ID: "thread"}, closedClient, sessionMeta{}, nil)
+	require.NoError(t, normalized.storeStartedSession(active))
+	require.NoError(t, normalized.Close())
+
+	memoized := NewAgent()
+	closeDone := make(chan struct{})
+	close(closeDone)
+	memoizedSession := &session{
+		agent: memoized,
+		id:    "memoized",
+		closeOperation: &sessionCloseOperation{
+			done: closeDone,
+			err:  codex.ErrConnectionClosed,
+		},
+		closeContained:  true,
+		closeCommitDone: true,
+	}
+	memoized.sessions[memoizedSession.id] = memoizedSession
+	require.NoError(t, memoized.Close())
 }
 
 type countingCloseCodexClient struct {
