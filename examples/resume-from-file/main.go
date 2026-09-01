@@ -159,16 +159,14 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 
 	store := codexacp.NewInMemorySessionStore()
 
-	configuration, err := json.Marshal(sessionConfiguration{
+	// This closed record contains only JSON-native scalar, string-map, and string-slice fields.
+	configuration, _ := json.Marshal(sessionConfiguration{
 		Version:       1,
 		SessionID:     *sessionID,
 		Revision:      1,
 		Env:           map[string]string{},
 		ExtraPathDirs: []string{},
 	})
-	if err != nil {
-		return err
-	}
 
 	if err := store.Replace(ctx, codexacp.SessionKey{SessionID: *sessionID}, []codexacp.SessionStoreReplacement{{
 		Key:     codexacp.SessionKey{SessionID: *sessionID},
