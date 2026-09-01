@@ -569,6 +569,8 @@ func TestSharedRuntimeProbesNativeVersionForAdapterOwnedLaunch(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 	require.Equal(t, "0.199.0", launched.NativeVersion)
+	require.NotNil(t, launched.ObserveStartupStage)
+	launched.ObserveStartupStage(t.Context(), "runtime", "spawn", time.Millisecond, nil)
 }
 
 func TestRuntimeReplacementResumesEachSessionLazilyWithItsOwnConfig(t *testing.T) {
