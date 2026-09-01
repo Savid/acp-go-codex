@@ -24,6 +24,7 @@ const (
 	codexNPMCPUX64            = "x64"
 	codexNPMCPUARM64          = "arm64"
 	codexNPMOSLinux           = "linux"
+	codexNPMOSDarwin          = "darwin"
 	codexPackageJSONMaxBytes  = 1 << 20
 	codexPackageLayoutVersion = 1
 	codexPackageVariant       = "codex"
@@ -361,12 +362,12 @@ func currentNPMCodexPlatform() (npmCodexPlatform, bool) {
 		}, true
 	case "darwin/amd64":
 		return npmCodexPlatform{
-			alias: "codex-darwin-x64", cpu: codexNPMCPUX64, distribution: "darwin-x64", os: "darwin",
+			alias: "codex-darwin-x64", cpu: codexNPMCPUX64, distribution: "darwin-x64", os: codexNPMOSDarwin,
 			target: "x86_64-apple-darwin",
 		}, true
 	case "darwin/arm64":
 		return npmCodexPlatform{
-			alias: "codex-darwin-arm64", cpu: codexNPMCPUARM64, distribution: "darwin-arm64", os: "darwin",
+			alias: "codex-darwin-arm64", cpu: codexNPMCPUARM64, distribution: "darwin-arm64", os: codexNPMOSDarwin,
 			target: "aarch64-apple-darwin",
 		}, true
 	default:

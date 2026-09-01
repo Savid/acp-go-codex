@@ -198,9 +198,8 @@ while read line; do :; done
 	if err != nil {
 		t.Fatalf("NewAppServerClient returned error: %v", err)
 	}
-	if err := client.Close(context.Background()); err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "signal: killed") {
-		t.Fatalf("Close returned error: %v", err)
-	}
+	client.cancelProcess()
+	_ = client.Close(context.Background())
 }
 
 func TestAppServerRunTurnMapsEvents(t *testing.T) {

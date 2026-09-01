@@ -12,6 +12,7 @@ import (
 var (
 	getProcessGroupID = syscall.Getpgid
 	killProcessID     = syscall.Kill
+	signalOneProcess  = func(process *os.Process, signal os.Signal) error { return process.Signal(signal) }
 )
 
 func terminateProcess(cmd *exec.Cmd) error {
@@ -35,7 +36,7 @@ func signalProcess(cmd *exec.Cmd, signal syscall.Signal) error {
 		return nil
 	}
 
-	err := cmd.Process.Signal(signal)
+	err := signalOneProcess(cmd.Process, signal)
 	if errors.Is(err, os.ErrProcessDone) {
 		return nil
 	}
