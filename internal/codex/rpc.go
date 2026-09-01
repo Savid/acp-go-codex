@@ -126,11 +126,12 @@ func (t *lineTransport) readError(err error) error {
 		return &ProcessExitError{Err: errors.Join(err, t.proc.waitTerminal())}
 	}
 
-	if !t.proc.exited(t.grace) {
+	exited, terminalErr := t.proc.waitTerminalWithin(t.grace)
+	if !exited {
 		return err
 	}
 
-	return &ProcessExitError{Err: err}
+	return &ProcessExitError{Err: errors.Join(err, terminalErr)}
 }
 
 func (t *lineTransport) Close() error {

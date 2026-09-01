@@ -628,6 +628,34 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 		require.Equal(t, 13, result.value)
 		require.ErrorContains(t, result.err, "early")
 	})
+
+	t.Run("registration failure cancels and joins an active request", func(t *testing.T) {
+		writer := newRequestRegistrationWriter(io.Discard)
+		registeredErr := errors.New("registration failed")
+		started := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			_, callErr := registeredActionRequest[int](t.Context(), writer, "registration", nil, func() error {
+				return registeredErr
+			}, func(requestCtx context.Context) (int, error) {
+				close(started)
+				<-requestCtx.Done()
+
+				return 0, context.Cause(requestCtx)
+			})
+			done <- callErr
+		}()
+		<-started
+		require.Eventually(t, func() bool {
+			writer.mu.Lock()
+			defer writer.mu.Unlock()
+
+			return writer.pending["registration"] != nil
+		}, time.Second, time.Millisecond)
+		_, err := writer.Write(wirePayload("registration"))
+		require.NoError(t, err)
+		require.ErrorIs(t, <-done, registeredErr)
+	})
 }
 
 func TestRegisteredClientCallsRejectInvalidScopeAndBackpressure(t *testing.T) {

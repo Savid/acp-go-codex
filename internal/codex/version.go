@@ -64,12 +64,7 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 		var cleanupErr error
 
 		if native != nil {
-			revokeErr := native.Revoke(context.Background())
-
-			_, waitErr := native.Wait(context.Background())
-			if waitErr != nil {
-				cleanupErr = errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
-			}
+			_, cleanupErr = revokeAndWaitNative(native)
 		}
 
 		return "", errors.Join(
@@ -90,16 +85,9 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 
 	result, waitErr := native.Wait(ctx)
 	if ctx.Err() != nil {
-		revokeErr := native.Revoke(context.Background())
+		_, terminalErr := revokeAndWaitNative(native)
 
-		_, terminalErr := native.Wait(context.Background())
-		if terminalErr == nil {
-			revokeErr = nil
-		} else {
-			revokeErr = errors.Join(ErrContainmentIncomplete, revokeErr)
-		}
-
-		return "", errors.Join(ctx.Err(), revokeErr, terminalErr)
+		return "", errors.Join(ctx.Err(), terminalErr)
 	}
 
 	copyErr := errors.Join(<-stdoutDone, <-stderrDone)

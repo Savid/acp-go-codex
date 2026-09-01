@@ -25,6 +25,7 @@ const (
 )
 
 var processCloseGrace = 2 * time.Second
+var processContainmentTimeout = 5 * time.Second
 
 func launchAppServer(
 	ctx context.Context,
@@ -95,13 +96,7 @@ func launchAppServer(
 
 	stdin, stdout, stderr := native.Stdin(), native.Stdout(), native.Stderr()
 	if stdin == nil || stdout == nil || stderr == nil {
-		revokeErr := native.Revoke(context.Background())
-		_, waitErr := native.Wait(context.Background())
-
-		var cleanupErr error
-		if waitErr != nil {
-			cleanupErr = errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
-		}
+		_, cleanupErr := revokeAndWaitNative(native)
 
 		return nil, "", "", errors.Join(
 			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
@@ -240,51 +235,35 @@ type process struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 
-	waitOnce sync.Once
-	waitDone chan struct{}
-	result   NativeResult
-	waitErr  error
-
 	packageCleanup     func() error
 	packageCleanupOnce sync.Once
 	packageCleanupErr  error
 }
 
-func (p *process) beginWait() {
-	p.waitOnce.Do(func() {
-		p.waitDone = make(chan struct{})
-		go func() {
-			defer close(p.waitDone)
+func (p *process) exited(grace time.Duration) bool {
+	exited, _ := p.waitTerminalWithin(grace)
 
-			p.result, p.waitErr = p.native.Wait(context.Background())
-		}()
-	})
+	return exited
 }
 
-func (p *process) exited(grace time.Duration) bool {
-	p.beginWait()
+func (p *process) waitTerminalWithin(timeout time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-	select {
-	case <-p.waitDone:
-		return true
-	case <-time.After(grace):
-		return false
+	result, err := p.native.Wait(ctx)
+
+	terminalErr := terminalNativeProcessError(result, err)
+	if ctx.Err() != nil {
+		return false, terminalErr
 	}
+
+	return true, terminalErr
 }
 
 func (p *process) waitTerminal() error {
-	p.beginWait()
-	<-p.waitDone
+	_, err := p.waitTerminalWithin(processContainmentTimeout)
 
-	if p.waitErr != nil {
-		return errors.Join(ErrContainmentIncomplete, p.waitErr)
-	}
-
-	if p.result.ExitCode != 0 || p.result.Signal != 0 {
-		return fmt.Errorf("codex app-server exited with status %d signal %d", p.result.ExitCode, p.result.Signal)
-	}
-
-	return nil
+	return err
 }
 
 func (p *process) Close() error {
@@ -300,24 +279,57 @@ func (p *process) Close() error {
 		return p.cleanupPackage()
 	}
 
-	p.beginWait()
+	graceCtx, cancelGrace := context.WithTimeout(context.Background(), processCloseGrace)
+	result, waitErr := p.native.Wait(graceCtx)
+	graceExpired := graceCtx.Err() != nil
 
-	select {
-	case <-p.waitDone:
-		return errors.Join(p.waitTerminal(), p.cleanupPackage())
-	case <-time.After(processCloseGrace):
+	cancelGrace()
+
+	if !graceExpired {
+		terminalErr := terminalNativeProcessError(result, waitErr)
+		if errors.Is(terminalErr, ErrContainmentIncomplete) {
+			return terminalErr
+		}
+
+		return errors.Join(terminalErr, p.cleanupPackage())
 	}
 
-	revokeErr := p.native.Revoke(context.Background())
-	waitErr := p.waitTerminal()
-
-	if p.waitErr != nil && revokeErr != nil {
-		revokeErr = errors.Join(ErrContainmentIncomplete, revokeErr)
-	} else {
-		revokeErr = nil
+	result, containmentErr := revokeAndWaitNative(p.native)
+	if containmentErr != nil {
+		return containmentErr
 	}
 
-	return errors.Join(revokeErr, waitErr, p.cleanupPackage())
+	return errors.Join(terminalNativeProcessError(result, nil), p.cleanupPackage())
+}
+
+func revokeAndWaitNative(native NativeProcess) (NativeResult, error) {
+	revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), processContainmentTimeout)
+	revokeErr := native.Revoke(revokeCtx)
+
+	cancelRevoke()
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), processContainmentTimeout)
+	result, waitErr := native.Wait(waitCtx)
+
+	cancelWait()
+
+	if waitErr != nil {
+		return result, errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
+	}
+
+	return result, nil
+}
+
+func terminalNativeProcessError(result NativeResult, err error) error {
+	if err != nil {
+		return errors.Join(ErrContainmentIncomplete, err)
+	}
+
+	if result.ExitCode != 0 || result.Signal != 0 {
+		return fmt.Errorf("codex app-server exited with status %d signal %d", result.ExitCode, result.Signal)
+	}
+
+	return nil
 }
 
 func (p *process) cleanupPackage() error {

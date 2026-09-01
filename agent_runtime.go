@@ -25,6 +25,8 @@ const (
 	retiredResidenceByteLimit  = 64 << 20
 )
 
+var runtimeNativeTreeTimeout = 5 * time.Second
+
 var runtimeReadyDeadline = 2 * time.Minute
 var runtimeRandRead = rand.Read
 var runtimeUserHomeDir = os.UserHomeDir
@@ -810,7 +812,12 @@ func runtimeHomeReleaser(authority HostAuthority, home string) func() error {
 			return reclaimErr
 		}
 
-		if err := authority.ReclaimNativeTree(context.Background(), home); err != nil {
+		reclaimCtx, cancel := context.WithTimeout(context.Background(), runtimeNativeTreeTimeout)
+		err := authority.ReclaimNativeTree(reclaimCtx, home)
+
+		cancel()
+
+		if err != nil {
 			if errors.Is(err, ErrNativeTreeBusy) {
 				return err
 			}

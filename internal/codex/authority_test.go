@@ -141,6 +141,28 @@ type orderedAuthorityProcess struct {
 	result NativeResult
 }
 
+type deadlineAuthorityProcess struct {
+	*authorityTestProcess
+}
+
+func (p *deadlineAuthorityProcess) Wait(ctx context.Context) (NativeResult, error) {
+	p.mu.Lock()
+	p.waits++
+	p.mu.Unlock()
+	<-ctx.Done()
+
+	return NativeResult{}, ctx.Err()
+}
+
+func (p *deadlineAuthorityProcess) Revoke(ctx context.Context) error {
+	p.mu.Lock()
+	p.revokes++
+	p.mu.Unlock()
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
 type orderedWriteCloser struct{ calls *[]string }
 
 func (w *orderedWriteCloser) Write(value []byte) (int, error) { return len(value), nil }
@@ -153,11 +175,15 @@ func (w *orderedWriteCloser) Close() error {
 func (p *orderedAuthorityProcess) Stdin() io.WriteCloser { return p.stdin }
 func (*orderedAuthorityProcess) Stdout() io.ReadCloser   { return io.NopCloser(bytes.NewReader(nil)) }
 func (*orderedAuthorityProcess) Stderr() io.ReadCloser   { return io.NopCloser(bytes.NewReader(nil)) }
-func (p *orderedAuthorityProcess) Wait(context.Context) (NativeResult, error) {
-	<-p.done
-	*p.calls = append(*p.calls, "wait")
+func (p *orderedAuthorityProcess) Wait(ctx context.Context) (NativeResult, error) {
+	select {
+	case <-ctx.Done():
+		return NativeResult{}, ctx.Err()
+	case <-p.done:
+		*p.calls = append(*p.calls, "wait")
 
-	return p.result, nil
+		return p.result, nil
+	}
 }
 func (p *orderedAuthorityProcess) Revoke(context.Context) error {
 	*p.calls = append(*p.calls, "revoke")
@@ -177,4 +203,20 @@ func TestManagedProcessCloseGracefullyClosesThenRevokesAndWaits(t *testing.T) {
 	managed := &process{native: native, stdin: native.stdin, stdout: native.Stdout()}
 	require.NoError(t, managed.Close())
 	require.Equal(t, []string{"stdin-close", "revoke", "wait"}, calls)
+}
+
+func TestManagedProcessCloseBoundsAuthorityCalls(t *testing.T) {
+	originalGrace, originalContainment := processCloseGrace, processContainmentTimeout
+	processCloseGrace, processContainmentTimeout = 0, 0
+	t.Cleanup(func() {
+		processCloseGrace, processContainmentTimeout = originalGrace, originalContainment
+	})
+
+	native := &deadlineAuthorityProcess{authorityTestProcess: newAuthorityTestProcess("")}
+	managed := &process{native: native, stdin: native.stdin, stdout: native.stdout}
+	err := managed.Close()
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, 2, native.waits)
+	require.Equal(t, 1, native.revokes)
 }

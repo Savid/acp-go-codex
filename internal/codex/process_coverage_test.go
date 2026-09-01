@@ -300,6 +300,12 @@ func TestLineTransportReadErrorCoverage(t *testing.T) {
 	transport.grace = time.Second
 	var exit *ProcessExitError
 	require.ErrorAs(t, transport.readError(cause), &exit)
+	failed := newCoverageNativeProcess()
+	failed.waitErr = errors.New("terminal proof failed")
+	transport.proc = &process{native: failed}
+	err := transport.readError(cause)
+	require.ErrorAs(t, err, &exit)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 }
 
 type terminalErrorVersionProcess struct {

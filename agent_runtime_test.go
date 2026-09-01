@@ -863,6 +863,13 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 	failingRelease := runtimeHomeReleaser(failingAuthority, "/home")
 	require.ErrorIs(t, failingRelease(), ErrContainmentIncomplete)
 	require.ErrorIs(t, failingRelease(), ErrContainmentIncomplete)
+	originalNativeTreeTimeout := runtimeNativeTreeTimeout
+	runtimeNativeTreeTimeout = 0
+	t.Cleanup(func() { runtimeNativeTreeTimeout = originalNativeTreeTimeout })
+	deadlineAuthority := reclaimDeadlineAuthority{HostAuthority: authority}
+	deadlineRelease := runtimeHomeReleaser(deadlineAuthority, "/home")
+	require.ErrorIs(t, deadlineRelease(), ErrContainmentIncomplete)
+	require.ErrorIs(t, deadlineRelease(), context.DeadlineExceeded)
 
 	require.Equal(t, filepath.Clean("/native/codex"), NewAgent(WithHostAuthority(authorityCoverageHost{
 		environment: func() map[string]string { return map[string]string{"CODEX_HOME": "/native/codex"} },
@@ -891,6 +898,12 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 	go func() { waitResult <- waitAgent.retireRuntimeGenerationOwned(ctx, nil, nil) }()
 	close(wait)
 	require.NoError(t, <-waitResult)
+	closingAgent := NewAgent()
+	closing := make(chan struct{})
+	close(closing)
+	closingAgent.runtimeClosing = closing
+	closingAgent.runtimeCleanupErr = injected
+	require.ErrorIs(t, closingAgent.retireRuntimeGeneration(ctx, nil), injected)
 
 	latchAgent := NewAgent()
 	latchClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: ErrContainmentIncomplete}
@@ -904,6 +917,16 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 	attachAgent := NewAgent()
 	attachSession := newSession(attachAgent, "attach", "/tmp/project", nil, codex.Thread{ID: "attach"}, attachClient, sessionMeta{}, nil)
 	require.ErrorIs(t, attachAgent.runtimeReadyCanaryWithConfig(ctx, attachClient, attachSession, map[string]any{"key": "value"}), attachErr)
+}
+
+type reclaimDeadlineAuthority struct {
+	HostAuthority
+}
+
+func (a reclaimDeadlineAuthority) ReclaimNativeTree(ctx context.Context, _ string) error {
+	<-ctx.Done()
+
+	return ctx.Err()
 }
 
 func TestRuntimeEnvironmentRejectsReservedSessionKeys(t *testing.T) {
