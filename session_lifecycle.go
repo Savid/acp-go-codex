@@ -266,16 +266,11 @@ func (s *session) closeCanaryEventsLocked(canary *nativeCanary) {
 	close(canary.events)
 }
 
-func (s *session) runNativeEventPump(events <-chan codex.Event, barriers <-chan chan error, done chan<- struct{}) {
-	defer close(done)
-	defer func() {
-		s.lifecycleMu.Lock()
-		s.nativeEventPumping = false
-		s.lifecycleMu.Unlock()
-	}()
+func (s *session) runNativeEventPump(events <-chan codex.Event, barriers <-chan chan error, done chan struct{}) {
+	defer s.finishNativeEventPump(done)
 	defer func() {
 		if recover() != nil {
-			s.failNativeIncarnation(errors.New("codex thread event pump panicked"))
+			s.failNativeIncarnationFromNativePump(errors.New("codex thread event pump panicked"))
 		}
 	}()
 
@@ -286,8 +281,8 @@ func (s *session) runNativeEventPump(events <-chan codex.Event, barriers <-chan 
 				goto stopped
 			}
 
-			if err := s.routeNativeEvent(event); err != nil {
-				s.failNativeIncarnation(err)
+			if err := s.routeNativeEventFromNativePump(event); err != nil {
+				s.failNativeIncarnationFromNativePump(err)
 
 				return
 			}
@@ -306,7 +301,7 @@ func (s *session) runNativeEventPump(events <-chan codex.Event, barriers <-chan 
 						goto stopped
 					}
 
-					if err := s.routeNativeEvent(event); err != nil {
+					if err := s.routeNativeEventFromNativePump(event); err != nil {
 						barrierErr = err
 						draining = false
 					}
@@ -320,7 +315,7 @@ func (s *session) runNativeEventPump(events <-chan codex.Event, barriers <-chan 
 			close(result)
 
 			if barrierErr != nil {
-				s.failNativeIncarnation(barrierErr)
+				s.failNativeIncarnationFromNativePump(barrierErr)
 
 				return
 			}
@@ -337,8 +332,45 @@ stopped:
 	s.lifecycleMu.Unlock()
 
 	if !closing && !failed && !stopping {
-		s.failNativeIncarnation(codex.ErrConnectionClosed)
+		s.failNativeIncarnationFromNativePump(codex.ErrConnectionClosed)
 	}
+}
+
+func (s *session) deferFenceUntilNativePumpStops() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	s.nativeEventFencePending = true
+}
+
+func (s *session) finishNativeEventPump(done chan struct{}) {
+	s.lifecycleMu.Lock()
+	fencePending := s.nativeEventFencePending
+	s.lifecycleMu.Unlock()
+
+	if fencePending {
+		cancel, release, _ := s.detachNativeEvents()
+		if cancel != nil {
+			cancel()
+		}
+
+		if release != nil {
+			release()
+		}
+
+		s.fenceSessionAfterNativePump()
+	}
+
+	s.lifecycleMu.Lock()
+	s.nativeEventPumping = false
+	s.nativeEventFencePending = false
+
+	if s.nativeEventDone == done {
+		s.nativeEventDone = nil
+	}
+
+	close(done)
+	s.lifecycleMu.Unlock()
 }
 
 func (s *session) drainNativeEvents(ctx context.Context) error {
@@ -368,17 +400,7 @@ func (s *session) drainNativeEvents(ctx context.Context) error {
 }
 
 func (s *session) stopNativeEventsContext(ctx context.Context) error {
-	s.lifecycleMu.Lock()
-	s.nativeEventStopping = true
-	cancel := s.nativeEventCancel
-	release := s.nativeEventRelease
-	done := s.nativeEventDone
-	s.nativeEventCancel = nil
-	s.nativeEventRelease = nil
-	s.nativeEventBarrier = nil
-	s.closeCanaryEventsLocked(s.nativeCanary)
-	s.nativeCanary = nil
-	s.lifecycleMu.Unlock()
+	cancel, release, done := s.detachNativeEvents()
 
 	if cancel != nil {
 		cancel()
@@ -403,6 +425,23 @@ func (s *session) stopNativeEventsContext(ctx context.Context) error {
 	s.lifecycleMu.Unlock()
 
 	return nil
+}
+
+func (s *session) detachNativeEvents() (context.CancelFunc, func(), chan struct{}) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	s.nativeEventStopping = true
+	cancel := s.nativeEventCancel
+	release := s.nativeEventRelease
+	done := s.nativeEventDone
+	s.nativeEventCancel = nil
+	s.nativeEventRelease = nil
+	s.nativeEventBarrier = nil
+	s.closeCanaryEventsLocked(s.nativeCanary)
+	s.nativeCanary = nil
+
+	return cancel, release, done
 }
 
 func (s *session) prepareNativeEventRebind() error {
@@ -1241,6 +1280,14 @@ func (in *promptIncarnation) settle(
 }
 
 func (s *session) routeNativeEvent(event codex.Event) error {
+	return s.routeNativeEventWithPumpOwnership(event, false)
+}
+
+func (s *session) routeNativeEventFromNativePump(event codex.Event) error {
+	return s.routeNativeEventWithPumpOwnership(event, true)
+}
+
+func (s *session) routeNativeEventWithPumpOwnership(event codex.Event, nativePumpOwned bool) error {
 	s.lifecycleRouteMu.Lock()
 
 	defer s.lifecycleRouteMu.Unlock()
@@ -1256,10 +1303,18 @@ func (s *session) routeNativeEvent(event codex.Event) error {
 		s.nativeRouteCancel = nil
 	}()
 
-	return s.routeNativeEventLocked(routeCtx, event)
+	return s.routeNativeEventLockedWithPumpOwnership(routeCtx, event, nativePumpOwned)
 }
 
 func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event) error {
+	return s.routeNativeEventLockedWithPumpOwnership(ctx, event, false)
+}
+
+func (s *session) routeNativeEventLockedWithPumpOwnership(
+	ctx context.Context,
+	event codex.Event,
+	nativePumpOwned bool,
+) error {
 	if s.lifecycleFailure != nil {
 		return s.lifecycleFailure
 	}
@@ -1352,7 +1407,7 @@ func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event)
 		return nil
 	}
 
-	return s.routeAutonomousEventLocked(ctx, event)
+	return s.routeAutonomousEventLockedWithPumpOwnership(ctx, event, nativePumpOwned)
 }
 
 // applyTurnlessThreadEventLocked disposes of a thread event the app-server
@@ -1431,6 +1486,14 @@ func (s *session) closeCycleEventsLocked(in *promptIncarnation) {
 }
 
 func (s *session) routeAutonomousEventLocked(ctx context.Context, event codex.Event) error {
+	return s.routeAutonomousEventLockedWithPumpOwnership(ctx, event, false)
+}
+
+func (s *session) routeAutonomousEventLockedWithPumpOwnership(
+	ctx context.Context,
+	event codex.Event,
+	nativePumpOwned bool,
+) error {
 	if _, bounded := ctx.Deadline(); !bounded {
 		var cancel context.CancelFunc
 
@@ -1502,7 +1565,9 @@ func (s *session) routeAutonomousEventLocked(ctx context.Context, event codex.Ev
 	boundary := &turnContainment{done: make(chan struct{}), started: true}
 	in.terminating = boundary
 	s.lifecycleMu.Unlock()
-	settleErr := s.completeAutonomousSettlement(routeCtx, in, boundary, nil, lifecycle.ActionFailed, stopReason, outcome)
+	settleErr := s.completeAutonomousSettlement(
+		routeCtx, in, boundary, nil, lifecycle.ActionFailed, stopReason, outcome, nativePumpOwned,
+	)
 	s.lifecycleMu.Lock()
 
 	return errors.Join(handleErr, settleErr)
@@ -1516,6 +1581,7 @@ func (s *session) completeAutonomousSettlement(
 	actionState lifecycle.ActionState,
 	stopReason acp.StopReason,
 	outcome lifecycle.Outcome,
+	nativePumpOwned bool,
 ) error {
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptSettlementTimeout)
 	if deadline, ok := ctx.Deadline(); ok {
@@ -1529,7 +1595,7 @@ func (s *session) completeAutonomousSettlement(
 		expected = in.state.nativeIdentity
 	}
 
-	mirrorErr := s.mirrorAndEmitRolloutThrough(settleCtx, expected)
+	mirrorErr := s.mirrorAndEmitRolloutThroughNativePump(settleCtx, expected, nativePumpOwned)
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 
@@ -1943,6 +2009,14 @@ func (s *session) rememberTerminalNativeTurnLocked(turnID string) {
 }
 
 func (s *session) failNativeIncarnation(err error) {
+	s.failNativeIncarnationWithPumpOwnership(err, false)
+}
+
+func (s *session) failNativeIncarnationFromNativePump(err error) {
+	s.failNativeIncarnationWithPumpOwnership(err, true)
+}
+
+func (s *session) failNativeIncarnationWithPumpOwnership(err error, nativePumpOwned bool) {
 	if err == nil {
 		err = codex.ErrConnectionClosed
 	}
@@ -1972,7 +2046,7 @@ func (s *session) failNativeIncarnation(err error) {
 			current.terminating = boundary
 			s.lifecycleMu.Unlock()
 			_ = s.completeAutonomousSettlement(
-				context.TODO(), current, boundary, err, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed,
+				context.TODO(), current, boundary, err, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed, nativePumpOwned,
 			)
 			s.lifecycleMu.Lock()
 		}
@@ -2042,6 +2116,14 @@ func (s *session) waitForLifecycleTurn(ctx context.Context, nativeTurnID string)
 }
 
 func (s *session) fenceSession() {
+	s.fenceSessionWithNativeEvents(true)
+}
+
+func (s *session) fenceSessionAfterNativePump() {
+	s.fenceSessionWithNativeEvents(false)
+}
+
+func (s *session) fenceSessionWithNativeEvents(stopNativeEvents bool) {
 	closeCtx, cancelClose := context.WithTimeout(context.TODO(), closeTimeout)
 	_ = s.beginLifecycleClose(closeCtx)
 	gateErr := lockLifecycleRoute(closeCtx, &s.lifecycleRouteMu)
@@ -2064,8 +2146,11 @@ func (s *session) fenceSession() {
 		cancelClose()
 
 		stopCtx, cancel := context.WithTimeout(context.TODO(), closeTimeout)
+
 		_ = s.stopLifecycleDeliveries(stopCtx)
-		_ = s.stopNativeEventsContext(stopCtx)
+		if stopNativeEvents {
+			_ = s.stopNativeEventsContext(stopCtx)
+		}
 
 		cancel()
 
@@ -2083,7 +2168,7 @@ func (s *session) fenceSession() {
 
 	if boundary != nil {
 		_ = s.completeAutonomousSettlement(
-			context.TODO(), current, boundary, nil, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed,
+			context.TODO(), current, boundary, nil, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed, false,
 		)
 	}
 
@@ -2100,8 +2185,11 @@ func (s *session) fenceSession() {
 	cancelClose()
 
 	stopCtx, cancel := context.WithTimeout(context.TODO(), closeTimeout)
+
 	_ = s.stopLifecycleDeliveries(stopCtx)
-	_ = s.stopNativeEventsContext(stopCtx)
+	if stopNativeEvents {
+		_ = s.stopNativeEventsContext(stopCtx)
+	}
 
 	cancel()
 }
@@ -2178,7 +2266,7 @@ func (s *session) shutdownAgentTurnMatching(
 
 	containmentErr := s.containCancelledTurn(ctx, client, threadID, interruptErr)
 	resultErr := s.completeAutonomousSettlement(
-		ctx, in, boundary, containmentErr, lifecycle.ActionCancelled, acp.StopReasonCancelled, lifecycle.OutcomeCancelled,
+		ctx, in, boundary, containmentErr, lifecycle.ActionCancelled, acp.StopReasonCancelled, lifecycle.OutcomeCancelled, false,
 	)
 
 	return true, resultErr

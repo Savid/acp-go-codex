@@ -36,11 +36,19 @@ func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
 }
 
 func (s *session) mirrorAndEmitRolloutThrough(ctx context.Context, expected nativeTurnIdentity) error {
+	return s.mirrorAndEmitRolloutThroughNativePump(ctx, expected, false)
+}
+
+func (s *session) mirrorAndEmitRolloutThroughNativePump(
+	ctx context.Context,
+	expected nativeTurnIdentity,
+	nativePumpOwned bool,
+) error {
 	s.mirrorMu.Lock()
 	err := s.mirrorRolloutLocked(ctx, expected)
 	s.mirrorMu.Unlock()
 
-	return s.handleManagedAppendLogFailure(err)
+	return s.handleManagedAppendLogFailure(err, nativePumpOwned)
 }
 
 func (s *session) captureRolloutEntries(ctx context.Context, startRow int) ([]SessionStoreEntry, error) {
@@ -70,10 +78,14 @@ func (s *session) captureRolloutEntries(ctx context.Context, startRow int) ([]Se
 	return entries, nil
 }
 
-func (s *session) handleManagedAppendLogFailure(err error) error {
+func (s *session) handleManagedAppendLogFailure(err error, nativePumpOwned bool) error {
 	var captureErr *managedNativeAppendLogError
 	if err == nil || !errors.As(err, &captureErr) || !latchRuntimeCleanup(captureErr.err) {
 		return err
+	}
+
+	if nativePumpOwned {
+		return s.agent.retainOpaqueNativeTreeFromNativePump(err, s)
 	}
 
 	return s.agent.retainOpaqueNativeTree(err)
@@ -378,7 +390,7 @@ func (s *session) recaptureFailedMirror(ctx context.Context) error {
 	err := s.mirrorRolloutLocked(ctx, s.captureExpected)
 	s.mirrorMu.Unlock()
 
-	return s.handleManagedAppendLogFailure(err)
+	return s.handleManagedAppendLogFailure(err, false)
 }
 
 // fencePersistence stops every later commit for this session. It takes the

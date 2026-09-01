@@ -296,6 +296,10 @@ func retainRuntimeResources(err error) bool {
 }
 
 func (a *Agent) retainOpaqueNativeTree(err error) error {
+	return a.retainOpaqueNativeTreeFromNativePump(err, nil)
+}
+
+func (a *Agent) retainOpaqueNativeTreeFromNativePump(err error, current *session) error {
 	if err == nil {
 		return nil
 	}
@@ -308,6 +312,8 @@ func (a *Agent) retainOpaqueNativeTree(err error) error {
 	}
 
 	a.runtimeDead = true
+	fanoutOwner := !a.opaqueNativeFanout
+	a.opaqueNativeFanout = true
 
 	fenced := make([]*session, 0, len(a.sessions))
 	for _, active := range a.sessions {
@@ -316,7 +322,17 @@ func (a *Agent) retainOpaqueNativeTree(err error) error {
 	}
 	a.mu.Unlock()
 
+	if !fanoutOwner {
+		return opaqueErr
+	}
+
 	for _, active := range fenced {
+		if active == current {
+			active.deferFenceUntilNativePumpStops()
+
+			continue
+		}
+
 		active.fenceSession()
 	}
 

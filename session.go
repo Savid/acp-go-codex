@@ -104,6 +104,7 @@ type session struct {
 	nativeEventOpened       bool
 	nativeEventStopping     bool
 	nativeEventPumping      bool
+	nativeEventFencePending bool
 	nativeEventAttaching    bool
 	nativeEventRebinding    bool
 	nativeEventReplaying    bool

@@ -143,6 +143,7 @@ type Agent struct {
 	runtimeScratchRoot    string
 	runtimeScratchRelease func()
 	runtimeCleanupErr     error
+	opaqueNativeFanout    bool
 	retainedThreads       map[acp.SessionId]*retainedRuntimeThread
 	retiredResidences     []retiredNativeResidence
 	nativeResidenceCount  int

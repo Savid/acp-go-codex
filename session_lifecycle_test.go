@@ -1976,7 +1976,9 @@ func TestAutonomousTurnSettlementRejectsChangedAndTerminalOwners(t *testing.T) {
 	boundary := &turnContainment{done: make(chan struct{}), started: true}
 	in := &promptIncarnation{nativeTurnID: "native"}
 	s := &session{agent: NewAgent()}
-	err := s.completeAutonomousSettlement(t.Context(), in, boundary, errors.New("prior"), lifecycle.ActionFailed, "", lifecycle.OutcomeFailed)
+	err := s.completeAutonomousSettlement(
+		t.Context(), in, boundary, errors.New("prior"), lifecycle.ActionFailed, "", lifecycle.OutcomeFailed, false,
+	)
 	require.ErrorContains(t, err, "turn changed during settlement")
 	require.ErrorContains(t, err, "prior")
 	<-boundary.done

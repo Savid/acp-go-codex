@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,6 +22,32 @@ type appendLogTestAuthority struct {
 	records [][]byte
 	readErr error
 	panics  bool
+}
+
+type synchronizedAppendLogTestAuthority struct {
+	*appendLogTestAuthority
+	started chan struct{}
+	release chan struct{}
+}
+
+func (a *synchronizedAppendLogTestAuthority) ReadNativeAppendLog(
+	ctx context.Context,
+	path string,
+	after uint64,
+) ([][]byte, error) {
+	select {
+	case a.started <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	return a.appendLogTestAuthority.ReadNativeAppendLog(ctx, path, after)
 }
 
 func (*appendLogTestAuthority) NativeEnvironment() map[string]string {
@@ -204,6 +233,125 @@ func TestManagedRolloutCaptureFailureClassification(t *testing.T) {
 			require.True(t, agent.runtimeDead)
 			require.ErrorIs(t, agent.runtimeCleanupErr, ErrContainmentIncomplete)
 		})
+	}
+}
+
+func TestManagedAutonomousCaptureFailureJoinsSingleOwnerFanout(t *testing.T) {
+	authority := &synchronizedAppendLogTestAuthority{
+		appendLogTestAuthority: &appendLogTestAuthority{readErr: ErrHostAuthorityUnavailable},
+		started:                make(chan struct{}, 2),
+		release:                make(chan struct{}),
+	}
+	agent := NewAgent(WithHostAuthority(authority), WithSessionStore(NewInMemorySessionStore()))
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
+	newManagedSession := func(id, threadID string) *session {
+		s := newSession(
+			agent,
+			acp.SessionId(id),
+			t.TempDir(),
+			nil,
+			codex.Thread{ID: threadID, Path: "/native/home/sessions/" + id + ".jsonl"},
+			newSpyCodexClient(),
+			sessionMeta{},
+			nil,
+		)
+		agent.sessions[s.id] = s
+		require.NoError(t, s.openLifecycleStream(t.Context(), agent.lifecycle))
+
+		return s
+	}
+	type pump struct {
+		events chan codex.Event
+		done   chan struct{}
+	}
+	startPump := func(s *session) pump {
+		events := make(chan codex.Event, 2)
+		barriers := make(chan chan error)
+		done := make(chan struct{})
+		s.lifecycleMu.Lock()
+		s.nativeEventSource = true
+		s.nativeEventPumping = true
+		s.nativeEventDone = done
+		s.nativeEventBarrier = barriers
+		s.nativeEventCancel = func() { close(events) }
+		s.nativeEventRelease = func() {}
+		s.lifecycleMu.Unlock()
+		go s.runNativeEventPump(events, barriers, done)
+
+		return pump{events: events, done: done}
+	}
+
+	first := newManagedSession("managed-first", "first-thread")
+	second := newManagedSession("managed-second", "second-thread")
+	firstPump := startPump(first)
+	secondPump := startPump(second)
+	firstPump.events <- codex.Event{
+		Kind: codex.EventAgentMessageDelta, Scope: codex.EventScopeThread,
+		ThreadID: "first-thread", TurnID: "first-turn", ItemID: "first-message", Text: "first working",
+	}
+	secondPump.events <- codex.Event{
+		Kind: codex.EventAgentMessageDelta, Scope: codex.EventScopeThread,
+		ThreadID: "second-thread", TurnID: "second-turn", ItemID: "second-message", Text: "second working",
+	}
+	require.Eventually(t, func() bool {
+		first.lifecycleMu.Lock()
+		firstActive := first.agentIncarnation != nil
+		first.lifecycleMu.Unlock()
+		second.lifecycleMu.Lock()
+		secondActive := second.agentIncarnation != nil
+		second.lifecycleMu.Unlock()
+
+		return firstActive && secondActive
+	}, 4*time.Second, 10*time.Millisecond)
+
+	firstPump.events <- codex.Event{
+		Kind: codex.EventCompleted, Scope: codex.EventScopeThread,
+		ThreadID: "first-thread", TurnID: "first-turn", StopReason: codex.StopReasonEndTurn,
+	}
+	secondPump.events <- codex.Event{
+		Kind: codex.EventCompleted, Scope: codex.EventScopeThread,
+		ThreadID: "second-thread", TurnID: "second-turn", StopReason: codex.StopReasonEndTurn,
+	}
+	for range 2 {
+		select {
+		case <-authority.started:
+		case <-time.After(4 * time.Second):
+			t.Fatal("both autonomous settlements did not reach managed append-log capture")
+		}
+	}
+	close(authority.release)
+
+	joined, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+	defer cancel()
+	for _, done := range []<-chan struct{}{firstPump.done, secondPump.done} {
+		select {
+		case <-done:
+		case <-joined.Done():
+			t.Fatal("fatal append-log fanout did not join both native event pumps")
+		}
+	}
+
+	agent.mu.Lock()
+	runtimeDead := agent.runtimeDead
+	runtimeErr := agent.runtimeCleanupErr
+	fanoutStarted := agent.opaqueNativeFanout
+	agent.mu.Unlock()
+	require.True(t, runtimeDead)
+	require.True(t, fanoutStarted)
+	require.ErrorIs(t, runtimeErr, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, runtimeErr, ErrContainmentIncomplete)
+
+	for _, s := range []*session{first, second} {
+		s.lifecycleMu.Lock()
+		lifecycleErr := s.lifecycleFailure
+		joinedFence := s.lifecycleClosing && !s.nativeEventPumping && !s.nativeEventFencePending && s.nativeEventDone == nil
+		s.lifecycleMu.Unlock()
+		s.mu.Lock()
+		clientDead := s.clientDead
+		s.mu.Unlock()
+		require.ErrorIs(t, lifecycleErr, ErrHostAuthorityUnavailable)
+		require.True(t, joinedFence)
+		require.True(t, clientDead)
 	}
 }
 
