@@ -2,12 +2,12 @@ package codexacp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -65,13 +65,13 @@ func (s *session) mirrorRolloutLocked(ctx context.Context) error {
 	entries := make([]json.RawMessage, 0)
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 
 		if row >= startRow {
-			entries = append(entries, json.RawMessage(line))
+			entries = append(entries, append(json.RawMessage(nil), line...))
 		}
 
 		row++

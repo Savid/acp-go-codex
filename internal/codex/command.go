@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -96,18 +97,25 @@ func launchAppServer(
 
 	stdin, stdout, stderr := native.Stdin(), native.Stdout(), native.Stderr()
 	if stdin == nil || stdout == nil || stderr == nil {
-		_, cleanupErr := revokeAndWaitNative(native)
+		_, _, cleanupErr := revokeAndWaitNative(native)
+		stdioErr := closeNativePipes(stdin, stdout, stderr)
 
 		return nil, "", "", errors.Join(
 			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
-			cleanupErr,
+			cleanupErr, stdioErr,
 		)
 	}
 
-	proc := &process{native: native, stdin: stdin, stdout: stdout, packageCleanup: packageCleanup}
+	stderrDone := make(chan struct{})
+	proc := &process{
+		native: native, stdin: stdin, stdout: stdout, stderr: stderr, stderrDone: stderrDone,
+		packageCleanup: packageCleanup,
+	}
 	packageCleanup = nil
 
 	go func() {
+		defer close(stderrDone)
+
 		_, _ = io.Copy(io.Discard, stderr)
 	}()
 
@@ -234,6 +242,16 @@ type process struct {
 	native NativeProcess
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
+	stderr io.ReadCloser
+
+	closeMu         sync.Mutex
+	inputCloseOnce  sync.Once
+	inputCloseErr   error
+	streamCloseOnce sync.Once
+	streamCloseErr  error
+	stderrDone      chan struct{}
+	terminalProven  bool
+	terminalErr     error
 
 	packageCleanup     func() error
 	packageCleanupOnce sync.Once
@@ -271,38 +289,100 @@ func (p *process) Close() error {
 		return nil
 	}
 
-	if p.stdin != nil {
-		_ = p.stdin.Close()
-	}
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+
+	inputErr := p.closeInput()
 
 	if p.native == nil {
-		return p.cleanupPackage()
+		return errors.Join(inputErr, p.closeStreams(), p.cleanupPackage())
+	}
+
+	if p.terminalProven {
+		return errors.Join(inputErr, p.closeStreams(), p.terminalErr, p.cleanupPackage())
 	}
 
 	graceCtx, cancelGrace := context.WithTimeout(context.Background(), processCloseGrace)
 	result, waitErr := p.native.Wait(graceCtx)
-	graceExpired := graceCtx.Err() != nil
+	ownedGraceErr := graceCtx.Err()
 
 	cancelGrace()
 
-	if !graceExpired {
-		terminalErr := terminalNativeProcessError(result, waitErr)
-		if errors.Is(terminalErr, ErrContainmentIncomplete) {
-			return terminalErr
-		}
+	if waitErr == nil {
+		p.terminalProven = true
+		p.terminalErr = terminalNativeProcessError(result, nil)
 
-		return errors.Join(terminalErr, p.cleanupPackage())
+		return errors.Join(inputErr, p.closeStreams(), p.terminalErr, p.cleanupPackage())
 	}
 
-	result, containmentErr := revokeAndWaitNative(p.native)
-	if containmentErr != nil {
-		return containmentErr
+	independentWaitErr := withoutExactErrorLeaves(waitErr, ownedGraceErr)
+	result, terminal, settlementErr := revokeAndWaitNative(p.native)
+	streamErr := p.closeStreams()
+
+	if !terminal {
+		return errors.Join(inputErr, streamErr, independentWaitErr, settlementErr)
 	}
 
-	return errors.Join(terminalNativeProcessError(result, nil), p.cleanupPackage())
+	p.terminalProven = true
+	p.terminalErr = terminalNativeProcessError(result, nil)
+
+	return errors.Join(inputErr, streamErr, independentWaitErr, settlementErr, p.terminalErr, p.cleanupPackage())
 }
 
-func revokeAndWaitNative(native NativeProcess) (NativeResult, error) {
+func (p *process) closeInput() error {
+	p.inputCloseOnce.Do(func() {
+		if p.stdin != nil {
+			p.inputCloseErr = processPipeCloseError(p.stdin.Close())
+		}
+	})
+
+	return p.inputCloseErr
+}
+
+func (p *process) closeStreams() error {
+	p.streamCloseOnce.Do(func() {
+		if p.stdout != nil {
+			p.streamCloseErr = processPipeCloseError(p.stdout.Close())
+		}
+
+		if p.stderr != nil {
+			p.streamCloseErr = errors.Join(p.streamCloseErr, processPipeCloseError(p.stderr.Close()))
+		}
+
+		if p.stderrDone != nil {
+			<-p.stderrDone
+		}
+	})
+
+	return p.streamCloseErr
+}
+
+func processPipeCloseError(err error) error {
+	if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return nil
+	}
+
+	return err
+}
+
+func closeNativePipes(stdin io.WriteCloser, stdout, stderr io.ReadCloser) error {
+	var err error
+	if stdin != nil {
+		err = processPipeCloseError(stdin.Close())
+	}
+
+	if stdout != nil {
+		err = errors.Join(err, processPipeCloseError(stdout.Close()))
+	}
+
+	if stderr != nil {
+		err = errors.Join(err, processPipeCloseError(stderr.Close()))
+	}
+
+	return err
+}
+
+func revokeAndWaitNative(native NativeProcess) (NativeResult, bool, error) {
 	revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), processContainmentTimeout)
 	revokeErr := native.Revoke(revokeCtx)
 
@@ -314,10 +394,38 @@ func revokeAndWaitNative(native NativeProcess) (NativeResult, error) {
 	cancelWait()
 
 	if waitErr != nil {
-		return result, errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
+		return result, false, errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
 	}
 
-	return result, nil
+	return result, true, revokeErr
+}
+
+func withoutExactErrorLeaves(err, discarded error) error {
+	if err == nil || discarded == nil {
+		return err
+	}
+
+	if err == discarded {
+		return nil
+	}
+
+	type joined interface{ Unwrap() []error }
+
+	if combined, ok := err.(joined); ok {
+		var retained error
+		for _, component := range combined.Unwrap() {
+			retained = errors.Join(retained, withoutExactErrorLeaves(component, discarded))
+		}
+
+		return retained
+	}
+
+	type wrapped interface{ Unwrap() error }
+	if single, ok := err.(wrapped); ok {
+		return withoutExactErrorLeaves(single.Unwrap(), discarded)
+	}
+
+	return err
 }
 
 func terminalNativeProcessError(result NativeResult, err error) error {

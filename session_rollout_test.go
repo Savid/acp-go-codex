@@ -17,7 +17,8 @@ func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
 	agent := NewAgent(WithSessionStore(store))
 	agent.setAgentClient(newRecordingAgentClient())
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, []byte("{\"type\":\"one\",\"payload\":{}}\n{\"type\":\"two\",\"payload\":{}}\n"), 0o600); err != nil {
+	firstRow := "  {\"type\":\"one\",\"payload\":{}} \t"
+	if err := os.WriteFile(rollout, []byte(firstRow+"\n{\"type\":\"two\",\"payload\":{}}\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
 	}
 	session := &session{
@@ -35,6 +36,7 @@ func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("durable entries after first mirror len=%d err=%v", len(entries), err)
 	}
+	require.Equal(t, firstRow, string(entries[0]), "mirror must preserve the native row bytes")
 	if session.mirroredRows != 2 {
 		t.Fatalf("mirrored cursor after first mirror = %d", session.mirroredRows)
 	}

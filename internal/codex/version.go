@@ -60,39 +60,61 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 		return "", fmt.Errorf("start codex CLI version probe: %w", err)
 	}
 
-	if native == nil || native.Stdin() == nil || native.Stdout() == nil || native.Stderr() == nil {
+	if native == nil {
+		return "", ErrHostAuthorityUnavailable
+	}
+
+	stdin, stdoutReader, stderrReader := native.Stdin(), native.Stdout(), native.Stderr()
+	if stdin == nil || stdoutReader == nil || stderrReader == nil {
 		var cleanupErr error
 
-		if native != nil {
-			_, cleanupErr = revokeAndWaitNative(native)
-		}
+		_, _, cleanupErr = revokeAndWaitNative(native)
+		closeErr := closeVersionProbePipes(stdin, stdoutReader, stderrReader, nil, nil)
 
 		return "", errors.Join(
 			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
-			cleanupErr,
+			cleanupErr, closeErr,
 		)
 	}
 
-	_ = native.Stdin().Close()
+	inputErr := processPipeCloseError(stdin.Close())
 
 	var stdout bytes.Buffer
 
 	stdoutDone := make(chan error, 1)
 	stderrDone := make(chan error, 1)
 
-	go func() { _, copyErr := io.Copy(&stdout, native.Stdout()); stdoutDone <- copyErr }()
-	go func() { _, copyErr := io.Copy(io.Discard, native.Stderr()); stderrDone <- copyErr }()
+	go func() { _, copyErr := io.Copy(&stdout, stdoutReader); stdoutDone <- copyErr }()
+	go func() { _, copyErr := io.Copy(io.Discard, stderrReader); stderrDone <- copyErr }()
 
 	result, waitErr := native.Wait(ctx)
-	if ctx.Err() != nil {
-		_, terminalErr := revokeAndWaitNative(native)
+	terminalResult := result
+	terminal := waitErr == nil
 
-		return "", errors.Join(ctx.Err(), terminalErr)
+	var settlementErr error
+	if waitErr != nil {
+		terminalResult, terminal, settlementErr = revokeAndWaitNative(native)
 	}
 
-	copyErr := errors.Join(<-stdoutDone, <-stderrDone)
-	if waitErr != nil || result.ExitCode != 0 || result.Signal != 0 {
-		return "", fmt.Errorf("check codex CLI version: %w", errors.Join(waitErr, copyErr))
+	copyErr := errors.Join(inputErr, settleVersionProbePipes(terminal, stdoutReader, stderrReader, stdoutDone, stderrDone))
+
+	if ctx.Err() != nil {
+		return "", errors.Join(ctx.Err(), withoutExactErrorLeaves(waitErr, ctx.Err()), settlementErr, copyErr)
+	}
+
+	if !terminal {
+		return "", fmt.Errorf("check codex CLI version: %w", errors.Join(waitErr, settlementErr, copyErr))
+	}
+
+	if waitErr != nil {
+		return "", fmt.Errorf("check codex CLI version: %w", errors.Join(waitErr, settlementErr, copyErr))
+	}
+
+	if terminalResult.ExitCode != 0 || terminalResult.Signal != 0 {
+		return "", errors.Join(
+			fmt.Errorf("check codex CLI version: status %d signal %d", terminalResult.ExitCode, terminalResult.Signal),
+			copyErr,
+		)
 	}
 
 	if copyErr != nil {
@@ -100,4 +122,44 @@ func ProbeVersion(ctx context.Context, options VersionProbeOptions) (string, err
 	}
 
 	return validateCodexVersionOutput(stdout.String())
+}
+
+func settleVersionProbePipes(
+	terminal bool,
+	stdout, stderr io.ReadCloser,
+	stdoutDone, stderrDone <-chan error,
+) error {
+	if !terminal {
+		return closeVersionProbePipes(nil, stdout, stderr, stdoutDone, stderrDone)
+	}
+
+	return errors.Join(
+		joinVersionProbeCopies(stdoutDone, stderrDone),
+		closeVersionProbePipes(nil, stdout, stderr, nil, nil),
+	)
+}
+
+func joinVersionProbeCopies(stdoutDone, stderrDone <-chan error) error {
+	var err error
+	if stdoutDone != nil {
+		err = processPipeCloseError(<-stdoutDone)
+	}
+
+	if stderrDone != nil {
+		err = errors.Join(err, processPipeCloseError(<-stderrDone))
+	}
+
+	return err
+}
+
+func closeVersionProbePipes(
+	stdin io.WriteCloser,
+	stdout, stderr io.ReadCloser,
+	stdoutDone, stderrDone <-chan error,
+) error {
+	err := closeNativePipes(stdin, stdout, stderr)
+
+	err = errors.Join(err, joinVersionProbeCopies(stdoutDone, stderrDone))
+
+	return err
 }

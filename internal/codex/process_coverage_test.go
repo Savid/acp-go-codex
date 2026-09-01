@@ -351,6 +351,12 @@ func TestVersionProbeCoverageEdges(t *testing.T) {
 	copyFailure.stdout = errorReadCloser{err: copyErr}
 	_, err = ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "managed", HostAuthority: &coverageHost{environment: map[string]string{}, process: copyFailure}})
 	require.ErrorIs(t, err, copyErr)
+
+	exitFailure := newCoverageNativeProcess()
+	exitFailure.stdout = io.NopCloser(bytes.NewBufferString("codex 0.144.1"))
+	exitFailure.result = NativeResult{ExitCode: 9}
+	_, err = ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "managed", HostAuthority: &coverageHost{environment: map[string]string{}, process: exitFailure}})
+	require.ErrorContains(t, err, "status 9")
 }
 
 func TestRunAccountCommandCoverageEdges(t *testing.T) {

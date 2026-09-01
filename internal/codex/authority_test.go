@@ -3,9 +3,13 @@ package codex
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -14,8 +18,39 @@ type authorityTestWriteCloser struct{ bytes.Buffer }
 
 func (*authorityTestWriteCloser) Close() error { return nil }
 
+type blockingAuthorityReadCloser struct {
+	closed chan struct{}
+	done   chan struct{}
+	once   sync.Once
+}
+
+func newBlockingAuthorityReadCloser() *blockingAuthorityReadCloser {
+	return &blockingAuthorityReadCloser{closed: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (r *blockingAuthorityReadCloser) Read([]byte) (int, error) {
+	<-r.closed
+	r.once.Do(func() { close(r.done) })
+
+	return 0, io.EOF
+}
+
+func (r *blockingAuthorityReadCloser) Close() error {
+	r.release()
+
+	return nil
+}
+
+func (r *blockingAuthorityReadCloser) release() {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
+}
+
 type authorityTestProcess struct {
-	stdin  *authorityTestWriteCloser
+	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
 
@@ -120,6 +155,10 @@ func TestManagedSelectorRefusesSessionPackageCopyBeforeLaunch(t *testing.T) {
 
 func TestIncompleteManagedStdioIsRevokedAndWaited(t *testing.T) {
 	process := newAuthorityTestProcess("")
+	stdin := &recordingCloser{}
+	stdout := &recordingCloser{}
+	process.stdin = stdin
+	process.stdout = stdout
 	process.stderr = nil
 	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
 
@@ -132,6 +171,8 @@ func TestIncompleteManagedStdioIsRevokedAndWaited(t *testing.T) {
 	require.Empty(t, nativePath)
 	require.Equal(t, 1, process.revokes)
 	require.Equal(t, 1, process.waits)
+	require.True(t, stdin.closed)
+	require.True(t, stdout.closed)
 }
 
 type orderedAuthorityProcess struct {
@@ -219,4 +260,128 @@ func TestManagedProcessCloseBoundsAuthorityCalls(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Equal(t, 2, native.waits)
 	require.Equal(t, 1, native.revokes)
+}
+
+type retryableAuthorityProcess struct {
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	terminal atomic.Bool
+	waits    atomic.Int32
+	revokes  atomic.Int32
+}
+
+type independentlyFailingWaitProcess struct {
+	*authorityTestProcess
+	err   error
+	waits atomic.Int32
+}
+
+func (p *independentlyFailingWaitProcess) Wait(context.Context) (NativeResult, error) {
+	if p.waits.Add(1) == 1 {
+		return NativeResult{}, p.err
+	}
+
+	return NativeResult{}, nil
+}
+
+func (p *retryableAuthorityProcess) Stdin() io.WriteCloser { return p.stdin }
+func (p *retryableAuthorityProcess) Stdout() io.ReadCloser { return p.stdout }
+func (p *retryableAuthorityProcess) Stderr() io.ReadCloser { return p.stderr }
+func (p *retryableAuthorityProcess) Wait(ctx context.Context) (NativeResult, error) {
+	p.waits.Add(1)
+	_, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		panic("process wait did not have a deadline")
+	}
+	if p.terminal.Load() {
+		return NativeResult{Revoked: true}, nil
+	}
+
+	<-ctx.Done()
+
+	return NativeResult{}, ctx.Err()
+}
+func (p *retryableAuthorityProcess) Revoke(ctx context.Context) error {
+	p.revokes.Add(1)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		panic("process revoke did not have a deadline")
+	}
+
+	return nil
+}
+
+func TestManagedProcessCloseJoinsPipesAndRetriesTerminalProof(t *testing.T) {
+	originalGrace, originalContainment := processCloseGrace, processContainmentTimeout
+	processCloseGrace, processContainmentTimeout = 20*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() {
+		processCloseGrace, processContainmentTimeout = originalGrace, originalContainment
+	})
+
+	stdout := newBlockingAuthorityReadCloser()
+	stderr := newBlockingAuthorityReadCloser()
+	native := &retryableAuthorityProcess{
+		stdin: &authorityTestWriteCloser{}, stdout: stdout, stderr: stderr,
+	}
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+
+		_, _ = io.Copy(io.Discard, stderr)
+	}()
+
+	cleanupCalls := atomic.Int32{}
+	managed := &process{
+		native: native, stdin: native.stdin, stdout: stdout, stderr: stderr, stderrDone: stderrDone,
+		packageCleanup: func() error {
+			cleanupCalls.Add(1)
+
+			return nil
+		},
+	}
+	require.ErrorIs(t, managed.Close(), ErrContainmentIncomplete)
+	select {
+	case <-stdout.closed:
+	default:
+		t.Fatal("incomplete close did not release stdout")
+	}
+	select {
+	case <-stderrDone:
+	default:
+		t.Fatal("incomplete close did not join stderr drain")
+	}
+	require.Zero(t, cleanupCalls.Load(), "uncertain terminal wait released package resources")
+
+	native.terminal.Store(true)
+	require.NoError(t, managed.Close())
+	require.EqualValues(t, 1, cleanupCalls.Load())
+	require.EqualValues(t, 3, native.waits.Load())
+	require.EqualValues(t, 1, native.revokes.Load())
+}
+
+func TestManagedProcessClosePreservesFirstWaitCauseWithoutRewaitingTerminalProcess(t *testing.T) {
+	waitErr := errors.New("independent host wait failure")
+	native := &independentlyFailingWaitProcess{authorityTestProcess: newAuthorityTestProcess(""), err: waitErr}
+	cleanupCalls := atomic.Int32{}
+	managed := &process{native: native, packageCleanup: func() error {
+		cleanupCalls.Add(1)
+
+		return nil
+	}}
+
+	require.ErrorIs(t, managed.Close(), waitErr)
+	require.NoError(t, managed.Close())
+	require.EqualValues(t, 2, native.waits.Load())
+	require.EqualValues(t, 1, cleanupCalls.Load())
+}
+
+func TestWithoutExactErrorLeavesDropsWrappedOwnedContextOnly(t *testing.T) {
+	independent := errors.New("independent")
+	owned := context.DeadlineExceeded
+	err := errors.Join(independent, fmt.Errorf("owned wait context: %w", owned))
+
+	filtered := withoutExactErrorLeaves(err, owned)
+	require.ErrorIs(t, filtered, independent)
+	require.NotErrorIs(t, filtered, owned)
+	require.NoError(t, withoutExactErrorLeaves(fmt.Errorf("owned wait context: %w", owned), owned))
 }

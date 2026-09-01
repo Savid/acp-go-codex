@@ -915,6 +915,19 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
 		done := c.closeDone
+		if done != nil {
+			select {
+			case <-done:
+				if errors.Is(c.closeErr, ErrContainmentIncomplete) {
+					c.closeDone = make(chan struct{})
+					done = c.closeDone
+
+					// #nosec G118 -- containment retry must outlive this caller's context.
+					go c.finishClose(done)
+				}
+			default:
+			}
+		}
 		c.mu.Unlock()
 
 		return c.waitClose(ctx, done)

@@ -161,13 +161,16 @@ type rpcConn struct {
 
 	nextID atomic.Int64
 
-	mu          sync.Mutex
-	pending     map[string]pendingCall
-	requests    map[string]*pendingRequest
-	closed      bool
-	closeErr    error
-	closeWait   chan struct{}
-	shutdownErr error
+	mu            sync.Mutex
+	pending       map[string]pendingCall
+	requests      map[string]*pendingRequest
+	closed        bool
+	closeErr      error
+	closeWait     chan struct{}
+	closeComplete bool
+	shutdownCause error
+	transportErr  error
+	shutdownErr   error
 }
 
 type rpcEvent struct {
@@ -296,10 +299,21 @@ func (c *rpcConn) CloseContext(ctx context.Context) error {
 func (c *rpcConn) closeContext(ctx context.Context) error {
 	c.startShutdown(nil)
 
+	c.mu.Lock()
+	if c.closeComplete && errors.Is(c.transportErr, ErrContainmentIncomplete) {
+		c.closeWait = make(chan struct{})
+		c.closeComplete = false
+
+		go c.retryTransportClose()
+	}
+
+	wait := c.closeWait
+	c.mu.Unlock()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-c.closeWait:
+	case <-wait:
 	}
 
 	c.mu.Lock()
@@ -318,7 +332,7 @@ func (c *rpcConn) startShutdown(cause error) {
 			c.closeErr = fmt.Errorf("%w: %w", ErrConnectionClosed, cause)
 		}
 
-		shutdownCause := c.closeErr
+		c.shutdownCause = c.closeErr
 
 		for key, call := range c.pending {
 			delete(c.pending, key)
@@ -335,21 +349,33 @@ func (c *rpcConn) startShutdown(cause error) {
 			request.cancel()
 		}
 
-		go func() {
-			transportErr := c.transport.Close()
-
-			for _, request := range requests {
-				<-request.done
-			}
-
-			<-c.done
-
-			c.mu.Lock()
-			c.shutdownErr = errors.Join(shutdownCause, transportErr)
-			close(c.closeWait)
-			c.mu.Unlock()
-		}()
+		go c.finishShutdown(requests)
 	})
+}
+
+func (c *rpcConn) finishShutdown(requests []*pendingRequest) {
+	transportErr := c.transport.Close()
+
+	for _, request := range requests {
+		<-request.done
+	}
+
+	<-c.done
+	c.publishTransportClose(transportErr)
+}
+
+func (c *rpcConn) retryTransportClose() {
+	c.publishTransportClose(c.transport.Close())
+}
+
+func (c *rpcConn) publishTransportClose(transportErr error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.transportErr = transportErr
+	c.shutdownErr = errors.Join(c.shutdownCause, transportErr)
+	c.closeComplete = true
+	close(c.closeWait)
 }
 
 func (c *rpcConn) readLoop() {
