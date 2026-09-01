@@ -15,16 +15,6 @@ func (s *session) containCancelledTurn(
 	threadID string,
 	interruptErr error,
 ) error {
-	return s.containCancelledTurnWithPolicy(ctx, client, threadID, interruptErr, false)
-}
-
-func (s *session) containCancelledTurnWithPolicy(
-	ctx context.Context,
-	client codex.Client,
-	threadID string,
-	interruptErr error,
-	_ bool,
-) error {
 	containCtx, cancelContain := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	containErr := terminateThreadBackgroundTerminals(containCtx, client, threadID)
 

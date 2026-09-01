@@ -141,7 +141,7 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 		return lifecycleErr
 	}
 
-	err = session.shutdownActiveTurnForNonce(ctx, false, route.TurnNonce)
+	err = session.shutdownActiveTurnForNonce(ctx, route.TurnNonce)
 
 	return cancelACPError(err, session.accountMetaSnapshot())
 }
@@ -184,7 +184,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	// can enter behind this boundary.
 	var shutdownErr error
 	if !retryCommit {
-		shutdownErr = errors.Join(gateErr, session.shutdownActiveTurn(ctx, true))
+		shutdownErr = errors.Join(gateErr, session.shutdownActiveTurn(ctx))
 		session.awaitPromptSettlement()
 	}
 
@@ -320,7 +320,7 @@ func (a *Agent) tearDownDeletedSession(ctx context.Context, id acp.SessionId) er
 
 	if active != nil {
 		gateErr := active.beginLifecycleClose(ctx)
-		shutdownErr := errors.Join(gateErr, active.shutdownActiveTurn(ctx, true))
+		shutdownErr := errors.Join(gateErr, active.shutdownActiveTurn(ctx))
 		active.awaitPromptSettlement()
 		active.sessionOps.Lock()
 

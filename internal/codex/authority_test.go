@@ -3,7 +3,6 @@ package codex
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -133,58 +132,6 @@ func TestIncompleteManagedStdioIsRevokedAndWaited(t *testing.T) {
 	require.Empty(t, nativePath)
 	require.Equal(t, 1, process.revokes)
 	require.Equal(t, 1, process.waits)
-}
-
-func TestManagedAccountCommandUsesHostAuthorityAndReclaimsTrees(t *testing.T) {
-	originalProbe := accountProbeVersion
-	originalScratchParent := accountScratchParent
-	t.Cleanup(func() {
-		accountProbeVersion = originalProbe
-		accountScratchParent = originalScratchParent
-	})
-	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return "0.144.1", nil }
-	scratch := t.TempDir()
-	accountScratchParent = func(string) (string, error) { return scratch, nil }
-
-	process := newAuthorityTestProcess("")
-	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin", "HOME": "/host/home"}, process: process}
-	home := t.TempDir()
-	err := RunAccountCommand(t.Context(), AccountCommandOptions{
-		CLIPath: "host-pinned-codex", CodexHome: home, Mode: accountCommandLogout, HostAuthority: host,
-	})
-	require.NoError(t, err)
-	require.Equal(t, []string{home}, host.prepared)
-	require.Equal(t, []string{home}, host.reclaimed)
-	require.Len(t, host.requests, 1)
-	require.Equal(t, "host-pinned-codex", host.requests[0].Executable)
-	require.Equal(t, []string{accountCommandLogout}, host.requests[0].Arguments)
-}
-
-func TestManagedAccountPrepareFailureLeavesAttemptedTreeOpaque(t *testing.T) {
-	originalProbe := accountProbeVersion
-	originalScratchParent := accountScratchParent
-	t.Cleanup(func() {
-		accountProbeVersion = originalProbe
-		accountScratchParent = originalScratchParent
-	})
-	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return "0.144.1", nil }
-	scratch := t.TempDir()
-	accountScratchParent = func(string) (string, error) { return scratch, nil }
-
-	injected := errors.New("shim prepare failed after transfer")
-	host := &authorityTestHost{
-		environment: map[string]string{"PATH": "/host/bin", "HOME": "/host/home"},
-		process:     newAuthorityTestProcess(""), prepareErrs: []error{nil, injected},
-	}
-	home := t.TempDir()
-	err := RunAccountCommand(t.Context(), AccountCommandOptions{
-		CLIPath: "host-pinned-codex", CodexHome: home, Mode: accountCommandLogin, HostAuthority: host,
-	})
-	require.ErrorIs(t, err, injected)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
-	require.Len(t, host.prepared, 2)
-	require.Equal(t, []string{home}, host.reclaimed)
-	require.DirExists(t, host.prepared[1])
 }
 
 type orderedAuthorityProcess struct {

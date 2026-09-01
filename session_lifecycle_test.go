@@ -2170,7 +2170,7 @@ func TestAutonomousEventHandlingAndShutdownFailClosedAtEveryBoundary(t *testing.
 	require.True(t, s.clientDead)
 
 	s = &session{agentIncarnation: &promptIncarnation{turnNonce: "current"}}
-	contained, err := s.shutdownAgentTurnForNonce(t.Context(), true, "stale")
+	contained, err := s.shutdownAgentTurnForNonce(t.Context(), "stale")
 	require.True(t, contained)
 	require.ErrorIs(t, err, errTurnRouteMismatch)
 
@@ -2178,21 +2178,21 @@ func TestAutonomousEventHandlingAndShutdownFailClosedAtEveryBoundary(t *testing.
 	boundary := &turnContainment{done: done, err: errors.New("settled")}
 	s = &session{agentIncarnation: &promptIncarnation{terminating: boundary}}
 	close(done)
-	contained, err = s.shutdownAgentTurn(t.Context(), true)
+	contained, err = s.shutdownAgentTurn(t.Context())
 	require.True(t, contained)
 	require.ErrorContains(t, err, "settled")
 
 	s = &session{agentIncarnation: &promptIncarnation{terminating: &turnContainment{done: make(chan struct{})}}}
 	ctx, cancel = context.WithCancel(t.Context())
 	cancel()
-	contained, err = s.shutdownAgentTurn(ctx, true)
+	contained, err = s.shutdownAgentTurn(ctx)
 	require.True(t, contained)
 	require.ErrorIs(t, err, context.Canceled)
 
 	s = &session{agent: NewAgent()}
 	in := &promptIncarnation{session: s, nativeTurnID: "native", turnNonce: "nonce"}
 	s.agentIncarnation = in
-	contained, err = s.shutdownAgentTurn(t.Context(), true)
+	contained, err = s.shutdownAgentTurn(t.Context())
 	require.True(t, contained)
 	require.ErrorContains(t, err, "no exact native cancellation target")
 }

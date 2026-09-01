@@ -275,7 +275,7 @@ func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, ru
 				}
 			}
 
-			bindErr = errors.Join(bindErr, s.shutdownActiveTurn(ctx, true))
+			bindErr = errors.Join(bindErr, s.shutdownActiveTurn(ctx))
 		} else {
 			s.stageTurnID(turn.ID)
 			s.rejectTurnBinding()
@@ -293,7 +293,7 @@ func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, ru
 		}
 
 		if errors.Is(err, codex.ErrTurnEventOverflow) && turn.ID != "" {
-			bindErr = errors.Join(bindErr, s.shutdownActiveTurn(ctx, true))
+			bindErr = errors.Join(bindErr, s.shutdownActiveTurn(ctx))
 		}
 
 		result.failure = s.mapTurnFailure(errors.Join(err, bindErr))
@@ -308,7 +308,7 @@ func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, ru
 	// durable ownership of the frame and named the turn it opened.
 	if err := run.incarnation.acceptNative(turnCtx, run.submission, turn.ID); err != nil {
 		result.accepted = true
-		containmentErr := s.shutdownActiveTurn(ctx, true)
+		containmentErr := s.shutdownActiveTurn(ctx)
 		result.failure = s.mapTurnFailure(errors.Join(err, containmentErr))
 
 		return result
@@ -373,7 +373,7 @@ func (s *session) drivePromptTurn(
 
 	switch {
 	case overflowed && !turnCancelled:
-		containmentErr := s.shutdownActiveTurn(ctx, true)
+		containmentErr := s.shutdownActiveTurn(ctx)
 		result.failure = s.mapTurnFailure(errors.Join(codex.ErrTurnEventOverflow, containmentErr))
 	case handled != nil:
 		var deliveryFailure *hostDeliveryError
@@ -381,12 +381,12 @@ func (s *session) drivePromptTurn(
 		var nativeFailure *acp.RequestError
 		switch {
 		case errors.As(handled, &deliveryFailure):
-			containmentErr := s.shutdownActiveTurn(ctx, true)
+			containmentErr := s.shutdownActiveTurn(ctx)
 			result.failure = errors.Join(handled, containmentErr)
 		case errors.As(handled, &nativeFailure):
 			result.failure = handled
 		default:
-			containmentErr := s.shutdownActiveTurn(ctx, true)
+			containmentErr := s.shutdownActiveTurn(ctx)
 			result.failure = s.mapTurnFailure(errors.Join(handled, containmentErr))
 		}
 	case state.stopReason == acp.StopReasonCancelled:
@@ -442,7 +442,7 @@ func (s *session) settlePrompt(
 	// The terminal identity update is still mandatory delivery. If it fails,
 	// contain the exact accepted native turn before durability or idle can move.
 	if deliveryErr := s.finalizePromptNativeIdentity(context.WithoutCancel(turnCtx), result.state); deliveryErr != nil {
-		containmentErr := s.shutdownActiveTurn(ctx, true)
+		containmentErr := s.shutdownActiveTurn(ctx)
 		result.failure = errors.Join(deliveryErr, containmentErr, result.failure)
 	}
 

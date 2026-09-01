@@ -107,16 +107,15 @@ func TestRunAccountCommandDoesNotWaitForBlockedInputAfterExit(t *testing.T) {
 	accountScratchParent = func(string) (string, error) { return t.TempDir(), nil }
 	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return minCodexVersion, nil }
 
-	process := newAuthorityTestProcess("")
-	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
+	script := filepath.Join(t.TempDir(), "codex")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700))
 	input := &blockingAccountInput{done: make(chan struct{})}
 	t.Cleanup(func() { close(input.done) })
 
 	done := make(chan error, 1)
 	go func() {
 		done <- RunAccountCommand(context.Background(), AccountCommandOptions{
-			CLIPath: "host-codex", CodexHome: t.TempDir(), Mode: accountCommandLogout,
-			HostAuthority: host, Stdin: input,
+			CLIPath: script, CodexHome: t.TempDir(), Mode: accountCommandLogout, Stdin: input,
 		})
 	}()
 

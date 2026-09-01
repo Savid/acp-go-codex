@@ -1477,7 +1477,7 @@ func (s *session) routeAutonomousEventLocked(ctx context.Context, event codex.Ev
 	if handleErr != nil {
 		turnNonce := in.turnNonce
 		s.lifecycleMu.Unlock()
-		_, containmentErr := s.shutdownAgentTurnForNonce(ctx, true, turnNonce)
+		_, containmentErr := s.shutdownAgentTurnForNonce(ctx, turnNonce)
 		s.lifecycleMu.Lock()
 
 		return errors.Join(handleErr, containmentErr)
@@ -2101,17 +2101,16 @@ func (s *session) fenceSession() {
 	cancel()
 }
 
-func (s *session) shutdownAgentTurn(ctx context.Context, protectPeers bool) (bool, error) {
-	return s.shutdownAgentTurnMatching(ctx, protectPeers, "", false)
+func (s *session) shutdownAgentTurn(ctx context.Context) (bool, error) {
+	return s.shutdownAgentTurnMatching(ctx, "", false)
 }
 
-func (s *session) shutdownAgentTurnForNonce(ctx context.Context, protectPeers bool, turnNonce string) (bool, error) {
-	return s.shutdownAgentTurnMatching(ctx, protectPeers, turnNonce, true)
+func (s *session) shutdownAgentTurnForNonce(ctx context.Context, turnNonce string) (bool, error) {
+	return s.shutdownAgentTurnMatching(ctx, turnNonce, true)
 }
 
 func (s *session) shutdownAgentTurnMatching(
 	ctx context.Context,
-	protectPeers bool,
 	expectedNonce string,
 	requireExactNonce bool,
 ) (bool, error) {
@@ -2172,7 +2171,7 @@ func (s *session) shutdownAgentTurnMatching(
 		cancelInterrupt()
 	}
 
-	containmentErr := s.containCancelledTurnWithPolicy(ctx, client, threadID, interruptErr, protectPeers)
+	containmentErr := s.containCancelledTurn(ctx, client, threadID, interruptErr)
 	resultErr := s.completeAutonomousSettlement(
 		ctx, in, boundary, containmentErr, lifecycle.ActionCancelled, acp.StopReasonCancelled, lifecycle.OutcomeCancelled,
 	)

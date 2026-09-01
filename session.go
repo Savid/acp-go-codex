@@ -693,26 +693,26 @@ func (s *session) ensureTurnContainmentLocked() *turnContainment {
 	return s.turnContainment
 }
 
-func (s *session) shutdownActiveTurn(ctx context.Context, protectPeers bool) error {
-	handled, err := s.shutdownPromptTurn(ctx, protectPeers, "", false)
+func (s *session) shutdownActiveTurn(ctx context.Context) error {
+	handled, err := s.shutdownPromptTurn(ctx, "", false)
 	if handled {
 		return err
 	}
 
-	_, err = s.shutdownAgentTurn(ctx, protectPeers)
+	_, err = s.shutdownAgentTurn(ctx)
 
 	return err
 }
 
 var errTurnRouteMismatch = errors.New("turnNonce does not identify the active turn")
 
-func (s *session) shutdownActiveTurnForNonce(ctx context.Context, protectPeers bool, turnNonce string) error {
-	handled, err := s.shutdownPromptTurn(ctx, protectPeers, turnNonce, true)
+func (s *session) shutdownActiveTurnForNonce(ctx context.Context, turnNonce string) error {
+	handled, err := s.shutdownPromptTurn(ctx, turnNonce, true)
 	if handled {
 		return err
 	}
 
-	handled, err = s.shutdownAgentTurnForNonce(ctx, protectPeers, turnNonce)
+	handled, err = s.shutdownAgentTurnForNonce(ctx, turnNonce)
 	if !handled {
 		return errTurnRouteMismatch
 	}
@@ -722,7 +722,6 @@ func (s *session) shutdownActiveTurnForNonce(ctx context.Context, protectPeers b
 
 func (s *session) shutdownPromptTurn(
 	ctx context.Context,
-	protectPeers bool,
 	expectedNonce string,
 	requireExactNonce bool,
 ) (bool, error) {
@@ -798,7 +797,7 @@ func (s *session) shutdownPromptTurn(
 		cancelInterrupt()
 	}
 
-	containmentErr := s.containCancelledTurnWithPolicy(ctx, client, threadID, interruptErr, protectPeers)
+	containmentErr := s.containCancelledTurn(ctx, client, threadID, interruptErr)
 
 	s.mu.Lock()
 	boundary.err = containmentErr
@@ -1028,7 +1027,7 @@ func (s *session) closeOwned(ctx context.Context) error {
 
 	if !alreadyContained {
 		gateErr := s.beginLifecycleClose(ctx)
-		shutdownErr = errors.Join(gateErr, s.shutdownActiveTurn(ctx, true))
+		shutdownErr = errors.Join(gateErr, s.shutdownActiveTurn(ctx))
 		s.awaitPromptSettlement()
 	}
 

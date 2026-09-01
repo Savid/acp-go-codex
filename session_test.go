@@ -56,7 +56,7 @@ func TestTurnContainmentWaitBranches(t *testing.T) {
 			done: done, err: containErr, started: true,
 		},
 	}
-	require.ErrorIs(t, completed.shutdownActiveTurn(context.Background(), true), containErr)
+	require.ErrorIs(t, completed.shutdownActiveTurn(context.Background()), containErr)
 
 	waiting := &session{
 		cancel: func() {},
@@ -66,7 +66,7 @@ func TestTurnContainmentWaitBranches(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	require.ErrorIs(t, waiting.shutdownActiveTurn(canceled, true), context.Canceled)
+	require.ErrorIs(t, waiting.shutdownActiveTurn(canceled), context.Canceled)
 	require.ErrorIs(t, waiting.awaitTurnContainment(canceled), context.Canceled)
 }
 
@@ -85,7 +85,7 @@ func TestShutdownActiveTurnCancelsInteractionStartedDuringContainment(t *testing
 
 	shutdownDone := make(chan error, 1)
 	go func() {
-		shutdownDone <- session.shutdownActiveTurn(context.Background(), true)
+		shutdownDone <- session.shutdownActiveTurn(context.Background())
 	}()
 	<-client.interruptStarted
 
@@ -615,10 +615,10 @@ func TestSessionTurnAndCloseOperationsFailClosedAtOwnershipBoundaries(t *testing
 	s := &session{closing: true}
 	_, err := s.beginPromptTurn(t.Context(), "nonce")
 	require.Error(t, err)
-	require.ErrorIs(t, s.shutdownActiveTurnForNonce(t.Context(), true, "nonce"), errTurnRouteMismatch)
+	require.ErrorIs(t, s.shutdownActiveTurnForNonce(t.Context(), "nonce"), errTurnRouteMismatch)
 
 	s = &session{turnNonce: "current", cancel: func() {}, turnContainment: &turnContainment{done: make(chan struct{})}}
-	handled, err := s.shutdownPromptTurn(t.Context(), true, "stale", true)
+	handled, err := s.shutdownPromptTurn(t.Context(), "stale", true)
 	require.True(t, handled)
 	require.ErrorIs(t, err, errTurnRouteMismatch)
 

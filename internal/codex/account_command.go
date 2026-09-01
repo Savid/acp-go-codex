@@ -26,7 +26,6 @@ type AccountCommandOptions struct {
 	Signals             <-chan os.Signal
 	Env                 map[string]string
 	ImplicitEnvironment map[string]string
-	HostAuthority       HostAuthority
 }
 
 var accountScratchParent func(string) (string, error)
@@ -58,7 +57,7 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 	providerOptions := Options{
 		CLIPath: options.CLIPath, CodexHome: options.CodexHome, WritableHome: options.CodexHome,
 		Scratch: scratchParent, ScratchParent: scratchParent, Env: options.Env,
-		ImplicitEnvironment: options.ImplicitEnvironment, HostAuthority: options.HostAuthority,
+		ImplicitEnvironment: options.ImplicitEnvironment,
 	}
 
 	environment, err := buildMergedEnv(providerOptions)
@@ -71,13 +70,9 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		selector = defaultCodexExecutable
 	}
 
-	if options.HostAuthority == nil {
-		selector, err = resolveOrdinaryProcessExecutable(selector, environment)
-		if err != nil {
-			return err
-		}
-	} else if selectorErr := validateManagedSelector(selector); selectorErr != nil {
-		return selectorErr
+	selector, err = resolveOrdinaryProcessExecutable(selector, environment)
+	if err != nil {
+		return err
 	}
 
 	var shim *browserShim
@@ -90,46 +85,20 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 		environment = shim.environ(environment)
 	}
 
-	prepared := make([]string, 0, 2)
-
-	if options.HostAuthority != nil {
-		for _, tree := range []string{options.CodexHome, shimDirectory(shim)} {
-			if tree == "" {
-				continue
-			}
-
-			if prepareErr := options.HostAuthority.PrepareNativeTree(ctx, tree); prepareErr != nil {
-				cleanupErr := reclaimAccountTrees(options.HostAuthority, prepared)
-				if tree != shimDirectory(shim) {
-					cleanupErr = errors.Join(cleanupErr, shim.remove())
-				}
-
-				return errors.Join(prepareErr, ErrContainmentIncomplete, cleanupErr)
-			}
-
-			prepared = append(prepared, tree)
-		}
-	}
 	defer func() {
-		returnErr = errors.Join(returnErr, cleanupAccountTrees(options.HostAuthority, prepared, shim))
+		returnErr = errors.Join(returnErr, shim.remove())
 	}()
 
 	if _, probeErr := accountProbeVersion(ctx, VersionProbeOptions{
 		CLIPath: selector, CodexHome: options.CodexHome, Scratch: scratchParent, ScratchParent: scratchParent,
-		Env: options.Env, ImplicitEnvironment: options.ImplicitEnvironment, HostAuthority: options.HostAuthority,
+		Env: options.Env, ImplicitEnvironment: options.ImplicitEnvironment,
 	}); probeErr != nil {
 		return probeErr
 	}
 
 	request := NativeRequest{Executable: selector, Arguments: args, Environment: environment}
 
-	var native NativeProcess
-	if options.HostAuthority != nil {
-		native, err = options.HostAuthority.StartNative(ctx, request)
-	} else {
-		native, err = startOrdinaryNative(ctx, request, providerOptions)
-	}
-
+	native, err := startOrdinaryNative(ctx, request, providerOptions)
 	if err != nil {
 		return err
 	}
@@ -138,25 +107,6 @@ func RunAccountCommand(ctx context.Context, options AccountCommandOptions) (retu
 }
 
 func runAccountNative(ctx context.Context, options AccountCommandOptions, native NativeProcess) error {
-	if native == nil {
-		return ErrHostAuthorityUnavailable
-	}
-
-	if native.Stdin() == nil || native.Stdout() == nil || native.Stderr() == nil {
-		revokeErr := native.Revoke(context.Background())
-		_, waitErr := native.Wait(context.Background())
-
-		var cleanupErr error
-		if waitErr != nil {
-			cleanupErr = errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
-		}
-
-		return errors.Join(
-			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
-			cleanupErr,
-		)
-	}
-
 	copyDone := make(chan error, 2)
 
 	go func() {
@@ -174,6 +124,7 @@ func runAccountNative(ctx context.Context, options AccountCommandOptions, native
 	waitDone := make(chan waitResult, 1)
 
 	go func() {
+		copyErr := errors.Join(accountCopyError(<-copyDone), accountCopyError(<-copyDone))
 		result, waitErr := native.Wait(context.WithoutCancel(ctx))
 
 		terminal := waitErr == nil
@@ -181,7 +132,7 @@ func runAccountNative(ctx context.Context, options AccountCommandOptions, native
 			waitErr = fmt.Errorf("codex account command exited with status %d signal %d", result.ExitCode, result.Signal)
 		}
 
-		waitDone <- waitResult{err: waitErr, terminal: terminal}
+		waitDone <- waitResult{err: errors.Join(waitErr, copyErr), terminal: terminal}
 	}()
 
 	signals := options.Signals
@@ -191,7 +142,7 @@ func runAccountNative(ctx context.Context, options AccountCommandOptions, native
 		case wait := <-waitDone:
 			_ = native.Stdin().Close()
 
-			return errors.Join(wait.err, <-copyDone, <-copyDone)
+			return wait.err
 		case <-ctx.Done():
 			revokeErr := native.Revoke(context.Background())
 			wait := <-waitDone
@@ -226,42 +177,12 @@ func runAccountNative(ctx context.Context, options AccountCommandOptions, native
 	}
 }
 
-func cleanupAccountTrees(authority HostAuthority, trees []string, shim *browserShim) error {
-	if err := reclaimAccountTrees(authority, trees); err != nil {
-		return err
-	}
-
-	return shim.remove()
-}
-
-func reclaimAccountTrees(authority HostAuthority, trees []string) error {
-	if authority == nil {
+func accountCopyError(err error) error {
+	if errors.Is(err, os.ErrClosed) {
 		return nil
 	}
 
-	var result error
-
-	for index := len(trees) - 1; index >= 0; index-- {
-		if err := authority.ReclaimNativeTree(context.Background(), trees[index]); err != nil {
-			if errors.Is(err, ErrNativeTreeBusy) {
-				result = errors.Join(result, err)
-
-				continue
-			}
-
-			result = errors.Join(result, fmt.Errorf("%w: %w", ErrContainmentIncomplete, err))
-		}
-	}
-
-	return result
-}
-
-func shimDirectory(shim *browserShim) string {
-	if shim == nil {
-		return ""
-	}
-
-	return shim.dir
+	return err
 }
 
 func readerOrEmpty(reader io.Reader) io.Reader {
