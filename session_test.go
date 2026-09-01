@@ -317,7 +317,7 @@ func TestSessionCloseCoordinatesConcurrentCallersExactlyOnce(t *testing.T) {
 	}
 
 	require.Equal(t, int64(1), client.calls.Load())
-	require.Equal(t, int64(1), commits.Load())
+	require.Equal(t, int64(2), commits.Load(), "close commits durable configuration and the resumable snapshot")
 }
 
 func TestEnsureLiveClientRelaunchFailures(t *testing.T) {

@@ -180,6 +180,7 @@ func TestDeleteRefusesLoadResumingAcrossTheTombstone(t *testing.T) {
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`),
 	}))
+	appendTestDurableSessionConfig(t, store, id, nil, nil)
 
 	client := &blockingLifecycleCodexClient{
 		spyCodexClient: newSpyCodexClient(),
@@ -228,6 +229,7 @@ func TestRefusedRegistrationContainsOnceAndSparesTheRuntime(t *testing.T) {
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`),
 	}))
+	appendTestDurableSessionConfig(t, store, id, nil, nil)
 
 	client := &postContainmentStrictClient{
 		blockingLifecycleCodexClient: &blockingLifecycleCodexClient{
@@ -2887,6 +2889,7 @@ func TestDeleteBeatsALoadAlreadyPastItsEntryCheck(t *testing.T) {
 	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"session"}}`),
 	}))
+	appendTestDurableSessionConfig(t, store, "session", nil, nil)
 
 	client := &blockingLifecycleCodexClient{
 		spyCodexClient: newSpyCodexClient(),
@@ -3238,6 +3241,7 @@ func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
 		t.Run(operation.name, func(t *testing.T) {
 			client := newSpyCodexClient()
 			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+			appendTestDurableSessionConfig(t, agent.options.SessionStore, "stored", nil, nil)
 			agent.lifecycle = negotiated
 			require.ErrorContains(t, operation.run(agent, boundEstablishmentContext(t)), "changed owner")
 		})
