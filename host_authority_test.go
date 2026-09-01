@@ -193,6 +193,7 @@ type traceAuthority struct {
 	mu          sync.Mutex
 	trace       []string
 	prepared    map[string]string
+	start       func(NativeRequest) (NativeProcess, error)
 	startErr    error
 	prepareErr  error
 	reclaimBusy int
@@ -269,6 +270,10 @@ func (a *traceAuthority) ReclaimNativeTree(_ context.Context, path string) error
 
 func (a *traceAuthority) StartNative(_ context.Context, request NativeRequest) (NativeProcess, error) {
 	a.record("start:" + request.Executable)
+	if a.start != nil {
+		return a.start(request)
+	}
+
 	if a.startErr != nil {
 		return nil, a.startErr
 	}
@@ -345,17 +350,120 @@ func TestHostAuthorityReclaimPrecedesRemoval(t *testing.T) {
 
 func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
 	injected := errors.New("managed launch refused")
-	authority := newTraceAuthority(t.TempDir())
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	executable := filepath.Join(root, "ordinary-fallback-must-not-run")
+	authority := newTraceAuthority(root)
 	authority.startErr = injected
 	agent := NewAgent(
 		WithHostAuthority(authority),
-		WithExecutablePath(filepath.Join(t.TempDir(), "ordinary-fallback-must-not-run")),
-		WithScratchDir(t.TempDir()),
+		WithExecutablePath(executable),
+		WithHome(home),
+		WithScratchDir(root),
 	)
 
-	_, err := agent.probeRuntimeVersion(t.Context())
+	_, err := agent.sharedRuntime(t.Context())
 	require.ErrorIs(t, err, injected)
-	require.Len(t, authority.events(), 1)
+	require.NotErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, []string{"prepare:" + home, "start:" + executable, "reclaim:" + home}, authority.events())
+	require.DirExists(t, home)
+}
+
+func TestHostAuthorityAmbiguousStartRetainsPreparedTree(t *testing.T) {
+	var typedNil *traceNativeProcess
+
+	for name, start := range map[string]func(NativeRequest) (NativeProcess, error){
+		"panic": func(NativeRequest) (NativeProcess, error) {
+			panic("start outcome unknown")
+		},
+		"nil success": func(NativeRequest) (NativeProcess, error) {
+			//nolint:nilnil // Exercises an invalid successful host result.
+			return nil, nil
+		},
+		"typed nil success": func(NativeRequest) (NativeProcess, error) {
+			return typedNil, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			const callers = 4
+
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			authority := newTraceAuthority(root)
+			startEntered := make(chan struct{})
+			releaseStart := make(chan struct{})
+			authority.start = func(request NativeRequest) (NativeProcess, error) {
+				close(startEntered)
+				<-releaseStart
+
+				return start(request)
+			}
+			agent := NewAgent(WithHostAuthority(authority), WithHome(home), WithScratchDir(root))
+
+			originalRemove := runtimeRemoveAll
+			removeCalls := 0
+			runtimeRemoveAll = func(string) error {
+				removeCalls++
+
+				return nil
+			}
+			t.Cleanup(func() { runtimeRemoveAll = originalRemove })
+
+			results := make(chan error, callers)
+			go func() {
+				_, err := agent.sharedRuntime(t.Context())
+				results <- err
+			}()
+			<-startEntered
+			for range callers - 1 {
+				go func() {
+					_, err := agent.sharedRuntime(t.Context())
+					results <- err
+				}()
+			}
+			close(releaseStart)
+			for range callers {
+				err := <-results
+				require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+				require.ErrorIs(t, err, ErrContainmentIncomplete)
+			}
+
+			require.ErrorIs(t, agent.runtimeCleanupErr, ErrHostAuthorityUnavailable)
+			require.ErrorIs(t, agent.runtimeCleanupErr, ErrContainmentIncomplete)
+			require.NotNil(t, agent.runtimeNativeRelease)
+			require.NotEmpty(t, agent.runtimeScratchRoot)
+			require.Equal(t, []string{"prepare:" + home, "start:codex"}, authority.events())
+			require.Zero(t, removeCalls)
+
+			authority.mu.Lock()
+			prepared := authority.prepared[home]
+			authority.mu.Unlock()
+			require.NotEmpty(t, prepared)
+
+			_, err := agent.sharedRuntime(t.Context())
+			require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.Equal(t, []string{"prepare:" + home, "start:codex"}, authority.events())
+			require.Zero(t, removeCalls)
+
+			_, err = agent.reserveNativeResidenceCapacity(t.Context(), 1)
+			require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.Zero(t, agent.nativeResidenceCount)
+			require.Zero(t, removeCalls)
+
+			closeErr := agent.Close()
+			require.ErrorIs(t, closeErr, ErrHostAuthorityUnavailable)
+			require.ErrorIs(t, closeErr, ErrContainmentIncomplete)
+			require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+			require.Equal(t, []string{"prepare:" + home, "start:codex"}, authority.events())
+			require.Zero(t, removeCalls)
+			authority.mu.Lock()
+			require.Equal(t, prepared, authority.prepared[home])
+			authority.mu.Unlock()
+		})
+	}
 }
 
 func TestHostAuthorityExplicitNilIsUnavailable(t *testing.T) {

@@ -92,13 +92,15 @@ func (a *guardedHostAuthority) ReclaimNativeTree(ctx context.Context, path strin
 func (a *guardedHostAuthority) StartNative(ctx context.Context, request NativeRequest) (process NativeProcess, err error) {
 	defer func() {
 		if recover() != nil {
-			err = ErrHostAuthorityUnavailable
+			process = nil
+			err = errors.Join(ErrHostAuthorityUnavailable, ErrContainmentIncomplete)
 		}
 	}()
 
 	process, err = a.authority.StartNative(ctx, request)
 	if err == nil && interfaceNil(process) {
-		err = ErrHostAuthorityUnavailable
+		process = nil
+		err = errors.Join(ErrHostAuthorityUnavailable, ErrContainmentIncomplete)
 	}
 
 	if err == nil {

@@ -1249,10 +1249,13 @@ func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 	a.runtimeEpoch++
 	a.mu.Unlock()
 
-	cleanupErr := errors.Join(
-		latchedCleanupErr,
-		a.closeRuntimeGeneration(ctx, client, release, scratchRoot, scratchRelease, epoch),
-	)
+	cleanupErr := latchedCleanupErr
+	if !retainRuntimeResources(cleanupErr) {
+		cleanupErr = errors.Join(
+			cleanupErr,
+			a.closeRuntimeGeneration(ctx, client, release, scratchRoot, scratchRelease, epoch),
+		)
+	}
 
 	a.mu.Lock()
 	if cleanupErr != nil {
