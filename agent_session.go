@@ -1266,7 +1266,11 @@ func (a *Agent) loadStoredSession(ctx context.Context, sessionID acp.SessionId) 
 		return nil, err
 	}
 
-	return entries, nil
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	return validateStoredRolloutEntries(entries)
 }
 
 func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSessionRequest, entries []SessionStoreEntry) (acp.LoadSessionResponse, error) {

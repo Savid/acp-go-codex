@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -116,15 +117,55 @@ func (s *session) mirrorRolloutLocked(ctx context.Context) error {
 func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, int, error) {
 	clean := make([]SessionStoreEntry, 0, len(entries))
 	for index, entry := range entries {
-		var obj map[string]any
-		if err := json.Unmarshal(entry, &obj); err != nil || obj == nil {
-			return nil, index, fmt.Errorf("entry %d must be a JSON object", index)
+		if _, err := decodeRolloutRow(entry); err != nil {
+			return nil, index, fmt.Errorf("entry %d is not a valid rollout row: %w", index, err)
 		}
 
 		clean = append(clean, cloneStoreEntry(entry))
 	}
 
 	return clean, len(clean), nil
+}
+
+func validateStoredRolloutEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, error) {
+	clean, _, err := validateSessionImportEntries(entries)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		nativeThreadID   string
+		sessionMetaIndex = -1
+	)
+
+	for index, entry := range clean {
+		row, err := decodeRolloutRow(entry)
+		if err != nil {
+			return nil, err
+		}
+
+		if row.Type != "session_meta" {
+			continue
+		}
+
+		if sessionMetaIndex >= 0 {
+			return nil, fmt.Errorf("entry %d duplicates session_meta from entry %d", index, sessionMetaIndex)
+		}
+
+		current := stringFromAny(row.Payload["id"])
+		if current == "" {
+			return nil, fmt.Errorf("entry %d session_meta thread identity is required", index)
+		}
+
+		sessionMetaIndex = index
+		nativeThreadID = current
+	}
+
+	if nativeThreadID == "" {
+		return nil, errors.New("stored Codex thread identity is required")
+	}
+
+	return clean, nil
 }
 
 func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKey, entries []SessionStoreEntry) error {

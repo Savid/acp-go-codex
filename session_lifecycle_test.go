@@ -3047,7 +3047,7 @@ func TestCloseCommitsTheCapturedPrefixAcrossTheFence(t *testing.T) {
 	}}
 
 	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
-	captured := SessionStoreEntry(`{"type":"turn_context"}`)
+	captured := SessionStoreEntry(`{"type":"turn_context","payload":{}}`)
 	session.unsyncedEntries = []SessionStoreEntry{captured}
 	session.unsyncedRow = 1
 
@@ -3073,7 +3073,7 @@ func TestAgentCloseCommitsTheDurableRungAWireCloseOwes(t *testing.T) {
 	}}
 
 	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
-	captured := SessionStoreEntry(`{"type":"turn_context"}`)
+	captured := SessionStoreEntry(`{"type":"turn_context","payload":{}}`)
 	session.unsyncedEntries = []SessionStoreEntry{captured}
 	session.unsyncedRow = 1
 
@@ -3096,10 +3096,10 @@ func TestAgentCloseKeepsTheMaterialWhileTheCommitIsOwed(t *testing.T) {
 	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
 
 	material := filepath.Join(t.TempDir(), "rollout.jsonl")
-	writeRolloutLines(t, material, `{"type":"turn_context"}`)
+	writeRolloutLines(t, material, `{"type":"turn_context","payload":{}}`)
 
 	session.materializedPath = material
-	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context"}`)}
+	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context","payload":{}}`)}
 	session.unsyncedRow = 1
 
 	require.ErrorIs(t, agent.Close(), storeFailure)
@@ -3151,7 +3151,7 @@ func TestDeleteFencesEveryLaterCommit(t *testing.T) {
 	store := &attemptCountingStore{InMemorySessionStore: NewInMemorySessionStore(), refuse: storeFailure}
 
 	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
-	path := rolloutFixture(t, session, `{"type":"turn_context"}`)
+	path := rolloutFixture(t, session, `{"type":"turn_context","payload":{}}`)
 
 	// A settlement pass that captured a prefix and could not place it: the
 	// commit this delete must never make is now owed.
@@ -3168,7 +3168,7 @@ func TestDeleteFencesEveryLaterCommit(t *testing.T) {
 	// The harness finished a row behind the delete, so a late tail pass has
 	// something new to place and is refused by the fence rather than by an
 	// empty read.
-	writeRolloutLines(t, path, `{"type":"turn_context"}`, `{"type":"event_msg","payload":{"type":"agent_message","message":"late"}}`)
+	writeRolloutLines(t, path, `{"type":"turn_context","payload":{}}`, `{"type":"event_msg","payload":{"type":"agent_message","message":"late"}}`)
 
 	fenced := store.attempts()
 
@@ -3203,7 +3203,7 @@ func TestCloseFailsWhenTheCapturedPrefixCannotBeCommitted(t *testing.T) {
 	}}
 
 	agent, session, _ := closeBoundaryFixture(t, WithSessionStore(store))
-	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context"}`)}
+	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context","payload":{}}`)}
 	session.unsyncedRow = 1
 	refuse = true
 
@@ -3254,7 +3254,7 @@ func TestPendingCommitCloseKeepsProviderAuthTerminal(t *testing.T) {
 	require.NotNil(t, agent.providerAuth, "the broker is built from the configured ledger root")
 	require.False(t, agent.providerAuth.sessionClosed(session.id))
 
-	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context"}`)}
+	session.unsyncedEntries = []SessionStoreEntry{SessionStoreEntry(`{"type":"turn_context","payload":{}}`)}
 	session.unsyncedRow = 1
 
 	_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.id})
@@ -3303,7 +3303,7 @@ func writeRolloutLines(t *testing.T, path string, lines ...string) {
 func TestCloseRecapturesAPrefixNoSettlementCaptured(t *testing.T) {
 	const torn = `{"type":"turn_c`
 
-	const whole = `{"type":"turn_context"}`
+	const whole = `{"type":"turn_context","payload":{}}`
 
 	t.Run("the recaptured prefix is committed", func(t *testing.T) {
 		var appended []SessionStoreEntry
@@ -3355,7 +3355,7 @@ func TestCloseRecapturesAPrefixNoSettlementCaptured(t *testing.T) {
 // own. Only the failure that captured nothing sends it back to the file, and a
 // failure a later pass repaired does not.
 func TestCloseReadsNothingNewWithoutACaptureFailure(t *testing.T) {
-	const first = `{"type":"turn_context"}`
+	const first = `{"type":"turn_context","payload":{}}`
 
 	const second = `{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`
 
@@ -3752,7 +3752,7 @@ func TestAgentOriginSettlementMirrorsBeforeActionAndIdle(t *testing.T) {
 			}
 			fixture.agent.options.SessionStore = store
 			rollout := fixture.session.cwd + "/rollout.jsonl"
-			require.NoError(t, os.WriteFile(rollout, []byte("{\"type\":\"event_msg\"}\n"), 0o600))
+			require.NoError(t, os.WriteFile(rollout, []byte("{\"type\":\"event_msg\",\"payload\":{}}\n"), 0o600))
 			fixture.session.rolloutPath = rollout
 
 			done := test.settle(fixture)
@@ -3792,7 +3792,7 @@ func TestAgentOriginMirrorFailureFencesWithoutIdleAndRetainsOwedPrefix(t *testin
 	require.True(t, fixture.incarnation.stream.Fenced())
 	require.True(t, fixture.session.captureFailed)
 
-	require.NoError(t, os.WriteFile(rollout, []byte("{\"type\":\"event_msg\"}\n"), 0o600))
+	require.NoError(t, os.WriteFile(rollout, []byte("{\"type\":\"event_msg\",\"payload\":{}}\n"), 0o600))
 	require.NoError(t, fixture.session.commitResumableSnapshot(t.Context()))
 	entries, loadErr := store.Load(t.Context(), SessionKey{SessionID: string(fixture.session.id)})
 	require.NoError(t, loadErr)

@@ -1383,9 +1383,10 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}
 	if err := defaultStore.Replace(ctx, SessionKey{SessionID: string(activeID)}, []SessionStoreReplacement{{
 		Key: SessionKey{SessionID: string(activeID)},
-		Entries: []SessionStoreEntry{SessionStoreEntry(
-			`{"type":"event_msg","payload":{"type":"agent_message","message":"stored history"}}`,
-		)},
+		Entries: []SessionStoreEntry{
+			SessionStoreEntry(`{"type":"session_meta","payload":{"id":"active"}}`),
+			SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"stored history"}}`),
+		},
 	}}); err != nil {
 		t.Fatalf("seed active store: %v", err)
 	}
@@ -1506,7 +1507,10 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 		return newSpyCodexClient(), nil
 	}))
 
-	materializedEntries := []SessionStoreEntry{SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"agent"}]}}`)}
+	materializedEntries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"stored"}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"agent"}]}}`),
+	}
 	store.entries = materializedEntries
 	resumeResp, err := agent.ResumeSession(ctx, ResumeSessionRequest("stored", "/tmp/project"))
 	if err != nil {

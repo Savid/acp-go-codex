@@ -83,9 +83,23 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	if _, err := decodeRolloutRow(SessionStoreEntry(" ")); err == nil {
 		t.Fatal("decodeRolloutRow accepted empty row")
 	}
-	row, err := decodeRolloutRow(SessionStoreEntry(`{"type":"event_msg"}`))
+	if _, err := decodeRolloutRow(SessionStoreEntry(`{"type":"event_msg"}`)); err == nil {
+		t.Fatal("decodeRolloutRow accepted a missing payload")
+	}
+	row, err := decodeRolloutRow(SessionStoreEntry(`{"type":"event_msg","payload":{}}`))
 	if err != nil || row.Payload == nil {
-		t.Fatalf("decodeRolloutRow payload default row=%#v err=%v", row, err)
+		t.Fatalf("decodeRolloutRow valid row=%#v err=%v", row, err)
+	}
+	for _, invalid := range []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"event_msg","type":"event_msg","payload":{}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"nested":1,"nested":2}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{},"unknown":true}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{}} {}`),
+		SessionStoreEntry(`{"timestamp":1,"type":"event_msg","payload":{}}`),
+	} {
+		if _, err := decodeRolloutRow(invalid); err == nil {
+			t.Fatalf("decodeRolloutRow accepted %s", invalid)
+		}
 	}
 	if updates, err := rolloutReplayUpdates([]SessionStoreEntry{SessionStoreEntry(`{"payload":{}}`)}); err == nil || updates != nil {
 		t.Fatalf("rolloutReplayUpdates invalid row updates=%#v err=%v", updates, err)
@@ -156,6 +170,7 @@ func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 	entries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"stored-session"}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_reasoning","text":"thinking"}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}`),

@@ -394,7 +394,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	}
 
 	valid := filepath.Join(t.TempDir(), "valid.jsonl")
-	if err := os.WriteFile(valid, []byte(`{"type":"event_msg"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(valid, []byte(`{"type":"event_msg","payload":{}}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write valid rollout: %v", err)
 	}
 	promptSession.rolloutPath = valid
@@ -1382,7 +1382,7 @@ func TestPromptSettlementKeepsTheNativeCauseWhenTheCommitAlsoFails(t *testing.T)
 	}
 
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	require.NoError(t, os.WriteFile(rollout, []byte(`{"type":"event_msg"}`+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(rollout, []byte(`{"type":"event_msg","payload":{}}`+"\n"), 0o600))
 	promptSession.rolloutPath = rollout
 
 	withRolloutAppendSettings(t, time.Second, []time.Duration{0})

@@ -15,7 +15,7 @@ func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
 	agent := NewAgent(WithSessionStore(store))
 	agent.setAgentClient(newRecordingAgentClient())
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, []byte("{\"type\":\"one\"}\n{\"type\":\"two\"}\n"), 0o600); err != nil {
+	if err := os.WriteFile(rollout, []byte("{\"type\":\"one\",\"payload\":{}}\n{\"type\":\"two\",\"payload\":{}}\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
 	}
 	session := &session{
@@ -50,7 +50,7 @@ func TestRolloutMirrorKeepsDurableCursorWhenRowsAlreadyMirrored(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := NewAgent(WithSessionStore(store))
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	if err := os.WriteFile(rollout, []byte("{\"type\":\"one\"}\n\n{\"type\":\"two\"}\n"), 0o600); err != nil {
+	if err := os.WriteFile(rollout, []byte("{\"type\":\"one\",\"payload\":{}}\n\n{\"type\":\"two\",\"payload\":{}}\n"), 0o600); err != nil {
 		t.Fatalf("write rollout: %v", err)
 	}
 	session := &session{
@@ -179,5 +179,29 @@ func TestDurableRolloutEntriesSkipsMirroredRows(t *testing.T) {
 	})
 	if len(entries) != 1 || next != 2 {
 		t.Fatalf("durable entries=%d next=%d, want 1 and 2", len(entries), next)
+	}
+}
+
+func TestValidateStoredRolloutEntriesRequiresOneNativeIdentity(t *testing.T) {
+	valid := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message"}}`),
+	}
+	clean, err := validateStoredRolloutEntries(valid)
+	if err != nil || len(clean) != len(valid) {
+		t.Fatalf("valid stored rollout clean=%q err=%v", clean, err)
+	}
+
+	for _, invalid := range [][]SessionStoreEntry{
+		{SessionStoreEntry(`{"type":"event_msg","payload":{}}`)},
+		{SessionStoreEntry(`{"type":"session_meta","payload":{}}`)},
+		{
+			SessionStoreEntry(`{"type":"session_meta","payload":{"id":"one"}}`),
+			SessionStoreEntry(`{"type":"session_meta","payload":{"id":"two"}}`),
+		},
+	} {
+		if _, err := validateStoredRolloutEntries(invalid); err == nil {
+			t.Fatalf("stored rollout accepted %q", invalid)
+		}
 	}
 }

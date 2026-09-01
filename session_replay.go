@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -154,26 +155,119 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 		return rolloutRow{}, errors.New(validationRequired)
 	}
 
+	if err := rejectDuplicateRolloutKeys(trimmed); err != nil {
+		return rolloutRow{}, err
+	}
+
+	members, err := decodeExactJSONObject(trimmed)
+	if err != nil {
+		return rolloutRow{}, errors.New("rollout row must be one JSON object")
+	}
+
+	for name := range members {
+		switch name {
+		case "timestamp", jsonFieldType, "payload":
+		default:
+			return rolloutRow{}, fmt.Errorf("unknown rollout row field %q", name)
+		}
+	}
+
+	var rowType string
+	if rawType, ok := members[jsonFieldType]; !ok || json.Unmarshal(rawType, &rowType) != nil || rowType == "" {
+		return rolloutRow{}, errors.New("type is required")
+	}
+
+	var payload map[string]any
+	if rawPayload, ok := members["payload"]; !ok || json.Unmarshal(rawPayload, &payload) != nil || payload == nil {
+		return rolloutRow{}, errors.New("payload must be an object")
+	}
+
+	if rawTimestamp, ok := members["timestamp"]; ok {
+		var timestamp string
+		if json.Unmarshal(rawTimestamp, &timestamp) != nil || timestamp == "" {
+			return rolloutRow{}, errors.New("timestamp must be a non-empty string")
+		}
+	}
+
 	var raw map[string]any
 	if err := json.Unmarshal(trimmed, &raw); err != nil {
 		return rolloutRow{}, err
 	}
 
-	row := rolloutRow{
-		Type:    stringFromAny(raw[jsonFieldType]),
-		Payload: mapFromAny(raw["payload"]),
-		raw:     raw,
+	return rolloutRow{Type: rowType, Payload: payload, raw: raw}, nil
+}
+
+func rejectDuplicateRolloutKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+
+	if err := consumeRolloutJSONValue(decoder); err != nil {
+		return err
 	}
 
-	if row.Type == "" {
-		return rolloutRow{}, fmt.Errorf("type is required")
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return errors.New("rollout row carries trailing input")
 	}
 
-	if row.Payload == nil {
-		row.Payload = map[string]any{}
+	return nil
+}
+
+func consumeRolloutJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
 	}
 
-	return row, nil
+	delim, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+
+		for decoder.More() {
+			keyToken, tokenErr := decoder.Token()
+			if tokenErr != nil {
+				return tokenErr
+			}
+
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("rollout object member name must be a string")
+			}
+
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("rollout object repeats field %q", key)
+			}
+
+			seen[key] = struct{}{}
+
+			if valueErr := consumeRolloutJSONValue(decoder); valueErr != nil {
+				return valueErr
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if valueErr := consumeRolloutJSONValue(decoder); valueErr != nil {
+				return valueErr
+			}
+		}
+	default:
+		return errors.New("invalid rollout JSON delimiter")
+	}
+
+	closing, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+
+	if (delim == '{' && closing != json.Delim('}')) || (delim == '[' && closing != json.Delim(']')) {
+		return errors.New("invalid rollout JSON closing delimiter")
+	}
+
+	return nil
 }
 
 func replayEventMsg(payload map[string]any) []acp.SessionUpdate {
