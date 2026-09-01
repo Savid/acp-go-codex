@@ -801,12 +801,6 @@ func (s *session) shutdownPromptTurn(
 	}
 
 	containmentErr := s.containCancelledTurn(ctx, client, threadID, interruptErr)
-	captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-	mirrorErr := s.mirrorAndEmitRolloutThrough(captureCtx, nativeTurnIdentity{turnID: turnID})
-
-	cancelCapture()
-
-	containmentErr = errors.Join(containmentErr, mirrorErr)
 
 	s.mu.Lock()
 	boundary.err = containmentErr

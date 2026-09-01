@@ -115,6 +115,37 @@ func TestManagedRolloutWaitsForExactNativeTurnBoundary(t *testing.T) {
 	require.True(t, rolloutReachedNativeBoundary(durable, expected))
 }
 
+func TestManagedCancelledTurnCapturesOnlyDuringSettlement(t *testing.T) {
+	authority := &appendLogTestAuthority{records: [][]byte{
+		[]byte(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-cancelled"}}`),
+		[]byte(`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"message-cancelled","content":[]}}`),
+		[]byte(`{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-cancelled"}}`),
+	}}
+	agent := NewAgent(WithHostAuthority(authority), WithSessionStore(NewInMemorySessionStore()))
+	s := &session{
+		agent:           agent,
+		id:              "managed-cancelled",
+		client:          newSpyCodexClient(),
+		codexThreadID:   "thread",
+		turnID:          "turn-cancelled",
+		turnDispatched:  true,
+		cancel:          func() {},
+		turnContainment: &turnContainment{done: make(chan struct{})},
+		rolloutPath:     "/native/home/sessions/rollout.jsonl",
+	}
+
+	handled, err := s.shutdownPromptTurn(t.Context(), "", false)
+	require.True(t, handled)
+	require.NoError(t, err)
+	require.Empty(t, authority.path)
+	require.Zero(t, s.mirroredRows)
+
+	expected := nativeTurnIdentity{turnID: "turn-cancelled", messageID: "message-cancelled"}
+	require.NoError(t, s.mirrorAndEmitRolloutThrough(t.Context(), expected))
+	require.Equal(t, s.rolloutPath, authority.path)
+	require.Equal(t, 3, s.mirroredRows)
+}
+
 func TestManagedRolloutCaptureFailureClassification(t *testing.T) {
 	injected := errors.New("capture refused")
 	ordinaryAuthority := &appendLogTestAuthority{readErr: injected}
