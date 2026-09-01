@@ -74,10 +74,8 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 		return errors.New("lifecycle capability carries trailing input")
 	}
 
-	if len(seen) != 0 {
-		if _, present := seen[fieldVersion]; !present {
-			return errors.New("lifecycle capability version is missing")
-		}
+	if _, present := seen[fieldVersion]; !present {
+		return errors.New("lifecycle capability version is missing")
 	}
 
 	*n = decoded
