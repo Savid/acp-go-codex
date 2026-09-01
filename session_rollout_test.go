@@ -74,6 +74,26 @@ func TestManagedRolloutMirrorUsesHostAppendLog(t *testing.T) {
 	require.Equal(t, " \t{\"type\":\"two\",\"payload\":{}} ", string(durable[0]))
 }
 
+func TestManagedRolloutCaptureEdgeErrors(t *testing.T) {
+	authority := &appendLogTestAuthority{}
+	agent := NewAgent(WithHostAuthority(authority), WithSessionStore(NewInMemorySessionStore()))
+	s := &session{agent: agent, id: "managed-edges", rolloutPath: "/native/rollout.jsonl"}
+
+	_, err := s.captureRolloutEntries(t.Context(), -1)
+	require.ErrorContains(t, err, "cursor is negative")
+
+	authority.records = [][]byte{[]byte(`{}`)}
+	_, err = s.captureRolloutEntries(t.Context(), int(^uint(0)>>1))
+	require.ErrorContains(t, err, "row count exceeds platform limit")
+
+	authority.records = nil
+	err = s.mirrorAndEmitRolloutThrough(t.Context(), nativeTurnIdentity{turnID: "turn"})
+	require.ErrorContains(t, err, "append log has not reached the completed turn")
+
+	wrapped := &managedNativeAppendLogError{err: errors.New("refused")}
+	require.Equal(t, "read managed native append log: refused", wrapped.Error())
+}
+
 func TestManagedRolloutWaitsForExactNativeTurnBoundary(t *testing.T) {
 	const (
 		turnID    = "turn-managed"
@@ -113,6 +133,10 @@ func TestManagedRolloutWaitsForExactNativeTurnBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, durable, 3)
 	require.True(t, rolloutReachedNativeBoundary(durable, expected))
+	require.False(t, rolloutReachedNativeBoundary(
+		append([]SessionStoreEntry{SessionStoreEntry(`not-json`)}, durable...),
+		nativeTurnIdentity{turnID: "other"},
+	))
 }
 
 func TestManagedCancelledTurnCapturesOnlyDuringSettlement(t *testing.T) {

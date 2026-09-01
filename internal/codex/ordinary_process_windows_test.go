@@ -21,9 +21,12 @@ var (
 
 func TestOrdinaryWindowsNativeRuntimeAndLogout(t *testing.T) {
 	originalScratchParent := accountScratchParent
+	originalGOOS := processGOOS
 	t.Cleanup(func() {
 		accountScratchParent = originalScratchParent
+		processGOOS = originalGOOS
 	})
+	processGOOS = platformWindows
 
 	executable, err := os.Executable()
 	require.NoError(t, err)

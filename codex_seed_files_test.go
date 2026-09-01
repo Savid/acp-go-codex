@@ -115,9 +115,10 @@ func TestNewClientSeedFilesRequireHome(t *testing.T) {
 			return newSpyCodexClient(), nil
 		}),
 	)
+	agent.options.implicitEnvironment = map[string]string{}
 
 	_, err := agent.sharedRuntime(context.Background())
-	requireUnsupported(t, err)
+	require.ErrorContains(t, err, "codex home must resolve to a canonical absolute path")
 }
 
 func TestWriteSeedFilesRecordsManifest(t *testing.T) {
