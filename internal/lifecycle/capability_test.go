@@ -26,6 +26,14 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 		{"boolean", `{"version":true}`},
 		{"duplicate", `{"version":1,"version":1}`},
 		{"unknown", `{"version":1,"unknown":true}`},
+		{"empty input", ``},
+		{"array", `[]`},
+		{"truncated member", `{"version":1,`},
+		{"truncated object", `{"version":1`},
+		{"updates type", `{"version":1,"updatesOutsidePrompt":1}`},
+		{"quiescence type", `{"version":1,"authoritativeQuiescence":1}`},
+		{"source type", `{"version":1,"quiescenceSource":1}`},
+		{"activity kinds type", `{"version":1,"activityKinds":1}`},
 		{"trailing", `{"version":1} {}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -34,5 +42,18 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 			var value Negotiated
 			require.Error(t, json.Unmarshal([]byte(test.data), &value))
 		})
+	}
+}
+
+func TestLifecycleCapabilityDirectMalformedInput(t *testing.T) {
+	t.Parallel()
+
+	for _, data := range []string{
+		`{"version":1,`,
+		`{"version":1`,
+		`{"version":1} {}`,
+	} {
+		var value Negotiated
+		require.Error(t, value.UnmarshalJSON([]byte(data)))
 	}
 }
