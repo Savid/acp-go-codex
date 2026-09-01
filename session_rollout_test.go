@@ -12,6 +12,154 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type appendLogTestAuthority struct {
+	mu      sync.Mutex
+	path    string
+	after   uint64
+	records [][]byte
+	readErr error
+	panics  bool
+}
+
+func (*appendLogTestAuthority) NativeEnvironment() map[string]string {
+	return map[string]string{"HOME": "/native/home", "PATH": "/usr/bin:/bin"}
+}
+
+func (*appendLogTestAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+
+func (a *appendLogTestAuthority) ReadNativeAppendLog(
+	_ context.Context,
+	path string,
+	after uint64,
+) ([][]byte, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.path = path
+	a.after = after
+	if a.panics {
+		panic("append-log read panic")
+	}
+
+	return a.records, a.readErr
+}
+
+func (*appendLogTestAuthority) ReclaimNativeTree(context.Context, string) error { return nil }
+
+func (*appendLogTestAuthority) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
+	return nil, errors.New("unexpected native start")
+}
+
+func TestManagedRolloutMirrorUsesHostAppendLog(t *testing.T) {
+	store := NewInMemorySessionStore()
+	record := []byte(" \t{\"type\":\"two\",\"payload\":{}} ")
+	authority := &appendLogTestAuthority{records: [][]byte{record}}
+	agent := NewAgent(WithHostAuthority(authority), WithSessionStore(store))
+	s := &session{
+		agent:         agent,
+		id:            "managed",
+		rolloutPath:   "/native/home/sessions/rollout.jsonl",
+		mirroredRows:  1,
+		codexThreadID: "thread",
+	}
+
+	require.NoError(t, s.mirrorAndEmitRollout(t.Context()))
+	require.Equal(t, s.rolloutPath, authority.path)
+	require.Equal(t, uint64(1), authority.after)
+	require.Equal(t, 2, s.mirroredRows)
+
+	record[0] = '!'
+	durable, err := store.Load(t.Context(), SessionKey{SessionID: string(s.id)})
+	require.NoError(t, err)
+	require.Equal(t, " \t{\"type\":\"two\",\"payload\":{}} ", string(durable[0]))
+}
+
+func TestManagedRolloutWaitsForExactNativeTurnBoundary(t *testing.T) {
+	const (
+		turnID    = "turn-managed"
+		messageID = "message-managed"
+	)
+
+	store := NewInMemorySessionStore()
+	authority := &appendLogTestAuthority{records: [][]byte{
+		[]byte(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-managed"}}`),
+		[]byte(`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"message-managed","content":[]}}`),
+	}}
+	agent := NewAgent(WithHostAuthority(authority), WithSessionStore(store))
+	s := &session{
+		agent:       agent,
+		id:          "managed-boundary",
+		rolloutPath: "/native/home/sessions/rollout.jsonl",
+	}
+	expected := nativeTurnIdentity{turnID: turnID, messageID: messageID}
+
+	err := s.mirrorAndEmitRolloutThrough(t.Context(), expected)
+	require.ErrorContains(t, err, "native append log has not reached the completed turn")
+	require.True(t, s.captureFailed)
+	require.Equal(t, expected, s.captureExpected)
+	require.Zero(t, s.mirroredRows)
+
+	authority.mu.Lock()
+	authority.records = append(authority.records,
+		[]byte(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-managed"}}`),
+	)
+	authority.mu.Unlock()
+
+	require.NoError(t, s.recaptureFailedMirror(t.Context()))
+	require.False(t, s.captureFailed)
+	require.Equal(t, nativeTurnIdentity{}, s.captureExpected)
+	require.Equal(t, 3, s.mirroredRows)
+	durable, err := store.Load(t.Context(), SessionKey{SessionID: string(s.id)})
+	require.NoError(t, err)
+	require.Len(t, durable, 3)
+	require.True(t, rolloutReachedNativeBoundary(durable, expected))
+}
+
+func TestManagedRolloutCaptureFailureClassification(t *testing.T) {
+	injected := errors.New("capture refused")
+	ordinaryAuthority := &appendLogTestAuthority{readErr: injected}
+	ordinaryAgent := NewAgent(WithHostAuthority(ordinaryAuthority), WithSessionStore(NewInMemorySessionStore()))
+	ordinarySession := &session{agent: ordinaryAgent, id: "ordinary-failure", rolloutPath: "/native/rollout.jsonl"}
+
+	err := ordinarySession.mirrorAndEmitRollout(t.Context())
+	require.ErrorIs(t, err, injected)
+	require.True(t, ordinarySession.captureFailed)
+	require.False(t, ordinaryAgent.runtimeDead)
+
+	for name, configure := range map[string]func(*appendLogTestAuthority){
+		"authority unavailable": func(authority *appendLogTestAuthority) {
+			authority.readErr = ErrHostAuthorityUnavailable
+		},
+		"containment incomplete": func(authority *appendLogTestAuthority) {
+			authority.readErr = ErrContainmentIncomplete
+		},
+		"panic": func(authority *appendLogTestAuthority) {
+			authority.panics = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			authority := &appendLogTestAuthority{}
+			configure(authority)
+			agent := NewAgent(WithHostAuthority(authority), WithSessionStore(NewInMemorySessionStore()))
+			s := &session{agent: agent, id: "fatal", rolloutPath: "/native/rollout.jsonl"}
+
+			err := s.mirrorAndEmitRollout(t.Context())
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.True(t, agent.runtimeDead)
+			require.ErrorIs(t, agent.runtimeCleanupErr, ErrContainmentIncomplete)
+		})
+	}
+}
+
+func TestOrdinaryNativeAppendLogRejectsCursorPastEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("{\"type\":\"one\",\"payload\":{}}\n"), 0o600))
+
+	_, err := readOrdinaryNativeAppendLog(path, 2)
+	require.ErrorContains(t, err, "cursor 2 exceeds row count 1")
+}
+
 func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := NewAgent(WithSessionStore(store))

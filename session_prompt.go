@@ -452,7 +452,7 @@ func (s *session) settlePrompt(
 
 	stopReason, outcome := promptSettlement(result)
 
-	if err := s.commitForegroundPrefix(settleCtx); err != nil {
+	if err := s.commitForegroundPrefix(settleCtx, result.state.nativeIdentity); err != nil {
 		s.poisonForegroundSettlement(incarnation, err)
 
 		return acp.PromptResponse{}, settlementFailure(result.failure, err)
@@ -508,8 +508,8 @@ func settlementFailure(nativeFailure error, settlementErr error) error {
 // commitForegroundPrefix places the largest prefix of this turn's native state
 // the store can hold. A failed or cancelled turn commits exactly what it
 // streamed, so the commit runs on every exit rather than on success alone.
-func (s *session) commitForegroundPrefix(ctx context.Context) error {
-	err := s.mirrorAndEmitRollout(ctx)
+func (s *session) commitForegroundPrefix(ctx context.Context, expected nativeTurnIdentity) error {
+	err := s.mirrorAndEmitRolloutThrough(ctx, expected)
 	if err == nil {
 		return nil
 	}

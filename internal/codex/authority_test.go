@@ -107,6 +107,9 @@ func (h *authorityTestHost) PrepareNativeTree(_ context.Context, path string) er
 
 	return nil
 }
+func (h *authorityTestHost) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, nil
+}
 func (h *authorityTestHost) ReclaimNativeTree(_ context.Context, path string) error {
 	h.reclaimed = append(h.reclaimed, path)
 	if len(h.reclaimErrs) != 0 {

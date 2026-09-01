@@ -25,6 +25,9 @@ func (*unavailableAuthority) NativeEnvironment() map[string]string {
 	return map[string]string{"PATH": "/bin"}
 }
 func (*unavailableAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (*unavailableAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, nil
+}
 func (*unavailableAuthority) ReclaimNativeTree(context.Context, string) error { return nil }
 func (*unavailableAuthority) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
 	return nil, ErrHostAuthorityUnavailable
@@ -35,6 +38,9 @@ type invalidEnvironmentAuthority struct{ starts *int }
 func (a invalidEnvironmentAuthority) NativeEnvironment() map[string]string { return nil }
 func (a invalidEnvironmentAuthority) PrepareNativeTree(context.Context, string) error {
 	return errors.New("unexpected prepare")
+}
+func (a invalidEnvironmentAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, errors.New("unexpected read")
 }
 func (a invalidEnvironmentAuthority) ReclaimNativeTree(context.Context, string) error { return nil }
 func (a invalidEnvironmentAuthority) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
@@ -80,6 +86,9 @@ func (*orderingAuthority) NativeEnvironment() map[string]string {
 	return map[string]string{"PATH": "/bin", "HOME": "/tmp"}
 }
 func (*orderingAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (*orderingAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, nil
+}
 func (a *orderingAuthority) ReclaimNativeTree(context.Context, string) error {
 	*a.calls = append(*a.calls, "reclaim")
 
@@ -240,6 +249,34 @@ func (a *traceAuthority) PrepareNativeTree(_ context.Context, path string) error
 	}
 
 	return nil
+}
+
+func (a *traceAuthority) ReadNativeAppendLog(_ context.Context, path string, after uint64) ([][]byte, error) {
+	a.record("read:" + path)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for root, hidden := range a.prepared {
+		if path != root && !strings.HasPrefix(path, root+string(os.PathSeparator)) {
+			continue
+		}
+
+		nativePath := hidden + strings.TrimPrefix(path, root)
+		records, readErr := readOrdinaryNativeAppendLog(nativePath, after)
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		result := make([][]byte, len(records))
+		for index, record := range records {
+			result[index] = record
+		}
+
+		return result, nil
+	}
+
+	return nil, errors.New("native append log is outside a prepared tree")
 }
 
 func (a *traceAuthority) ReclaimNativeTree(_ context.Context, path string) error {
@@ -651,6 +688,7 @@ func TestNativeTreeBusyBlocksAdmissionUntilReclaimRetry(t *testing.T) {
 type authorityCoverageHost struct {
 	environment func() map[string]string
 	prepare     func() error
+	read        func() ([][]byte, error)
 	reclaim     func() error
 	start       func() (NativeProcess, error)
 }
@@ -661,6 +699,10 @@ func (h authorityCoverageHost) NativeEnvironment() map[string]string {
 
 func (h authorityCoverageHost) PrepareNativeTree(context.Context, string) error {
 	return h.prepare()
+}
+
+func (h authorityCoverageHost) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return h.read()
 }
 
 func (h authorityCoverageHost) ReclaimNativeTree(context.Context, string) error {
@@ -721,6 +763,11 @@ func TestHostAuthorityDefensiveWrappers(t *testing.T) {
 
 			return nil
 		},
+		read: func() ([][]byte, error) {
+			panicNow()
+
+			return nil, nil
+		},
 		reclaim: func() error {
 			panicNow()
 
@@ -735,6 +782,8 @@ func TestHostAuthorityDefensiveWrappers(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, map[string]string{"SAFE": "value"}, guarded.NativeEnvironment())
 	require.ErrorIs(t, guarded.PrepareNativeTree(t.Context(), "tree"), ErrHostAuthorityUnavailable)
+	_, err = guarded.ReadNativeAppendLog(t.Context(), "tree/log", 0)
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
 	require.ErrorIs(t, guarded.ReclaimNativeTree(t.Context(), "tree"), ErrHostAuthorityUnavailable)
 
 	started, err := guarded.StartNative(t.Context(), NativeRequest{})
@@ -776,13 +825,16 @@ func TestHostAuthorityValidationAndAdapters(t *testing.T) {
 	base := authorityCoverageHost{
 		environment: func() map[string]string { return map[string]string{"SAFE": "value"} },
 		prepare:     func() error { return ErrContainmentIncomplete },
+		read:        func() ([][]byte, error) { return nil, ErrHostAuthorityUnavailable },
 		reclaim:     func() error { return ErrNativeTreeBusy },
 		start:       func() (NativeProcess, error) { return nil, ErrHostAuthorityUnavailable },
 	}
 	adapter := adaptHostAuthority(base)
 	require.ErrorIs(t, adapter.PrepareNativeTree(t.Context(), "tree"), codex.ErrContainmentIncomplete)
+	_, err := adapter.ReadNativeAppendLog(t.Context(), "tree/log", 0)
+	require.ErrorIs(t, err, codex.ErrHostAuthorityUnavailable)
 	require.ErrorIs(t, adapter.ReclaimNativeTree(t.Context(), "tree"), codex.ErrNativeTreeBusy)
-	_, err := adapter.StartNative(t.Context(), codex.NativeRequest{})
+	_, err = adapter.StartNative(t.Context(), codex.NativeRequest{})
 	require.ErrorIs(t, err, codex.ErrHostAuthorityUnavailable)
 
 	base.start = func() (NativeProcess, error) {

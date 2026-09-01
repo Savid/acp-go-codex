@@ -1524,7 +1524,12 @@ func (s *session) completeAutonomousSettlement(
 	}
 	defer cancel()
 
-	mirrorErr := s.mirrorAndEmitRollout(settleCtx)
+	expected := nativeTurnIdentity{}
+	if in != nil && in.state != nil {
+		expected = in.state.nativeIdentity
+	}
+
+	mirrorErr := s.mirrorAndEmitRolloutThrough(settleCtx, expected)
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 

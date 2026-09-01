@@ -79,6 +79,31 @@ func (a *guardedHostAuthority) PrepareNativeTree(ctx context.Context, path strin
 	return a.authority.PrepareNativeTree(ctx, path)
 }
 
+func (a *guardedHostAuthority) ReadNativeAppendLog(
+	ctx context.Context,
+	path string,
+	after uint64,
+) (records [][]byte, err error) {
+	defer func() {
+		if recover() != nil {
+			records = nil
+			err = ErrHostAuthorityUnavailable
+		}
+	}()
+
+	records, err = a.authority.ReadNativeAppendLog(ctx, path, after)
+	if err != nil {
+		return nil, err
+	}
+
+	cloned := make([][]byte, len(records))
+	for index, record := range records {
+		cloned[index] = append([]byte(nil), record...)
+	}
+
+	return cloned, nil
+}
+
 func (a *guardedHostAuthority) ReclaimNativeTree(ctx context.Context, path string) (err error) {
 	defer func() {
 		if recover() != nil {
@@ -172,6 +197,16 @@ func adaptHostAuthority(authority HostAuthority) codex.HostAuthority {
 
 func (a hostAuthorityAdapter) PrepareNativeTree(ctx context.Context, path string) error {
 	return toInternalAuthorityError(a.HostAuthority.PrepareNativeTree(ctx, path))
+}
+
+func (a hostAuthorityAdapter) ReadNativeAppendLog(
+	ctx context.Context,
+	path string,
+	after uint64,
+) ([][]byte, error) {
+	records, err := a.HostAuthority.ReadNativeAppendLog(ctx, path, after)
+
+	return records, toInternalAuthorityError(err)
 }
 
 func (a hostAuthorityAdapter) ReclaimNativeTree(ctx context.Context, path string) error {

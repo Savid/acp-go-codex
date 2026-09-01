@@ -69,6 +69,9 @@ type coverageHost struct {
 
 func (h *coverageHost) NativeEnvironment() map[string]string          { return h.environment }
 func (*coverageHost) PrepareNativeTree(context.Context, string) error { return nil }
+func (*coverageHost) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, nil
+}
 func (*coverageHost) ReclaimNativeTree(context.Context, string) error { return nil }
 func (h *coverageHost) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
 	return h.process, h.err

@@ -24,10 +24,5 @@ func (s *session) containCancelledTurn(
 		s.setClientDead(true)
 	}
 
-	// Native cleanup can finish the rollout after the event terminal. Read it
-	// only after targeted protocol cleanup so no thread event can append behind
-	// the durable mirror.
-	mirrorErr := s.mirrorAndEmitRollout(context.WithoutCancel(ctx))
-
-	return errors.Join(interruptErr, containErr, mirrorErr)
+	return errors.Join(interruptErr, containErr)
 }

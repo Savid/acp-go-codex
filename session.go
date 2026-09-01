@@ -73,6 +73,7 @@ type session struct {
 	interactions        map[string]*sessionInteraction
 	mirrorMu            sync.Mutex
 	mirroredRows        int
+	captureExpected     nativeTurnIdentity
 	imageStoreMu        sync.Mutex
 	rawEventMu          sync.Mutex
 	rawEventSequence    int64
@@ -800,6 +801,12 @@ func (s *session) shutdownPromptTurn(
 	}
 
 	containmentErr := s.containCancelledTurn(ctx, client, threadID, interruptErr)
+	captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	mirrorErr := s.mirrorAndEmitRolloutThrough(captureCtx, nativeTurnIdentity{turnID: turnID})
+
+	cancelCapture()
+
+	containmentErr = errors.Join(containmentErr, mirrorErr)
 
 	s.mu.Lock()
 	boundary.err = containmentErr

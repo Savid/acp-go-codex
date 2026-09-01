@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRolloutTerminalIdentityUsesFinalAssistantAndReplaysEmptyAssistant(t *testing.T) {
@@ -62,6 +64,31 @@ func TestRolloutTerminalIdentityUsesFinalAssistantAndReplaysEmptyAssistant(t *te
 	if err := errorSession.replayRollout(context.Background(), errorEntries[1:]); !errors.Is(err, updateErr) {
 		t.Fatalf("identity replay update error = %v, want %v", err, updateErr)
 	}
+}
+
+func TestRolloutReachedNativeBoundary(t *testing.T) {
+	withoutTerminal := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","id":"message-1","content":[]}}`),
+	}
+	expected := nativeTurnIdentity{turnID: "turn-1", messageID: "message-1"}
+	require.False(t, rolloutReachedNativeBoundary(withoutTerminal, expected))
+	require.False(t, rolloutReachedNativeBoundary(withoutTerminal, nativeTurnIdentity{messageID: "message-1"}))
+
+	completed := append(cloneStoreEntries(withoutTerminal),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`),
+	)
+	require.True(t, rolloutReachedNativeBoundary(completed, expected))
+	require.False(t, rolloutReachedNativeBoundary(completed, nativeTurnIdentity{turnID: "turn-1", messageID: "other-message"}))
+	require.False(t, rolloutReachedNativeBoundary(append(cloneStoreEntries(withoutTerminal),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`),
+	), expected))
+
+	aborted := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-2"}}`),
+	}
+	require.True(t, rolloutReachedNativeBoundary(aborted, nativeTurnIdentity{turnID: "turn-2"}))
 }
 
 func TestNativeIdentityMetaPreservesStructuredOutput(t *testing.T) {
