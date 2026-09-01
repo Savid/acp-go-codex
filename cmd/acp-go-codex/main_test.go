@@ -168,6 +168,70 @@ func TestPendingSignalAndCommandExitCode(t *testing.T) {
 	require.Equal(t, 1, commandExitCode(errors.New("failure")))
 }
 
+type namedSignal string
+
+func (s namedSignal) String() string { return string(s) }
+func (namedSignal) Signal()          {}
+
+func TestMainSignalAndNativeCommandCoverage(t *testing.T) {
+	originalArgs := os.Args
+	originalExit := exit
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		exit = originalExit
+	})
+
+	exitCode := -1
+	os.Args = []string{"acp-go-codex", "-bad"}
+	exit = func(code int) { exitCode = code }
+	main()
+	require.Equal(t, 2, exitCode)
+
+	require.Equal(t, 1, signalCode(namedSignal("named")))
+	require.Equal(t, 128+int(syscall.SIGTERM), signalCode(syscall.SIGTERM))
+
+	normalExit := exec.Command("sh", "-c", "exit 2") // #nosec G204 -- fixed test command.
+	normalErr := normalExit.Run()
+	var normal *exec.ExitError
+	require.ErrorAs(t, normalErr, &normal)
+	require.Equal(t, 2, commandExitCode(normal))
+	require.Zero(t, signalExitCode(normal))
+
+	signaledExit := exec.Command("sh", "-c", "kill -TERM $$") // #nosec G204 -- fixed test command.
+	signaledErr := signaledExit.Run()
+	var signaled *exec.ExitError
+	require.ErrorAs(t, signaledErr, &signaled)
+	require.Equal(t, 128+int(syscall.SIGTERM), commandExitCode(signaled))
+	require.Equal(t, 128+int(syscall.SIGTERM), signalExitCode(signaled))
+
+	home := filepath.Join(t.TempDir(), "home")
+	require.Error(t, runCodexCLI(t.Context(), "/definitely/missing/codex", "", "", loginCommand, false,
+		bytes.NewReader(nil), io.Discard, io.Discard))
+	require.Error(t, runCodexCLI(t.Context(), "/definitely/missing/codex", home, t.TempDir(), loginCommand, false,
+		bytes.NewReader(nil), io.Discard, io.Discard))
+	signals := make(chan os.Signal)
+	require.Error(t, runCodexCLIWithSignals(t.Context(), "/definitely/missing/codex", home, t.TempDir(), logoutCommand, false,
+		bytes.NewReader(nil), io.Discard, io.Discard, signals))
+}
+
+func TestRunReturnsDeliveredSignalAndSubcommandFlagError(t *testing.T) {
+	originalServe := serve
+	originalShutdown := shutdownOpenTelemetry
+	t.Cleanup(func() {
+		serve = originalServe
+		shutdownOpenTelemetry = originalShutdown
+	})
+	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
+	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...codexacp.Option) error {
+		require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+		<-ctx.Done()
+
+		return ctx.Err()
+	}
+	require.Equal(t, 128+int(syscall.SIGTERM), run(t.Context(), nil, bytes.NewReader(nil), io.Discard, io.Discard))
+	require.Equal(t, 2, run(t.Context(), []string{loginCommand, "-bad"}, bytes.NewReader(nil), io.Discard, io.Discard))
+}
+
 func TestResolvedCodexCLIHome(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	resolved, err := resolvedCodexCLIHome(home)
