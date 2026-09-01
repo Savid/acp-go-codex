@@ -424,6 +424,14 @@ func TestHostAuthorityRolloutPrepareFailureRemainsOpaque(t *testing.T) {
 	injected := errors.New("rollout prepare failed after transfer")
 	authority.prepareErr = injected
 	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
+	originalRemove := removeMaterializedRolloutFile
+	removeCalls := 0
+	removeMaterializedRolloutFile = func(path string) error {
+		removeCalls++
+
+		return originalRemove(path)
+	}
+	t.Cleanup(func() { removeMaterializedRolloutFile = originalRemove })
 
 	release, err := agent.reserveNativeResidenceCapacity(t.Context(), 3)
 	require.NoError(t, err)
@@ -438,6 +446,7 @@ func TestHostAuthorityRolloutPrepareFailureRemainsOpaque(t *testing.T) {
 	require.Len(t, authority.events(), 1)
 	require.True(t, strings.HasPrefix(authority.events()[0], "prepare:"))
 	require.NotContains(t, strings.Join(authority.events(), "\n"), "reclaim:")
+	require.Zero(t, removeCalls)
 	_, err = agent.reserveNativeResidenceCapacity(t.Context(), 1)
 	require.ErrorIs(t, err, ErrContainmentIncomplete)
 }
@@ -449,6 +458,14 @@ func TestHostAuthorityPromptImagePrepareFailureRemainsOpaque(t *testing.T) {
 	authority.prepareErr = injected
 	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
 	active := &session{agent: agent}
+	originalRemove := removePromptImageDir
+	removeCalls := 0
+	removePromptImageDir = func(path string) error {
+		removeCalls++
+
+		return originalRemove(path)
+	}
+	t.Cleanup(func() { removePromptImageDir = originalRemove })
 
 	_, err := active.preparePromptImages(t.Context(), []decodedPromptImage{{
 		data: make([]byte, codexInlineImageEnvelopeSize), mimeType: mimeImagePNG,
@@ -459,6 +476,7 @@ func TestHostAuthorityPromptImagePrepareFailureRemainsOpaque(t *testing.T) {
 	require.Len(t, authority.events(), 1)
 	require.True(t, strings.HasPrefix(authority.events()[0], "prepare:"))
 	require.NotContains(t, strings.Join(authority.events(), "\n"), "reclaim:")
+	require.Zero(t, removeCalls)
 }
 
 func TestNativeTreeBusyBlocksAdmissionUntilReclaimRetry(t *testing.T) {
