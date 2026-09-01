@@ -61,6 +61,14 @@ records live under additional subpaths. Each generated image has one canonical
 record keyed by stable native identity and byte fingerprint; rollout rows carry
 only the artifact reference, while raw events carry sanitized metadata.
 
+The required `session-config/v1` subrecord is an append-only sequence with
+contiguous revisions. Every revision names the ACP session id and carries the
+complete validated session environment plus the ordered extra PATH directories.
+Cold load and resume restore an omitted carrier from the latest revision;
+explicit values remain intentional lifecycle inputs. A missing record,
+mismatched identity, revision gap, or malformed carrier refuses recovery before
+Codex is called.
+
 Every loaded rollout row is one closed JSON object containing `type`, `payload`,
 and an optional non-empty string `timestamp`. `type` must be a non-empty string,
 `payload` must be an object, and duplicate keys at any depth, unknown top-level

@@ -3308,8 +3308,10 @@ func TestCloseRecapturesAPrefixNoSettlementCaptured(t *testing.T) {
 	t.Run("the recaptured prefix is committed", func(t *testing.T) {
 		var appended []SessionStoreEntry
 
-		store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
-			appended = append(appended, entries...)
+		store := &appendFuncStore{append: func(_ context.Context, key SessionKey, entries []SessionStoreEntry) error {
+			if key.Subpath == SessionStoreMainSubpath {
+				appended = append(appended, entries...)
+			}
 
 			return nil
 		}}
@@ -3362,8 +3364,10 @@ func TestCloseReadsNothingNewWithoutACaptureFailure(t *testing.T) {
 	t.Run("an unmirrored row no settlement pass ever read", func(t *testing.T) {
 		var appended []SessionStoreEntry
 
-		store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
-			appended = append(appended, entries...)
+		store := &appendFuncStore{append: func(_ context.Context, key SessionKey, entries []SessionStoreEntry) error {
+			if key.Subpath == SessionStoreMainSubpath {
+				appended = append(appended, entries...)
+			}
 
 			return nil
 		}}
@@ -3379,8 +3383,10 @@ func TestCloseReadsNothingNewWithoutACaptureFailure(t *testing.T) {
 	t.Run("a capture failure a later pass repaired", func(t *testing.T) {
 		var appended []SessionStoreEntry
 
-		store := &appendFuncStore{append: func(_ context.Context, _ SessionKey, entries []SessionStoreEntry) error {
-			appended = append(appended, entries...)
+		store := &appendFuncStore{append: func(_ context.Context, key SessionKey, entries []SessionStoreEntry) error {
+			if key.Subpath == SessionStoreMainSubpath {
+				appended = append(appended, entries...)
+			}
 
 			return nil
 		}}

@@ -141,7 +141,7 @@ func TestDeleteSessionTombstonesStoreAndBlocksLoadResume(t *testing.T) {
 	if seedErr := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(resp.SessionId)},
 		Entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)},
-	}}); seedErr != nil {
+	}, testDurableSessionConfigReplacement(t, resp.SessionId, nil, nil)}); seedErr != nil {
 		t.Fatalf("seed store: %v", seedErr)
 	}
 
@@ -708,7 +708,7 @@ func TestDeleteSessionSurfacesNativeCleanupErrorAfterTombstone(t *testing.T) {
 	if seedErr := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(resp.SessionId)},
 		Entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)},
-	}}); seedErr != nil {
+	}, testDurableSessionConfigReplacement(t, resp.SessionId, nil, nil)}); seedErr != nil {
 		t.Fatalf("seed store: %v", seedErr)
 	}
 
@@ -1390,6 +1390,8 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("seed active store: %v", err)
 	}
+	appendTestDurableSessionConfig(t, defaultStore, activeID, nil, nil)
+
 	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err != nil {
 		t.Fatalf("LoadSession active with store rows returned error: %v", err)
 	}
@@ -1465,7 +1467,7 @@ func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
 				Entries: []SessionStoreEntry{SessionStoreEntry(
 					`{"type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp/project"}}`,
 				)},
-			}}))
+			}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 
 			client.mu.Lock()
 			client.resumes = nil
@@ -1738,7 +1740,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(hijackID)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(hijackID)},
 		Entries: entries,
-	}}))
+	}, testDurableSessionConfigReplacement(t, hijackID, nil, nil)}))
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(hijackID, "/tmp/project"))
 	require.ErrorContains(t, err, "retained by another session")
 
@@ -1746,7 +1748,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: missingIdentity,
-	}}))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
 	require.ErrorContains(t, err, "thread identity is required")
 
@@ -1754,13 +1756,13 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: wrongRetainedIdentity,
-	}}))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
 	require.ErrorContains(t, err, "does not match the retained session")
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: entries,
-	}}))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 
 	resumed, err := agent.ResumeSession(ctx, ResumeSessionRequest(
 		created.SessionId,
@@ -1812,7 +1814,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: wrongEntries,
-	}}))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(
 		created.SessionId,
 		"/tmp/project",
@@ -1926,6 +1928,8 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		client := newSpyCodexClient()
 		agent := NewAgent()
 		bind(agent, client)
+		appendTestDurableSessionConfig(t, agent.options.SessionStore, "session", nil, nil)
+
 		_, err := agent.resumeMaterializedSession(ctx, params, entries)
 		require.NoError(t, err)
 	})
@@ -3536,11 +3540,13 @@ func mapsEqual(got any, want map[string]any) bool {
 }
 
 type configurableStore struct {
-	entries   []SessionStoreEntry
-	summaries []SessionSummary
-	loadErr   error
-	listErr   error
-	deleteErr error
+	entries       []SessionStoreEntry
+	configEntries []SessionStoreEntry
+	configMissing bool
+	summaries     []SessionSummary
+	loadErr       error
+	listErr       error
+	deleteErr     error
 }
 
 type blockingDeleteSessionStore struct {
@@ -3564,9 +3570,30 @@ func (s *configurableStore) Append(context.Context, SessionKey, []SessionStoreEn
 	return nil
 }
 
-func (s *configurableStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
+func (s *configurableStore) Load(_ context.Context, key SessionKey) ([]SessionStoreEntry, error) {
 	if s.loadErr != nil {
 		return nil, s.loadErr
+	}
+	if key.Subpath == sessionConfigStoreSubpath {
+		if s.configMissing {
+			return nil, nil
+		}
+		if s.configEntries != nil {
+			return cloneStoreEntries(s.configEntries), nil
+		}
+
+		entry, err := json.Marshal(durableSessionConfig{
+			Version:       sessionConfigVersion,
+			SessionID:     key.SessionID,
+			Revision:      1,
+			Env:           map[string]string{},
+			ExtraPathDirs: []string{},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return []SessionStoreEntry{entry}, nil
 	}
 
 	return cloneStoreEntries(s.entries), nil

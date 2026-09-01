@@ -123,8 +123,10 @@ type session struct {
 	// unsyncedEntries is the exact durable prefix a failed commit did not place.
 	// It is retained rather than dropped, and the next prompt blocks loudly on
 	// it until the store holds it.
-	unsyncedEntries []SessionStoreEntry
-	unsyncedRow     int
+	unsyncedEntries        []SessionStoreEntry
+	unsyncedRow            int
+	durableConfigRevision  int
+	durableConfigCommitted bool
 	// captureFailed records that a mirror pass failed before it could capture the
 	// durable prefix it was reading. Such a pass retains nothing, so this is the
 	// only thing left saying a prefix is still owed, and the close boundary reads

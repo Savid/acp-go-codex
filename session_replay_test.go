@@ -182,6 +182,7 @@ func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 	if err := store.Append(ctx, SessionKey{SessionID: "stored-session"}, entries); err != nil {
 		t.Fatalf("store Append returned error: %v", err)
 	}
+	appendTestDurableSessionConfig(t, store, "stored-session", nil, nil)
 
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest("stored-session", cwd)); err != nil {
 		t.Fatalf("LoadSession returned error: %v", err)

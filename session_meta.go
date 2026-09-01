@@ -13,17 +13,19 @@ import (
 )
 
 type sessionMeta struct {
-	Model               string
-	ReasoningEffort     string
-	ServiceTier         string
-	Personality         string
-	Env                 map[string]string
-	ExtraPathDirs       []string
-	ApprovalPolicy      any
-	SandboxPolicy       any
-	OutputSchema        any
-	RawMessages         rawMessageConfig
-	MCPToolApprovalMode string
+	Model                string
+	ReasoningEffort      string
+	ServiceTier          string
+	Personality          string
+	Env                  map[string]string
+	EnvPresent           bool
+	ExtraPathDirs        []string
+	ExtraPathDirsPresent bool
+	ApprovalPolicy       any
+	SandboxPolicy        any
+	OutputSchema         any
+	RawMessages          rawMessageConfig
+	MCPToolApprovalMode  string
 }
 
 func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
@@ -37,31 +39,35 @@ func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
 	}
 
 	return sessionMeta{
-		Model:               codexOptions.Model,
-		ReasoningEffort:     codexOptions.ReasoningEffort,
-		ServiceTier:         codexOptions.ServiceTier,
-		Personality:         codexOptions.Personality,
-		Env:                 cloneStringMap(codexOptions.Env),
-		ExtraPathDirs:       cloneStrings(codexOptions.ExtraPathDirs),
-		ApprovalPolicy:      codexOptions.ApprovalPolicy,
-		SandboxPolicy:       codexOptions.SandboxPolicy,
-		OutputSchema:        codexOptions.OutputSchema,
-		RawMessages:         rawMessageConfigFromMeta(meta),
-		MCPToolApprovalMode: codexOptions.MCPToolApprovalMode,
+		Model:                codexOptions.Model,
+		ReasoningEffort:      codexOptions.ReasoningEffort,
+		ServiceTier:          codexOptions.ServiceTier,
+		Personality:          codexOptions.Personality,
+		Env:                  cloneStringMap(codexOptions.Env),
+		EnvPresent:           codexOptions.EnvPresent,
+		ExtraPathDirs:        cloneStrings(codexOptions.ExtraPathDirs),
+		ExtraPathDirsPresent: codexOptions.ExtraPathDirsPresent,
+		ApprovalPolicy:       codexOptions.ApprovalPolicy,
+		SandboxPolicy:        codexOptions.SandboxPolicy,
+		OutputSchema:         codexOptions.OutputSchema,
+		RawMessages:          rawMessageConfigFromMeta(meta),
+		MCPToolApprovalMode:  codexOptions.MCPToolApprovalMode,
 	}, nil
 }
 
 type codexOptions struct {
-	Model               string
-	ReasoningEffort     string
-	ServiceTier         string
-	Personality         string
-	Env                 map[string]string
-	ExtraPathDirs       []string
-	ApprovalPolicy      any
-	SandboxPolicy       any
-	OutputSchema        any
-	MCPToolApprovalMode string
+	Model                string
+	ReasoningEffort      string
+	ServiceTier          string
+	Personality          string
+	Env                  map[string]string
+	EnvPresent           bool
+	ExtraPathDirs        []string
+	ExtraPathDirsPresent bool
+	ApprovalPolicy       any
+	SandboxPolicy        any
+	OutputSchema         any
+	MCPToolApprovalMode  string
 }
 
 func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
@@ -109,6 +115,7 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 		}
 
 		options.Env = env
+		options.EnvPresent = true
 	}
 
 	if rawPathDirs, ok := optionsMap[metaExtraPathDirsKey]; ok {
@@ -118,6 +125,7 @@ func codexOptionsFromMeta(meta map[string]any) (codexOptions, error) {
 		}
 
 		options.ExtraPathDirs = dirs
+		options.ExtraPathDirsPresent = true
 	}
 
 	if policy, ok := optionsMap[metaApprovalPolicyKey]; ok {

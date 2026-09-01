@@ -675,6 +675,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	meta = resolveActiveSessionCarriers(meta, a.activeSession(params.SessionId))
+
 	start := codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -724,8 +726,20 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	storedConfig, err := a.loadDurableSessionConfig(ctx, params.SessionId)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	meta, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
+
 	if active := a.activeSession(params.SessionId); active != nil {
-		return a.rebindActiveStoredSession(ctx, params, entries, meta, active, nil)
+		response, rebindErr := a.rebindActiveStoredSession(ctx, params, entries, meta, active, nil)
+		if rebindErr == nil {
+			configureLoadedSessionPersistence(active, storedConfig, configMatches)
+		}
+
+		return response, rebindErr
 	}
 
 	retained, err := a.claimRetainedRuntimeThreadForStore(params.SessionId, rolloutNativeThreadID(entries))
@@ -736,7 +750,10 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	}
 
 	if retained != nil {
-		resp, _, resumeErr := a.resumeRetainedRuntimeSession(ctx, params, meta, retained)
+		resp, resumed, resumeErr := a.resumeRetainedRuntimeSession(ctx, params, meta, retained)
+		if resumeErr == nil {
+			configureLoadedSessionPersistence(resumed, storedConfig, configMatches)
+		}
 
 		return resp, resumeErr
 	}
@@ -793,6 +810,8 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	id := params.SessionId
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	configureLoadedSessionPersistence(session, storedConfig, configMatches)
+
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
 		_ = session.Close(context.TODO())
 
@@ -1146,6 +1165,8 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 
+	meta = resolveActiveSessionCarriers(meta, a.activeSession(params.SessionId))
+
 	start := codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1168,6 +1189,18 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		if len(storeEntries) == 0 {
 			return acp.LoadSessionResponse{}, newUnknownSession()
 		}
+
+		storedConfig, configErr := a.loadDurableSessionConfig(ctx, params.SessionId)
+		if configErr != nil {
+			return acp.LoadSessionResponse{}, configErr
+		}
+
+		_, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
+		if !configMatches {
+			return acp.LoadSessionResponse{}, errors.New("active Codex session configuration does not match its durable record")
+		}
+
+		configureLoadedSessionPersistence(existing, storedConfig, true)
 
 		if replayErr := existing.replayRollout(ctx, storeEntries); replayErr != nil {
 			return acp.LoadSessionResponse{}, replayErr
@@ -1283,6 +1316,13 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, err
 	}
 
+	storedConfig, err := a.loadDurableSessionConfig(ctx, params.SessionId)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	meta, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
+
 	if active := a.activeSession(params.SessionId); active != nil {
 		resp, rebindErr := a.rebindActiveStoredSession(ctx, acp.ResumeSessionRequest(params), entries, meta, active, func() error {
 			return active.replayRollout(ctx, entries)
@@ -1290,6 +1330,8 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		if rebindErr != nil {
 			return acp.LoadSessionResponse{}, rebindErr
 		}
+
+		configureLoadedSessionPersistence(active, storedConfig, configMatches)
 
 		return acp.LoadSessionResponse(resp), nil
 	}
@@ -1306,6 +1348,8 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		if resumeErr != nil {
 			return acp.LoadSessionResponse{}, resumeErr
 		}
+
+		configureLoadedSessionPersistence(active, storedConfig, configMatches)
 
 		if replayErr := active.replayRollout(ctx, entries); replayErr != nil {
 			_, closeErr := a.CloseSession(context.WithoutCancel(ctx), acp.CloseSessionRequest{SessionId: params.SessionId})
@@ -1366,6 +1410,8 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	id := params.SessionId
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+	configureLoadedSessionPersistence(session, storedConfig, configMatches)
+
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
 		_ = session.Close(context.TODO())
 
@@ -1537,6 +1583,15 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
+	parentSnapshot := parent.snapshot()
+	if !meta.EnvPresent {
+		meta.Env = cloneStringMap(parentSnapshot.env)
+	}
+
+	if !meta.ExtraPathDirsPresent {
+		meta.ExtraPathDirs = cloneStrings(parentSnapshot.extraPathDirs)
+	}
+
 	idValue, err := newSessionID()
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
@@ -1554,7 +1609,6 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	parentSnapshot := parent.snapshot()
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	thread, err := client.ForkThread(ctx, codex.ThreadForkRequest{

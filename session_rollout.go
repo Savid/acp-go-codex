@@ -234,6 +234,13 @@ func (s *session) commitRolloutEntries(
 		return nil
 	}
 
+	if err := s.commitDurableSessionConfig(ctx, store); err != nil {
+		s.unsyncedEntries = entries
+		s.unsyncedRow = nextRow
+
+		return err
+	}
+
 	if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, entries); err != nil {
 		s.unsyncedEntries = entries
 		s.unsyncedRow = nextRow

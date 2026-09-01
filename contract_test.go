@@ -70,7 +70,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 					Entries: []SessionStoreEntry{SessionStoreEntry(
 						`{"type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp/project"}}`,
 					)},
-				}})
+				}, testDurableSessionConfigReplacement(t, session.SessionId, nil, nil)})
 				if err != nil {
 					return err
 				}
