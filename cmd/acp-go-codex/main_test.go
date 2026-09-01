@@ -223,7 +223,9 @@ func TestRunReturnsDeliveredSignalAndSubcommandFlagError(t *testing.T) {
 	})
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...codexacp.Option) error {
-		require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+		process, err := os.FindProcess(os.Getpid())
+		require.NoError(t, err)
+		require.NoError(t, process.Signal(syscall.SIGTERM))
 		<-ctx.Done()
 
 		return ctx.Err()
