@@ -368,8 +368,9 @@ func TestFailedDeleteLeavesRacingLoadRetriable(t *testing.T) {
 	ctx := context.Background()
 	store := &blockingDeleteSessionStore{
 		configurableStore: &configurableStore{
-			entries:   []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`)},
-			deleteErr: errors.New("store delete failed"),
+			entries:       []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`)},
+			configPresent: true,
+			deleteErr:     errors.New("store delete failed"),
 		},
 		started: make(chan struct{}),
 		release: make(chan struct{}),
@@ -1407,7 +1408,13 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 		t.Fatal("LoadSession active ignored store load error")
 	}
 
-	activeReplayErrStore := &configurableStore{entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)}}
+	activeReplayErrStore := &configurableStore{
+		entries: []SessionStoreEntry{
+			SessionStoreEntry(`{"type":"session_meta","payload":{"id":"active"}}`),
+			SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`),
+		},
+		configPresent: true,
+	}
 	activeReplayErrAgent := NewAgent(WithSessionStore(activeReplayErrStore))
 	activeReplayErrAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
 	activeReplayErrSession := newSession(activeReplayErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, newSpyCodexClient(), sessionMeta{}, nil)
@@ -1504,7 +1511,7 @@ func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
 
 func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	ctx := context.Background()
-	store := &configurableStore{}
+	store := &configurableStore{configPresent: true}
 	agent := NewAgent(WithSessionStore(store), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newSpyCodexClient(), nil
 	}))
@@ -1522,14 +1529,14 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 		t.Fatal("ResumeSession materialized returned nil meta")
 	}
 
-	loadAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+	loadAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries, configPresent: true}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newSpyCodexClient(), nil
 	}))
 	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("stored", "/tmp/project")); err != nil {
 		t.Fatalf("LoadSession materialized returned error: %v", err)
 	}
 
-	resumeErrAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+	resumeErrAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries, configPresent: true}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: codex.ErrThreadNotFound}, nil
 	}))
 	if _, err := resumeErrAgent.ResumeSession(ctx, ResumeSessionRequest("stored", "/tmp/project")); err == nil {
@@ -2442,6 +2449,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 
 	fixture := func(client codex.Client) (*Agent, *retainedRuntimeThread) {
 		agent := NewAgent()
+		appendTestDurableSessionConfig(t, agent.options.SessionStore, "session", nil, nil)
 		agent.runtimeClient = client
 		agent.runtimeEpoch = 9
 		retained := &retainedRuntimeThread{
@@ -2703,7 +2711,7 @@ func (c *blockingLifecycleCodexClient) resumeCallCount() int {
 
 func TestCloseSessionSerializesRetainedResume(t *testing.T) {
 	ctx := context.Background()
-	store := &configurableStore{}
+	store := &configurableStore{configPresent: true}
 	client := &blockingLifecycleCodexClient{
 		spyCodexClient:     newSpyCodexClient(),
 		unsubscribeStarted: make(chan struct{}),
@@ -2799,7 +2807,7 @@ func TestRetainedRuntimeClaimSerializesResumeAndDelete(t *testing.T) {
 	params := ResumeSessionRequest("session", "/tmp/project")
 
 	t.Run("double resume and delete lose to claimed resume", func(t *testing.T) {
-		store := &configurableStore{entries: entries}
+		store := &configurableStore{entries: entries, configPresent: true}
 		client := &blockingLifecycleCodexClient{
 			spyCodexClient: newSpyCodexClient(),
 			resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
@@ -3542,7 +3550,7 @@ func mapsEqual(got any, want map[string]any) bool {
 type configurableStore struct {
 	entries       []SessionStoreEntry
 	configEntries []SessionStoreEntry
-	configMissing bool
+	configPresent bool
 	summaries     []SessionSummary
 	loadErr       error
 	listErr       error
@@ -3575,7 +3583,7 @@ func (s *configurableStore) Load(_ context.Context, key SessionKey) ([]SessionSt
 		return nil, s.loadErr
 	}
 	if key.Subpath == sessionConfigStoreSubpath {
-		if s.configMissing {
+		if !s.configPresent {
 			return nil, nil
 		}
 		if s.configEntries != nil {

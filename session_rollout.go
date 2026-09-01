@@ -288,7 +288,11 @@ func (s *session) ensureMirrorSynced(ctx context.Context) error {
 	defer s.mirrorMu.Unlock()
 
 	store := s.agent.options.SessionStore
-	if store == nil || len(s.unsyncedEntries) == 0 {
+	if store == nil {
+		return nil
+	}
+
+	if len(s.unsyncedEntries) == 0 && (s.durableConfigRevision == 0 || s.durableConfigCommitted) {
 		return nil
 	}
 

@@ -1,12 +1,10 @@
 package codexacp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"slices"
 
@@ -14,8 +12,10 @@ import (
 )
 
 const (
-	sessionConfigStoreSubpath = "session-config/v1"
-	sessionConfigVersion      = 1
+	sessionConfigStoreSubpath  = "session-config/v1"
+	sessionConfigVersion       = 1
+	sessionConfigFieldVersion  = "version"
+	sessionConfigFieldRevision = "revision"
 )
 
 type durableSessionConfig struct {
@@ -102,16 +102,33 @@ func decodeDurableSessionConfig(entry SessionStoreEntry) (durableSessionConfig, 
 		return durableSessionConfig{}, err
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(entry))
-	decoder.DisallowUnknownFields()
-
-	var decoded durableSessionConfig
-	if err := decoder.Decode(&decoded); err != nil {
-		return durableSessionConfig{}, err
+	members, err := decodeExactJSONObject(entry)
+	if err != nil {
+		return durableSessionConfig{}, errors.New("session configuration must be one JSON object")
 	}
 
-	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return durableSessionConfig{}, errors.New("session configuration carries trailing input")
+	required := []string{sessionConfigFieldVersion, jsonFieldSessionID, sessionConfigFieldRevision, metaEnvKey, metaExtraPathDirsKey}
+	if len(members) != len(required) {
+		return durableSessionConfig{}, errors.New("session configuration has an unknown or missing field")
+	}
+
+	for _, name := range required {
+		if _, ok := members[name]; !ok {
+			return durableSessionConfig{}, fmt.Errorf("session configuration field %q is required", name)
+		}
+	}
+
+	var decoded durableSessionConfig
+	for name, target := range map[string]any{
+		sessionConfigFieldVersion:  &decoded.Version,
+		jsonFieldSessionID:         &decoded.SessionID,
+		sessionConfigFieldRevision: &decoded.Revision,
+		metaEnvKey:                 &decoded.Env,
+		metaExtraPathDirsKey:       &decoded.ExtraPathDirs,
+	} {
+		if decodeErr := json.Unmarshal(members[name], target); decodeErr != nil {
+			return durableSessionConfig{}, fmt.Errorf("decode session configuration field %q: %w", name, decodeErr)
+		}
 	}
 
 	if decoded.Version != sessionConfigVersion || decoded.SessionID == "" || decoded.Revision <= 0 ||
@@ -159,10 +176,12 @@ func resolveActiveSessionCarriers(meta sessionMeta, active *session) sessionMeta
 
 	if !meta.EnvPresent {
 		meta.Env = cloneStringMap(active.env)
+		meta.EnvPresent = true
 	}
 
 	if !meta.ExtraPathDirsPresent {
 		meta.ExtraPathDirs = cloneStrings(active.extraPathDirs)
+		meta.ExtraPathDirsPresent = true
 	}
 
 	return meta
@@ -174,6 +193,25 @@ func configureLoadedSessionPersistence(session *session, stored durableSessionCo
 
 	session.durableConfigRevision = stored.Revision
 	session.durableConfigCommitted = matches
+}
+
+func (s *session) pendingDurableSessionConfig(revision int) bool {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	return revision > 0 && s.durableConfigRevision == revision && !s.durableConfigCommitted
+}
+
+func (s *session) commitPendingDurableSessionConfig(ctx context.Context) error {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	store := s.agent.options.SessionStore
+	if store == nil || s.durableConfigRevision == 0 || s.durableConfigCommitted {
+		return nil
+	}
+
+	return s.commitDurableSessionConfig(ctx, store)
 }
 
 func nonNilStringMap(value map[string]string) map[string]string {

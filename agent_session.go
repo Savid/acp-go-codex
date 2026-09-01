@@ -691,6 +691,10 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		}
 		defer func() { resultErr = finish(resultErr) }()
 
+		if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
+			return acp.ResumeSessionResponse{}, err
+		}
+
 		models := modelList(ctx, session.client)
 		snapshot := session.snapshot()
 
@@ -734,12 +738,11 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	meta, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
 
 	if active := a.activeSession(params.SessionId); active != nil {
-		response, rebindErr := a.rebindActiveStoredSession(ctx, params, entries, meta, active, nil)
-		if rebindErr == nil {
+		return a.rebindActiveStoredSession(ctx, params, entries, meta, active, func() error {
 			configureLoadedSessionPersistence(active, storedConfig, configMatches)
-		}
 
-		return response, rebindErr
+			return active.commitPendingDurableSessionConfig(ctx)
+		})
 	}
 
 	retained, err := a.claimRetainedRuntimeThreadForStore(params.SessionId, rolloutNativeThreadID(entries))
@@ -750,10 +753,10 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	}
 
 	if retained != nil {
-		resp, resumed, resumeErr := a.resumeRetainedRuntimeSession(ctx, params, meta, retained)
-		if resumeErr == nil {
-			configureLoadedSessionPersistence(resumed, storedConfig, configMatches)
-		}
+		resp, _, resumeErr := a.resumeRetainedRuntimeSession(ctx, params, meta, retained, loadedSessionPersistence{
+			config:  storedConfig,
+			matches: configMatches,
+		})
 
 		return resp, resumeErr
 	}
@@ -810,7 +813,6 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	id := params.SessionId
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
-	configureLoadedSessionPersistence(session, storedConfig, configMatches)
 
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
 		_ = session.Close(context.TODO())
@@ -838,6 +840,14 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	configureLoadedSessionPersistence(session, storedConfig, configMatches)
+
+	if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.ResumeSessionResponse{}, err
+	}
+
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 
@@ -858,6 +868,7 @@ func (a *Agent) resumeRetainedRuntimeSession(
 	params acp.ResumeSessionRequest,
 	meta sessionMeta,
 	retained *retainedRuntimeThread,
+	persistence ...loadedSessionPersistence,
 ) (acp.ResumeSessionResponse, *session, error) {
 	releaseClaim := true
 	defer func() {
@@ -945,6 +956,14 @@ func (a *Agent) resumeRetainedRuntimeSession(
 		return acp.ResumeSessionResponse{}, nil, rollback(err)
 	}
 
+	if len(persistence) != 0 {
+		configureLoadedSessionPersistence(session, persistence[0].config, persistence[0].matches)
+	}
+
+	if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
+		return acp.ResumeSessionResponse{}, nil, rollback(err)
+	}
+
 	if err := a.storeRetainedRuntimeSession(session, retained); err != nil {
 		return acp.ResumeSessionResponse{}, nil, rollback(err)
 	}
@@ -956,6 +975,11 @@ func (a *Agent) resumeRetainedRuntimeSession(
 		Meta:          sessionResponseMeta(snapshot),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, session, nil
+}
+
+type loadedSessionPersistence struct {
+	config  durableSessionConfig
+	matches bool
 }
 
 // rebindActiveStoredSession refreshes lifecycle configuration without
@@ -1196,11 +1220,17 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		}
 
 		_, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
-		if !configMatches {
+		if !configMatches && !existing.pendingDurableSessionConfig(storedConfig.Revision) {
 			return acp.LoadSessionResponse{}, errors.New("active Codex session configuration does not match its durable record")
 		}
 
-		configureLoadedSessionPersistence(existing, storedConfig, true)
+		if configMatches {
+			configureLoadedSessionPersistence(existing, storedConfig, true)
+		}
+
+		if err := existing.commitPendingDurableSessionConfig(ctx); err != nil {
+			return acp.LoadSessionResponse{}, err
+		}
 
 		if replayErr := existing.replayRollout(ctx, storeEntries); replayErr != nil {
 			return acp.LoadSessionResponse{}, replayErr
@@ -1325,13 +1355,17 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	if active := a.activeSession(params.SessionId); active != nil {
 		resp, rebindErr := a.rebindActiveStoredSession(ctx, acp.ResumeSessionRequest(params), entries, meta, active, func() error {
+			configureLoadedSessionPersistence(active, storedConfig, configMatches)
+
+			if commitErr := active.commitPendingDurableSessionConfig(ctx); commitErr != nil {
+				return commitErr
+			}
+
 			return active.replayRollout(ctx, entries)
 		})
 		if rebindErr != nil {
 			return acp.LoadSessionResponse{}, rebindErr
 		}
-
-		configureLoadedSessionPersistence(active, storedConfig, configMatches)
 
 		return acp.LoadSessionResponse(resp), nil
 	}
@@ -1344,12 +1378,13 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	}
 
 	if retained != nil {
-		resp, active, resumeErr := a.resumeRetainedRuntimeSession(ctx, acp.ResumeSessionRequest(params), meta, retained)
+		resp, active, resumeErr := a.resumeRetainedRuntimeSession(ctx, acp.ResumeSessionRequest(params), meta, retained, loadedSessionPersistence{
+			config:  storedConfig,
+			matches: configMatches,
+		})
 		if resumeErr != nil {
 			return acp.LoadSessionResponse{}, resumeErr
 		}
-
-		configureLoadedSessionPersistence(active, storedConfig, configMatches)
 
 		if replayErr := active.replayRollout(ctx, entries); replayErr != nil {
 			_, closeErr := a.CloseSession(context.WithoutCancel(ctx), acp.CloseSessionRequest{SessionId: params.SessionId})
@@ -1410,7 +1445,6 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	id := params.SessionId
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
-	configureLoadedSessionPersistence(session, storedConfig, configMatches)
 
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
 		_ = session.Close(context.TODO())
@@ -1433,6 +1467,14 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	session.setAccount(clientAccountMeta(ctx, client))
 
 	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.LoadSessionResponse{}, err
+	}
+
+	configureLoadedSessionPersistence(session, storedConfig, configMatches)
+
+	if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
 		_ = session.Close(context.Background())
 
 		return acp.LoadSessionResponse{}, err

@@ -3,6 +3,8 @@
 This example reads a Codex rollout JSONL transcript from `session.jsonl` in this
 directory into a `SessionStore`, loads the session through ACP so previous
 interactions are replayed, then sends one no-tools smoke-test prompt in-process.
+The import also creates the required initial `session-config/v1` record with an
+empty session environment and no extra PATH directories.
 It denies tool permissions by default so a copied session cannot silently run
 commands while you are checking resume behavior.
 

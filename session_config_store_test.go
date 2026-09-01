@@ -82,6 +82,12 @@ func TestDurableSessionConfigRoundTripAndStrictReader(t *testing.T) {
 
 	for _, invalid := range []string{
 		`{"version":1,"sessionId":"session","revision":1,"env":{},"extraPathDirs":[],"extra":true}`,
+		`{"Version":1,"sessionId":"session","revision":1,"env":{},"extraPathDirs":[]}`,
+		`{"version":1,"SessionId":"session","revision":1,"env":{},"extraPathDirs":[]}`,
+		`{"version":1,"sessionId":"session","Revision":1,"env":{},"extraPathDirs":[]}`,
+		`{"version":1,"sessionId":"session","revision":1,"ENV":{},"extraPathDirs":[]}`,
+		`{"version":1,"sessionId":"session","revision":1,"env":{},"ExtraPathDirs":[]}`,
+		`{"version":1,"sessionId":"session","revision":1,"env":{},"Env":{},"extraPathDirs":[]}`,
 		`{"version":1,"sessionId":"session","revision":1,"env":{"A":"one","A":"two"},"extraPathDirs":[]}`,
 		`{"version":1,"sessionId":"session","revision":1,"env":null,"extraPathDirs":[]}`,
 		`{"version":1,"sessionId":"session","revision":1,"env":{},"extraPathDirs":null}`,
@@ -147,6 +153,28 @@ func TestResolveStoredSessionCarriersUsesOnlyOmittedValues(t *testing.T) {
 	require.Empty(t, explicit.ExtraPathDirs)
 }
 
+func TestResolveActiveSessionCarriersMakesInheritanceAuthoritative(t *testing.T) {
+	active := &session{
+		env:           map[string]string{"TOKEN": "active"},
+		extraPathDirs: []string{"/active"},
+	}
+
+	resolved := resolveActiveSessionCarriers(sessionMeta{}, active)
+	require.Equal(t, active.env, resolved.Env)
+	require.Equal(t, active.extraPathDirs, resolved.ExtraPathDirs)
+	require.True(t, resolved.EnvPresent)
+	require.True(t, resolved.ExtraPathDirsPresent)
+
+	stored := durableSessionConfig{
+		Env:           map[string]string{"TOKEN": "stale"},
+		ExtraPathDirs: []string{"/stale"},
+	}
+	resolved, matches := resolveStoredSessionCarriers(resolved, stored)
+	require.False(t, matches)
+	require.Equal(t, active.env, resolved.Env)
+	require.Equal(t, active.extraPathDirs, resolved.ExtraPathDirs)
+}
+
 func TestResumeSessionRestoresDurableSessionCarriers(t *testing.T) {
 	store := NewInMemorySessionStore()
 	entries := []SessionStoreEntry{
@@ -203,6 +231,278 @@ func TestResumeSessionRejectsMissingDurableSessionConfigBeforeNative(t *testing.
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	require.Empty(t, client.resume.ThreadID)
+}
+
+func TestConfigurableStoreDefaultsToMissingSessionConfiguration(t *testing.T) {
+	store := &configurableStore{entries: []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
+	}}
+	agent := NewAgent(WithSessionStore(store))
+
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest("logical-session", t.TempDir()))
+	require.ErrorContains(t, err, "stored Codex session configuration is required")
+}
+
+func TestMaterializedLifecycleCommitsChangedSessionCarriersBeforeSuccess(t *testing.T) {
+	for _, operation := range []struct {
+		name string
+		run  func(context.Context, *Agent, acp.SessionId, string, ...SessionRequestOption) error
+	}{
+		{
+			name: "resume",
+			run: func(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, options ...SessionRequestOption) error {
+				_, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, options...))
+
+				return err
+			},
+		},
+		{
+			name: "load",
+			run: func(ctx context.Context, agent *Agent, id acp.SessionId, cwd string, options ...SessionRequestOption) error {
+				_, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, options...))
+
+				return err
+			},
+		},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			id := acp.SessionId("logical-session")
+			require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+				SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
+			}))
+			appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+
+			client := newSpyCodexClient()
+			agent := NewAgent(
+				WithSessionStore(store),
+				withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+					return client, nil
+				}),
+			)
+			t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+			rotatedPath := t.TempDir()
+			err := operation.run(t.Context(), agent, id, t.TempDir(), WithSessionMeta(CodexOptions{
+				Env:           map[string]string{"TOKEN": "rotated"},
+				ExtraPathDirs: []string{rotatedPath},
+			}.Meta()))
+			require.NoError(t, err)
+
+			stored, err := agent.loadDurableSessionConfig(t.Context(), id)
+			require.NoError(t, err)
+			require.Equal(t, 2, stored.Revision)
+			require.Equal(t, map[string]string{"TOKEN": "rotated"}, stored.Env)
+			require.Equal(t, []string{rotatedPath}, stored.ExtraPathDirs)
+		})
+	}
+}
+
+func TestActiveLifecycleCommitsInheritedPendingSessionCarriers(t *testing.T) {
+	store := NewInMemorySessionStore()
+	id := acp.SessionId("logical-session")
+	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
+	}))
+	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+
+	client := newSpyCodexClient()
+	agent := NewAgent(WithSessionStore(store))
+	activeMeta := sessionMeta{
+		Env:           map[string]string{"TOKEN": "active"},
+		ExtraPathDirs: []string{"/active"},
+	}
+	active := newSession(agent, id, "/work", nil, codex.Thread{
+		ID:   "native-thread",
+		Path: "/native/rollout.jsonl",
+	}, client, activeMeta, nil)
+	active.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+		Cwd:      "/work",
+		Meta:     activeMeta,
+		ResumeID: string(id),
+	})
+	active.durableConfigRevision = 1
+	active.durableConfigCommitted = false
+	agent.sessions[id] = active
+	agent.runtimeClient = client
+	t.Cleanup(func() { active.fenceSession() })
+
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work"))
+	require.NoError(t, err)
+
+	stored, err := agent.loadDurableSessionConfig(t.Context(), id)
+	require.NoError(t, err)
+	require.Equal(t, 2, stored.Revision)
+	require.Equal(t, activeMeta.Env, stored.Env)
+	require.Equal(t, activeMeta.ExtraPathDirs, stored.ExtraPathDirs)
+}
+
+func TestActiveRebindCommitsChangedSessionCarriersBeforeSuccess(t *testing.T) {
+	store := NewInMemorySessionStore()
+	id := acp.SessionId("logical-session")
+	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
+	}))
+	storedPath := t.TempDir()
+	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{storedPath})
+
+	client := newSpyCodexClient()
+	agent := NewAgent(WithSessionStore(store))
+	activeMeta := sessionMeta{
+		Env:           map[string]string{"TOKEN": "stored"},
+		ExtraPathDirs: []string{storedPath},
+	}
+	active := newSession(agent, id, "/work", nil, codex.Thread{
+		ID:   "native-thread",
+		Path: "/native/rollout.jsonl",
+	}, client, activeMeta, nil)
+	active.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+		Cwd:      "/work",
+		Meta:     activeMeta,
+		ResumeID: string(id),
+	})
+	active.durableConfigRevision = 1
+	active.durableConfigCommitted = true
+	agent.sessions[id] = active
+	agent.runtimeClient = client
+	t.Cleanup(func() { active.fenceSession() })
+
+	rotatedPath := t.TempDir()
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work", WithSessionMeta(CodexOptions{
+		Env:           map[string]string{"TOKEN": "rotated"},
+		ExtraPathDirs: []string{rotatedPath},
+	}.Meta())))
+	require.NoError(t, err)
+
+	stored, err := agent.loadDurableSessionConfig(t.Context(), id)
+	require.NoError(t, err)
+	require.Equal(t, 2, stored.Revision)
+	require.Equal(t, map[string]string{"TOKEN": "rotated"}, stored.Env)
+	require.Equal(t, []string{rotatedPath}, stored.ExtraPathDirs)
+}
+
+func TestActiveRebindRetriesFailedConfigurationBeforeLaterSuccess(t *testing.T) {
+	withRolloutAppendSettings(t, time.Second, []time.Duration{0})
+
+	store := &failNextConfigAppendStore{InMemorySessionStore: NewInMemorySessionStore()}
+	id := acp.SessionId("logical-session")
+	require.NoError(t, store.InMemorySessionStore.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
+	}))
+	appendTestDurableSessionConfig(t, store.InMemorySessionStore, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+
+	client := newSpyCodexClient()
+	agent := NewAgent(WithSessionStore(store))
+	activeMeta := sessionMeta{
+		Env:           map[string]string{"TOKEN": "stored"},
+		ExtraPathDirs: []string{"/stored"},
+	}
+	active := newSession(agent, id, "/work", nil, codex.Thread{
+		ID:   "native-thread",
+		Path: "/native/rollout.jsonl",
+	}, client, activeMeta, nil)
+	active.fingerprint = codexSessionStartFingerprint(codexSessionStart{
+		Cwd:      "/work",
+		Meta:     activeMeta,
+		ResumeID: string(id),
+	})
+	active.durableConfigRevision = 1
+	active.durableConfigCommitted = true
+	agent.sessions[id] = active
+	agent.runtimeClient = client
+	t.Cleanup(func() { active.fenceSession() })
+
+	store.fail = true
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work", WithSessionMeta(CodexOptions{
+		Env:           map[string]string{"TOKEN": "rotated"},
+		ExtraPathDirs: []string{"/rotated"},
+	}.Meta())))
+	require.ErrorContains(t, err, "configuration append failed")
+	require.True(t, active.pendingDurableSessionConfig(1))
+
+	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work"))
+	require.NoError(t, err)
+
+	stored, err := agent.loadDurableSessionConfig(t.Context(), id)
+	require.NoError(t, err)
+	require.Equal(t, 2, stored.Revision)
+	require.Equal(t, map[string]string{"TOKEN": "rotated"}, stored.Env)
+	require.Equal(t, []string{"/rotated"}, stored.ExtraPathDirs)
+}
+
+type failNextConfigAppendStore struct {
+	*InMemorySessionStore
+	fail bool
+}
+
+func (s *failNextConfigAppendStore) Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
+	if key.Subpath == sessionConfigStoreSubpath && s.fail {
+		s.fail = false
+
+		return errors.New("configuration append failed")
+	}
+
+	return s.InMemorySessionStore.Append(ctx, key, entries)
+}
+
+func TestRetainedResumeCommitsChangedSessionCarriersBeforePublication(t *testing.T) {
+	store := NewInMemorySessionStore()
+	id := acp.SessionId("logical-session")
+	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
+	}))
+	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+
+	client := newSpyCodexClient()
+	agent := NewAgent(WithSessionStore(store))
+	agent.runtimeClient = client
+	agent.runtimeEpoch = 7
+	agent.retainedThreads[id] = &retainedRuntimeThread{
+		sessionID: id,
+		threadID:  "native-thread",
+		path:      "/native/rollout.jsonl",
+		client:    client,
+		epoch:     7,
+	}
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	rotatedPath := t.TempDir()
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work", WithSessionMeta(CodexOptions{
+		Env:           map[string]string{"TOKEN": "rotated"},
+		ExtraPathDirs: []string{rotatedPath},
+	}.Meta())))
+	require.NoError(t, err)
+	require.NotNil(t, agent.activeSession(id))
+
+	stored, err := agent.loadDurableSessionConfig(t.Context(), id)
+	require.NoError(t, err)
+	require.Equal(t, 2, stored.Revision)
+	require.Equal(t, map[string]string{"TOKEN": "rotated"}, stored.Env)
+	require.Equal(t, []string{rotatedPath}, stored.ExtraPathDirs)
+}
+
+func TestCloseCommitsChangedSessionCarriersWithoutPromptRows(t *testing.T) {
+	store := NewInMemorySessionStore()
+	id := acp.SessionId("logical-session")
+	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+
+	agent := NewAgent(WithSessionStore(store))
+	session := &session{
+		agent:                  agent,
+		id:                     id,
+		env:                    map[string]string{"TOKEN": "rotated"},
+		extraPathDirs:          []string{"/rotated"},
+		closeContained:         true,
+		durableConfigRevision:  1,
+		durableConfigCommitted: false,
+	}
+
+	require.NoError(t, session.Close(t.Context()))
+	stored, err := agent.loadDurableSessionConfig(t.Context(), id)
+	require.NoError(t, err)
+	require.Equal(t, 2, stored.Revision)
+	require.Equal(t, session.env, stored.Env)
+	require.Equal(t, session.extraPathDirs, stored.ExtraPathDirs)
 }
 
 func TestRolloutCommitPlacesChangedConfigRevisionBeforeMainRows(t *testing.T) {

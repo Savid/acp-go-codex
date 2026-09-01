@@ -84,6 +84,22 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 		entries, err := store.Load(context.Background(), codexacp.SessionKey{SessionID: sessionID})
 		require.NoError(t, err)
 		require.Len(t, entries, 2)
+		configuration, err := store.Load(context.Background(), codexacp.SessionKey{
+			SessionID: sessionID,
+			Subpath:   sessionConfigurationSubpath,
+		})
+		require.NoError(t, err)
+		require.Len(t, configuration, 1)
+
+		var decoded sessionConfiguration
+		require.NoError(t, json.Unmarshal(configuration[0], &decoded))
+		require.Equal(t, sessionConfiguration{
+			Version:       1,
+			SessionID:     sessionID,
+			Revision:      1,
+			Env:           map[string]string{},
+			ExtraPathDirs: []string{},
+		}, decoded)
 		fmt.Fprint(stdout, "loaded")
 
 		return nil
