@@ -274,6 +274,17 @@ func TestAllowedImageFileMaterialization(t *testing.T) {
 
 	require.Len(t, s.allowedImageRoots(), 5)
 
+	managed := NewAgent(
+		WithHome(home),
+		WithScratchDir(scratch),
+		WithHostAuthority(newTraceAuthority(t.TempDir())),
+	)
+	managed.runtimeScratchRoot = agent.runtimeScratchRoot
+	managedSession := &session{agent: managed, id: "managed-paths", cwd: workspace}
+	require.NotContains(t, managedSession.allowedImageRoots(), generated)
+	_, _, err = managedSession.readAllowedImageFile(filepath.Join(generated, "image.png"))
+	requireImageOutputReason(t, err, imageOutputPathDenied)
+
 	_, _, err = s.readAllowedImageFile(filepath.Join(workspace, "missing.png"))
 	requireImageOutputReason(t, err, imageOutputMissingFile)
 
