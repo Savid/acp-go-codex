@@ -21,6 +21,11 @@ type rolloutRow struct {
 
 const valueAgentMessageCamel = "agentMessage"
 
+// rolloutFieldOrdinal is the monotonic row counter Codex writes alongside every
+// rollout row. The adapter never reads it: rows are placed by file order, and
+// the field is accepted so a strict row check does not refuse native output.
+const rolloutFieldOrdinal = "ordinal"
+
 func rolloutNativeThreadID(entries []SessionStoreEntry) string {
 	for _, entry := range entries {
 		row, err := decodeRolloutRow(entry)
@@ -165,7 +170,7 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 
 	for name := range members {
 		switch name {
-		case "timestamp", jsonFieldType, "payload":
+		case "timestamp", jsonFieldType, "payload", rolloutFieldOrdinal:
 		default:
 			return rolloutRow{}, fmt.Errorf("unknown rollout row field %q", name)
 		}
@@ -185,6 +190,13 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 		var timestamp string
 		if json.Unmarshal(rawTimestamp, &timestamp) != nil || timestamp == "" {
 			return rolloutRow{}, errors.New("timestamp must be a non-empty string")
+		}
+	}
+
+	if rawOrdinal, ok := members[rolloutFieldOrdinal]; ok {
+		var ordinal uint64
+		if json.Unmarshal(rawOrdinal, &ordinal) != nil {
+			return rolloutRow{}, errors.New("ordinal must be a non-negative integer")
 		}
 	}
 

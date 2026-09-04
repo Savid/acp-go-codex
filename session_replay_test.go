@@ -93,12 +93,17 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	if err != nil || row.Payload == nil {
 		t.Fatalf("decodeRolloutRow valid row=%#v err=%v", row, err)
 	}
+	ordinalRow, err := decodeRolloutRow(SessionStoreEntry(`{"timestamp":"2026-01-01T00:00:00Z","ordinal":7,"type":"event_msg","payload":{}}`))
+	if err != nil || ordinalRow.Type != "event_msg" {
+		t.Fatalf("decodeRolloutRow ordinal row=%#v err=%v", ordinalRow, err)
+	}
 	for _, invalid := range []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"event_msg","type":"event_msg","payload":{}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"nested":1,"nested":2}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{},"unknown":true}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{}} {}`),
 		SessionStoreEntry(`{"timestamp":1,"type":"event_msg","payload":{}}`),
+		SessionStoreEntry(`{"ordinal":-1,"type":"event_msg","payload":{}}`),
 	} {
 		if _, err := decodeRolloutRow(invalid); err == nil {
 			t.Fatalf("decodeRolloutRow accepted %s", invalid)

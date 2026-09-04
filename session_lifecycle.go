@@ -498,9 +498,9 @@ func (s *session) prepareNativeEventRebind() error {
 	s.nativeEventRebinding = false
 	s.nativeEventOpened = false
 	s.preOpenEvents = append(s.preOpenEvents, pending...)
-	s.terminalNativeTurns = nil
-	s.terminalNativeTurnOrder = nil
-	s.terminalNativeTurnNext = 0
+	// The tombstones outlive the rebind. A rebind re-attaches the same native
+	// thread, so the app-server keeps the turn identities it already settled and
+	// can still flush a trailing frame for one of them afterwards.
 	s.signalLifecycleChangedLocked()
 	s.lifecycleMu.Unlock()
 
@@ -1306,6 +1306,24 @@ func (s *session) routeNativeEventWithPumpOwnership(event codex.Event, nativePum
 	return s.routeNativeEventLockedWithPumpOwnership(routeCtx, event, nativePumpOwned)
 }
 
+// nativeTurnBoundLocked reports whether a live cycle already acknowledged this
+// exact native turn and therefore still owns the frames it emits.
+func (s *session) nativeTurnBoundLocked(nativeTurnID string) bool {
+	if canary := s.nativeCanary; canary != nil && canary.turnID == nativeTurnID {
+		return true
+	}
+
+	if current := s.incarnation; current != nil && current.nativeTurnID == nativeTurnID {
+		return true
+	}
+
+	if current := s.agentIncarnation; current != nil && current.nativeTurnID == nativeTurnID {
+		return true
+	}
+
+	return false
+}
+
 func (s *session) routeNativeEventLocked(ctx context.Context, event codex.Event) error {
 	return s.routeNativeEventLockedWithPumpOwnership(ctx, event, false)
 }
@@ -1333,6 +1351,18 @@ func (s *session) routeNativeEventLockedWithPumpOwnership(
 
 	if event.TurnID == "" {
 		return s.applyTurnlessThreadEventLocked(ctx, event)
+	}
+
+	// A settled turn keeps flushing: a late token-usage update, a completed item
+	// racing its turn terminal. The tombstone is read here, before any pre-bind
+	// prefix or rebind queue can hold the event, because a trailing frame that
+	// outlives its turn must never be carried into the next one — the
+	// acknowledgement of that turn would then read it as a concurrent native
+	// foreground turn and fail a prompt nothing was wrong with. A cycle that
+	// already acknowledged this exact turn still owns its stream, so the drop
+	// applies only to a frame no live cycle is bound to.
+	if _, terminal := s.terminalNativeTurns[event.TurnID]; terminal && !s.nativeTurnBoundLocked(event.TurnID) {
+		return nil
 	}
 
 	if canary := s.nativeCanary; canary != nil {
@@ -1499,13 +1529,6 @@ func (s *session) routeAutonomousEventLockedWithPumpOwnership(
 
 		ctx, cancel = context.WithTimeout(ctx, promptSettlementTimeout)
 		defer cancel()
-	}
-
-	// A settled turn keeps flushing: a late token-usage update, a completed item
-	// racing its turn terminal. None of it reopens the turn, and none of it is
-	// the start of a new one.
-	if _, terminal := s.terminalNativeTurns[event.TurnID]; terminal {
-		return nil
 	}
 
 	if s.incarnation != nil {

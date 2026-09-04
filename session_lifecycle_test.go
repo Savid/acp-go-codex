@@ -2014,6 +2014,19 @@ func TestAutonomousRoutingDropsTerminalAndRejectsConcurrentTurns(t *testing.T) {
 	require.NoError(t, s.routeNativeEvent(event("terminal")))
 	require.Nil(t, s.agentIncarnation)
 
+	// A cycle that already acknowledged the tombstoned turn still owns its
+	// frames, so the trailing-frame drop must not take them away from it.
+	s = newAutonomousSession(t)
+	s.terminalNativeTurns = map[string]struct{}{"terminal": {}}
+	s.nativeCanary = &nativeCanary{turnID: "terminal", events: make(chan codex.Event, sessionNativeEventBuffer)}
+	require.NoError(t, s.routeNativeEvent(event("terminal")))
+	require.Len(t, s.nativeCanary.events, 1)
+
+	s = newAutonomousSession(t)
+	s.terminalNativeTurns = map[string]struct{}{"terminal": {}}
+	s.agentIncarnation = &promptIncarnation{nativeTurnID: "terminal", terminating: &turnContainment{}}
+	require.NoError(t, s.routeNativeEvent(event("terminal")))
+
 	s = newAutonomousSession(t)
 	s.agentIncarnation = &promptIncarnation{nativeTurnID: "one"}
 	require.ErrorContains(t, s.routeNativeEvent(event("two")), "concurrent agent-origin")

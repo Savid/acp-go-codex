@@ -1025,6 +1025,16 @@ func (a *Agent) rebindActiveStoredSession(
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
+	// Codex ignores thread/resume overrides for a thread the app-server still
+	// holds loaded, so the rotated configuration only lands once the thread is
+	// dropped from it. Admission already holds this session's turn, so no native
+	// turn can be running across the drop, and a resume that fails afterwards
+	// leaves the thread unloaded — the dead-client mark is what makes the next
+	// request revive it instead of prompting a thread the app-server released.
+	if unsubscribeErr := client.UnsubscribeThread(ctx, ownedThreadID); unsubscribeErr != nil {
+		return acp.ResumeSessionResponse{}, codexThreadACPError(unsubscribeErr, active.accountMetaSnapshot())
+	}
+
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      ownedThreadID,
 		Path:          ownedPath,
@@ -1034,6 +1044,8 @@ func (a *Agent) rebindActiveStoredSession(
 		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
+		active.setClientDead(true)
+
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, active.accountMetaSnapshot())
 	}
 

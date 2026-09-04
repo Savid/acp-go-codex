@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1887,6 +1888,26 @@ func (c *activeRolloutPathClient) ResumeThread(ctx context.Context, req codex.Th
 	return thread, nil
 }
 
+type activeRolloutPathCalls struct {
+	resumeCount  int
+	resume       codex.ThreadResumeRequest
+	unsubscribed []string
+}
+
+// snapshot reads the recorded native calls without leaving the client mutex
+// held: a failed assertion inside a manual lock/unlock pair unwinds through
+// Goexit and would deadlock the agent close that runs during cleanup.
+func (c *activeRolloutPathClient) snapshot() activeRolloutPathCalls {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return activeRolloutPathCalls{
+		resumeCount:  c.resumeCount,
+		resume:       c.resume,
+		unsubscribed: slices.Clone(c.unsubscribed),
+	}
+}
+
 func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	c.mu.Lock()
 	c.lastTurn = req
@@ -1956,10 +1977,9 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, agent.activeSession(created.SessionId))
 
-	client.mu.Lock()
-	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
-	require.Zero(t, client.resumeCount)
-	client.mu.Unlock()
+	calls := client.snapshot()
+	require.Equal(t, []string{nativeThreadID}, calls.unsubscribed)
+	require.Zero(t, calls.resumeCount)
 
 	hijackID := acp.SessionId("other-logical-session")
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(hijackID)}, []SessionStoreReplacement{{
@@ -2000,12 +2020,11 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NotNil(t, resumedActive)
 	require.NotSame(t, active, resumedActive)
 
-	client.mu.Lock()
-	require.Equal(t, 1, client.resumeCount)
-	require.Equal(t, nativeThreadID, client.resume.ThreadID)
-	require.Equal(t, nativePath, client.resume.Path)
-	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
-	client.mu.Unlock()
+	calls = client.snapshot()
+	require.Equal(t, 1, calls.resumeCount)
+	require.Equal(t, nativeThreadID, calls.resume.ThreadID)
+	require.Equal(t, nativePath, calls.resume.Path)
+	require.Equal(t, []string{nativeThreadID}, calls.unsubscribed)
 
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(
 		created.SessionId,
@@ -2015,11 +2034,12 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, resumedActive, agent.activeSession(created.SessionId))
 
-	client.mu.Lock()
-	require.Equal(t, 2, client.resumeCount)
-	require.Equal(t, nativePath, client.resume.Path)
-	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
-	client.mu.Unlock()
+	// The active rebind drops the thread from the app-server before resuming it,
+	// because Codex ignores resume overrides for a thread it still holds loaded.
+	calls = client.snapshot()
+	require.Equal(t, 2, calls.resumeCount)
+	require.Equal(t, nativePath, calls.resume.Path)
+	require.Equal(t, []string{nativeThreadID, nativeThreadID}, calls.unsubscribed)
 
 	agent.setAgentClient(&errorAgentClient{
 		recordingAgentClient: newRecordingAgentClient(),
@@ -2047,9 +2067,8 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	))
 	require.ErrorContains(t, err, "stored Codex thread does not match the active session")
 
-	client.mu.Lock()
-	require.Equal(t, 3, client.resumeCount, "wrong-thread snapshot reached Codex")
-	client.mu.Unlock()
+	calls = client.snapshot()
+	require.Equal(t, 3, calls.resumeCount, "wrong-thread snapshot reached Codex")
 }
 
 type activeRebindEdgeClient struct {
@@ -2188,12 +2207,36 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("unsubscribe failure keeps the thread loaded", func(t *testing.T) {
+		client := &errorCodexClient{
+			spyCodexClient: newSpyCodexClient(),
+			unsubscribeErr: errors.New("unsubscribe failed"),
+		}
+		agent := NewAgent()
+		active := bind(agent, client)
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "unsubscribe failed")
+		require.Empty(t, client.resume.ThreadID)
+
+		active.mu.Lock()
+		dead := active.clientDead
+		active.mu.Unlock()
+		require.False(t, dead)
+	})
+
 	t.Run("native resume failure", func(t *testing.T) {
 		client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("resume failed")}
 		agent := NewAgent()
 		active := bind(agent, client)
 		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
 		require.ErrorContains(t, err, "resume failed")
+
+		// The thread was dropped from the app-server before the resume, so the
+		// dead mark is what makes the next request revive it.
+		active.mu.Lock()
+		dead := active.clientDead
+		active.mu.Unlock()
+		require.True(t, dead)
 	})
 
 	for _, tc := range []struct {

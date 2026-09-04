@@ -78,9 +78,11 @@ policy.
 </Warning>
 
 Every loaded rollout row is one closed JSON object containing `type`, `payload`,
-and an optional non-empty string `timestamp`. `type` must be a non-empty string,
-`payload` must be an object, and duplicate keys at any depth, unknown top-level
-members, malformed values, or trailing input are refused. A stored rollout must
+an optional non-empty string `timestamp`, and an optional non-negative integer
+`ordinal`. `type` must be a non-empty string, `payload` must be an object, and
+duplicate keys at any depth, unknown top-level members, malformed values, or
+trailing input are refused. Rows are placed by file order, so `ordinal` is
+accepted and never read. A stored rollout must
 contain exactly one `session_meta` row with a non-empty native thread id.
 
 The adapter derives the terminal native checkpoint from these unmodified rows:
