@@ -3,9 +3,16 @@ package codexacp
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 )
+
+// errPartialNativeAppendLogRecord names a rollout row the native side has begun
+// but not finished: bytes after the last newline are a record still being
+// written, and a read that lands there fails closed rather than handing back a
+// half row the mirror would then commit as terminal evidence.
+var errPartialNativeAppendLogRecord = errors.New("native append-log ends inside a record")
 
 func readOrdinaryNativeAppendLog(path string, after uint64) ([]SessionStoreEntry, error) {
 	file, err := os.Open(path)
@@ -16,6 +23,7 @@ func readOrdinaryNativeAppendLog(path string, after uint64) ([]SessionStoreEntry
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(nil, maxSessionImportLineBytes)
+	scanner.Split(scanTerminatedLines)
 
 	var row uint64
 
@@ -43,4 +51,23 @@ func readOrdinaryNativeAppendLog(path string, after uint64) ([]SessionStoreEntry
 	}
 
 	return records, nil
+}
+
+// scanTerminatedLines is bufio.ScanLines with one difference: a final line the
+// file does not terminate is not a record. Trailing whitespace is a complete
+// file; anything else after the last newline is a row still being appended.
+func scanTerminatedLines(data []byte, atEOF bool) (int, []byte, error) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return i + 1, bytes.TrimSuffix(data[:i], []byte{'\r'}), nil
+	}
+
+	if !atEOF {
+		return 0, nil, nil
+	}
+
+	if len(bytes.TrimSpace(data)) == 0 {
+		return len(data), nil, nil
+	}
+
+	return 0, nil, errPartialNativeAppendLogRecord
 }
