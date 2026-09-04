@@ -24,6 +24,11 @@ const (
 		")\r\n" +
 		"echo %* > \"%ACCOUNT_LOG%\"\r\n"
 
+	fakeCLITailStreams = "@echo off\r\n" +
+		"echo codex stdout tail\r\n" +
+		">&2 echo codex stderr tail\r\n" +
+		"exit /b 0\r\n"
+
 	fakeCLIAppServer = "@echo off\r\n" +
 		"if \"%~1\"==\"--version\" (\r\n" +
 		"  echo codex-cli 0.144.1\r\n" +

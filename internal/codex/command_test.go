@@ -97,18 +97,26 @@ func TestOrdinaryNativeWaitAndRevoke(t *testing.T) {
 		Executable: "/bin/sh", Arguments: []string{"-c", "exit 7"}, Environment: os.Environ(),
 	}, Options{skipHomeLock: true})
 	require.NoError(t, err)
+	// The ordinary backend owns both ends of every pipe, so this process holds
+	// the parent ends until it releases them itself.
+	defer func() {
+		require.NoError(t, closeNativePipes(native.Stdin(), native.Stdout(), native.Stderr()))
+	}()
 	result, err := native.Wait(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 7, result.ExitCode)
 
-	native, err = startOrdinaryNative(t.Context(), NativeRequest{
+	revoked, err := startOrdinaryNative(t.Context(), NativeRequest{
 		Executable: "/bin/sh", Arguments: []string{"-c", "sleep 30"}, Environment: os.Environ(),
 	}, Options{skipHomeLock: true})
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, closeNativePipes(revoked.Stdin(), revoked.Stdout(), revoked.Stderr()))
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	require.NoError(t, native.Revoke(ctx))
-	result, err = native.Wait(ctx)
+	require.NoError(t, revoked.Revoke(ctx))
+	result, err = revoked.Wait(ctx)
 	require.NoError(t, err)
 	require.True(t, result.Revoked)
 }
