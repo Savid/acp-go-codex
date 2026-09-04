@@ -55,15 +55,20 @@ func TestCodexCLIRawExtensionNotifications(t *testing.T) {
 		t.Fatalf("stop reason = %s", resp.StopReason)
 	}
 
+	// The raw event carries the app-server notification verbatim plus the
+	// method that delivered it, so the agent message arrives as a completed
+	// agentMessage item rather than a legacy event_msg envelope.
 	eventually(t, 30*time.Second, 250*time.Millisecond, func() bool {
 		for _, notification := range client.extensionSnapshot() {
 			event, _ := notification.Params["event"].(map[string]any)
-			payload, _ := event["payload"].(map[string]any)
+			item, _ := event["item"].(map[string]any)
 			if notification.Method == codexacp.RawEventMethod &&
-				len(notification.Params) == 4 &&
 				notification.Params["sessionId"] == string(session.SessionId) &&
-				event["type"] == "event_msg" &&
-				payload["type"] == "agent_message" {
+				notification.Params["source"] == "codex-app-server" &&
+				notification.Params["sequence"] != nil &&
+				notification.Params["_meta"] != nil &&
+				event["method"] == "item/completed" &&
+				item["type"] == "agentMessage" {
 				return true
 			}
 		}
@@ -186,8 +191,10 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 		t.Fatalf("close first session: %v", err)
 	}
 
+	// Resume addresses the ACP session ID. The native Codex thread ID is
+	// adapter-internal state a host never routes on.
 	resumed, err := conn.ResumeSession(ctx, acp.ResumeSessionRequest{
-		SessionId:  acp.SessionId(threadID),
+		SessionId:  first.SessionId,
 		Cwd:        cwd,
 		McpServers: []acp.McpServer{},
 	})
@@ -197,12 +204,15 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 	if resumed.ConfigOptions == nil {
 		t.Fatalf("resume config options missing: %#v", resumed)
 	}
+	if codexThreadID(resumed.Meta) != threadID {
+		t.Fatalf("resume rebound a different Codex thread: %#v", resumed.Meta)
+	}
 
 	client.resetRecordedOutput()
 	resp = promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, acp.PromptRequest{
 			Meta:      newTurnRouteMeta(),
-			SessionId: acp.SessionId(threadID),
+			SessionId: first.SessionId,
 			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply exactly ACP_RESUME_OK.")},
 		})
 	})
@@ -214,14 +224,14 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 	}
 
 	fork, err := codexacp.CallForkSession(ctx, conn, acp.UnstableForkSessionRequest{
-		SessionId:  acp.SessionId(threadID),
+		SessionId:  first.SessionId,
 		Cwd:        cwd,
 		McpServers: []acp.UnstableMcpServer{},
 	})
 	if err != nil {
 		t.Fatalf("fork session: %v", err)
 	}
-	if fork.SessionId == "" || fork.SessionId == acp.SessionId(threadID) {
+	if fork.SessionId == "" || fork.SessionId == first.SessionId {
 		t.Fatalf("bad fork response: %#v", fork)
 	}
 
@@ -239,7 +249,7 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 		session acp.SessionId
 		text    string
 	}{
-		{acp.SessionId(threadID), "ACP_CONCURRENT_ONE"},
+		{first.SessionId, "ACP_CONCURRENT_ONE"},
 		{second.SessionId, "ACP_CONCURRENT_TWO"},
 	} {
 		go func() {
@@ -262,7 +272,7 @@ func TestCodexCLIResumeForkAndConcurrentSessions(t *testing.T) {
 		})
 	}
 
-	for _, id := range []acp.SessionId{acp.SessionId(threadID), fork.SessionId, second.SessionId} {
+	for _, id := range []acp.SessionId{first.SessionId, fork.SessionId, second.SessionId} {
 		if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id}); err != nil {
 			t.Fatalf("close session %s: %v", id, err)
 		}

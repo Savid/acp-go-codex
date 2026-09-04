@@ -212,17 +212,17 @@ func TestOrdinaryNativeConstructionAndWaitEdges(t *testing.T) {
 		func(cmd *exec.Cmd) { cmd.Stderr = io.Discard },
 	} {
 		ordinaryExecCommand = func(string, ...string) *exec.Cmd {
-			cmd := exec.Command("/bin/true")
+			cmd := exec.Command(trueExecutable(t))
 			configure(cmd)
 
 			return cmd
 		}
-		_, err = startOrdinaryNative(t.Context(), NativeRequest{Executable: "/bin/true"}, Options{skipHomeLock: true})
+		_, err = startOrdinaryNative(t.Context(), NativeRequest{Executable: trueExecutable(t)}, Options{skipHomeLock: true})
 		require.Error(t, err)
 	}
 	ordinaryExecCommand = originalCommand
 
-	_, err = startOrdinaryNative(t.Context(), NativeRequest{Executable: "/bin/true"}, Options{})
+	_, err = startOrdinaryNative(t.Context(), NativeRequest{Executable: trueExecutable(t)}, Options{})
 	require.Error(t, err)
 
 	scratch, home := t.TempDir(), t.TempDir()
@@ -231,10 +231,10 @@ func TestOrdinaryNativeConstructionAndWaitEdges(t *testing.T) {
 	lock, err := homelock.Acquire(lockRoot)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, lock.Release()) })
-	_, err = startOrdinaryNative(t.Context(), NativeRequest{Executable: "/bin/true"}, Options{ScratchParent: scratch, WritableHome: home})
+	_, err = startOrdinaryNative(t.Context(), NativeRequest{Executable: trueExecutable(t)}, Options{ScratchParent: scratch, WritableHome: home})
 	require.Error(t, err)
 
-	notStarted := &ordinaryNativeProcess{cmd: exec.Command("/bin/true"), done: make(chan struct{})}
+	notStarted := &ordinaryNativeProcess{cmd: exec.Command(trueExecutable(t)), done: make(chan struct{})}
 	_, err = notStarted.Wait(t.Context())
 	require.Error(t, err)
 
@@ -274,7 +274,7 @@ func TestUnixSignalProcessEdges(t *testing.T) {
 	t.Cleanup(func() {
 		getProcessGroupID, killProcessID, signalOneProcess = originalPGID, originalKill, originalSignal
 	})
-	doneCommand := exec.Command("/bin/true")
+	doneCommand := exec.Command(trueExecutable(t))
 	require.NoError(t, doneCommand.Run())
 	require.ErrorIs(t, signalOneProcess(doneCommand.Process, syscall.SIGTERM), os.ErrProcessDone)
 	cmd := &exec.Cmd{Process: &os.Process{Pid: 12345}}
@@ -372,7 +372,7 @@ func TestRunAccountCommandCoverageEdges(t *testing.T) {
 	SetScratchParentResolver(func(string) (string, error) { return t.TempDir(), nil })
 
 	base := AccountCommandOptions{
-		CLIPath: "/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
+		CLIPath: trueExecutable(t), CodexHome: t.TempDir(), Mode: accountCommandLogout,
 		ImplicitEnvironment: map[string]string{"PATH": "/bin"},
 	}
 	invalidEnvironment := base
@@ -462,4 +462,15 @@ func TestRunAccountNativeCoverageEdges(t *testing.T) {
 	require.ErrorIs(t, accountCopyError(copyErr), copyErr)
 	var output bytes.Buffer
 	require.Same(t, &output, writerOrDiscard(&output))
+}
+
+// trueExecutable resolves the platform's no-op executable through PATH, since
+// coreutils installs it under /usr/bin on macOS and /bin on most Linux hosts.
+func trueExecutable(t *testing.T) string {
+	t.Helper()
+
+	path, err := exec.LookPath("true")
+	require.NoError(t, err)
+
+	return path
 }

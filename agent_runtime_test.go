@@ -39,6 +39,22 @@ func (c *observedDoneContext) Done() <-chan struct{} {
 	return c.Context.Done()
 }
 
+// countedDoneContext closes second on the second Done call, which lets a
+// test order itself after a select statement re-consults the context.
+type countedDoneContext struct {
+	context.Context //nolint:containedctx // Test wrapper observes the exact Done calls.
+	second          chan struct{}
+	calls           atomic.Int64
+}
+
+func (c *countedDoneContext) Done() <-chan struct{} {
+	if c.calls.Add(1) == 2 {
+		close(c.second)
+	}
+
+	return c.Context.Done()
+}
+
 type mismatchedResumeClient struct{ *runtimeRecordingClient }
 
 type blockingCloseRuntimeClient struct {

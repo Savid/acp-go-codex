@@ -607,7 +607,10 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 
 	t.Run("early request returns after successful registration write", func(t *testing.T) {
 		writer := newRequestRegistrationWriter(io.Discard)
-		observedCtx := &observedDoneContext{Context: t.Context(), observed: make(chan struct{})}
+		// The barrier consults ctx.Done() once in its outer select and a second
+		// time only after it has taken the early response, so the second call
+		// proves the early branch is armed before the registration write lands.
+		observedCtx := &countedDoneContext{Context: t.Context(), second: make(chan struct{})}
 		done := make(chan registeredActionResult[int], 1)
 		go func() {
 			value, callErr := registeredActionRequest[int](observedCtx, writer, "success", nil, nil, func(context.Context) (int, error) {
@@ -621,7 +624,7 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 
 			return writer.pending["success"] != nil
 		}, time.Second, time.Millisecond)
-		<-observedCtx.observed
+		<-observedCtx.second
 		_, err := writer.Write(wirePayload("success"))
 		require.NoError(t, err)
 		result := <-done
