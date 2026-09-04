@@ -986,10 +986,14 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 
 	completedUsageConn := newRecordingAgentClient()
 	usageAgent.setAgentClient(completedUsageConn)
+	// Codex never reuses a turn id, and the settled "turn" above is tombstoned
+	// across the rebind, so the second prompt's native turn carries its own id:
+	// a frame for a tombstoned turn that no live cycle owns is dropped, and the
+	// fake publishes its events before the prompt has bound the returned turn.
 	usageSession.client = &runEventsClient{events: []codex.Event{{
 		Kind:     codex.EventCompleted,
 		ThreadID: "thread",
-		TurnID:   "turn",
+		TurnID:   "turn-2",
 		Usage:    codex.Usage{InputTokens: 1, OutputTokens: 2},
 	}}}
 	require.NoError(t, usageSession.rebindNativeEvents(usageSession.client))

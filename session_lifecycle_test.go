@@ -3306,7 +3306,10 @@ func rolloutFixture(t *testing.T, session *session, lines ...string) string {
 func writeRolloutLines(t *testing.T, path string, lines ...string) {
 	t.Helper()
 
-	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600))
+	// Every rollout row the harness has finished ends in a newline; a torn row
+	// written through here is a complete but malformed row, not an unfinished
+	// one, and readOrdinaryNativeAppendLog's own proof covers the unfinished case.
+	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
 }
 
 // TestCloseRecapturesAPrefixNoSettlementCaptured pins the close rung against the

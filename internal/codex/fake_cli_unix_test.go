@@ -26,6 +26,12 @@ fi
 printf '%s' "$*" > "$ACCOUNT_LOG"
 `
 
+	fakeCLITailStreams = `#!/bin/sh
+printf '%s\n' 'codex stdout tail'
+printf '%s\n' 'codex stderr tail' >&2
+exit 0
+`
+
 	fakeCLIAppServer = `#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo codex-cli 0.144.1

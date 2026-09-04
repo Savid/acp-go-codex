@@ -140,13 +140,14 @@ func runAccountNative(ctx context.Context, options AccountCommandOptions, native
 	for {
 		select {
 		case wait := <-waitDone:
-			_ = native.Stdin().Close()
+			settleAccountNativePipes(native)
 
 			return wait.err
 		case <-ctx.Done():
 			revokeErr := native.Revoke(context.Background())
 			wait := <-waitDone
-			_ = native.Stdin().Close()
+
+			settleAccountNativePipes(native)
 
 			if wait.terminal {
 				revokeErr = nil
@@ -164,7 +165,8 @@ func runAccountNative(ctx context.Context, options AccountCommandOptions, native
 
 			revokeErr := native.Revoke(context.Background())
 			wait := <-waitDone
-			_ = native.Stdin().Close()
+
+			settleAccountNativePipes(native)
 
 			if wait.terminal {
 				revokeErr = nil
@@ -175,6 +177,14 @@ func runAccountNative(ctx context.Context, options AccountCommandOptions, native
 			return errors.Join(revokeErr, wait.err)
 		}
 	}
+}
+
+// settleAccountNativePipes releases this process's ends of the child's three
+// standard streams. The ordinary backend owns both ends of every pipe outright,
+// so nothing closes the parent ends on this process's behalf once each reader
+// has drained its stream to EOF.
+func settleAccountNativePipes(native NativeProcess) {
+	_ = closeNativePipes(native.Stdin(), native.Stdout(), native.Stderr())
 }
 
 func accountCopyError(err error) error {
