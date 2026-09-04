@@ -315,8 +315,9 @@ func codexConfigRootIsReserved(key string) bool {
 }
 
 // resolveSeedPath validates a relative seed path and joins it under home. It
-// rejects empty keys, absolute paths, and any ".." segment, returning the
-// absolute destination and the canonical slash-separated manifest key.
+// rejects empty keys, rooted or volume-qualified paths in either platform's
+// spelling, and any ".." segment, returning the absolute destination and the
+// canonical slash-separated manifest key.
 func resolveSeedPath(home string, name string) (string, string, error) {
 	field := fmt.Sprintf("seedFiles[%q]", name)
 
@@ -324,11 +325,17 @@ func resolveSeedPath(home string, name string) (string, string, error) {
 		return "", "", unsupportedField(field)
 	}
 
-	if filepath.IsAbs(name) {
+	slashed := filepath.ToSlash(name)
+
+	// The refusal is about the shape the host sent, not about the platform
+	// reading it. A rooted path is refused everywhere, so a key like
+	// "/etc/passwd" is not quietly admitted as a relative name on the one
+	// platform whose IsAbs does not recognise that spelling, and a
+	// volume-qualified key is refused on the platform that has volumes.
+	if filepath.IsAbs(name) || strings.HasPrefix(slashed, "/") || filepath.VolumeName(name) != "" {
 		return "", "", unsupportedField(field)
 	}
 
-	slashed := filepath.ToSlash(name)
 	for _, segment := range strings.Split(slashed, "/") {
 		if segment == ".." {
 			return "", "", unsupportedField(field)

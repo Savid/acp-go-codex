@@ -330,7 +330,7 @@ func TestPreparePromptImagesTransportsAndFailures(t *testing.T) {
 	require.FileExists(t, prepared.images[0].LocalPath)
 	info, err := os.Stat(prepared.images[0].LocalPath)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	require.Equal(t, hostFilePerm(0o600), info.Mode().Perm())
 	dir := filepath.Dir(prepared.images[0].LocalPath)
 	prepared.release()
 	require.NoDirExists(t, dir)

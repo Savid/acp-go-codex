@@ -48,7 +48,7 @@ func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) 
 
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	resp, err := agent.NewSession(context.Background(), NewSessionRequest("/work"))
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work")))
 	require.NoError(t, err)
 	session := agent.sessionMust(resp.SessionId)
 	_ = session.beginTurn(context.Background(), "active")

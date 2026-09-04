@@ -5,6 +5,7 @@ package codex
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -58,4 +59,23 @@ func TestOrdinaryWindowsNativeRuntimeAndLogout(t *testing.T) {
 		Mode:                accountCommandLogout,
 		ImplicitEnvironment: implicitEnvironment,
 	}))
+}
+
+// TestKillProcessTreatsAFinishedProcessAsContained pins the Windows spelling of
+// "already gone", and pins it as a platform fact rather than an assumption. A
+// unix host answers os.ErrProcessDone; Windows releases the process handle at
+// Wait and refuses the terminate with EINVAL. A containment path that read that
+// as a failure would refuse every close over a turn whose native process had
+// already exited.
+func TestKillProcessTreatsAFinishedProcessAsContained(t *testing.T) {
+	command := exec.Command("cmd", "/c", "exit 0") // #nosec G204 -- fixed test command.
+	require.NoError(t, command.Run())
+
+	require.ErrorIs(t, command.Process.Kill(), syscall.EINVAL,
+		"Windows no longer refuses a terminate on a finished process with EINVAL")
+
+	require.NoError(t, killProcess(command))
+	require.NoError(t, terminateProcess(command))
+	require.NoError(t, killProcess(nil))
+	require.NoError(t, killProcess(&exec.Cmd{}))
 }

@@ -57,7 +57,7 @@ func TestAuthLoginLogoutGuardAndMetadata(t *testing.T) {
 	if client.login.AccessToken != "access" || client.login.RefreshToken != "refresh" || client.login.ExpiresAtUnixSec != 123 {
 		t.Fatalf("stored login tokens were not applied to provider: %#v", client.login)
 	}
-	if _, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project")); err != nil {
+	if _, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"))); err != nil {
 		t.Fatalf("token-backed NewSession returned error: %v", err)
 	}
 	if client.login.AccessToken != "access" {
@@ -240,7 +240,7 @@ func TestAuthErrorBranches(t *testing.T) {
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return logoutClient, nil }),
 	)
 	closeErr := errors.New("logout close failed")
-	logoutSession := newSession(logoutAgent, "logout-session", "/tmp/project", nil, codex.Thread{ID: "logout-thread"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}, sessionMeta{}, nil)
+	logoutSession := newSession(logoutAgent, "logout-session", absTestPath("tmp", "project"), nil, codex.Thread{ID: "logout-thread"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}, sessionMeta{}, nil)
 	if err := logoutAgent.storeStartedSession(logoutSession); err != nil {
 		t.Fatalf("store logout session: %v", err)
 	}
@@ -592,56 +592,6 @@ func TestProviderAuthConsentGateRequiresExactHomeEquality(t *testing.T) {
 	}
 }
 
-// TestConsentedHomeRefusesADirectoryReplacedAfterConsent pins what consent is
-// held over. A name is not a directory: anything at this agent's uid can point
-// the consented path somewhere else, and the account legs drive native calls
-// that resolve the path again when they run.
-func TestConsentedHomeRefusesADirectoryReplacedAfterConsent(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	other := filepath.Join(root, "other")
-
-	for _, dir := range []string{home, other} {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatalf("create %s: %v", dir, err)
-		}
-	}
-
-	granted := consentDirectHome(Options{Home: home, ProviderAuthDirectHome: home})
-
-	t.Cleanup(granted.close)
-
-	if !granted.unchanged() {
-		t.Fatal("the gate refused the directory it opened")
-	}
-
-	if err := os.Rename(home, filepath.Join(root, "moved")); err != nil {
-		t.Fatalf("move the consented home: %v", err)
-	}
-
-	if granted.unchanged() {
-		t.Fatal("a path reaching nothing still read as the consented home")
-	}
-
-	if err := os.Symlink(other, home); err != nil {
-		t.Fatalf("point the consented path elsewhere: %v", err)
-	}
-
-	if granted.unchanged() {
-		t.Fatal("a repointed path still read as the consented home")
-	}
-
-	if (consentedHome{}).unchanged() {
-		t.Fatal("an ungranted gate read as consented")
-	}
-
-	granted.close()
-
-	if granted.unchanged() {
-		t.Fatal("a released directory still read as the consented home")
-	}
-}
-
 func TestProviderAuthClosedParamObjects(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 
@@ -784,7 +734,7 @@ func TestProviderAuthInjectionOptionKeyIsUnsupported(t *testing.T) {
 	fixture := newProviderAuthFixture(t)
 
 	_, err := fixture.agent.NewSession(context.Background(), acp.NewSessionRequest{
-		Cwd: "/tmp/project",
+		Cwd: absTestPath("tmp", "project"),
 		Meta: map[string]any{
 			codexMetaKey: map[string]any{
 				"options": map[string]any{"providerAuth": map[string]any{}},

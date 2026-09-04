@@ -375,7 +375,7 @@ func TestRolloutMirrorDoesNotDuplicateDurableRows(t *testing.T) {
 	session := &session{
 		agent:         agent,
 		id:            "session",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		rolloutPath:   rollout,
 	}

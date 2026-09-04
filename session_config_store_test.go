@@ -68,7 +68,7 @@ func TestDurableSessionConfigRoundTripAndStrictReader(t *testing.T) {
 		agent:         agent,
 		id:            "session",
 		env:           map[string]string{"TOKEN": "rotated"},
-		extraPathDirs: []string{"/operation/one", "/operation/two"},
+		extraPathDirs: []string{absTestPath("operation", "one"), absTestPath("operation", "two")},
 	}
 
 	require.NoError(t, session.commitDurableSessionConfig(t.Context(), store))
@@ -176,7 +176,7 @@ func TestLoadDurableSessionConfigRejectsIdentityAndRevisionDrift(t *testing.T) {
 func TestResolveStoredSessionCarriersUsesOnlyOmittedValues(t *testing.T) {
 	stored := durableSessionConfig{
 		Env:           map[string]string{"TOKEN": "stored"},
-		ExtraPathDirs: []string{"/stored"},
+		ExtraPathDirs: []string{absTestPath("stored")},
 	}
 
 	omitted, matches := resolveStoredSessionCarriers(sessionMeta{}, stored)
@@ -198,7 +198,7 @@ func TestResolveStoredSessionCarriersUsesOnlyOmittedValues(t *testing.T) {
 func TestResolveActiveSessionCarriersMakesInheritanceAuthoritative(t *testing.T) {
 	active := &session{
 		env:           map[string]string{"TOKEN": "active"},
-		extraPathDirs: []string{"/active"},
+		extraPathDirs: []string{absTestPath("active")},
 	}
 
 	resolved := resolveActiveSessionCarriers(sessionMeta{}, active)
@@ -209,7 +209,7 @@ func TestResolveActiveSessionCarriersMakesInheritanceAuthoritative(t *testing.T)
 
 	stored := durableSessionConfig{
 		Env:           map[string]string{"TOKEN": "stale"},
-		ExtraPathDirs: []string{"/stale"},
+		ExtraPathDirs: []string{absTestPath("stale")},
 	}
 	resolved, matches := resolveStoredSessionCarriers(resolved, stored)
 	require.False(t, matches)
@@ -225,7 +225,7 @@ func TestResumeSessionRestoresDurableSessionCarriers(t *testing.T) {
 	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: "logical-session"}, entries))
 	appendTestDurableSessionConfig(t, store, "logical-session", map[string]string{
 		"TOKEN": "stored-token",
-	}, []string{"/operation/first", "/operation/second"})
+	}, []string{absTestPath("operation", "first"), absTestPath("operation", "second")})
 
 	client := newSpyCodexClient()
 	agent := NewAgent(
@@ -244,7 +244,7 @@ func TestResumeSessionRestoresDurableSessionCarriers(t *testing.T) {
 	client.mu.Unlock()
 
 	require.Equal(t, map[string]string{"TOKEN": "stored-token"}, request.Environment)
-	require.Equal(t, []string{"/operation/first", "/operation/second"}, request.ExtraPathDirs)
+	require.Equal(t, []string{absTestPath("operation", "first"), absTestPath("operation", "second")}, request.ExtraPathDirs)
 
 	active := agent.activeSession("logical-session")
 	require.NotNil(t, active)
@@ -313,7 +313,7 @@ func TestMaterializedLifecycleCommitsChangedSessionCarriersBeforeSuccess(t *test
 			require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 				SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
 			}))
-			appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+			appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{absTestPath("stored")})
 
 			client := newSpyCodexClient()
 			agent := NewAgent(
@@ -346,20 +346,20 @@ func TestActiveLifecycleCommitsInheritedPendingSessionCarriers(t *testing.T) {
 	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
 	}))
-	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{absTestPath("stored")})
 
 	client := newSpyCodexClient()
 	agent := NewAgent(WithSessionStore(store))
 	activeMeta := sessionMeta{
 		Env:           map[string]string{"TOKEN": "active"},
-		ExtraPathDirs: []string{"/active"},
+		ExtraPathDirs: []string{absTestPath("active")},
 	}
-	active := newSession(agent, id, "/work", nil, codex.Thread{
+	active := newSession(agent, id, absTestPath("work"), nil, codex.Thread{
 		ID:   "native-thread",
 		Path: "/native/rollout.jsonl",
 	}, client, activeMeta, nil)
 	active.fingerprint = codexSessionStartFingerprint(codexSessionStart{
-		Cwd:      "/work",
+		Cwd:      absTestPath("work"),
 		Meta:     activeMeta,
 		ResumeID: string(id),
 	})
@@ -369,7 +369,7 @@ func TestActiveLifecycleCommitsInheritedPendingSessionCarriers(t *testing.T) {
 	agent.runtimeClient = client
 	t.Cleanup(func() { active.fenceSession() })
 
-	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work"))
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, absTestPath("work")))
 	require.NoError(t, err)
 
 	stored, err := agent.loadDurableSessionConfig(t.Context(), id)
@@ -394,12 +394,12 @@ func TestActiveRebindCommitsChangedSessionCarriersBeforeSuccess(t *testing.T) {
 		Env:           map[string]string{"TOKEN": "stored"},
 		ExtraPathDirs: []string{storedPath},
 	}
-	active := newSession(agent, id, "/work", nil, codex.Thread{
+	active := newSession(agent, id, absTestPath("work"), nil, codex.Thread{
 		ID:   "native-thread",
 		Path: "/native/rollout.jsonl",
 	}, client, activeMeta, nil)
 	active.fingerprint = codexSessionStartFingerprint(codexSessionStart{
-		Cwd:      "/work",
+		Cwd:      absTestPath("work"),
 		Meta:     activeMeta,
 		ResumeID: string(id),
 	})
@@ -410,7 +410,7 @@ func TestActiveRebindCommitsChangedSessionCarriersBeforeSuccess(t *testing.T) {
 	t.Cleanup(func() { active.fenceSession() })
 
 	rotatedPath := t.TempDir()
-	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work", WithSessionMeta(CodexOptions{
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, absTestPath("work"), WithSessionMeta(CodexOptions{
 		Env:           map[string]string{"TOKEN": "rotated"},
 		ExtraPathDirs: []string{rotatedPath},
 	}.Meta())))
@@ -431,20 +431,20 @@ func TestActiveRebindRetriesFailedConfigurationBeforeLaterSuccess(t *testing.T) 
 	require.NoError(t, store.InMemorySessionStore.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
 	}))
-	appendTestDurableSessionConfig(t, store.InMemorySessionStore, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+	appendTestDurableSessionConfig(t, store.InMemorySessionStore, id, map[string]string{"TOKEN": "stored"}, []string{absTestPath("stored")})
 
 	client := newSpyCodexClient()
 	agent := NewAgent(WithSessionStore(store))
 	activeMeta := sessionMeta{
 		Env:           map[string]string{"TOKEN": "stored"},
-		ExtraPathDirs: []string{"/stored"},
+		ExtraPathDirs: []string{absTestPath("stored")},
 	}
-	active := newSession(agent, id, "/work", nil, codex.Thread{
+	active := newSession(agent, id, absTestPath("work"), nil, codex.Thread{
 		ID:   "native-thread",
 		Path: "/native/rollout.jsonl",
 	}, client, activeMeta, nil)
 	active.fingerprint = codexSessionStartFingerprint(codexSessionStart{
-		Cwd:      "/work",
+		Cwd:      absTestPath("work"),
 		Meta:     activeMeta,
 		ResumeID: string(id),
 	})
@@ -455,21 +455,21 @@ func TestActiveRebindRetriesFailedConfigurationBeforeLaterSuccess(t *testing.T) 
 	t.Cleanup(func() { active.fenceSession() })
 
 	store.fail = true
-	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work", WithSessionMeta(CodexOptions{
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, absTestPath("work"), WithSessionMeta(CodexOptions{
 		Env:           map[string]string{"TOKEN": "rotated"},
-		ExtraPathDirs: []string{"/rotated"},
+		ExtraPathDirs: []string{absTestPath("rotated")},
 	}.Meta())))
 	require.ErrorContains(t, err, "configuration append failed")
 	require.True(t, active.pendingDurableSessionConfig(1))
 
-	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work"))
+	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(id, absTestPath("work")))
 	require.NoError(t, err)
 
 	stored, err := agent.loadDurableSessionConfig(t.Context(), id)
 	require.NoError(t, err)
 	require.Equal(t, 2, stored.Revision)
 	require.Equal(t, map[string]string{"TOKEN": "rotated"}, stored.Env)
-	require.Equal(t, []string{"/rotated"}, stored.ExtraPathDirs)
+	require.Equal(t, []string{absTestPath("rotated")}, stored.ExtraPathDirs)
 }
 
 type failNextConfigAppendStore struct {
@@ -493,7 +493,7 @@ func TestRetainedResumeCommitsChangedSessionCarriersBeforePublication(t *testing
 	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`),
 	}))
-	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{absTestPath("stored")})
 
 	client := newSpyCodexClient()
 	agent := NewAgent(WithSessionStore(store))
@@ -509,7 +509,7 @@ func TestRetainedResumeCommitsChangedSessionCarriersBeforePublication(t *testing
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
 	rotatedPath := t.TempDir()
-	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, "/work", WithSessionMeta(CodexOptions{
+	_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, absTestPath("work"), WithSessionMeta(CodexOptions{
 		Env:           map[string]string{"TOKEN": "rotated"},
 		ExtraPathDirs: []string{rotatedPath},
 	}.Meta())))
@@ -526,14 +526,14 @@ func TestRetainedResumeCommitsChangedSessionCarriersBeforePublication(t *testing
 func TestCloseCommitsChangedSessionCarriersWithoutPromptRows(t *testing.T) {
 	store := NewInMemorySessionStore()
 	id := acp.SessionId("logical-session")
-	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{"/stored"})
+	appendTestDurableSessionConfig(t, store, id, map[string]string{"TOKEN": "stored"}, []string{absTestPath("stored")})
 
 	agent := NewAgent(WithSessionStore(store))
 	session := &session{
 		agent:                  agent,
 		id:                     id,
 		env:                    map[string]string{"TOKEN": "rotated"},
-		extraPathDirs:          []string{"/rotated"},
+		extraPathDirs:          []string{absTestPath("rotated")},
 		closeContained:         true,
 		durableConfigRevision:  1,
 		durableConfigCommitted: false,
@@ -558,7 +558,7 @@ func TestRolloutCommitPlacesChangedConfigRevisionBeforeMainRows(t *testing.T) {
 	session := &session{
 		id:                    "session",
 		env:                   map[string]string{"TOKEN": "rotated"},
-		extraPathDirs:         []string{"/rotated"},
+		extraPathDirs:         []string{absTestPath("rotated")},
 		durableConfigRevision: 1,
 	}
 	row := SessionStoreEntry(`{"type":"session_meta","payload":{"id":"native-thread"}}`)

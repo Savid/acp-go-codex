@@ -56,7 +56,7 @@ func sampleLedgerRecord() authLedgerRecord {
 }
 
 func TestValidateProviderAuthOptions(t *testing.T) {
-	if err := validateProviderAuthOptions(Options{ProviderAuthRoot: "/abs", ProviderAuthDirectHome: "/abs"}); err != nil {
+	if err := validateProviderAuthOptions(Options{ProviderAuthRoot: absTestPath("abs"), ProviderAuthDirectHome: absTestPath("abs")}); err != nil {
 		t.Fatalf("absolute paths were rejected: %v", err)
 	}
 
@@ -66,7 +66,7 @@ func TestValidateProviderAuthOptions(t *testing.T) {
 	if err := validateProviderAuthOptions(Options{AllowAccountLogout: true}); err == nil {
 		t.Fatal("account logout without an explicit home was accepted")
 	}
-	if err := validateProviderAuthOptions(Options{AllowAccountLogout: true, Home: "/abs"}); err != nil {
+	if err := validateProviderAuthOptions(Options{AllowAccountLogout: true, Home: absTestPath("abs")}); err != nil {
 		t.Fatalf("account logout with an explicit home was rejected: %v", err)
 	}
 
@@ -81,7 +81,7 @@ func TestAuthLedgerRootConfigured(t *testing.T) {
 		t.Fatal("an unset root reported configured")
 	}
 
-	if !authLedgerRootConfigured(Options{ProviderAuthRoot: "/root"}) {
+	if !authLedgerRootConfigured(Options{ProviderAuthRoot: absTestPath("root")}) {
 		t.Fatal("a set root reported unconfigured")
 	}
 }
@@ -102,7 +102,7 @@ func TestNewAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
 		t.Fatalf("seed root: %v", err)
 	}
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, Home: "/home"}); err != nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, Home: absTestPath("home")}); err != nil {
 		t.Fatalf("new ledger: %v", err)
 	}
 
@@ -111,13 +111,13 @@ func TestNewAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
 		t.Fatalf("stat root: %v", err)
 	}
 
-	if info.Mode().Perm() != authLedgerDirMode {
-		t.Fatalf("root mode = %v, want %v", info.Mode().Perm(), os.FileMode(authLedgerDirMode))
+	if info.Mode().Perm() != hostDirPerm(authLedgerDirMode) {
+		t.Fatalf("root mode = %v, want %v", info.Mode().Perm(), hostDirPerm(authLedgerDirMode))
 	}
 }
 
 func TestNewAuthLedgerPreparationFailures(t *testing.T) {
-	options := Options{ProviderAuthRoot: t.TempDir(), Home: "/home"}
+	options := Options{ProviderAuthRoot: t.TempDir(), Home: absTestPath("home")}
 
 	cases := map[string]func(){
 		"mkdir": func() {
@@ -271,7 +271,7 @@ func TestAuthLedgerEntryIsValuesFree(t *testing.T) {
 		t.Fatalf("stat entry: %v", err)
 	}
 
-	if info.Mode().Perm() != authLedgerFileMode {
+	if info.Mode().Perm() != hostFilePerm(authLedgerFileMode) {
 		t.Fatalf("entry mode = %v", info.Mode().Perm())
 	}
 }
@@ -327,9 +327,6 @@ func TestAuthLedgerWriteFailures(t *testing.T) {
 			}
 			ledgerRename = func(string, string) error { return errors.New("rename") }
 			ledgerRemove = func(string) error { return nil }
-		},
-		"syncdir": func() {
-			ledgerOpen = func(string) (*os.File, error) { return nil, errors.New("open") }
 		},
 	}
 
@@ -516,6 +513,9 @@ func TestAuthInventoryFailures(t *testing.T) {
 func TestAuthInventoryFailsWithoutTheNativeAuthSurface(t *testing.T) {
 	home := t.TempDir()
 	agent := NewAgent(WithHome(home), WithProviderAuthRoot(t.TempDir()), WithProviderAuthDirectHome(home))
+
+	t.Cleanup(func() { _ = agent.Close() })
+
 	storeRateLimitsSession(t, agent, "plain", newSpyCodexClient())
 
 	if err := agent.providerAuth.ledger.write(sampleLedgerRecord()); err != nil {

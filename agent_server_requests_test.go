@@ -36,7 +36,7 @@ func newServerRequestSession(t *testing.T) (*Agent, *session, context.Context) {
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
 
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestServerRequestsNoSessionOrClientBranches(t *testing.T) {
 func TestServerRequestWaitsForAcceptedNativeTurnBinding(t *testing.T) {
 	agent := NewAgent()
 	client := newSpyCodexClient()
-	session := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	session := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 	agent.sessions[session.id] = session
 	_ = session.beginTurn(context.Background(), "turn-nonce")
 
@@ -295,7 +295,7 @@ func TestServerRequestErrorAndDecisionBranches(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestServerRequestLateApprovalIsDetachedOnCancel(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -674,7 +674,7 @@ func TestServerRequestsApprovalElicitationAndRefresh(t *testing.T) {
 	enableClientElicitation(agent, true, false)
 
 	ctx := context.Background()
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -744,7 +744,7 @@ func TestServerRequestsPermissionsAndMCPElicitation(t *testing.T) {
 	enableClientElicitation(agent, true, true)
 
 	ctx := context.Background()
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -808,7 +808,7 @@ func TestServerRequestsMCPToolApprovalUsesPermission(t *testing.T) {
 	agent.setAgentClient(conn)
 
 	ctx := context.Background()
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}

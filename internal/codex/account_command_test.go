@@ -37,17 +37,19 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 		accountProbeVersion = originalProbe
 	})
 
+	existing := anExistingExecutable(t)
+
 	require.Error(t, RunAccountCommand(t.Context(), AccountCommandOptions{Mode: "invalid"}))
 	require.ErrorContains(t, RunAccountCommand(t.Context(), AccountCommandOptions{Mode: accountCommandLogout}), "writable home")
 
 	accountScratchParent = nil
 	require.ErrorContains(t, RunAccountCommand(t.Context(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
+		CLIPath: existing, CodexHome: t.TempDir(), Mode: accountCommandLogout,
 	}), "scratch parent resolver")
 
 	accountScratchParent = func(string) (string, error) { return "", errors.New("scratch unavailable") }
 	require.ErrorContains(t, RunAccountCommand(t.Context(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
+		CLIPath: existing, CodexHome: t.TempDir(), Mode: accountCommandLogout,
 	}), "scratch unavailable")
 
 	accountScratchParent = func(string) (string, error) { return t.TempDir(), nil }
@@ -55,7 +57,7 @@ func TestRunAccountCommandFailureBranches(t *testing.T) {
 		return "", errors.New("probe failed")
 	}
 	require.ErrorContains(t, RunAccountCommand(t.Context(), AccountCommandOptions{
-		CLIPath: "/usr/bin/true", CodexHome: t.TempDir(), Mode: accountCommandLogout,
+		CLIPath: existing, CodexHome: t.TempDir(), Mode: accountCommandLogout,
 	}), "probe failed")
 }
 
@@ -66,25 +68,15 @@ func TestRunAccountCommandOrdinaryBackend(t *testing.T) {
 	accountScratchParent = func(string) (string, error) { return parent, nil }
 
 	logPath := filepath.Join(t.TempDir(), "account.log")
-	script := filepath.Join(t.TempDir(), "codex")
-	require.NoError(t, os.WriteFile(script, []byte(`#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo codex-cli 0.144.1
-  exit 0
-fi
-printf '%s' "$*" > "$ACCOUNT_LOG"
-`), 0o700))
+	script := writeFakeCLI(t, t.TempDir(), "codex", fakeCLIAccountLog)
 	t.Setenv("ACCOUNT_LOG", logPath)
 
 	closedSignals := make(chan os.Signal)
 	close(closedSignals)
-	require.NoError(t, RunAccountCommand(t.Context(), AccountCommandOptions{
+	requireAccountLoginOutcome(t, RunAccountCommand(t.Context(), AccountCommandOptions{
 		CLIPath: script, CodexHome: t.TempDir(), Mode: accountCommandLogin, DeviceAuth: true,
 		Signals: closedSignals,
-	}))
-	raw, err := os.ReadFile(logPath)
-	require.NoError(t, err)
-	require.Equal(t, "login --device-auth", string(raw))
+	}), logPath)
 }
 
 type blockingAccountInput struct {
@@ -107,8 +99,7 @@ func TestRunAccountCommandDoesNotWaitForBlockedInputAfterExit(t *testing.T) {
 	accountScratchParent = func(string) (string, error) { return t.TempDir(), nil }
 	accountProbeVersion = func(context.Context, VersionProbeOptions) (string, error) { return minCodexVersion, nil }
 
-	script := filepath.Join(t.TempDir(), "codex")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	script := writeFakeCLI(t, t.TempDir(), "codex", fakeCLIExitZero)
 	input := &blockingAccountInput{done: make(chan struct{})}
 	t.Cleanup(func() { close(input.done) })
 

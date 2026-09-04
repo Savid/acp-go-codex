@@ -41,7 +41,7 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 		{
 			name: "new",
 			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
-				_, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+				_, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 
 				return err
 			},
@@ -49,11 +49,11 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 		{
 			name: "resume",
 			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
-				session, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+				session, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 				if err != nil {
 					return err
 				}
-				_, err = conn.ResumeSession(ctx, ResumeSessionRequest(session.SessionId, "/tmp/project"))
+				_, err = conn.ResumeSession(ctx, ResumeSessionRequest(session.SessionId, absTestPath("tmp", "project")))
 
 				return err
 			},
@@ -61,20 +61,20 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 		{
 			name: "load",
 			run: func(ctx context.Context, conn *acp.ClientSideConnection, store SessionStore) error {
-				session, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+				session, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 				if err != nil {
 					return err
 				}
 				err = store.Replace(ctx, SessionKey{SessionID: string(session.SessionId)}, []SessionStoreReplacement{{
 					Key: SessionKey{SessionID: string(session.SessionId)},
 					Entries: []SessionStoreEntry{SessionStoreEntry(
-						`{"type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp/project"}}`,
+						`{"type":"session_meta","payload":{"id":"thread-1","cwd":` + absTestPathJSON("tmp", "project") + `}}`,
 					)},
 				}, testDurableSessionConfigReplacement(t, session.SessionId, nil, nil)})
 				if err != nil {
 					return err
 				}
-				_, err = conn.LoadSession(ctx, LoadSessionRequest(session.SessionId, "/tmp/project"))
+				_, err = conn.LoadSession(ctx, LoadSessionRequest(session.SessionId, absTestPath("tmp", "project")))
 
 				return err
 			},
@@ -82,11 +82,11 @@ func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
 		{
 			name: "fork",
 			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
-				session, err := conn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+				session, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 				if err != nil {
 					return err
 				}
-				_, err = CallForkSession(ctx, conn, ForkSessionRequest(session.SessionId, "/tmp/project"))
+				_, err = CallForkSession(ctx, conn, ForkSessionRequest(session.SessionId, absTestPath("tmp", "project")))
 
 				return err
 			},
@@ -124,7 +124,7 @@ func TestCommandContractSlashTextPassesThroughRunTurn(t *testing.T) {
 			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 				return client, nil
 			}))
-			session, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+			session, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 			if err != nil {
 				t.Fatalf("NewSession returned error: %v", err)
 			}

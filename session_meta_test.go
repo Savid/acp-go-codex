@@ -129,7 +129,7 @@ func TestLifecycleMetaValidatesExtraPathDirs(t *testing.T) {
 	input := []string{absolute, second}
 	parsed, err := sessionMetaFromLifecycle(CodexOptions{ExtraPathDirs: input}.Meta())
 	require.NoError(t, err)
-	input[0] = "/caller/mutated"
+	input[0] = absTestPath("caller", "mutated")
 	require.Equal(t, absolute, parsed.ExtraPathDirs[0])
 }
 

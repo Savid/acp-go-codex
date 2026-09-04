@@ -120,7 +120,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 			agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
 			agent.setAgentClient(newRecordingAgentClient())
 
-			resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+			resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 			if err != nil {
 				t.Fatalf("NewSession returned error: %v", err)
 			}
@@ -183,7 +183,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
 	agent.setAgentClient(newRecordingAgentClient())
 
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestTurnFailureProcessExitMapping(t *testing.T) {
 	agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
 	agent.setAgentClient(newRecordingAgentClient())
 
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 
 	promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "hi"))
@@ -248,7 +248,7 @@ func TestPromptRelaunchesDeadClient(t *testing.T) {
 	s := &session{
 		agent:         agent,
 		id:            "relaunch-ok",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread-1",
 		clientDead:    true,
 		client:        old,
@@ -276,7 +276,7 @@ func TestPromptRelaunchesDeadClient(t *testing.T) {
 
 // T5 — a native error observed while cancelled maps to cancelled, not a failure.
 func TestTurnFailureCancelNotConflated(t *testing.T) {
-	cancelSession := &session{agent: NewAgent(), id: "cancel", cwd: "/tmp/project", codexThreadID: "thread"}
+	cancelSession := &session{agent: NewAgent(), id: "cancel", cwd: absTestPath("tmp", "project"), codexThreadID: "thread"}
 	cancelSession.agent.setAgentClient(newRecordingAgentClient())
 	cancelSession.client = &cancelDuringRunClient{spyCodexClient: newSpyCodexClient(), session: cancelSession}
 
@@ -296,7 +296,7 @@ func TestTurnCancelWinsOnTimeoutCoincidence(t *testing.T) {
 	coincideSession := &session{
 		agent:         NewAgent(WithTurnTimeout(time.Nanosecond)),
 		id:            "coincide",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 	}
 	coincideSession.agent.setAgentClient(newRecordingAgentClient())
@@ -351,7 +351,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 	timeoutSession := &session{
 		agent:         NewAgent(WithTurnTimeout(40 * time.Millisecond)),
 		id:            "timeout",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		client:        interrupt,
 	}
@@ -379,7 +379,7 @@ func TestTurnFailureTimeoutKeepsSharedRuntimeOnTargetedContainmentFailure(t *tes
 	timeoutSession := &session{
 		agent:         agent,
 		id:            "timeout-close-error",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		client:        interrupt,
 	}

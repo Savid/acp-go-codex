@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -129,8 +128,7 @@ func TestTerminalVersionProbeDrainsBufferedOutputBeforeClosingReaders(t *testing
 }
 
 func TestProbeVersionOrdinaryBackend(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "codex")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\necho codex-cli 0.144.1\n"), 0o700))
+	script := writeFakeCLI(t, t.TempDir(), "codex", fakeCLIVersionOnly)
 	version, err := ProbeVersion(t.Context(), VersionProbeOptions{
 		CLIPath: script, ScratchParent: t.TempDir(), ImplicitEnvironment: map[string]string{"PATH": "/bin"},
 	})

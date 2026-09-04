@@ -209,7 +209,7 @@ func TestExactRouteSteerCancelAndRebindRacesHaveOneOwner(t *testing.T) {
 		_, err := agent.HandleExtensionMethod(t.Context(), SteerTurnMethod, steerExtensionParams(t, s.id, "race", "more"))
 		steerDone <- err
 	}()
-	require.Equal(t, "race-turn", (<-client.steerEntered).ExpectedTurnID)
+	require.Equal(t, "race-turn", (awaitTestSignal(t, client.steerEntered, "client.steerEntered")).ExpectedTurnID)
 
 	rebindErr := make(chan error, 1)
 	go func() {
@@ -223,7 +223,7 @@ func TestExactRouteSteerCancelAndRebindRacesHaveOneOwner(t *testing.T) {
 	cancelDone := make(chan error, 1)
 	go func() { cancelDone <- agent.Cancel(t.Context(), CancelRequest(s.id, "race")) }()
 	require.ErrorIs(t, <-steerDone, context.Canceled)
-	require.Equal(t, [2]string{"thread", "race-turn"}, <-client.cancelEntered)
+	require.Equal(t, [2]string{"thread", "race-turn"}, awaitTestSignal(t, client.cancelEntered, "client.cancelEntered"))
 	close(client.cancelRelease)
 	require.NoError(t, <-cancelDone)
 

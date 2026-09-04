@@ -286,13 +286,13 @@ func TestEmitPromptImageUpdates(t *testing.T) {
 func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	promptSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
+	promptSession := &session{agent: agent, id: "s", cwd: absTestPath("tmp", "project"), codexThreadID: "thread", client: &runEventsClient{}}
 	t.Cleanup(func() { promptSession.fenceSession() })
 	bindClient := func(client *runEventsClient) {
 		previous := promptSession
 		previous.fenceSession()
 		promptSession = &session{
-			agent: previous.agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: client,
+			agent: previous.agent, id: "s", cwd: absTestPath("tmp", "project"), codexThreadID: "thread", client: client,
 			rawMessages: previous.rawMessages,
 		}
 		require.NoError(t, promptSession.attachNativeEvents())
@@ -398,7 +398,7 @@ func TestPromptRolloutRawAndPermissionEdges(t *testing.T) {
 		t.Fatalf("write valid rollout: %v", err)
 	}
 	promptSession.rolloutPath = valid
-	promptSession.cwd = "/tmp/project"
+	promptSession.cwd = absTestPath("tmp", "project")
 	promptSession.agent = NewAgent(WithSessionStore(appendErrorStore{}))
 	withRolloutAppendSettings(t, time.Second, []time.Duration{0})
 	if err := promptSession.mirrorAndEmitRollout(ctx); err == nil {
@@ -455,13 +455,13 @@ func TestPromptCloseRaceBufferedFailureAndIncompleteStreamAreContained(t *testin
 		_, promptErr := s.Prompt(t.Context(), TextPromptRequest(s.id, "nonce", "text"))
 		promptDone <- promptErr
 	}()
-	<-client.entered
+	awaitTestSignal(t, client.entered, "client.entered")
 	s.mu.Lock()
 	s.closing = true
 	s.mu.Unlock()
 	close(client.release)
 	require.Error(t, <-promptDone)
-	<-client.released
+	awaitTestSignal(t, client.released, "client.released")
 
 	newRun := func(runClient codex.Client, preBind []codex.Event, conn agentClient) (*session, *promptIncarnation, promptTurnResult) {
 		agent := NewAgent()
@@ -539,7 +539,7 @@ func TestSessionPromptCancelAndUpdateEdges(t *testing.T) {
 func TestSessionPromptCancelAndAccountUpdate(t *testing.T) {
 	agent := NewAgent()
 	agent.setAgentClient(newRecordingAgentClient())
-	cancelSession := &session{agent: agent, id: "s", cwd: "/tmp/project", codexThreadID: "thread"}
+	cancelSession := &session{agent: agent, id: "s", cwd: absTestPath("tmp", "project"), codexThreadID: "thread"}
 	cancelSession.client = &cancelDuringRunClient{session: cancelSession}
 	resp, err := cancelSession.Prompt(context.Background(), TextPromptRequest("s", "test-turn", "hi"))
 	if err != nil || resp.StopReason != acp.StopReasonCancelled {
@@ -564,7 +564,7 @@ func TestSessionPromptCancelAndAccountUpdate(t *testing.T) {
 	accountSession := &session{
 		agent:         agent,
 		id:            "acct",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		client: &runEventsClient{events: []codex.Event{
 			{Kind: codex.EventAccountUpdated, Account: codex.Account{ID: "acct", Email: "new@example.com", PlanType: "pro", Raw: map[string]any{"accessToken": "secret"}}},
@@ -586,7 +586,7 @@ func TestSessionPromptDedupesDeltas(t *testing.T) {
 	dedupeSession := &session{
 		agent:         dedupeAgent,
 		id:            "dedupe",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		client: &runEventsClient{events: []codex.Event{
 			{Kind: codex.EventAgentMessageDelta, ItemID: "msg", ThreadID: "thread", TurnID: "turn", Text: "hello"},
@@ -796,7 +796,7 @@ func (c *overflowTurnClient) CancelTurn(_ context.Context, threadID, turnID stri
 func TestPromptRejectsAcceptedTurnWithoutNativeIdentity(t *testing.T) {
 	agent := NewAgent()
 	session := &session{
-		agent: agent, id: "session", cwd: "/tmp/project",
+		agent: agent, id: "session", cwd: absTestPath("tmp", "project"),
 		codexThreadID: "thread", client: &emptyTurnIDClient{spyCodexClient: newSpyCodexClient()},
 	}
 
@@ -849,7 +849,7 @@ func TestTurnOverflowContainsNativeTurnBeforePromptFailure(t *testing.T) {
 				cancelRelease:   cancelRelease,
 			}
 			session := &session{
-				agent: NewAgent(), id: "session", cwd: "/tmp/project",
+				agent: NewAgent(), id: "session", cwd: absTestPath("tmp", "project"),
 				codexThreadID: "thread", client: client,
 			}
 			t.Cleanup(session.fenceSession)
@@ -862,7 +862,7 @@ func TestTurnOverflowContainsNativeTurnBeforePromptFailure(t *testing.T) {
 				promptDone <- err
 			}()
 
-			require.Equal(t, [2]string{"thread", "overflow-turn"}, <-client.cancelStarted)
+			require.Equal(t, [2]string{"thread", "overflow-turn"}, awaitTestSignal(t, client.cancelStarted, "client.cancelStarted"))
 			select {
 			case err := <-promptDone:
 				t.Fatalf("overflow failed prompt before native containment completed: %v", err)
@@ -932,7 +932,7 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 	usageSession := &session{
 		agent:         usageAgent,
 		id:            "usage",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		client: &runEventsClient{events: []codex.Event{
 			{
@@ -1053,7 +1053,7 @@ func TestSandboxPolicyHelpers(t *testing.T) {
 	}
 	alreadyComplete := map[string]any{
 		"type":                "workspace-write",
-		"writableRoots":       []string{"/repo"},
+		"writableRoots":       []string{absTestPath("repo")},
 		"networkAccess":       true,
 		"excludeTmpdirEnvVar": true,
 		"excludeSlashTmp":     true,
@@ -1279,7 +1279,7 @@ func TestAcceptedTurnRequestErrorDeliveryIsContainedAndPreserved(t *testing.T) {
 // reject with the uniform prompt.image shape. Nothing is silently dropped.
 func TestPromptContentFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	promptSession := &session{agent: NewAgent(), id: "s", cwd: "/tmp/project", codexThreadID: "thread", client: &runEventsClient{}}
+	promptSession := &session{agent: NewAgent(), id: "s", cwd: absTestPath("tmp", "project"), codexThreadID: "thread", client: &runEventsClient{}}
 
 	for _, tt := range []struct {
 		name      string
@@ -1336,7 +1336,7 @@ func TestConcurrentPromptIsRefusedWithSessionPromptBackpressure(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return client, nil
 	}))
-	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 
 	firstDone := make(chan error, 1)
@@ -1347,7 +1347,7 @@ func TestConcurrentPromptIsRefusedWithSessionPromptBackpressure(t *testing.T) {
 		)
 		firstDone <- promptErr
 	}()
-	<-client.started
+	awaitTestSignal(t, client.started, "client.started")
 
 	resp, err := agent.Prompt(
 		context.Background(),
@@ -1378,7 +1378,7 @@ func TestPromptSettlementKeepsTheNativeCauseWhenTheCommitAlsoFails(t *testing.T)
 	promptSession := &session{
 		agent: NewAgent(WithSessionStore(appendErrorStore{})),
 		id:    "s",
-		cwd:   "/tmp/project",
+		cwd:   absTestPath("tmp", "project"),
 	}
 
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")

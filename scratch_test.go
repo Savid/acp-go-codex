@@ -28,7 +28,7 @@ func TestEnsureScratchParent(t *testing.T) {
 	if err != nil || parent != missing {
 		t.Fatalf("ensureScratchParent(%q) = %q, %v; want %q, nil", missing, parent, err, missing)
 	}
-	if info, statErr := os.Stat(missing); statErr != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+	if info, statErr := os.Stat(missing); statErr != nil || !info.IsDir() || info.Mode().Perm() != hostDirPerm(0o700) {
 		t.Fatalf("scratch parent info=%v err=%v, want 0700 directory", info, statErr)
 	}
 

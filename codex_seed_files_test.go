@@ -34,11 +34,11 @@ func TestWriteSeedFilesWritesUnderHome(t *testing.T) {
 
 	fileInfo, err := os.Stat(filepath.Join(home, "config.toml"))
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), fileInfo.Mode().Perm())
+	require.Equal(t, hostFilePerm(0o600), fileInfo.Mode().Perm())
 
 	dirInfo, err := os.Stat(filepath.Join(home, "prompts"))
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
+	require.Equal(t, hostDirPerm(0o700), dirInfo.Mode().Perm())
 }
 
 func TestWriteSeedFilesEmptyIsNoop(t *testing.T) {

@@ -2356,7 +2356,7 @@ func TestLifecycleAdvertisementAnswersOfferAndOpensForegroundStream(t *testing.T
 	// The negotiated answer lives on the response's own `_meta` and nowhere else.
 	require.NotContains(t, initialized.AgentCapabilities.Meta, lifecycle.MetaKey)
 
-	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 
 	promptRequest := TextPromptRequest(created.SessionId, "turn-nonce", "hello")
@@ -2424,7 +2424,7 @@ func TestLifecycleOpensForegroundStreamForFullWireSessionParams(t *testing.T) {
 	require.Contains(t, initialized.Meta, lifecycle.MetaKey, "version 1 is negotiated for this connection")
 
 	createdResult, reqErr := conn.handle(ctx, acp.AgentMethodSessionNew, json.RawMessage(`{
-		"cwd": "/tmp/project",
+		"cwd": `+absTestPathJSON("tmp", "project")+`,
 		"mcpServers": [
 			{
 				"name": "fixture",
@@ -2621,7 +2621,7 @@ func TestLifecycleAcceptanceDeliveryFailureContainsExactAcknowledgedTurn(t *test
 				_, err := s.Prompt(t.Context(), request)
 				promptDone <- err
 			}()
-			require.Equal(t, [2]string{"thread", "accepted-turn"}, <-client.cancelStarted)
+			require.Equal(t, [2]string{"thread", "accepted-turn"}, awaitTestSignal(t, client.cancelStarted, "client.cancelStarted"))
 			select {
 			case err := <-promptDone:
 				t.Fatalf("prompt returned before exact turn containment completed: %v", err)
@@ -2669,7 +2669,7 @@ func TestPostRunningTypedDeliveryFailuresContainBeforeSettlement(t *testing.T) {
 				_, err := s.Prompt(t.Context(), request)
 				promptDone <- err
 			}()
-			require.Equal(t, [2]string{"thread", "accepted-turn"}, <-client.cancelStarted)
+			require.Equal(t, [2]string{"thread", "accepted-turn"}, awaitTestSignal(t, client.cancelStarted, "client.cancelStarted"))
 			select {
 			case err := <-promptDone:
 				t.Fatalf("prompt returned before exact delivery containment: %v", err)
@@ -2783,7 +2783,7 @@ func TestLifecyclePreBindFailedOrMalformedAckIsContainedExactly(t *testing.T) {
 			}
 			_, err := s.Prompt(context.Background(), request)
 			require.Error(t, err)
-			require.Equal(t, [2]string{"thread", "pre-ack-turn"}, <-client.cancelled)
+			require.Equal(t, [2]string{"thread", "pre-ack-turn"}, awaitTestSignal(t, client.cancelled, "client.cancelled"))
 
 			joined := fmt.Sprint(updates.updates)
 			require.Contains(t, joined, "accepted")
@@ -2799,7 +2799,7 @@ func TestInternalSessionClosePublishesExpectedStopBeforeBrokerEOF(t *testing.T) 
 	client.session = s
 	require.NoError(t, s.attachNativeEvents())
 	require.NoError(t, s.Close(context.Background()))
-	require.NoError(t, <-client.order)
+	require.NoError(t, awaitTestSignal(t, client.order, "client.order"))
 	s.mu.Lock()
 	closing := s.closing
 	s.mu.Unlock()

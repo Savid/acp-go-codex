@@ -492,7 +492,7 @@ func TestPermissionCorrelationFailureAndHelperBranches(t *testing.T) {
 	agent, session, conn, turnCtx := newStrictPermissionSession(t)
 	liveMCPParams := map[string]any{"turnId": "native-permission-turn"}
 
-	inactive := newSession(agent, "inactive", "/tmp/project", nil, codex.Thread{ID: "inactive-thread"}, newSpyCodexClient(), sessionMeta{}, nil)
+	inactive := newSession(agent, "inactive", absTestPath("tmp", "project"), nil, codex.Thread{ID: "inactive-thread"}, newSpyCodexClient(), sessionMeta{}, nil)
 	_, requested, err := inactive.requestPermissionForTool(context.Background(), conn, acp.RequestPermissionRequest{}, permissionToolMCP)
 	require.NoError(t, err)
 	require.False(t, requested)
@@ -767,7 +767,7 @@ func TestPermissionAndElicitationReleaseToolLeaseBeforeHostResponseAtOneClientCa
 				requestDone <- elicitationErr
 			}()
 
-			requestID := <-wire.requestStarted
+			requestID := awaitTestSignal(t, wire.requestStarted, "wire.requestStarted")
 			s.permissionTools.mu.Lock()
 			leaseDone := s.permissionTools.tools["tool"].leaseDone
 			s.permissionTools.mu.Unlock()

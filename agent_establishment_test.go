@@ -448,7 +448,7 @@ func TestLifecycleEstablishmentIsArmedBeforeSessionPublication(t *testing.T) {
 		err   *acp.RequestError
 	}
 	handled := make(chan handlerResult, 1)
-	params := json.RawMessage(`{"cwd":"` + t.TempDir() + `","mcpServers":[],"` + establishmentHookParam + `":"77"}`)
+	params := json.RawMessage(`{"cwd":` + strconv.Quote(t.TempDir()) + `,"mcpServers":[],"` + establishmentHookParam + `":"77"}`)
 	go func() {
 		value, reqErr := conn.handle(t.Context(), acp.AgentMethodSessionNew, params)
 		handled <- handlerResult{value: value, err: reqErr}

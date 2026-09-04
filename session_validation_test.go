@@ -18,7 +18,7 @@ func TestValidatePathBranches(t *testing.T) {
 	if err := validateSessionStartPaths("", nil); err == nil {
 		t.Fatal("validateSessionStartPaths accepted empty cwd")
 	}
-	if err := validateSessionStartPaths("/repo", []string{"relative"}); err == nil {
+	if err := validateSessionStartPaths(absTestPath("repo"), []string{"relative"}); err == nil {
 		t.Fatal("validateSessionStartPaths accepted relative additional directory")
 	}
 	if err := validateAbsolutePaths("paths", []string{""}); err == nil {
@@ -27,7 +27,7 @@ func TestValidatePathBranches(t *testing.T) {
 	if err := validateOptionalAbsolutePath("cwd", nil); err != nil {
 		t.Fatalf("nil optional path returned error: %v", err)
 	}
-	path := "/repo"
+	path := absTestPath("repo")
 	if err := validateOptionalAbsolutePath("cwd", &path); err != nil {
 		t.Fatalf("absolute optional path returned error: %v", err)
 	}

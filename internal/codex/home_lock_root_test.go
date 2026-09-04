@@ -19,7 +19,7 @@ func TestHomeLockRootDerivesAProtectedRoot(t *testing.T) {
 
 	info, err := os.Stat(root)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	require.Equal(t, hostDirPerm(0o700), info.Mode().Perm())
 
 	again, err := HomeLockRoot(parent, home)
 	require.NoError(t, err)

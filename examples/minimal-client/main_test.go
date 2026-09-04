@@ -213,12 +213,8 @@ func TestStartAgentProcess(t *testing.T) {
 	originalCommand := commandContext
 	t.Cleanup(func() { commandContext = originalCommand })
 
-	script := filepath.Join(t.TempDir(), "fake-agent")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o700); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, script)
+		return fakeAgentCommand(t, ctx)
 	}
 
 	agent, err := startAgentProcess(context.Background(), io.Discard, io.Discard)
@@ -231,7 +227,7 @@ func TestStartAgentProcess(t *testing.T) {
 	}
 
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, script)
+		cmd := fakeAgentCommand(t, ctx)
 		cmd.Stdin = strings.NewReader("")
 
 		return cmd
@@ -240,7 +236,7 @@ func TestStartAgentProcess(t *testing.T) {
 		t.Fatal("startAgentProcess accepted StdinPipe failure")
 	}
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, script)
+		cmd := fakeAgentCommand(t, ctx)
 		cmd.Stdout = io.Discard
 
 		return cmd

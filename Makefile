@@ -97,6 +97,7 @@ test-cross-compile:
 	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/codex-darwin.test ./internal/codex
 	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/codex-cmd-darwin.test ./cmd/acp-go-codex
 	GOOS=darwin GOARCH=arm64 go build ./...
+	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/codex-root-windows.test .
 	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/codex-windows.test ./internal/codex
 	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/codex-cmd-windows.test ./cmd/acp-go-codex
 	GOOS=windows GOARCH=amd64 go build ./...

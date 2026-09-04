@@ -87,7 +87,7 @@ func TestShutdownActiveTurnCancelsInteractionStartedDuringContainment(t *testing
 	go func() {
 		shutdownDone <- session.shutdownActiveTurn(context.Background())
 	}()
-	<-client.interruptStarted
+	awaitTestSignal(t, client.interruptStarted, "client.interruptStarted")
 
 	interactionCtx, finishInteraction := session.beginInteraction(context.Background(), "during-containment")
 	close(client.interruptRelease)
@@ -179,7 +179,7 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 func TestSessionSnapshotConcurrentAccountUpdates(t *testing.T) {
 	session := &session{
 		id:              "s",
-		cwd:             "/tmp/project",
+		cwd:             absTestPath("tmp", "project"),
 		codexThreadID:   "thread",
 		model:           "gpt",
 		modelProvider:   "openai",
@@ -255,7 +255,7 @@ func TestSessionCloseUsesBoundedBackgroundContext(t *testing.T) {
 	client := &closeContextRecordingClient{spyCodexClient: newSpyCodexClient()}
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
 
-	resp, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestSessionCloseCoordinatesConcurrentCallersExactlyOnce(t *testing.T) {
 	for range callers {
 		go func() { results <- s.Close(t.Context()) }()
 	}
-	<-client.started
+	awaitTestSignal(t, client.started, "client.started")
 	require.Equal(t, int64(1), client.calls.Load())
 	close(client.release)
 	for range callers {
@@ -373,7 +373,7 @@ func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
 		}))
 		old := newSpyCodexClient()
 		active := &session{
-			agent: agent, id: "path", cwd: "/tmp/project",
+			agent: agent, id: "path", cwd: absTestPath("tmp", "project"),
 			codexThreadID: "thread-1", client: old, clientDead: true,
 		}
 		agent.sessions[active.id] = active
@@ -461,7 +461,7 @@ func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
 			}))
 			old := newSpyCodexClient()
 			active := &session{
-				agent: agent, id: acp.SessionId(test.name), cwd: "/tmp/project",
+				agent: agent, id: acp.SessionId(test.name), cwd: absTestPath("tmp", "project"),
 				codexThreadID: "thread-1", client: old, clientDead: true,
 			}
 			if activeReplacement != nil {
@@ -473,7 +473,7 @@ func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
 
 			done := make(chan error, 1)
 			go func() { done <- active.ensureLiveClient(context.Background()) }()
-			<-blocking.resumeStarted
+			awaitTestSignal(t, blocking.resumeStarted, "blocking.resumeStarted")
 			test.mutate(agent, active)
 			close(blocking.resumeRelease)
 			test.check(t, <-done)
@@ -603,7 +603,7 @@ func TestSessionContainmentAcceptsConcurrentRuntimeRetirementProof(t *testing.T)
 
 	done := make(chan error, 1)
 	go func() { done <- active.containSession(context.Background()) }()
-	<-client.started
+	awaitTestSignal(t, client.started, "client.started")
 	active.setClientDead(true)
 	close(client.release)
 
@@ -649,7 +649,7 @@ func TestUnsubscribeContainedThreadJoinsRetirementFailure(t *testing.T) {
 	agent := NewAgent()
 	agent.runtimeClient = client
 	agent.runtimeNativeRelease = func() error { return ErrContainmentIncomplete }
-	s := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	s := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 	agent.sessions[s.id] = s
 
 	err := s.unsubscribeContainedThread(t.Context(), client, "thread")

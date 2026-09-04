@@ -107,8 +107,8 @@ func TestPlaceholderSessionLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	newResp, err := agent.NewSession(ctx, acp.NewSessionRequest{
-		Cwd:                   "/tmp/project",
-		AdditionalDirectories: []string{"/tmp/other"},
+		Cwd:                   absTestPath("tmp", "project"),
+		AdditionalDirectories: []string{absTestPath("tmp", "other")},
 		McpServers:            []acp.McpServer{},
 	})
 	if err != nil {
@@ -188,7 +188,7 @@ func TestACPConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	}
 
 	newResp, err := clientConn.NewSession(ctx, acp.NewSessionRequest{
-		Cwd:        "/tmp/project",
+		Cwd:        absTestPath("tmp", "project"),
 		McpServers: []acp.McpServer{},
 	})
 	if err != nil {
@@ -247,7 +247,7 @@ func TestServeLocalConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	if _, err := clientConn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	newResp, err := clientConn.NewSession(ctx, acp.NewSessionRequest{Cwd: "/tmp/project", McpServers: []acp.McpServer{}})
+	newResp, err := clientConn.NewSession(ctx, acp.NewSessionRequest{Cwd: absTestPath("tmp", "project"), McpServers: []acp.McpServer{}})
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -385,9 +385,9 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	agent := NewAgent()
 	client := newSpyCodexClient()
 	otherClient := newSpyCodexClient()
-	matching := newSession(agent, "matching", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, client, sessionMeta{}, nil)
-	sameClientOtherThread := newSession(agent, "other-thread", "/tmp/project", nil, codex.Thread{ID: "thread-2"}, client, sessionMeta{}, nil)
-	other := newSession(agent, "other-client", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, otherClient, sessionMeta{}, nil)
+	matching := newSession(agent, "matching", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-1"}, client, sessionMeta{}, nil)
+	sameClientOtherThread := newSession(agent, "other-thread", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-2"}, client, sessionMeta{}, nil)
+	other := newSession(agent, "other-client", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-1"}, otherClient, sessionMeta{}, nil)
 	if err := agent.storeStartedSession(matching); err != nil {
 		t.Fatalf("store matching session: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestAgentCloseRetriesBusyRuntimeAndNormalizesClosedSession(t *testing.T) {
 	}
 	normalized := NewAgent()
 	normalized.runtimeClient = closedClient
-	active := newSession(normalized, "session", "/tmp/project", nil,
+	active := newSession(normalized, "session", absTestPath("tmp", "project"), nil,
 		codex.Thread{ID: "thread"}, closedClient, sessionMeta{}, nil)
 	require.NoError(t, normalized.storeStartedSession(active))
 	require.NoError(t, normalized.Close())
@@ -607,13 +607,13 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	if err := closedForStore.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
-	closedSession := newSession(closedForStore, "closed", "/tmp/project", nil, codex.Thread{ID: "closed"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
+	closedSession := newSession(closedForStore, "closed", absTestPath("tmp", "project"), nil, codex.Thread{ID: "closed"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
 	if err := closedForStore.storeStartedSession(closedSession); err == nil {
 		t.Fatal("storeStartedSession on closed agent succeeded")
 	}
 
 	limited := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
-	first := newSession(limited, "first", "/tmp/project", nil, codex.Thread{ID: "first"}, newSpyCodexClient(), sessionMeta{}, nil)
+	first := newSession(limited, "first", absTestPath("tmp", "project"), nil, codex.Thread{ID: "first"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := limited.storeStartedSession(first); err != nil {
 		t.Fatalf("store first session: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	// on every error, so containing it here as well would run one session's
 	// containment boundary twice over one native thread.
 	backpressured := newSpyCodexClient()
-	second := newSession(limited, "second", "/tmp/project", nil, codex.Thread{ID: "second"}, backpressured, sessionMeta{}, nil)
+	second := newSession(limited, "second", absTestPath("tmp", "project"), nil, codex.Thread{ID: "second"}, backpressured, sessionMeta{}, nil)
 	if err := limited.storeStartedSession(second); err == nil {
 		t.Fatal("storeStartedSession ignored active session limit")
 	}
@@ -631,11 +631,11 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	}
 
 	replacing := NewAgent()
-	old := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
+	old := newSession(replacing, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "old"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
 	if err := replacing.storeStartedSession(old); err != nil {
 		t.Fatalf("store old session: %v", err)
 	}
-	newer := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
+	newer := newSession(replacing, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := replacing.storeStartedSession(newer); err != nil {
 		t.Fatalf("replace session: %v", err)
 	}
@@ -654,11 +654,11 @@ func TestSameIdInstallRefusesOverAnUnsettledSession(t *testing.T) {
 	child := filepath.Join(unsettledDir, "child")
 	require.NoError(t, os.WriteFile(child, []byte("x"), 0o600))
 
-	unsettled := newSession(agent, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, newSpyCodexClient(), sessionMeta{}, nil)
+	unsettled := newSession(agent, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "old"}, newSpyCodexClient(), sessionMeta{}, nil)
 	unsettled.materializedPath = unsettledDir
 	require.NoError(t, agent.storeStartedSession(unsettled))
 
-	refused := newSession(agent, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
+	refused := newSession(agent, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
 	require.Error(t, agent.storeStartedSession(refused))
 	require.Same(t, unsettled, agent.activeSession("same"),
 		"an incomplete boundary keeps its id, and everything it still owes with it")
@@ -716,7 +716,7 @@ func newSpyCodexClient() *spyCodexClient {
 		thread: codex.Thread{
 			ID:        "thread-1",
 			SessionID: "thread-1",
-			Cwd:       "/tmp/project",
+			Cwd:       absTestPath("tmp", "project"),
 			Model:     "gpt-initial",
 			Provider:  "openai",
 			Title:     "Thread",
@@ -1071,7 +1071,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	if _, err := clientConn.Initialize(context.Background(), acp.InitializeRequest{}); err != nil {
 		t.Fatalf("serve close-error initialize: %v", err)
 	}
-	if _, err := clientConn.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/project", McpServers: []acp.McpServer{}}); err != nil {
+	if _, err := clientConn.NewSession(context.Background(), acp.NewSessionRequest{Cwd: absTestPath("tmp", "project"), McpServers: []acp.McpServer{}}); err != nil {
 		t.Fatalf("serve close-error session: %v", err)
 	}
 	serveCancel()
@@ -1145,10 +1145,10 @@ func TestServeJoinsIncompleteRuntimeLaunchBeforeReturning(t *testing.T) {
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	sessionErr := make(chan error, 1)
 	go func() {
-		_, err := clientConn.NewSession(sessionCtx, acp.NewSessionRequest{Cwd: "/tmp/project", McpServers: []acp.McpServer{}})
+		_, err := clientConn.NewSession(sessionCtx, acp.NewSessionRequest{Cwd: absTestPath("tmp", "project"), McpServers: []acp.McpServer{}})
 		sessionErr <- err
 	}()
-	<-factoryStarted
+	awaitTestSignal(t, factoryStarted, "factoryStarted")
 
 	serveCancel()
 	select {

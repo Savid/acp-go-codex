@@ -177,19 +177,7 @@ func TestAppServerClientModelAndAccountMethods(t *testing.T) {
 }
 
 func TestNewAppServerClientLaunchesCLI(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "codex")
-	if err := os.WriteFile(script, []byte(`#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo codex-cli 0.144.1
-  exit 0
-fi
-read line || exit 0
-echo '{"jsonrpc":"2.0","id":1,"result":{}}'
-read line || true
-while read line; do :; done
-`), 0o700); err != nil {
-		t.Fatalf("write codex script: %v", err)
-	}
+	script := writeFakeCLI(t, t.TempDir(), "codex", fakeCLIAppServer)
 	client, err := NewAppServerClient(context.Background(), Options{
 		CLIPath: script, CodexHome: t.TempDir(), Scratch: t.TempDir(),
 		ScratchParent: os.TempDir(),

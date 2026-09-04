@@ -367,9 +367,9 @@ func TestAgentSharesOneRuntimeAcrossThreadsAndReleasesItAtAgentClose(t *testing.
 
 	serverA := HTTPMCPServer("marker", "https://a.example/mcp", map[string]string{"Authorization": "Bearer A"})
 	serverB := HTTPMCPServer("marker", "https://b.example/mcp", map[string]string{"Authorization": "Bearer B"})
-	first, err := agent.NewSession(context.Background(), NewSessionRequest("/work/a", WithSessionMCPServers(serverA)))
+	first, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "a"), WithSessionMCPServers(serverA)))
 	require.NoError(t, err)
-	second, err := agent.NewSession(context.Background(), NewSessionRequest("/work/b", WithSessionMCPServers(serverB)))
+	second, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "b"), WithSessionMCPServers(serverB)))
 	require.NoError(t, err)
 	require.EqualValues(t, 1, launches.Load())
 	require.Len(t, client.starts, 2)
@@ -412,18 +412,18 @@ func TestAgentCloseConcurrentCallersJoinMemoizedContainmentResult(t *testing.T) 
 	for index := range sessions {
 		id := acp.SessionId(fmt.Sprintf("session-%d", index))
 		threadID := fmt.Sprintf("thread-%d", index)
-		agent.sessions[id] = newSession(agent, id, "/tmp/project", nil, codex.Thread{ID: threadID}, client, sessionMeta{}, nil)
+		agent.sessions[id] = newSession(agent, id, absTestPath("tmp", "project"), nil, codex.Thread{ID: threadID}, client, sessionMeta{}, nil)
 	}
 
 	const callers = 32
 	results := make(chan error, callers)
 	go func() { results <- agent.Close() }()
-	<-client.allStarted
+	awaitTestSignal(t, client.allStarted, "client.allStarted")
 	for range callers - 1 {
 		go func() { results <- agent.Close() }()
 	}
 
-	<-client.started
+	awaitTestSignal(t, client.started, "client.started")
 	for range callers {
 		require.ErrorIs(t, <-results, codex.ErrContainmentIncomplete)
 	}
@@ -462,7 +462,7 @@ func TestAgentCloseJoinsIncompleteRuntimeLaunchBeforeMemoizing(t *testing.T) {
 		_, err := agent.sharedRuntime(context.Background())
 		runtimeErr <- err
 	}()
-	<-factoryStarted
+	awaitTestSignal(t, factoryStarted, "factoryStarted")
 
 	closeErr := make(chan error, 1)
 	go func() { closeErr <- agent.Close() }()
@@ -508,7 +508,7 @@ func TestCloseSharedRuntimeFencesNewConstructionAndConcurrentClosers(t *testing.
 		_, err := agent.sharedRuntime(context.Background())
 		runtimeErr <- err
 	}()
-	<-factoryStarted
+	awaitTestSignal(t, factoryStarted, "factoryStarted")
 
 	firstClose := make(chan error, 1)
 	go func() { firstClose <- agent.closeSharedRuntime(context.Background()) }()
@@ -588,9 +588,9 @@ func TestRuntimeReplacementResumesEachSessionLazilyWithItsOwnConfig(t *testing.T
 
 	serverA := HTTPMCPServer("marker", "https://a.example/mcp", map[string]string{"Authorization": "Bearer A"})
 	serverB := HTTPMCPServer("marker", "https://b.example/mcp", map[string]string{"Authorization": "Bearer B"})
-	a, err := agent.NewSession(context.Background(), NewSessionRequest("/work/a", WithSessionMCPServers(serverA)))
+	a, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "a"), WithSessionMCPServers(serverA)))
 	require.NoError(t, err)
-	b, err := agent.NewSession(context.Background(), NewSessionRequest("/work/b", WithSessionMCPServers(serverB)))
+	b, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "b"), WithSessionMCPServers(serverB)))
 	require.NoError(t, err)
 
 	agent.markRuntimeDead(first)
@@ -664,7 +664,7 @@ func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newClient, nil
 	}))
-	active := newSession(agent, "closing", "/tmp/project", nil, codex.Thread{ID: "thread-closing"}, oldClient, sessionMeta{}, nil)
+	active := newSession(agent, "closing", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-closing"}, oldClient, sessionMeta{}, nil)
 	agent.sessions[active.id] = active
 	agent.runtimeClient = oldClient
 	agent.runtimeDead = true
@@ -802,7 +802,7 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 
 	require.NoError(t, reclaimAgent.retainOpaqueNativeTree(nil))
 	fencedClient := newSpyCodexClient()
-	fenced := newSession(reclaimAgent, "fenced", "/tmp/project", nil, codex.Thread{ID: "fenced"}, fencedClient, sessionMeta{}, nil)
+	fenced := newSession(reclaimAgent, "fenced", absTestPath("tmp", "project"), nil, codex.Thread{ID: "fenced"}, fencedClient, sessionMeta{}, nil)
 	reclaimAgent.sessions[fenced.id] = fenced
 	err = reclaimAgent.retainOpaqueNativeTree(injected)
 	require.ErrorIs(t, err, ErrContainmentIncomplete)
@@ -853,23 +853,23 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 
 	busyAuthority := authority
 	busyAuthority.reclaim = func() error { return ErrNativeTreeBusy }
-	busyRelease := runtimeHomeReleaser(busyAuthority, "/home")
+	busyRelease := runtimeHomeReleaser(busyAuthority, absTestPath("home"))
 	require.ErrorIs(t, busyRelease(), ErrNativeTreeBusy)
 	busyAuthority.reclaim = func() error { return nil }
 	// The releaser retains its guarded authority value, so a fresh releaser proves success and idempotence.
-	successRelease := runtimeHomeReleaser(busyAuthority, "/home")
+	successRelease := runtimeHomeReleaser(busyAuthority, absTestPath("home"))
 	require.NoError(t, successRelease())
 	require.NoError(t, successRelease())
 	failingAuthority := authority
 	failingAuthority.reclaim = func() error { return injected }
-	failingRelease := runtimeHomeReleaser(failingAuthority, "/home")
+	failingRelease := runtimeHomeReleaser(failingAuthority, absTestPath("home"))
 	require.ErrorIs(t, failingRelease(), ErrContainmentIncomplete)
 	require.ErrorIs(t, failingRelease(), ErrContainmentIncomplete)
 	originalNativeTreeTimeout := runtimeNativeTreeTimeout
 	runtimeNativeTreeTimeout = 0
 	t.Cleanup(func() { runtimeNativeTreeTimeout = originalNativeTreeTimeout })
 	deadlineAuthority := reclaimDeadlineAuthority{HostAuthority: authority}
-	deadlineRelease := runtimeHomeReleaser(deadlineAuthority, "/home")
+	deadlineRelease := runtimeHomeReleaser(deadlineAuthority, absTestPath("home"))
 	require.ErrorIs(t, deadlineRelease(), ErrContainmentIncomplete)
 	require.ErrorIs(t, deadlineRelease(), context.DeadlineExceeded)
 	deadlineAgent := NewAgent(WithHostAuthority(deadlineAuthority))
@@ -893,7 +893,7 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 	peerAgent := NewAgent()
 	peerClient := newSpyCodexClient()
 	peerAgent.runtimeClient = peerClient
-	owner := newSession(peerAgent, "owner", "/tmp/project", nil, codex.Thread{ID: "owner"}, peerClient, sessionMeta{}, nil)
+	owner := newSession(peerAgent, "owner", absTestPath("tmp", "project"), nil, codex.Thread{ID: "owner"}, peerClient, sessionMeta{}, nil)
 	peerAgent.retainedThreads["peer"] = &retainedRuntimeThread{
 		sessionID: "peer", threadID: "peer", client: peerClient, epoch: peerAgent.runtimeEpoch,
 	}
@@ -923,7 +923,7 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 	attachErr := errors.New("subscribe failed")
 	attachClient := &failingSubscribeClient{spyCodexClient: newSpyCodexClient(), err: attachErr}
 	attachAgent := NewAgent()
-	attachSession := newSession(attachAgent, "attach", "/tmp/project", nil, codex.Thread{ID: "attach"}, attachClient, sessionMeta{}, nil)
+	attachSession := newSession(attachAgent, "attach", absTestPath("tmp", "project"), nil, codex.Thread{ID: "attach"}, attachClient, sessionMeta{}, nil)
 	require.ErrorIs(t, attachAgent.runtimeReadyCanaryWithConfig(ctx, attachClient, attachSession, map[string]any{"key": "value"}), attachErr)
 }
 
@@ -1019,9 +1019,9 @@ func TestSessionEnvironmentDoesNotPinSharedRuntime(t *testing.T) {
 }
 
 func TestLifecycleFingerprintIncludesOrderedExtraPathDirs(t *testing.T) {
-	base := codexSessionStart{Cwd: "/tmp/project", Meta: sessionMeta{
+	base := codexSessionStart{Cwd: absTestPath("tmp", "project"), Meta: sessionMeta{
 		Env:           map[string]string{"SESSION": "one"},
-		ExtraPathDirs: []string{"/operation/first", "/operation/second"},
+		ExtraPathDirs: []string{absTestPath("operation", "first"), absTestPath("operation", "second")},
 	}}
 
 	changedEnv := base
@@ -1029,14 +1029,14 @@ func TestLifecycleFingerprintIncludesOrderedExtraPathDirs(t *testing.T) {
 	require.NotEqual(t, codexSessionStartFingerprint(base), codexSessionStartFingerprint(changedEnv))
 
 	reordered := base
-	reordered.Meta.ExtraPathDirs = []string{"/operation/second", "/operation/first"}
+	reordered.Meta.ExtraPathDirs = []string{absTestPath("operation", "second"), absTestPath("operation", "first")}
 	require.NotEqual(t, codexSessionStartFingerprint(base), codexSessionStartFingerprint(reordered))
 }
 
 func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	valid := &session{agent: agent, id: "s", codexThreadID: "thread", cwd: "/work"}
+	valid := &session{agent: agent, id: "s", codexThreadID: "thread", cwd: absTestPath("work")}
 	resumeFailure := &runtimeFailureClient{runtimeRecordingClient: newRuntimeRecordingClient(), resumeErr: errors.New("resume")}
 	_, err := agent.resumeRuntimeSession(ctx, resumeFailure, valid)
 	require.Error(t, err)
@@ -1048,7 +1048,7 @@ func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {
 	require.NoError(t, agent.runtimeReadyCanary(ctx, newSpyCodexClient(), valid))
 	canarySession := func(client codex.Client) *session {
 		s := &session{
-			agent: agent, id: "s", codexThreadID: "thread", cwd: "/work", client: client,
+			agent: agent, id: "s", codexThreadID: "thread", cwd: absTestPath("work"), client: client,
 			mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example/mcp", nil)},
 		}
 		t.Cleanup(s.fenceSession)
@@ -1351,7 +1351,7 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		client := newSpyCodexClient()
 		agent.runtimeClient = client
 		agent.runtimeEpoch = 3
-		active := newSession(agent, "session", "/work", nil, codex.Thread{
+		active := newSession(agent, "session", absTestPath("work"), nil, codex.Thread{
 			ID:   "thread",
 			Path: "/native/rollout.jsonl",
 		}, client, sessionMeta{}, nil)
@@ -1383,7 +1383,7 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 	t.Run("logical close without live runtime", func(t *testing.T) {
 		agent := NewAgent()
 		client := newSpyCodexClient()
-		active := newSession(agent, "session", "/work", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+		active := newSession(agent, "session", absTestPath("work"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 		agent.sessions[active.id] = active
 		agent.runtimeClient = client
 		agent.runtimeDead = true
@@ -1400,13 +1400,13 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		client := newSpyCodexClient()
 		agent.runtimeClient = client
 		agent.runtimeEpoch = 1
-		agent.sessions["requested"] = newSession(agent, "requested", "/work", nil, codex.Thread{ID: "self"}, client, sessionMeta{}, nil)
-		agent.sessions["unrelated"] = newSession(agent, "unrelated", "/work", nil, codex.Thread{ID: "other"}, client, sessionMeta{}, nil)
+		agent.sessions["requested"] = newSession(agent, "requested", absTestPath("work"), nil, codex.Thread{ID: "self"}, client, sessionMeta{}, nil)
+		agent.sessions["unrelated"] = newSession(agent, "unrelated", absTestPath("work"), nil, codex.Thread{ID: "other"}, client, sessionMeta{}, nil)
 		retained, err := agent.claimRetainedRuntimeThreadForStore("requested", "unclaimed")
 		require.ErrorIs(t, err, errNoRetainedRuntimeThread)
 		require.Nil(t, retained)
 
-		agent.sessions["peer"] = newSession(agent, "peer", "/work", nil, codex.Thread{ID: "claimed"}, client, sessionMeta{}, nil)
+		agent.sessions["peer"] = newSession(agent, "peer", absTestPath("work"), nil, codex.Thread{ID: "claimed"}, client, sessionMeta{}, nil)
 		_, err = agent.claimRetainedRuntimeThreadForStore("requested", "claimed")
 		require.ErrorContains(t, err, "active in another session")
 		retained, err = agent.claimRetainedRuntimeThreadForStore("missing", "")
@@ -1420,7 +1420,7 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 			client := newSpyCodexClient()
 			retained := newRetained(agent, client, "session")
 			retained.claimed = true
-			candidate := newSession(agent, "session", "/work", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+			candidate := newSession(agent, "session", absTestPath("work"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 
 			return agent, retained, candidate
 		}
