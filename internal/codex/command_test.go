@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Without "--disable plugins" the harness clones a plugin marketplace into
+// CODEX_HOME. Do not drop it to make this pass.
 func TestAppServerArgs(t *testing.T) {
 	args := appServerArgs(Options{
 		Config:    map[string]any{"z": true, "a": "value"},
