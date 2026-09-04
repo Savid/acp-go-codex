@@ -58,6 +58,6 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	processIsolationGOOS = processIsolationLinux
+	processGOOS = "linux"
 	goleak.VerifyTestMain(m)
 }

@@ -20,14 +20,8 @@ const (
 // cancelled turn. The app-server is shared, so cleanup must never cross the
 // owning thread boundary or close the runtime generation that serves peers.
 //
-// A sweep that was offered and did not prove the thread contained is a boundary
-// that did not complete, and it says so with the family's stable discriminator:
-// this result reaches session close, Agent.Close, and Serve unchanged, and each
-// of those surfaces owes the host an error matching
-// ErrProcessContainmentIncomplete. A client that offers no thread-scoped
-// containment at all is the one failure that is not that: nothing was selected
-// here, so the caller's generation fence is the boundary and classifies its own
-// result.
+// A failed offered sweep is incomplete containment. An unsupported sweep is
+// left distinct so a sole owner can retire the shared runtime instead.
 func terminateThreadBackgroundTerminals(
 	ctx context.Context,
 	client codex.Client,
@@ -38,7 +32,11 @@ func terminateThreadBackgroundTerminals(
 		return err
 	}
 
-	return fmt.Errorf("%w: %w", codex.ErrProcessContainmentIncomplete, err)
+	return errors.Join(
+		ErrContainmentIncomplete,
+		codex.ErrContainmentIncomplete,
+		fmt.Errorf("terminate Codex background terminals: %w", err),
+	)
 }
 
 func sweepThreadBackgroundTerminals(

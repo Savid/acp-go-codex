@@ -1,257 +1,76 @@
 ---
 title: "Security"
-description: "Trust boundaries an operator controls over the Codex home, session MCP data, and raw events."
+description: "Native execution and filesystem trust boundaries."
 ---
 
-The adapter is a thin boundary between an ACP client and the local Codex CLI.
-The controls below decide how much of the operator's Codex install a client can
-reach. For how common failures surface, see
-[Troubleshooting](/docs/operations/troubleshooting).
+## Native execution modes
 
-## Standalone command boundary
+Omitting `WithHostAuthority` runs Codex as the adapter's current user. The
+ordinary launcher owns its process handle and writable-home lock, and shutdown
+waits for the launched process. It does not claim an independent security
+boundary between the adapter and Codex.
 
-Omitting `-process-isolation-config` launches native work as the current
-identity. Linux still uses its ordinary guardian/liveness supervisor but
-takes no UID lock, authority domain, standalone disposition, or credential
-change. Other supported platforms use their native current-identity backend.
-Every ordinary backend reports non-authoritative `shared_identity`, publishes no
-provider-descendant inventory, and makes no whole-tree quiescence claim.
-The ordinary environment is captured once, then adapter-private names and
-ambient managed `CODEX_HOME`/`HOME`/XDG roots are removed before the resolved
-`CODEX_HOME` is restored. Ordinary executable lookup keeps normal relative
-executable and relative-`PATH` behavior; the absolute-`PATH` rule belongs only
-to the explicit closed policy.
+An embedded host selects managed execution with `WithHostAuthority`. A supplied
+authority must provide a usable native environment before initialization can
+succeed. It prepares every native-readable tree, launches every version probe,
+app-server, account helper, and browser-shim command, and later reclaims those
+trees. An explicit nil, typed nil, panic, incomplete process, or launch refusal
+fails closed; managed execution never retries through the ordinary launcher.
 
-Supplying the flag selects the explicit Linux hardening contract and requires a
-root-owned mode-`0600` policy. Resolution walks
-from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
-must be root-owned and not writable by group or other, and the final single-link
-policy inode is read through the descriptor that was validated. The configured
-account home is resolved the same way, must be a target-owned mode-`0700`
-directory beneath protected root-owned ancestry, and cannot be `/root` or
-`/nonexistent`.
+The standalone CLI intentionally exposes only ordinary execution. Hosts that
+need a stronger boundary embed the Go package and implement the authority
+contract themselves.
 
-Under explicit isolation the adapter remains root, but its ambient environment
-is never copied wholesale to the child. Only the complete literal
-`baseEnvironment` plus names in
-`inheritEnvironment` reach native work. An invalid explicit policy is rejected
-before spawn and is never retried using the ordinary backend.
+## Prepared-tree lifecycle
+
+The adapter completes all directory creation, seed writes, hydration, and
+validation before `PrepareNativeTree`. After preparation it treats the tree as
+opaque: only the host-launched native process may use paths inside it. Cleanup
+follows one order:
+
+1. close the app-server protocol and stop new admission;
+2. revoke native work when graceful shutdown does not settle it;
+3. wait for terminal native-process proof;
+4. reclaim each prepared tree;
+5. remove adapter scratch and release its reservation.
+
+`ErrNativeTreeBusy` means reclaim was attempted before the authority could
+prove the tree idle. It is retryable, leaves the tree and reservation intact,
+and is not classified as `ErrContainmentIncomplete`.
+`ErrContainmentIncomplete` means terminal ownership could not be proved; the
+tree stays quarantined and the Agent refuses another runtime generation.
+`ErrHostAuthorityUnavailable` classifies an unusable authority boundary.
+
+The Codex app-server is Agent-owned and shared by sessions. Session cancellation
+uses Codex protocol operations and does not revoke the shared process. Rollout
+and large prompt-image trees prepared while a runtime is live remain registered
+until that runtime generation reaches its terminal boundary. Count and exact
+hydrated-byte limits force retirement before another prepared residence is
+admitted.
+
+Managed executable selectors containing a `node_modules` path segment are
+refused during initialization, before filesystem inspection or mutation. A host
+must stage and pin packaged Codex itself.
 
 ## Home and account boundary
 
-`-home` and `WithHome` choose the `CODEX_HOME` used by launched Codex processes.
-Point it at an adapter-owned directory whenever you enable logout, so a client
-can never clear the credentials of the operator's normal Codex install.
+`CODEX_HOME` is a mutable account and configuration boundary. Seed files are
+written before host preparation and are confined to relative paths under the
+resolved home. Terminal `login` and `logout` require an explicit canonical
+home. Browser launchers are replaced by a private no-op shim for ordinary login;
+Windows login is refused because that shim cannot provide the same behavior.
 
-Only one cooperating app-server or terminal login/logout command may mutate a
-writable Codex home.
-The adapter derives a stable, protected per-home lock root beneath the selected
-scratch parent and takes two mode-0600, never-unlinked files there —
-`acp-go-codex-runtime.claim.lock` and
-`acp-go-codex-runtime.liveness.lock` — with build-tagged Unix `flock` and a
-Windows `LockFileEx` backend. On ordinary direct backends the adapter retains
-both locks until the direct native child is reaped. On Linux a guardian process
-owns only the claim lock; its separate liveness supervisor owns only the
-liveness lock and directly parents the native root. The native process never
-inherits either descriptor. Linux supervisors initially place the root and
-descendants in a process group and are child subreapers.
-For explicit isolation, Linux kills and reaps adopted descendants even when
-they escape the original process group with `setsid`, then requires a non-reaping
-`waitid(..., WNOWAIT)` `ECHILD` result as
-the kernel proof that no child remains. If either supervisor dies, the survivor
-performs the same containment; adapter/control EOF does too. Only after that
-proof does shutdown release liveness and then claim, so a second claimant fails
-closed while any old tree can still write the home.
-
-Under explicit Linux isolation both supervisors stay root and run from `/` with
-a closed private environment. Private launch configuration carries the target identity and
-native environment; only the Codex app-server receives the configured UID/GID
-with no supplementary groups. Before native start the independent trusted-root
-guardian/liveness pair validates and retains duplicates of the identical UID EX
-and domain SH open file descriptions. A primary guardian `SIGKILL` leaves
-liveness authoritative; a liveness `SIGKILL` leaves the guardian authoritative.
-The survivor holds both capabilities while it adopts, kills, and reaps
-daemonized and `setsid` descendants to kernel `ECHILD`; completion and the
-managed-root permit wait for that proof. The native tree inherits no launch,
-control, proof, guardian, or lock descriptor, so it cannot forge completion or
-overlap another provider tree using the same host identity.
-A dedicated guardian peer-liveness descriptor is fenced immediately before
-native start. Guardian death before readiness refuses native launch and lets
-liveness publish completion or quarantine only after kernel `ECHILD`.
-The identity root must be a persistent local-lock volume shared by every
-service or container using the same numeric UID namespace. Otherwise those
-participants require disjoint UID pools. Lock inodes are permanent and are
-never unlinked, renamed, or replaced.
-The durable authority root is `/var/lib/acp-go/agent-identities`.
-Before any identity operation, the adapter joins permanent `domain.lock`
-through matching strict `domain.json`, binding the boot, PID/user namespaces,
-canonical UID/GID maps, and unrestricted root procfs view. It and both trusted
-supervisors retain a shared checked-CLOEXEC lease through containment; native
-inherits no domain descriptor. Before launch the supervisor re-reads matching
-strict `domain.json` under that lease. Borrowed adoption strictly parses
-`/proc/self/fdinfo/<fd>` and requires the supplied open file description's
-matching whole-file `FLOCK`: UID `WRITE` and domain `READ`. Missing, unreadable,
-malformed, ambiguous, wrong-inode, partial-range, or wrong-mode state refuses;
-the adapter never calls mode-converting `flock` on the supplied descriptor.
-Separate-open contention remains an independent proof. Contended pristine same-domain bootstrap uses a
-bounded shared-lock rejoin; a retained shared lease protecting a live mismatch
-refuses. Rebind requires an
-exclusive lease, a boot-aware whole-root audit, durable atomic record replacement,
-and a shared-lock re-read. A contender that sees a peer's matching record after
-obtaining EX performs a real EX-to-SH conversion and shared re-read; it never
-returns a mislabeled exclusive lifetime lease. The full local-durable-noncloned
-filesystem probe reruns immediately before every initial publish, rebind, or
-replacement. Failure preserves the old record and blocks downgrade and launch.
-Same-boot exact-owner `ACTIVE` may rebind only while this provider holds that
-UID lock exclusively and proves task vacancy; a live UID-lock holder blocks rebind,
-and every other owner or `ACTIVE` refuses. A changed boot carries every valid standalone
-owner+`ACTIVE` unchanged and excluded, and ownerless `CLEAN_READY`
-may be carried. A provider never recovers ownerless `ACTIVE`: it performs no
-kill, path deletion, disposition rewrite, or CLEAN publish, and it fails closed
-with no launch. The operator posture that leaves is
-`Host recovery required` — what has to happen next, not the text of any error
-the adapter emits. The host authority alone owns that destructive
-recovery grammar and authority. Only the exact standalone owner may roll retained `ACTIVE`
-after publication and two consecutive vacancy scans. Missing domain state plus
-any owner or disposition fails closed. Every authorized cleanup requires exact
-persisted root device/inode; device renumber and cleanup-root filesystem
-substitution fail closed.
-Canonical crash temps are metadata-checked and never parsed. Domain temps are
-unlinked and directory-synced only under domain EX; marker temps only under
-their UID EX lock. A live-writer conflict is untouched, and malformed temp
-names or metadata fail closed. A matching-domain participant still joins SH
-while a valid canonical marker temp is protected by a live UID lock; its cleanup
-needs UID EX, not domain EX. Domain-record temps remain domain-EX-only.
-A matching-domain provider audit validates but tolerates a canonical unrelated marker temp.
-After target UID EX, it cleans target marker temps and re-reads the final disposition.
-A domain-rebind audit under domain EX drains all canonical marker temps under
-their UID EX locks.
-Pre-join filesystem probes hold a checked-CLOEXEC inode EX lease through unlink
-and directory sync across both canonical
-`.authority-probe-<24-lowercase-hex>` and
-`.authority-probe-<24-lowercase-hex>.renamed` names. Audit validates the named inode and
-metadata, takes inode `LOCK_EX|LOCK_NB`, then unlinks and directory-syncs. That
-inode lease permits matching shared cleanup; domain EX alone is insufficient.
-A live conflict remains untouched, matching shared join proceeds, and bootstrap
-cleanup bounded-waits. An authority `/proc/self/fd/<fd>` path ending in the
-kernel ` (deleted)` suffix fails closed.
-Permanent coordination inodes are never reconstructed beside durable state.
-  `domain.lock` creation requires a truly empty authority root; `owners.lock`
-  creation requires an established domain with no owner, disposition, UID-lock,
-  or affinity-lock state. A missing UID lock refuses beside its owner,
-  disposition, or temp; a missing affinity lock refuses when a marker maps to
-  its shard. This prevents an old unlinked open file description from becoming
-  split-brain authority. An exact-owner restart still validates the named
-  owners-lock metadata even though it skips that flock.
-With both host capabilities nil, standalone acquisition requires the explicit
-owner ID and state-root fields and strictly validates `<uid>.owner` and
-`<uid>.quarantine`. A new claim takes domain SH, permanent checked-CLOEXEC
-`owners.lock` EX, then nonblocking UID EX, and retains them through owner plus `ACTIVE`
-publication. It audits every owner and disposition globally and refuses
-duplicate UID, GID, provider+owner ID, state-root path, or state-root
-device/inode. It requires both owner and disposition absent and never claims
-ownerless `CLEAN_READY`. No provider waits for UID while holding owners EX; a busy candidate releases
-owners and boundedly retries the complete global scan. An exact-owner restart
-skips owners and may wait for UID with cancellation. The permanent owner kind is
-`standalone-provider`
-and permanently binds UID:GID, fixed provider module
-`github.com/savid/acp-go-codex`, canonical owner ID, and the exact no-symlink state-root
-path/device/inode.
-
-Before any audit passes, the provider drains every canonical owner temp,
-including temps for unrelated UIDs, under owners EX plus that temp's
-nonblocking UID EX lock. A busy temp UID releases owners and retries the whole
-scan. An exact-owner fast path that encounters a temp releases its target UID
-and joins owners-before-UID cleanup; unknown temp names refuse.
-
-The state root is dedicated, never `/`, and outside and not beneath the
-authority root. This exact provider resolves it componentwise from `/` without
-symlinks or magic links, and every ancestor except the final directory is
-root-owned and not group- or world-writable; the final directory is owned by
-the configured UID:GID with mode `0700`. It revalidates the protected path,
-ownership, mode, device, and inode immediately before `ACTIVE` publication and native launch. Host authority and foreign providers
-validate the tuple but carry or refuse it without requiring the path in their
-mount namespace.
-
-Publication uses a synced `<uid>.owner.next-` temporary,
-`RENAME_NOREPLACE`, named revalidation, and directory sync. Two consecutive
-full scans of every task's four `Uid`, four `Gid`, and supplementary
-`Groups` values are required before owner and `ACTIVE` publication. Every
-status has exactly one `Uid`, one `Gid`, and one `Groups`; missing, duplicate,
-or malformed fields refuse, while an empty `Groups` value is valid.
-`ACTIVE` has a fresh lease, empty paths, and `standalone:` plus lowercase
-SHA-256 of the compact canonical owner JSON without the file newline. Only the
-exact owner may restart matching retained `ACTIVE`, or finish an
-absent-disposition owner-sync crash marker, after two new consecutive scans.
-`CLEAN_READY`, unreadable or hidden credentials, survivors, and every tuple
-or state-root mismatch fail closed. Standalone never becomes `CLEAN_READY`,
-including on clean exit. With host capabilities, the adapter rejects any owner
-and never rewrites the ownerless host record.
-Participants sharing a pool must also share identical user-namespace UID/GID
-mappings and authoritative PID visibility, or use disjoint pools. The authority
-root rejects network, FUSE, pseudo, read-only, overlay, tmpfs, and unknown
-filesystems. Only probed ext2/3/4-magic, XFS, btrfs, f2fs, ZFS, and bcachefs backing
-filesystems are accepted. It probes separate-open lock exclusion, file sync,
-same-directory atomic rename,
-and directory sync. Each newly created directory level is parent-synced before
-any lock becomes authoritative.
-
-Ordinary mode is selected only by omitting `ProcessIsolation`. It uses the
-caller's current root or nonroot identity without consulting account databases,
-the identity authority, sudo, or synthetic UID/GID policy. It retains the
-portable two-lock writable-home exclusion but reports `shared_identity` and
-publishes no descendant inventory or whole-tree quiescence result. A non-nil
-policy can never select this path: explicit isolation is distinct trusted-root
-Linux only and fails closed on every policy, authority, platform, or launch
-error.
-
-Windows supports ordinary native runtimes and logout when its NTFS/ReFS lock
-requirements are met; login refuses because the browser launch cannot be
-neutralised. Embedded Darwin hosts also default to ordinary `shared_identity`.
-`WithDarwinBestEffortContainment()` is mutually exclusive with explicit
-isolation and explicitly accepts a weaker supervisor boundary. Each
-native launch receives a fresh process group; the liveness supervisor captures
-that original PGID while the sole direct-child waiter is paused, records the
-child identity, begins that waiter before readiness, then uses one memoized
-five-second cleanup: `SIGTERM`, at most 500 ms grace, `SIGKILL`, and polling
-until the original group is absent and the direct child is reaped.
-
-This is deliberately not authoritative. A descendant can call `setsid` and
-escape. Darwin exposes only a numeric PGID, so reuse can cause collateral
-signalling. Embedded hosts receive an unconditional warning, and
-provider-descendant inventory is unavailable rather than reported as zero.
-
-Before a Darwin best-effort launch, Codex writes a mode-0600 schema-1 record in
-the mode-0700 `acp-go-codex-containment` registry under the selected scratch
-parent and injects exact runtime-ID and generation-root markers into the native
-environment. `containment diagnose` and operator-selected `containment cleanup
--force` use both markers for same-UID correlation and revalidate every process
-before signalling it individually. They never treat a recorded PID or PGID as
-signal authority. Correlation is not ownership or proof of absence: marker
-inheritance can include legitimate detached work, and an escapee can scrub its
-markers.
-
-Lock admission also validates the filesystem containing the opened lock file.
-Linux accepts ext2, ext3, ext4, XFS, Btrfs, F2FS, and tmpfs; Windows accepts
-fixed or RAM drives formatted as NTFS or ReFS. Network mounts, overlay
-filesystems, unknown filesystem types, and platforms without a proved backend
-fail closed before either native runtime or terminal account mutation starts.
-These checks support ordinary Windows runtime/logout exclusion; they do not
-make explicit process isolation portable beyond Linux.
-
-ACP logout is disabled by default and is refused unless the adapter is started
-with `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)` and an
-explicit `-home` or `WithHome`. `CODEX_HOME`, `HOME`, and XDG root overrides are
-rejected from public and session environment overlays, so the consented home
-and trusted identity environment stay authoritative. See
-[Authentication](/docs/features/authentication) for the full flow.
+Provider-auth extension methods are ordinary-mode features. When
+`WithHostAuthority` is supplied, their capability is omitted, every
+`_codex/auth/*` request receives method-not-found, and no provider ledger path
+is created. The standard ACP auth methods and Agent runtime remain usable.
 
 ## MCP and raw-event data
 
 The adapter accepts only stdio and streamable-HTTP
 [MCP servers](/docs/features/mcp); any other transport is rejected with invalid
-params. Stdio MCP environment entries cannot use the adapter-reserved
-process-management namespace or Darwin runtime/scratch correlation markers.
+params. Stdio MCP environment entries cannot use adapter-reserved environment
+names.
 
 Session MCP is serialized only into thread-scoped app-server requests. Bearer
 headers do not ride process arguments or process-wide environment variables and
@@ -267,10 +86,12 @@ Prompt images are read from the base64 bytes in the ACP request, and an embedded
 block's image URI is never followed. Large validated inputs are materialized as
 mode-0600 files in an adapter-owned scratch directory and removed when the prompt
 call returns. Native image output paths are accepted only when their resolved
-target is a regular file inside the workspace, adapter scratch roots, the Codex
-`generated_images` directory, or the operating-system temporary directory —
-the roots the harness sandbox already lets a turn write to. The roots stop
-accidental reads of arbitrary paths; they are not an exfiltration boundary
+target is a regular file inside the workspace, adapter scratch roots, the
+operating-system temporary directory, or, in ordinary mode, the Codex
+`generated_images` directory — the roots the harness sandbox already lets a
+turn write to. A managed Codex home stays opaque while prepared, so managed
+image output must arrive as inline bytes or through another allowed root. The
+roots stop accidental reads of arbitrary paths; they are not an exfiltration boundary
 against a shell-capable agent, which can copy any readable file into the
 workspace. Every accepted path is still resolved through its symlinks,
 required to be a regular file, and read under the per-image byte bound. A

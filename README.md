@@ -82,9 +82,8 @@ func main() {
 
 See the [Go API reference](https://pkg.go.dev/github.com/savid/acp-go-codex)
 for options such as the Codex executable path, `CODEX_HOME`, the ephemeral
-scratch directory, default model, session storage, external ChatGPT token
-refresh, guarded logout, explicit Darwin containment selection, and
-OpenTelemetry providers.
+scratch directory, default model, session storage, host authority, external
+ChatGPT token refresh, guarded logout, and OpenTelemetry providers.
 
 ## What It Provides
 
@@ -114,13 +113,10 @@ OpenTelemetry providers.
   replaceable by a host-provided durable store; stored rows are Codex rollout
   JSONL keyed by `{SessionID, Subpath}`, and residual native threads are never
   listed, loaded, or resumed without those rows.
-- Same-identity native execution by default on every supported platform,
-  reporting non-authoritative `shared_identity` containment with no
-  provider-descendant inventory and no whole-tree quiescence claim.
-- Opt-in containment upgrades — a Linux-only trusted-root isolation policy that
-  reaps the native tree to kernel proof, or an explicitly accepted best-effort
-  Darwin process-group boundary — detailed in
-  [Security](docs/operations/security.mdx).
+- Ordinary same-user native execution when `WithHostAuthority` is omitted, and
+  host-managed environment, prepared-tree, launch, wait, revoke, and reclaim
+  seams when it is supplied. Managed failures never fall back to ordinary
+  execution; see [Security](docs/operations/security.mdx).
 - Optional raw Codex rollout extension notifications through `_codex/rawEvent`,
   plus OpenTelemetry adapter telemetry and native Codex app-server OTLP mapping
   that record no prompt or tool secrets by default.

@@ -5,9 +5,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 4242 canary \
  && useradd --uid 4242 --gid 4242 --create-home --shell /bin/sh canary \
- && install -d -m 0700 -o canary -g canary /home/canary/.cache /home/canary/.config /home/canary/.local/share /home/canary/.local/state /home/canary/.run \
- && install -d -m 0700 -o root -g root /var/lib/acp-go /var/lib/acp-go/agent-identities \
- && install -d -m 0711 /canary/scratch \
+ && install -d -m 0700 -o canary -g canary /home/canary \
+ && install -d -m 0700 -o canary -g canary /canary/scratch \
  && install -d -m 0777 /canary/evidence \
  && install -d -m 0755 /canary/decoys
 

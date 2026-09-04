@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestLineTransportSendRecvAndClose(t *testing.T) {
@@ -264,6 +266,59 @@ type passiveFailureTransport struct {
 	mu           sync.Mutex
 	reads        int
 	closes       int
+}
+
+type retryableCloseTransport struct {
+	done chan struct{}
+	once sync.Once
+	mu   sync.Mutex
+	n    int
+}
+
+func (t *retryableCloseTransport) Send(context.Context, rpcMessage) error { return nil }
+func (t *retryableCloseTransport) Recv() (rpcMessage, string, error) {
+	<-t.done
+
+	return rpcMessage{}, "", io.EOF
+}
+func (t *retryableCloseTransport) Close() error {
+	t.mu.Lock()
+	t.n++
+	call := t.n
+	t.mu.Unlock()
+	t.once.Do(func() { close(t.done) })
+
+	if call == 1 {
+		return errors.Join(ErrContainmentIncomplete, errors.New("terminal proof pending"))
+	}
+
+	return nil
+}
+
+func (t *retryableCloseTransport) closeCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.n
+}
+
+func TestRPCConnRetriesIncompleteTransportContainment(t *testing.T) {
+	transport := &retryableCloseTransport{done: make(chan struct{})}
+	conn := newRPCConn(transport, nil)
+
+	require.ErrorIs(t, conn.Close(), ErrContainmentIncomplete)
+	require.NoError(t, conn.Close())
+	require.Equal(t, 2, transport.closeCalls())
+}
+
+func TestAppServerRetriesIncompleteRPCContainment(t *testing.T) {
+	transport := &retryableCloseTransport{done: make(chan struct{})}
+	client := &AppServerClient{rpc: newRPCConn(transport, nil)}
+	client.ensureEventPump()
+
+	require.ErrorIs(t, client.Close(t.Context()), ErrContainmentIncomplete)
+	require.NoError(t, client.Close(t.Context()))
+	require.Equal(t, 2, transport.closeCalls())
 }
 
 func (t *passiveFailureTransport) Send(context.Context, rpcMessage) error { return nil }
@@ -536,12 +591,6 @@ func TestRPCTransportAndPendingCallErrors(t *testing.T) {
 	raw, err := marshalRaw(json.RawMessage(`{"ok":true}`))
 	if err != nil || string(raw) != `{"ok":true}` {
 		t.Fatalf("marshal raw = %s err=%v", raw, err)
-	}
-	if err := processCloseError(errors.New("close failed")); err == nil {
-		t.Fatal("processCloseError ignored plain error")
-	}
-	if err := processCloseError(ErrProcessContainmentIncomplete); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("processCloseError lost process-tree proof sentinel: %v", err)
 	}
 }
 

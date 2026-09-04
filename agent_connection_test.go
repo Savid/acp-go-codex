@@ -151,7 +151,7 @@ func TestLifecycleNegotiationOmitsNonInterruptibleCarrier(t *testing.T) {
 	params, err := json.Marshal(map[string]any{
 		"protocolVersion":    1,
 		"clientCapabilities": map[string]any{},
-		"_meta":              map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1}}},
+		"_meta":              map[string]any{lifecycle.MetaKey: map[string]any{"version": 1}},
 	})
 	require.NoError(t, err)
 	result, reqErr := conn.handle(t.Context(), acp.AgentMethodInitialize, params)
@@ -607,9 +607,13 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 
 	t.Run("early request returns after successful registration write", func(t *testing.T) {
 		writer := newRequestRegistrationWriter(io.Discard)
+		// The barrier consults ctx.Done() once in its outer select and a second
+		// time only after it has taken the early response, so the second call
+		// proves the early branch is armed before the registration write lands.
+		observedCtx := &countedDoneContext{Context: t.Context(), second: make(chan struct{})}
 		done := make(chan registeredActionResult[int], 1)
 		go func() {
-			value, callErr := registeredActionRequest[int](t.Context(), writer, "success", nil, nil, func(context.Context) (int, error) {
+			value, callErr := registeredActionRequest[int](observedCtx, writer, "success", nil, nil, func(context.Context) (int, error) {
 				return 13, errors.New("early")
 			})
 			done <- registeredActionResult[int]{value: value, err: callErr}
@@ -620,11 +624,40 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 
 			return writer.pending["success"] != nil
 		}, time.Second, time.Millisecond)
+		<-observedCtx.second
 		_, err := writer.Write(wirePayload("success"))
 		require.NoError(t, err)
 		result := <-done
 		require.Equal(t, 13, result.value)
 		require.ErrorContains(t, result.err, "early")
+	})
+
+	t.Run("registration failure cancels and joins an active request", func(t *testing.T) {
+		writer := newRequestRegistrationWriter(io.Discard)
+		registeredErr := errors.New("registration failed")
+		started := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			_, callErr := registeredActionRequest[int](t.Context(), writer, "registration", nil, func() error {
+				return registeredErr
+			}, func(requestCtx context.Context) (int, error) {
+				close(started)
+				<-requestCtx.Done()
+
+				return 0, context.Cause(requestCtx)
+			})
+			done <- callErr
+		}()
+		<-started
+		require.Eventually(t, func() bool {
+			writer.mu.Lock()
+			defer writer.mu.Unlock()
+
+			return writer.pending["registration"] != nil
+		}, time.Second, time.Millisecond)
+		_, err := writer.Write(wirePayload("registration"))
+		require.NoError(t, err)
+		require.ErrorIs(t, <-done, registeredErr)
 	})
 }
 

@@ -14,12 +14,12 @@ import (
 )
 
 func TestCodexOptionsExtraPathDirsCloneAndMeta(t *testing.T) {
-	paths := []string{"/operation/first", "/operation/second", "/operation/first"}
+	paths := []string{absTestPath("operation", "first"), absTestPath("operation", "second"), absTestPath("operation", "first")}
 	option := WithCodexExtraPathDirs(paths...)
-	paths[0] = "/caller/mutated"
+	paths[0] = absTestPath("caller", "mutated")
 
 	options := NewCodexOptions(option)
-	require.Equal(t, []string{"/operation/first", "/operation/second", "/operation/first"}, options.ExtraPathDirs)
+	require.Equal(t, []string{absTestPath("operation", "first"), absTestPath("operation", "second"), absTestPath("operation", "first")}, options.ExtraPathDirs)
 
 	meta := options.Meta()
 	codexMeta := asType[map[string]any](t, meta[codexMetaKey])
@@ -27,13 +27,13 @@ func TestCodexOptionsExtraPathDirsCloneAndMeta(t *testing.T) {
 	metaPaths := asType[[]string](t, values[metaExtraPathDirsKey])
 	require.Equal(t, options.ExtraPathDirs, metaPaths)
 
-	options.ExtraPathDirs[0] = "/options/mutated"
-	require.Equal(t, "/operation/first", metaPaths[0])
-	metaPaths[1] = "/meta/mutated"
+	options.ExtraPathDirs[0] = absTestPath("options", "mutated")
+	require.Equal(t, absTestPath("operation", "first"), metaPaths[0])
+	metaPaths[1] = absTestPath("meta", "mutated")
 
 	cloned := cloneCodexOptions(NewCodexOptions(option))
-	cloned.ExtraPathDirs[0] = "/clone/mutated"
-	require.Equal(t, "/operation/first", NewCodexOptions(option).ExtraPathDirs[0])
+	cloned.ExtraPathDirs[0] = absTestPath("clone", "mutated")
+	require.Equal(t, absTestPath("operation", "first"), NewCodexOptions(option).ExtraPathDirs[0])
 }
 
 func TestRequestBuilderClones(t *testing.T) {
@@ -41,8 +41,8 @@ func TestRequestBuilderClones(t *testing.T) {
 	env := map[string]string{"SESSION_MARKER": "one"}
 	approvalPolicy := map[string]any{"mode": "never"}
 	sandboxPolicy := map[string]any{"type": "workspaceWrite"}
-	req := NewSessionRequest("/repo",
-		WithSessionAdditionalDirectories("/extra"),
+	req := NewSessionRequest(absTestPath("repo"),
+		WithSessionAdditionalDirectories(absTestPath("extra")),
 		WithSessionRawEvents(true),
 		WithSessionMeta(meta),
 		WithSessionCodexOptions(NewCodexOptions(
@@ -71,7 +71,7 @@ func TestRequestBuilderClones(t *testing.T) {
 	if asType[map[string]string](t, options[metaEnvKey])["SESSION_MARKER"] != "one" {
 		t.Fatalf("Codex env was not cloned: %#v", options)
 	}
-	if len(LoadSessionRequest("s", "/repo").McpServers) != 0 || ResumeSessionRequest("s", "/repo").SessionId != "s" || ForkSessionRequest("s", "/repo").SessionId != "s" {
+	if len(LoadSessionRequest("s", absTestPath("repo")).McpServers) != 0 || ResumeSessionRequest("s", absTestPath("repo")).SessionId != "s" || ForkSessionRequest("s", absTestPath("repo")).SessionId != "s" {
 		t.Fatal("request builders returned unexpected values")
 	}
 	if DeleteSessionRequest("s").SessionId != "s" {
@@ -83,8 +83,8 @@ func TestRequestBuilderClones(t *testing.T) {
 	if SetModelRequest("s", "gpt-next").ValueId.Value != "gpt-next" {
 		t.Fatal("set model request returned unexpected value")
 	}
-	list := ListSessionsRequest(WithListSessionsCwd("/repo"), WithListSessionsCursor("c"), WithListSessionsMeta(map[string]any{"a": "b"}))
-	if *list.Cwd != "/repo" || *list.Cursor != "c" || list.Meta["a"] != "b" {
+	list := ListSessionsRequest(WithListSessionsCwd(absTestPath("repo")), WithListSessionsCursor("c"), WithListSessionsMeta(map[string]any{"a": "b"}))
+	if *list.Cwd != absTestPath("repo") || *list.Cursor != "c" || list.Meta["a"] != "b" {
 		t.Fatalf("list request = %#v", list)
 	}
 
@@ -96,7 +96,7 @@ func TestRequestBuilderClones(t *testing.T) {
 	httpServer := acp.McpServer{Http: &acp.McpServerHttpInline{Name: "http", Url: "https://example.com", Headers: []acp.HttpHeader{{Name: "H", Value: "V", Meta: map[string]any{"h": "m"}}}, Meta: map[string]any{"h": "m"}}}
 	sse := acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://example.com/sse", Headers: []acp.HttpHeader{{Name: "S", Value: "V"}}, Meta: map[string]any{"s": "m"}}}
 	acpServer := acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp", Id: "a1", Meta: map[string]any{"a": "m"}}}
-	sessionReq := NewSessionRequest("/repo", WithSessionMCPServers(stdio, httpServer, sse, acpServer), WithSessionOutputSchema(map[string]any{"type": "object"}))
+	sessionReq := NewSessionRequest(absTestPath("repo"), WithSessionMCPServers(stdio, httpServer, sse, acpServer), WithSessionOutputSchema(map[string]any{"type": "object"}))
 	if len(sessionReq.McpServers) != 4 {
 		t.Fatalf("mcp servers = %#v", sessionReq.McpServers)
 	}
@@ -186,11 +186,11 @@ func TestCallForkSessionHelper(t *testing.T) {
 	if _, err := clientConn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	parent, err := clientConn.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	parent, err := clientConn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	fork, err := CallForkSession(ctx, clientConn, ForkSessionRequest(parent.SessionId, "/tmp/project"))
+	fork, err := CallForkSession(ctx, clientConn, ForkSessionRequest(parent.SessionId, absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("CallForkSession returned error: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestCallForkSessionHelper(t *testing.T) {
 		return "not a fork response", nil
 	}, badA2CW, badC2AR)
 	_ = badPeer
-	if _, err := CallForkSession(ctx, badClientConn, ForkSessionRequest("parent", "/tmp/project")); err == nil {
+	if _, err := CallForkSession(ctx, badClientConn, ForkSessionRequest("parent", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("CallForkSession accepted undecodable response")
 	}
 }
@@ -251,7 +251,7 @@ func TestBuildersRefuseAFamilyReservedCallerLiteral(t *testing.T) {
 
 	require.NotPanics(t, func() {
 		host := map[string]any{"acp-go.dev-ish": true, codexMetaKey: map[string]any{}}
-		require.Equal(t, host, NewSessionRequest("/repo", WithSessionMeta(host)).Meta)
+		require.Equal(t, host, NewSessionRequest(absTestPath("repo"), WithSessionMeta(host)).Meta)
 		require.Equal(t, host, ListSessionsRequest(WithListSessionsMeta(host)).Meta)
 	}, "a key outside the closed set is ordinary host metadata")
 }

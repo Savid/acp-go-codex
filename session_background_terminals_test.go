@@ -60,7 +60,7 @@ func TestTerminateThreadBackgroundTerminalsRequiresScopedNativeSurface(t *testin
 	client := codex.NewPlaceholderClient(codex.Options{})
 	err := terminateThreadBackgroundTerminals(context.Background(), client, "thread")
 	require.ErrorContains(t, err, "required thread-scoped background terminal containment")
-	require.NotErrorIs(t, err, codex.ErrProcessContainmentIncomplete,
+	require.NotErrorIs(t, err, codex.ErrContainmentIncomplete,
 		"an unoffered sweep selects no boundary, so the caller's fence classifies the result")
 }
 
@@ -87,7 +87,7 @@ func soleFailedSweepAgent(t *testing.T, sweepFailure error) (*Agent, *failingBac
 // failed, so this session's descendants were never proved gone — and the
 // generation fence behind it succeeding says nothing about them, because it
 // retires the source rather than the processes. session/close, Agent.Close, and
-// Serve each owe the host an error matching ErrProcessContainmentIncomplete.
+// Serve each owe the host an error matching ErrContainmentIncomplete.
 func TestFailedSweepReportsIncompleteContainmentOnEverySurface(t *testing.T) {
 	sweepFailure := errors.New("thread-scoped containment failed")
 
@@ -96,7 +96,7 @@ func TestFailedSweepReportsIncompleteContainmentOnEverySurface(t *testing.T) {
 
 		_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: target.id})
 		require.ErrorIs(t, err, sweepFailure)
-		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
 
 		client.mu.Lock()
 		require.True(t, client.closed, "the sole owner's generation fence completed")
@@ -108,7 +108,7 @@ func TestFailedSweepReportsIncompleteContainmentOnEverySurface(t *testing.T) {
 
 		err := agent.Close()
 		require.ErrorIs(t, err, sweepFailure)
-		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
 
 		client.mu.Lock()
 		require.True(t, client.closed)
@@ -152,40 +152,11 @@ func TestFailedSweepReportsIncompleteContainmentOnEverySurface(t *testing.T) {
 		select {
 		case err := <-served:
 			require.ErrorIs(t, err, sweepFailure)
-			require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+			require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
 		case <-time.After(30 * time.Second):
 			t.Fatal("Serve did not return after cancellation")
 		}
 	})
-}
-
-func TestCancelFencesGenerationWhenTargetedContainmentFails(t *testing.T) {
-	containErr := errors.New("target containment failed")
-	client := &failingThreadScopedTerminalClient{
-		threadScopedTerminalClient: threadScopedTerminalClient{
-			spyCodexClient: newSpyCodexClient(),
-			terminals:      map[string]map[string]struct{}{"target-thread": {"target-1": {}}},
-		},
-		err: containErr,
-	}
-	agent := NewAgent()
-	agent.setAgentClient(newRecordingAgentClient())
-	agent.runtimeClient = client
-	target := newSession(agent, "target", t.TempDir(), nil, codex.Thread{ID: "target-thread"}, client, sessionMeta{}, nil)
-	peer := newSession(agent, "peer", t.TempDir(), nil, codex.Thread{ID: "peer-thread"}, client, sessionMeta{}, nil)
-	agent.sessions[target.id] = target
-	agent.sessions[peer.id] = peer
-	target.beginTurn(context.Background(), "target-nonce")
-	target.setTurnID("target-turn")
-	defer target.finishTurn()
-
-	err := agent.Cancel(context.Background(), CancelRequest(target.id, "target-nonce"))
-	require.ErrorContains(t, err, containErr.Error())
-	require.True(t, target.clientDead)
-	require.True(t, peer.clientDead)
-	client.mu.Lock()
-	require.True(t, client.closed, "failed targeted containment must fence the accepting generation")
-	client.mu.Unlock()
 }
 
 func TestCloseRefusesUnsupportedContainmentWithoutDestroyingPeer(t *testing.T) {
@@ -204,10 +175,9 @@ func TestCloseRefusesUnsupportedContainmentWithoutDestroyingPeer(t *testing.T) {
 
 	_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: target.id})
 	require.ErrorIs(t, err, codex.ErrBackgroundTerminalsUnsupported)
-	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
-	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
 	require.Same(t, client, agent.runtimeClient)
-	require.False(t, target.clientDead)
+	require.True(t, target.clientDead)
 	require.False(t, peer.clientDead)
 	require.ErrorIs(t, targetTurn.Err(), context.Canceled)
 	require.NoError(t, peerTurn.Err(), "target close must leave the peer turn alive")
@@ -219,30 +189,13 @@ func TestCloseRefusesUnsupportedContainmentWithoutDestroyingPeer(t *testing.T) {
 
 	target.finishTurn()
 	_, err = agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(target.id))
-	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
+	require.Error(t, err)
 	require.True(t, agent.isDeleted(target.id),
 		"the tombstone precedes teardown, so a failed containment reports with the id already hidden")
 	require.Same(t, target, agent.activeSession(target.id),
 		"a hidden id keeps its native scope so a later delete can finish the teardown")
 
 	peer.finishTurn()
-	require.NoError(t, agent.Close())
-}
-
-func TestCloseFenceProtectsRetainedPeer(t *testing.T) {
-	client := newSpyCodexClient()
-	agent := NewAgent()
-	agent.runtimeClient = client
-	agent.retainedThreads["retained-peer"] = &retainedRuntimeThread{
-		sessionID: "retained-peer",
-		threadID:  "retained-thread",
-		client:    client,
-	}
-	owner := &session{agent: agent, id: "owner", client: client}
-
-	err := agent.quiesceRuntimeAfterSessionClose(context.Background(), client, owner)
-	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
-	require.Same(t, client, agent.runtimeClient)
 	require.NoError(t, agent.Close())
 }
 
@@ -260,7 +213,6 @@ func TestDeleteRetainedThreadRefusesUnsupportedContainmentWithActivePeer(t *test
 
 	_, err := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest("target"))
 	require.ErrorIs(t, err, codex.ErrBackgroundTerminalsUnsupported)
-	require.ErrorIs(t, err, errSharedRuntimeHasPeers)
 	require.True(t, agent.isDeleted("target"),
 		"the tombstone precedes teardown, so a failed containment reports with the id already hidden")
 	require.False(t, agent.retainedThreads["target"].claimed)

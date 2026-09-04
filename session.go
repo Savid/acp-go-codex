@@ -22,6 +22,8 @@ type session struct {
 	rolloutPath           string
 	materializedPath      string
 	materializedRelease   func()
+	materializedBytes     int64
+	materializedEpoch     uint64
 	title                 string
 	updatedAt             string
 	model                 string
@@ -71,6 +73,7 @@ type session struct {
 	interactions        map[string]*sessionInteraction
 	mirrorMu            sync.Mutex
 	mirroredRows        int
+	captureExpected     nativeTurnIdentity
 	imageStoreMu        sync.Mutex
 	rawEventMu          sync.Mutex
 	rawEventSequence    int64
@@ -101,6 +104,7 @@ type session struct {
 	nativeEventOpened       bool
 	nativeEventStopping     bool
 	nativeEventPumping      bool
+	nativeEventFencePending bool
 	nativeEventAttaching    bool
 	nativeEventRebinding    bool
 	nativeEventReplaying    bool
@@ -121,8 +125,10 @@ type session struct {
 	// unsyncedEntries is the exact durable prefix a failed commit did not place.
 	// It is retained rather than dropped, and the next prompt blocks loudly on
 	// it until the store holds it.
-	unsyncedEntries []SessionStoreEntry
-	unsyncedRow     int
+	unsyncedEntries        []SessionStoreEntry
+	unsyncedRow            int
+	durableConfigRevision  int
+	durableConfigCommitted bool
 	// captureFailed records that a mirror pass failed before it could capture the
 	// durable prefix it was reading. Such a pass retains nothing, so this is the
 	// only thing left saying a prefix is still owed, and the close boundary reads
@@ -691,26 +697,26 @@ func (s *session) ensureTurnContainmentLocked() *turnContainment {
 	return s.turnContainment
 }
 
-func (s *session) shutdownActiveTurn(ctx context.Context, protectPeers bool) error {
-	handled, err := s.shutdownPromptTurn(ctx, protectPeers, "", false)
+func (s *session) shutdownActiveTurn(ctx context.Context) error {
+	handled, err := s.shutdownPromptTurn(ctx, "", false)
 	if handled {
 		return err
 	}
 
-	_, err = s.shutdownAgentTurn(ctx, protectPeers)
+	_, err = s.shutdownAgentTurn(ctx)
 
 	return err
 }
 
 var errTurnRouteMismatch = errors.New("turnNonce does not identify the active turn")
 
-func (s *session) shutdownActiveTurnForNonce(ctx context.Context, protectPeers bool, turnNonce string) error {
-	handled, err := s.shutdownPromptTurn(ctx, protectPeers, turnNonce, true)
+func (s *session) shutdownActiveTurnForNonce(ctx context.Context, turnNonce string) error {
+	handled, err := s.shutdownPromptTurn(ctx, turnNonce, true)
 	if handled {
 		return err
 	}
 
-	handled, err = s.shutdownAgentTurnForNonce(ctx, protectPeers, turnNonce)
+	handled, err = s.shutdownAgentTurnForNonce(ctx, turnNonce)
 	if !handled {
 		return errTurnRouteMismatch
 	}
@@ -720,7 +726,6 @@ func (s *session) shutdownActiveTurnForNonce(ctx context.Context, protectPeers b
 
 func (s *session) shutdownPromptTurn(
 	ctx context.Context,
-	protectPeers bool,
 	expectedNonce string,
 	requireExactNonce bool,
 ) (bool, error) {
@@ -796,7 +801,7 @@ func (s *session) shutdownPromptTurn(
 		cancelInterrupt()
 	}
 
-	containmentErr := s.containCancelledTurnWithPolicy(ctx, client, threadID, interruptErr, protectPeers)
+	containmentErr := s.containCancelledTurn(ctx, client, threadID, interruptErr)
 
 	s.mu.Lock()
 	boundary.err = containmentErr
@@ -936,24 +941,22 @@ func (s *session) releaseMaterialized() error {
 	s.mu.Lock()
 	materializedPath := s.materializedPath
 	materializedRelease := s.materializedRelease
+	materializedBytes := s.materializedBytes
+	materializedEpoch := s.materializedEpoch
 	s.mu.Unlock()
 
-	if materializedPath != "" {
-		if err := removeMaterializedRollout(materializedPath); err != nil {
-			return err
-		}
+	if err := s.agent.retireMaterializedRolloutAtEpoch(materializedPath, materializedBytes, materializedRelease, materializedEpoch); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
 	if s.materializedPath == materializedPath {
 		s.materializedPath = ""
 		s.materializedRelease = nil
+		s.materializedBytes = 0
+		s.materializedEpoch = 0
 	}
 	s.mu.Unlock()
-
-	if materializedRelease != nil {
-		materializedRelease()
-	}
 
 	return nil
 }
@@ -1028,7 +1031,7 @@ func (s *session) closeOwned(ctx context.Context) error {
 
 	if !alreadyContained {
 		gateErr := s.beginLifecycleClose(ctx)
-		shutdownErr = errors.Join(gateErr, s.shutdownActiveTurn(ctx, true))
+		shutdownErr = errors.Join(gateErr, s.shutdownActiveTurn(ctx))
 		s.awaitPromptSettlement()
 	}
 
@@ -1093,12 +1096,8 @@ func (s *session) waitForSettleGate() {
 	defer s.settleGate.Unlock() //nolint:gocritic // Deliberate synchronization barrier.
 }
 
-// containSession finishes this session's containment boundary. The thread-scoped
-// background-terminal sweep is the only targeted containment the app-server
-// offers; when it cannot be proved — because the app-server does not carry those
-// methods, or because a terminal outlived the sweep — the shared generation is
-// fenced only when no peer owns it. Otherwise close reports an incomplete
-// boundary without destroying a sibling session.
+// containSession finishes this session's protocol boundary without taking
+// ownership of the shared app-server runtime.
 func (s *session) containSession(ctx context.Context) error {
 	client, codexThreadID, clientDead := s.closeState()
 
@@ -1110,19 +1109,20 @@ func (s *session) containSession(ctx context.Context) error {
 	}
 
 	if clientDead {
-		return s.agent.quiesceRuntimeAfterSessionClose(closeCtx, client, s)
+		return errors.Join(
+			s.agent.retireRuntimeGenerationOwned(closeCtx, client, s),
+			s.stopNativeEventsContext(closeCtx),
+		)
 	}
 
-	if err := s.containThreadOrFenceGeneration(closeCtx, client, codexThreadID); err != nil {
+	if err := s.containThreadOrRetireRuntime(closeCtx, client, codexThreadID); err != nil {
 		return err
 	}
 
 	return s.unsubscribeContainedThread(closeCtx, client, codexThreadID)
 }
 
-// containThreadOrFenceGeneration proves this thread's background terminals gone,
-// or fences the generation they live in when it cannot.
-func (s *session) containThreadOrFenceGeneration(
+func (s *session) containThreadOrRetireRuntime(
 	ctx context.Context,
 	client codex.Client,
 	codexThreadID string,
@@ -1132,29 +1132,20 @@ func (s *session) containThreadOrFenceGeneration(
 		return nil
 	}
 
-	fenceErr := s.agent.quiesceRuntimeAfterSessionClose(ctx, client, s)
+	retireErr := s.agent.retireRuntimeGenerationOwned(ctx, client, s)
 	s.agent.mu.Lock()
 	agentClosed := s.agent.closed
 	s.agent.mu.Unlock()
 
-	if agentClosed && fenceErr == nil && errors.Is(containErr, codex.ErrConnectionClosed) {
+	if agentClosed && retireErr == nil && errors.Is(containErr, codex.ErrConnectionClosed) {
 		return nil
 	}
 
-	// Where the app-server offers no thread-scoped containment at all, the
-	// generation fence is the boundary rather than a fallback after a failure,
-	// so its result is the boundary's result. A sweep that was offered and did
-	// not prove the thread contained is a failure in its own right, and both are
-	// reported.
-	if errors.Is(containErr, codex.ErrBackgroundTerminalsUnsupported) {
-		if fenceErr != nil {
-			return errors.Join(containErr, fenceErr)
-		}
-
-		return fenceErr
+	if errors.Is(containErr, codex.ErrBackgroundTerminalsUnsupported) && retireErr == nil {
+		return nil
 	}
 
-	return errors.Join(containErr, fenceErr)
+	return errors.Join(containErr, retireErr)
 }
 
 func (s *session) unsubscribeContainedThread(
@@ -1173,16 +1164,14 @@ func (s *session) unsubscribeContainedThread(
 		return nil
 	}
 
-	// Cancellation or agent shutdown may retire the generation concurrently with unsubscribe.
-	// Once that transition owns the client, its containment proof supersedes a
-	// connection-closed unsubscribe result.
-	current, _, nowDead := s.closeState()
-	s.agent.mu.Lock()
-	agentClosed := s.agent.closed
-	s.agent.mu.Unlock()
+	current, _, _ := s.closeState()
+	if current == client && errors.Is(unsubscribeErr, codex.ErrConnectionClosed) {
+		retireErr := s.agent.retireRuntimeGenerationOwned(ctx, client, s)
+		if retireErr == nil {
+			return nil
+		}
 
-	if current == client && (nowDead || (agentClosed && errors.Is(unsubscribeErr, codex.ErrConnectionClosed))) {
-		return s.agent.quiesceRuntimeAfterCancel(ctx, client)
+		return errors.Join(unsubscribeErr, retireErr)
 	}
 
 	return unsubscribeErr

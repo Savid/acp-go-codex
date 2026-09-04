@@ -454,7 +454,7 @@ func (s *session) readAllowedImageFile(path string) ([]byte, string, error) {
 
 func (s *session) allowedImageRoots() []string {
 	roots := []string{s.cwd}
-	if scratch := s.agent.options.ScratchDir; scratch != "" {
+	if scratch := s.agent.scratchDir; scratch != "" {
 		roots = append(roots, scratch)
 	}
 
@@ -466,8 +466,10 @@ func (s *session) allowedImageRoots() []string {
 		roots = append(roots, runtimeScratch)
 	}
 
-	if home := s.agent.resolvedCodexHome(); home != "" {
-		roots = append(roots, filepath.Join(home, "generated_images"))
+	if s.agent.options.HostAuthority == nil {
+		if home := s.agent.resolvedCodexHome(); home != "" {
+			roots = append(roots, filepath.Join(home, "generated_images"))
+		}
 	}
 
 	// The harness sandbox already permits writing to the OS temp directory, so

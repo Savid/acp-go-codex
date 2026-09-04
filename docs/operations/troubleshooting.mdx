@@ -13,11 +13,10 @@ are absorbed by design.
 | Symptom | Cause and fix |
 | --- | --- |
 | Session start fails with "codex CLI ... is too old; need >= 0.144.1" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
-| Session start or terminal auth reports unapproved filesystem lock semantics | `CODEX_HOME` is on a network, overlay, or unknown filesystem. Move it to a supported local filesystem. |
 | Terminal login/logout reports a writable-home claim failure | Another cooperating runtime or terminal account command still owns that home. Quiesce it before retrying. |
-| Cancellation reports a background-terminal containment error | Codex did not prove the target thread's terminal set empty, so the adapter retired the shared runtime generation as a containment fallback. Inspect the native app-server error, then retry; logical sessions resume lazily on a replacement generation. |
-| Darwin reports `shared_identity` containment | This is the honest non-authoritative posture of ordinary current-identity mode. Embedded callers may use `WithDarwinBestEffortContainment` only after accepting escaped-descendant and numeric-PGID-reuse risks. |
-| Darwin cleanup reports correlated or ambiguous PIDs | Inspect the JSON result. The generation root is retained; resolve the selected processes and rerun the exact runtime-ID cleanup if appropriate. Never treat an empty report as proof that marker-scrubbing escapees are absent. |
+| Session start reports `host authority unavailable` | A supplied authority, environment, process handle, or managed launch failed validation. Correct the authority; the adapter will not retry through ordinary execution. |
+| Shutdown reports `native tree has live lease processes` | Reclaim reached a nonterminal native lease. Keep the tree intact and retry shutdown after terminal settlement. |
+| Shutdown reports `native containment incomplete` | Terminal ownership could not be proved. Quarantine the runtime and its prepared trees; do not admit another generation through that Agent. |
 | `session/prompt` fails with `codex_turn_failed` `cause: "timeout"` | The turn exceeded [`WithTurnTimeout`](/docs/core/sessions#turn-deadlines). Raise or clear the timeout; the session stays usable. |
 | `session/prompt` fails with authentication-required (`-32000`) | Codex credentials are missing or expired. Run `acp-go-codex login` or supply a token refresher. |
 | ACP logout is refused | Logout is gated. Start with `-codex-allow-account-logout` for an adapter-owned `CODEX_HOME`. |

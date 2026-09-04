@@ -27,6 +27,34 @@ type runtimeFailureClient struct {
 	events    []codex.Event
 }
 
+type observedDoneContext struct {
+	context.Context //nolint:containedctx // Test wrapper observes the exact Done call.
+	observed        chan struct{}
+	once            sync.Once
+}
+
+func (c *observedDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+
+	return c.Context.Done()
+}
+
+// countedDoneContext closes second on the second Done call, which lets a
+// test order itself after a select statement re-consults the context.
+type countedDoneContext struct {
+	context.Context //nolint:containedctx // Test wrapper observes the exact Done calls.
+	second          chan struct{}
+	calls           atomic.Int64
+}
+
+func (c *countedDoneContext) Done() <-chan struct{} {
+	if c.calls.Add(1) == 2 {
+		close(c.second)
+	}
+
+	return c.Context.Done()
+}
+
 type mismatchedResumeClient struct{ *runtimeRecordingClient }
 
 type blockingCloseRuntimeClient struct {
@@ -51,7 +79,7 @@ func (c *parallelContainmentRuntimeClient) Close(context.Context) error {
 	<-c.allStarted
 	close(c.releaseContainment)
 
-	return codex.ErrProcessContainmentIncomplete
+	return codex.ErrContainmentIncomplete
 }
 
 func (c *parallelContainmentRuntimeClient) ListBackgroundTerminals(
@@ -75,7 +103,7 @@ func (c *blockingCloseRuntimeClient) Close(context.Context) error {
 	close(c.started)
 	<-c.release
 
-	return codex.ErrProcessContainmentIncomplete
+	return codex.ErrContainmentIncomplete
 }
 
 func (c *mismatchedResumeClient) ResumeThread(
@@ -140,7 +168,7 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 
 	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
-	require.Nil(t, launched.ProcessIsolation)
+	require.Nil(t, launched.HostAuthority)
 	require.Equal(t, "captured", launched.ImplicitEnvironment[canary])
 
 	launched.ImplicitEnvironment[canary] = "caller mutation"
@@ -355,9 +383,9 @@ func TestAgentSharesOneRuntimeAcrossThreadsAndReleasesItAtAgentClose(t *testing.
 
 	serverA := HTTPMCPServer("marker", "https://a.example/mcp", map[string]string{"Authorization": "Bearer A"})
 	serverB := HTTPMCPServer("marker", "https://b.example/mcp", map[string]string{"Authorization": "Bearer B"})
-	first, err := agent.NewSession(context.Background(), NewSessionRequest("/work/a", WithSessionMCPServers(serverA)))
+	first, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "a"), WithSessionMCPServers(serverA)))
 	require.NoError(t, err)
-	second, err := agent.NewSession(context.Background(), NewSessionRequest("/work/b", WithSessionMCPServers(serverB)))
+	second, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "b"), WithSessionMCPServers(serverB)))
 	require.NoError(t, err)
 	require.EqualValues(t, 1, launches.Load())
 	require.Len(t, client.starts, 2)
@@ -400,22 +428,22 @@ func TestAgentCloseConcurrentCallersJoinMemoizedContainmentResult(t *testing.T) 
 	for index := range sessions {
 		id := acp.SessionId(fmt.Sprintf("session-%d", index))
 		threadID := fmt.Sprintf("thread-%d", index)
-		agent.sessions[id] = newSession(agent, id, "/tmp/project", nil, codex.Thread{ID: threadID}, client, sessionMeta{}, nil)
+		agent.sessions[id] = newSession(agent, id, absTestPath("tmp", "project"), nil, codex.Thread{ID: threadID}, client, sessionMeta{}, nil)
 	}
 
 	const callers = 32
 	results := make(chan error, callers)
 	go func() { results <- agent.Close() }()
-	<-client.allStarted
+	awaitTestSignal(t, client.allStarted, "client.allStarted")
 	for range callers - 1 {
 		go func() { results <- agent.Close() }()
 	}
 
-	<-client.started
+	awaitTestSignal(t, client.started, "client.started")
 	for range callers {
-		require.ErrorIs(t, <-results, codex.ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, <-results, codex.ErrContainmentIncomplete)
 	}
-	require.ErrorIs(t, agent.Close(), codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), codex.ErrContainmentIncomplete)
 	require.EqualValues(t, 1, client.count.Load())
 	require.EqualValues(t, sessions, client.containmentStarted.Load())
 }
@@ -436,7 +464,7 @@ func TestAgentCloseJoinsIncompleteRuntimeLaunchBeforeMemoizing(t *testing.T) {
 	releaseFactory := make(chan struct{})
 	client := &errorCodexClient{
 		spyCodexClient: newSpyCodexClient(),
-		closeErr:       codex.ErrProcessContainmentIncomplete,
+		closeErr:       codex.ErrContainmentIncomplete,
 	}
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		close(factoryStarted)
@@ -450,7 +478,7 @@ func TestAgentCloseJoinsIncompleteRuntimeLaunchBeforeMemoizing(t *testing.T) {
 		_, err := agent.sharedRuntime(context.Background())
 		runtimeErr <- err
 	}()
-	<-factoryStarted
+	awaitTestSignal(t, factoryStarted, "factoryStarted")
 
 	closeErr := make(chan error, 1)
 	go func() { closeErr <- agent.Close() }()
@@ -468,9 +496,9 @@ func TestAgentCloseJoinsIncompleteRuntimeLaunchBeforeMemoizing(t *testing.T) {
 	}
 
 	close(releaseFactory)
-	require.ErrorIs(t, <-runtimeErr, codex.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-closeErr, codex.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.Close(), codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-runtimeErr, codex.ErrContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, codex.ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), codex.ErrContainmentIncomplete)
 }
 
 func TestCloseSharedRuntimeFencesNewConstructionAndConcurrentClosers(t *testing.T) {
@@ -496,15 +524,11 @@ func TestCloseSharedRuntimeFencesNewConstructionAndConcurrentClosers(t *testing.
 		_, err := agent.sharedRuntime(context.Background())
 		runtimeErr <- err
 	}()
-	<-factoryStarted
+	awaitTestSignal(t, factoryStarted, "factoryStarted")
 
 	firstClose := make(chan error, 1)
 	go func() { firstClose <- agent.closeSharedRuntime(context.Background()) }()
 	<-factoryCancelled
-	quiesceErr := make(chan error, 1)
-	go func() {
-		quiesceErr <- agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient())
-	}()
 
 	waitCtx, cancelWait := context.WithCancel(context.Background())
 	waitingRuntime := make(chan error, 1)
@@ -528,109 +552,17 @@ func TestCloseSharedRuntimeFencesNewConstructionAndConcurrentClosers(t *testing.
 	close(releaseFactory)
 	require.ErrorIs(t, <-runtimeErr, context.Canceled)
 	require.NoError(t, <-firstClose)
-	require.NoError(t, <-quiesceErr)
 	require.NoError(t, <-secondClose)
 	require.NoError(t, <-survivingRuntime)
 	require.EqualValues(t, 2, factoryCalls.Load())
 	require.NoError(t, agent.Close())
 }
 
-func TestRuntimeVersionProbeOwnsDiscoveryAdmissionsAndGeneration(t *testing.T) {
-	originalProbe := runtimeProbeCodexVersion
-	t.Cleanup(func() { runtimeProbeCodexVersion = originalProbe })
-
-	parent := t.TempDir()
-	var acquired []RuntimeResourceKind
-	var reserved []RuntimeResourceKind
-	var releasedNative atomic.Int64
-	var releasedScratch atomic.Int64
-	var probeOptions codex.VersionProbeOptions
-	runtimeProbeCodexVersion = func(_ context.Context, options codex.VersionProbeOptions) (string, error) {
-		probeOptions = options
-
-		return minSupportedCodexVersion, nil
-	}
-
-	agent := NewAgent(
-		WithScratchDir(parent),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				acquired = append(acquired, kind)
-
-				return func() { releasedNative.Add(1) }, nil
-			},
-			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				reserved = append(reserved, kind)
-
-				return func() { releasedScratch.Add(1) }, nil
-			},
-		}),
-	)
-
-	version, err := agent.probeRuntimeVersion(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, minSupportedCodexVersion, version)
-	require.Equal(t, []RuntimeResourceKind{RuntimeResourceDiscovery}, acquired)
-	require.Equal(t, []RuntimeResourceKind{RuntimeResourceDiscovery}, reserved)
-	require.EqualValues(t, 1, releasedNative.Load())
-	require.EqualValues(t, 1, releasedScratch.Load())
-	require.Equal(t, parent, probeOptions.ScratchParent)
-	require.Contains(t, filepath.Base(probeOptions.Scratch), "acp-go-codex-runtime-discovery-")
-	require.NoDirExists(t, probeOptions.Scratch)
-}
-
 // The version probe launches a native process under the configured identity, so
 // it must refuse an unproven writable home before it takes any admission slot.
-func TestRuntimeVersionProbeRefusesUnprovenNativeHome(t *testing.T) {
-	var reserved atomic.Int64
-	agent := NewAgent(
-		WithHome(t.TempDir()),
-		WithProcessIsolation(foreignNativeIdentity()),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				reserved.Add(1)
-
-				return func() {}, nil
-			},
-		}),
-	)
-
-	_, err := agent.probeRuntimeVersion(t.Context())
-	require.Error(t, err)
-	require.EqualValues(t, 0, reserved.Load())
-}
-
 // Both native-launch refusals must fire before the app-server is spawned.
-func TestRuntimeLaunchRefusesSeedFilesAndUnprovenNativeHome(t *testing.T) {
-	var launches atomic.Int64
-	factory := withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		launches.Add(1)
-
-		return newSpyCodexClient(), nil
-	})
-
-	seeded := NewAgent(
-		WithHome(t.TempDir()),
-		WithProcessIsolation(ProcessIsolation{UID: uint32(os.Geteuid()), GID: uint32(os.Getegid())}),
-		WithSeedFiles(map[string]string{"config.toml": "model = \"gpt-5\""}),
-		factory,
-	)
-	_, err := seeded.launchRuntimeClient(t.Context(), 1, t.TempDir(), minSupportedCodexVersion)
-	require.ErrorContains(t, err, "seed files are unsupported with process isolation")
-
-	unproven := NewAgent(WithHome(t.TempDir()), WithProcessIsolation(foreignNativeIdentity()), factory)
-	_, err = unproven.launchRuntimeClient(t.Context(), 1, t.TempDir(), minSupportedCodexVersion)
-	require.Error(t, err)
-
-	require.EqualValues(t, 0, launches.Load())
-}
-
-// foreignNativeIdentity is a native identity the calling process cannot prove
+// foreignNativeIdentity is a native result the calling process cannot prove
 // ownership for on any platform.
-func foreignNativeIdentity() ProcessIsolation {
-	return ProcessIsolation{UID: uint32(os.Geteuid()) + 1, GID: uint32(os.Getegid()) + 1}
-}
-
 // Without a caller-supplied client factory the adapter owns the native launch,
 // so it probes the CLI version and hands it to the app-server options.
 func TestSharedRuntimeProbesNativeVersionForAdapterOwnedLaunch(t *testing.T) {
@@ -653,50 +585,8 @@ func TestSharedRuntimeProbesNativeVersionForAdapterOwnedLaunch(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 	require.Equal(t, "0.199.0", launched.NativeVersion)
-}
-
-func TestRuntimeVersionProbeAdmissionFailureBranches(t *testing.T) {
-	t.Run("scratch admission", func(t *testing.T) {
-		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return nil, errors.New("scratch admission")
-			},
-		}))
-		_, err := agent.probeRuntimeVersion(context.Background())
-		require.ErrorContains(t, err, "scratch admission")
-	})
-
-	t.Run("scratch generation", func(t *testing.T) {
-		parent := filepath.Join(t.TempDir(), "file")
-		require.NoError(t, os.WriteFile(parent, nil, 0o600))
-		var released atomic.Int64
-		agent := NewAgent(
-			WithScratchDir(parent),
-			WithRuntimeResourceHooks(RuntimeResourceHooks{
-				ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-					return func() { released.Add(1) }, nil
-				},
-			}),
-		)
-		_, err := agent.probeRuntimeVersion(context.Background())
-		require.Error(t, err)
-		require.EqualValues(t, 1, released.Load())
-	})
-
-	t.Run("native admission", func(t *testing.T) {
-		var released atomic.Int64
-		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() { released.Add(1) }, nil
-			},
-			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return nil, errors.New("native admission")
-			},
-		}))
-		_, err := agent.probeRuntimeVersion(context.Background())
-		require.ErrorContains(t, err, "native admission")
-		require.EqualValues(t, 1, released.Load())
-	})
+	require.NotNil(t, launched.ObserveStartupStage)
+	launched.ObserveStartupStage(t.Context(), "runtime", "spawn", time.Millisecond, nil)
 }
 
 func TestRuntimeReplacementResumesEachSessionLazilyWithItsOwnConfig(t *testing.T) {
@@ -714,9 +604,9 @@ func TestRuntimeReplacementResumesEachSessionLazilyWithItsOwnConfig(t *testing.T
 
 	serverA := HTTPMCPServer("marker", "https://a.example/mcp", map[string]string{"Authorization": "Bearer A"})
 	serverB := HTTPMCPServer("marker", "https://b.example/mcp", map[string]string{"Authorization": "Bearer B"})
-	a, err := agent.NewSession(context.Background(), NewSessionRequest("/work/a", WithSessionMCPServers(serverA)))
+	a, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "a"), WithSessionMCPServers(serverA)))
 	require.NoError(t, err)
-	b, err := agent.NewSession(context.Background(), NewSessionRequest("/work/b", WithSessionMCPServers(serverB)))
+	b, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work", "b"), WithSessionMCPServers(serverB)))
 	require.NoError(t, err)
 
 	agent.markRuntimeDead(first)
@@ -757,182 +647,6 @@ func TestRuntimeReplacementResumesEachSessionLazilyWithItsOwnConfig(t *testing.T
 	require.Equal(t, map[string]string{"Authorization": "Bearer B"}, configs["thread-2"]["http_headers"])
 }
 
-func TestRuntimeResourceHooksRejectAndReleaseAtExactBoundaries(t *testing.T) {
-	root := t.TempDir()
-	var scratchAcquired, scratchReleased, nativeAcquired, nativeReleased atomic.Int64
-	factoryCalled := false
-	agent := NewAgent(
-		WithScratchDir(root),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				require.Equal(t, RuntimeResourceRuntime, kind)
-				scratchAcquired.Add(1)
-
-				return func() { scratchReleased.Add(1) }, nil
-			},
-			AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				require.Equal(t, RuntimeResourceRuntime, kind)
-				nativeAcquired.Add(1)
-
-				return func() { nativeReleased.Add(1) }, errors.New("native root limit")
-			},
-		}),
-		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-			factoryCalled = true
-
-			return newSpyCodexClient(), nil
-		}),
-	)
-
-	_, err := agent.NewSession(context.Background(), NewSessionRequest("/work"))
-	require.ErrorContains(t, err, "native root limit")
-	require.False(t, factoryCalled)
-	require.EqualValues(t, 1, scratchAcquired.Load())
-	require.EqualValues(t, 1, scratchReleased.Load())
-	require.EqualValues(t, 1, nativeAcquired.Load())
-	require.Zero(t, nativeReleased.Load())
-	entries, err := os.ReadDir(root)
-	require.NoError(t, err)
-	require.Empty(t, entries)
-}
-
-func TestRuntimeResourceHooksReleaseOnlyAfterRuntimeCloseAndScratchDeletion(t *testing.T) {
-	root := t.TempDir()
-	client := newRuntimeRecordingClient()
-	var scratchReleased, nativeReleased atomic.Int64
-	agent := NewAgent(
-		WithScratchDir(root),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() { scratchReleased.Add(1) }, nil
-			},
-			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() { nativeReleased.Add(1) }, nil
-			},
-		}),
-		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
-	)
-
-	resp, err := agent.NewSession(context.Background(), NewSessionRequest("/work"))
-	require.NoError(t, err)
-	entries, err := os.ReadDir(root)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Zero(t, scratchReleased.Load())
-	require.Zero(t, nativeReleased.Load())
-
-	_, err = agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: resp.SessionId})
-	require.NoError(t, err)
-	require.Zero(t, scratchReleased.Load())
-	require.Zero(t, nativeReleased.Load())
-
-	require.NoError(t, agent.Close())
-	require.EqualValues(t, 1, scratchReleased.Load())
-	require.EqualValues(t, 1, nativeReleased.Load())
-	entries, err = os.ReadDir(root)
-	require.NoError(t, err)
-	require.Empty(t, entries)
-}
-
-func TestRuntimeResourceCleanupReleaseProofBoundaries(t *testing.T) {
-	originalRemoveAll := runtimeRemoveAll
-	t.Cleanup(func() { runtimeRemoveAll = originalRemoveAll })
-
-	t.Run("ordinary close error releases both after deletion", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "runtime")
-		require.NoError(t, os.Mkdir(root, 0o700))
-		var nativeReleased, scratchReleased atomic.Int64
-		closeErr := errors.New("ordinary close failure")
-
-		err := closeRuntimeResources(
-			context.Background(),
-			&errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr},
-			func() { nativeReleased.Add(1) },
-			root,
-			func() { scratchReleased.Add(1) },
-		)
-
-		require.ErrorIs(t, err, closeErr)
-		require.EqualValues(t, 1, nativeReleased.Load())
-		require.EqualValues(t, 1, scratchReleased.Load())
-		_, statErr := os.Stat(root)
-		require.ErrorIs(t, statErr, os.ErrNotExist)
-	})
-
-	t.Run("package stage cleanup failure retains scratch reservation", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "runtime")
-		require.NoError(t, os.Mkdir(root, 0o700))
-		var nativeReleased, scratchReleased atomic.Int64
-		stageErr := errors.Join(codex.ErrPackageStageCleanupIncomplete, errors.New("delete package stage"))
-
-		err := closeRuntimeResources(
-			context.Background(),
-			&errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: stageErr},
-			func() { nativeReleased.Add(1) },
-			root,
-			func() { scratchReleased.Add(1) },
-		)
-
-		require.ErrorIs(t, err, codex.ErrPackageStageCleanupIncomplete)
-		require.EqualValues(t, 1, nativeReleased.Load())
-		require.Zero(t, scratchReleased.Load())
-		_, statErr := os.Stat(root)
-		require.ErrorIs(t, statErr, os.ErrNotExist)
-	})
-
-	t.Run("unproven process tree retains both reservations", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "runtime")
-		require.NoError(t, os.Mkdir(root, 0o700))
-		var nativeReleased, scratchReleased atomic.Int64
-		removeCalled := false
-		runtimeRemoveAll = func(string) error {
-			removeCalled = true
-
-			return nil
-		}
-		t.Cleanup(func() { runtimeRemoveAll = originalRemoveAll })
-
-		err := closeRuntimeResources(
-			context.Background(),
-			&errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: codex.ErrProcessContainmentIncomplete},
-			func() { nativeReleased.Add(1) },
-			root,
-			func() { scratchReleased.Add(1) },
-		)
-
-		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
-		require.Zero(t, nativeReleased.Load())
-		require.Zero(t, scratchReleased.Load())
-		require.False(t, removeCalled)
-		require.DirExists(t, root)
-	})
-
-	t.Run("scratch deletion failure retains only scratch reservation", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "runtime")
-		require.NoError(t, os.Mkdir(root, 0o700))
-		var nativeReleased, scratchReleased atomic.Int64
-		deleteErr := errors.New("delete runtime root")
-		runtimeRemoveAll = func(path string) error {
-			require.Equal(t, root, path)
-
-			return deleteErr
-		}
-		t.Cleanup(func() { runtimeRemoveAll = originalRemoveAll })
-
-		err := finalizeRuntimeResources(
-			nil,
-			func() { nativeReleased.Add(1) },
-			root,
-			func() { scratchReleased.Add(1) },
-		)
-
-		require.ErrorIs(t, err, deleteErr)
-		require.EqualValues(t, 1, nativeReleased.Load())
-		require.Zero(t, scratchReleased.Load())
-		require.DirExists(t, root)
-	})
-}
-
 func TestSharedRuntimeLatchesUnprovenTreeFailure(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runtime")
 	require.NoError(t, os.Mkdir(root, 0o700))
@@ -940,79 +654,24 @@ func TestSharedRuntimeLatchesUnprovenTreeFailure(t *testing.T) {
 	agent := NewAgent()
 	agent.runtimeClient = &errorCodexClient{
 		spyCodexClient: newSpyCodexClient(),
-		closeErr:       codex.ErrProcessContainmentIncomplete,
+		closeErr:       codex.ErrContainmentIncomplete,
 	}
-	agent.runtimeNativeRelease = func() { nativeReleased.Add(1) }
+	agent.runtimeNativeRelease = func() error {
+		nativeReleased.Add(1)
+
+		return nil
+	}
 	agent.runtimeScratchRoot = root
 	agent.runtimeScratchRelease = func() { scratchReleased.Add(1) }
 
 	err := agent.closeSharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrContainmentIncomplete)
 	require.Zero(t, nativeReleased.Load())
 	require.Zero(t, scratchReleased.Load())
 	require.DirExists(t, root)
 	_, err = agent.sharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
-}
-
-func TestSharedRuntimeLatchesPackageStageCleanupFailure(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "runtime")
-	require.NoError(t, os.Mkdir(root, 0o700))
-	var nativeReleased, scratchReleased atomic.Int64
-	stageErr := errors.Join(codex.ErrPackageStageCleanupIncomplete, errors.New("delete package stage"))
-	agent := NewAgent()
-	agent.runtimeClient = &errorCodexClient{
-		spyCodexClient: newSpyCodexClient(),
-		closeErr:       stageErr,
-	}
-	agent.runtimeNativeRelease = func() { nativeReleased.Add(1) }
-	agent.runtimeScratchRoot = root
-	agent.runtimeScratchRelease = func() { scratchReleased.Add(1) }
-
-	err := agent.closeSharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrPackageStageCleanupIncomplete)
-	require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrPackageStageCleanupIncomplete)
-	require.EqualValues(t, 1, nativeReleased.Load())
-	require.Zero(t, scratchReleased.Load())
-	require.NoDirExists(t, root)
-	_, err = agent.sharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrPackageStageCleanupIncomplete)
-}
-
-func TestCancelRuntimeQuiescenceWaitsForExistingTransitionAndLatchesUnprovenTree(t *testing.T) {
-	t.Run("wait for owner", func(t *testing.T) {
-		agent := NewAgent()
-		transition := make(chan struct{})
-		close(transition)
-		agent.runtimeStarting = transition
-
-		require.NoError(t, agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient()))
-
-		agent.runtimeCleanupErr = codex.ErrProcessContainmentIncomplete
-		require.ErrorIs(
-			t,
-			agent.quiesceRuntimeAfterCancel(context.Background(), newSpyCodexClient()),
-			codex.ErrProcessContainmentIncomplete,
-		)
-	})
-
-	t.Run("latch unproven tree", func(t *testing.T) {
-		client := &errorCodexClient{
-			spyCodexClient: newSpyCodexClient(),
-			closeErr:       codex.ErrProcessContainmentIncomplete,
-		}
-		agent := NewAgent()
-		session := &session{agent: agent, id: "session", client: client}
-		agent.sessions[session.id] = session
-		agent.runtimeClient = client
-
-		err := agent.quiesceRuntimeAfterCancel(context.Background(), client)
-		require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
-		require.ErrorIs(t, agent.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
-		require.True(t, session.clientDead)
-		require.Nil(t, agent.runtimeStarting)
-	})
+	require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
 }
 
 func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
@@ -1021,7 +680,7 @@ func TestRuntimeRecoverySkipsSessionAfterCloseAdmission(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newClient, nil
 	}))
-	active := newSession(agent, "closing", "/tmp/project", nil, codex.Thread{ID: "thread-closing"}, oldClient, sessionMeta{}, nil)
+	active := newSession(agent, "closing", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-closing"}, oldClient, sessionMeta{}, nil)
 	agent.sessions[active.id] = active
 	agent.runtimeClient = oldClient
 	agent.runtimeDead = true
@@ -1060,93 +719,21 @@ func TestSharedRuntimeGenerationCleanupFailureBranches(t *testing.T) {
 	unproven := NewAgent()
 	unproven.runtimeClient = &errorCodexClient{
 		spyCodexClient: newSpyCodexClient(),
-		closeErr:       codex.ErrProcessContainmentIncomplete,
+		closeErr:       codex.ErrContainmentIncomplete,
 	}
 	unproven.runtimeDead = true
 
 	_, err = unproven.sharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, unproven.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
+	require.ErrorIs(t, unproven.runtimeCleanupErr, codex.ErrContainmentIncomplete)
 	require.Nil(t, unproven.runtimeStarting)
 
 	launchFailure := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return nil, codex.ErrProcessContainmentIncomplete
+		return nil, codex.ErrContainmentIncomplete
 	}))
 	_, err = launchFailure.sharedRuntime(context.Background())
-	require.ErrorIs(t, err, codex.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, launchFailure.runtimeCleanupErr, codex.ErrProcessContainmentIncomplete)
-}
-
-func TestRuntimeFailureAndHelperBranches(t *testing.T) {
-	ctx := context.Background()
-	agent := NewAgent()
-
-	_, err := agent.handleCodexServerRequestForEpoch(ctx, 99, codex.ServerRequest{})
-	require.Error(t, err)
-
-	release, err := agent.acquireNativeRoot(ctx, RuntimeResourceDiscovery)
-	require.NoError(t, err)
-	release()
-	scratchRelease, err := agent.reserveScratchRoot(ctx, RuntimeResourcePrompt)
-	require.NoError(t, err)
-	scratchRelease()
-
-	agent.options.RuntimeResourceHooks.AcquireNativeRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
-		//nolint:nilnil // Deliberately exercise rejection of a nil release callback.
-		return nil, nil
-	}
-	_, err = agent.acquireNativeRoot(ctx, RuntimeResourceRuntime)
-	require.Error(t, err)
-	agent.options.RuntimeResourceHooks.ReserveScratchRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
-		return nil, errors.New("scratch")
-	}
-	_, err = agent.reserveScratchRoot(ctx, RuntimeResourceRuntime)
-	require.Error(t, err)
-	agent.options.RuntimeResourceHooks.ReserveScratchRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
-		//nolint:nilnil // Deliberately exercise rejection of a nil release callback.
-		return nil, nil
-	}
-	_, err = agent.reserveScratchRoot(ctx, RuntimeResourceRuntime)
-	require.Error(t, err)
-
-	closed := NewAgent()
-	require.NoError(t, closed.Close())
-	_, err = closed.sharedRuntime(ctx)
-	require.Error(t, err)
-
-	waiting := NewAgent()
-	waiting.runtimeStarting = make(chan struct{})
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	_, err = waiting.sharedRuntime(canceled)
-	require.ErrorIs(t, err, context.Canceled)
-
-	badScratchParent := filepath.Join(t.TempDir(), "file")
-	require.NoError(t, os.WriteFile(badScratchParent, []byte("x"), 0o600))
-	badScratch := NewAgent(WithScratchDir(badScratchParent), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return newSpyCodexClient(), nil
-	}))
-	_, err = badScratch.sharedRuntime(ctx)
-	require.Error(t, err)
-
-	lost := NewAgent()
-	lost.options.customClientFactory = true
-	lost.options.clientFactory = func(context.Context, codex.Options) (codex.Client, error) {
-		lost.mu.Lock()
-		lost.closed = true
-		lost.mu.Unlock()
-
-		return newSpyCodexClient(), nil
-	}
-	_, err = lost.sharedRuntime(ctx)
-	require.Error(t, err)
-
-	invalidHome := NewAgent(WithEnv(map[string]string{"CODEX_HOME": "/env-home"}))
-	_, err = invalidHome.Initialize(t.Context(), acp.InitializeRequest{})
-	require.ErrorContains(t, err, valueInternalFailure)
-	require.NotContains(t, err.Error(), "CODEX_HOME")
-	t.Setenv("CODEX_HOME", "/process-home")
-	require.Equal(t, filepath.Clean("/process-home"), NewAgent().resolvedCodexHome())
+	require.ErrorIs(t, err, codex.ErrContainmentIncomplete)
+	require.ErrorIs(t, launchFailure.runtimeCleanupErr, codex.ErrContainmentIncomplete)
 }
 
 // The writable home a native launch is proven against resolves from the
@@ -1169,11 +756,206 @@ func TestResolvedCodexHomePrecedence(t *testing.T) {
 	require.Equal(t, filepath.Join(home, ".codex"), NewAgent().resolvedCodexHomeForEnv(nil))
 }
 
+func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
+	ctx := t.Context()
+
+	epochAgent := NewAgent()
+	_, err := epochAgent.handleCodexServerRequestForEpoch(ctx, epochAgent.runtimeEpoch, codex.ServerRequest{Method: "missing"})
+	require.Error(t, err)
+
+	authority := authorityCoverageHost{
+		environment: func() map[string]string { return map[string]string{"HOME": "/native/home"} },
+		prepare:     func() error { return nil },
+		reclaim:     func() error { return nil },
+		start:       func() (NativeProcess, error) { return nil, ErrHostAuthorityUnavailable },
+	}
+	capacity := NewAgent(WithHostAuthority(authority))
+	_, err = capacity.reserveNativeResidenceCapacity(ctx, retiredResidenceByteLimit+1)
+	require.Error(t, err)
+	capacity.nativeResidenceCount = retiredResidenceCountLimit
+	capacity.runtimeStarting = make(chan struct{})
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = capacity.reserveNativeResidenceCapacity(canceled, 1)
+	require.ErrorIs(t, err, context.Canceled)
+	capacity.runtimeStarting = nil
+	_, err = capacity.reserveNativeResidenceCapacity(ctx, 1)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+
+	waitingCapacity := NewAgent(WithHostAuthority(authority))
+	waitingCapacity.nativeResidenceCount = retiredResidenceCountLimit
+	starting := make(chan struct{})
+	waitingCapacity.runtimeStarting = starting
+	observedCtx := &observedDoneContext{Context: ctx, observed: make(chan struct{})}
+	capacityResult := make(chan error, 1)
+	go func() {
+		_, capacityErr := waitingCapacity.reserveNativeResidenceCapacity(observedCtx, 1)
+		capacityResult <- capacityErr
+	}()
+	<-observedCtx.observed
+	waitingCapacity.mu.Lock()
+	waitingCapacity.runtimeStarting = nil
+	waitingCapacity.mu.Unlock()
+	close(starting)
+	require.ErrorIs(t, <-capacityResult, ErrContainmentIncomplete)
+	injected := errors.New("injected")
+	reclaimCalls := 0
+	reclaimAuthority := authority
+	reclaimAuthority.reclaim = func() error {
+		reclaimCalls++
+
+		return injected
+	}
+	reclaimAgent := NewAgent(WithHostAuthority(reclaimAuthority))
+	reclaimAgent.retiredResidences = []retiredNativeResidence{
+		{epoch: 1, tree: "opaque", path: "opaque", remove: func(string) error { return nil }},
+		{epoch: 1, tree: "reclaimed", path: "reclaimed", reclaimed: true, remove: func(string) error { return injected }},
+	}
+	err = reclaimAgent.reclaimRetiredResidences(ctx, 1)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, err, injected)
+	require.Equal(t, 1, reclaimCalls)
+
+	require.NoError(t, reclaimAgent.retainOpaqueNativeTree(nil))
+	fencedClient := newSpyCodexClient()
+	fenced := newSession(reclaimAgent, "fenced", absTestPath("tmp", "project"), nil, codex.Thread{ID: "fenced"}, fencedClient, sessionMeta{}, nil)
+	reclaimAgent.sessions[fenced.id] = fenced
+	err = reclaimAgent.retainOpaqueNativeTree(injected)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.True(t, fenced.clientDead)
+
+	retainedAgent := NewAgent()
+	client := newSpyCodexClient()
+	retainedAgent.runtimeClient = client
+	retainedAgent.retainedThreads["session"] = &retainedRuntimeThread{
+		sessionID: "session", threadID: "thread", client: client, epoch: retainedAgent.runtimeEpoch,
+	}
+	_, err = retainedAgent.claimRetainedRuntimeThreadForStore("session", "")
+	require.Error(t, err)
+
+	closedAgent := NewAgent()
+	closedAgent.closed = true
+	_, err = closedAgent.sharedRuntime(ctx)
+	require.Error(t, err)
+	waitingAgent := NewAgent()
+	waitingAgent.runtimeStarting = make(chan struct{})
+	_, err = waitingAgent.sharedRuntime(canceled)
+	require.ErrorIs(t, err, context.Canceled)
+
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	require.NoError(t, os.WriteFile(blocked, nil, 0o600))
+	_, err = NewAgent(WithScratchDir(blocked)).startRuntimeGeneration(ctx, 1)
+	require.Error(t, err)
+	_, err = NewAgent(WithScratchDir(blocked)).probeRuntimeVersion(ctx)
+	require.Error(t, err)
+
+	_, err = NewAgent(WithHome("relative")).prepareRuntimeHome(ctx)
+	require.Error(t, err)
+	_, err = NewAgent(WithHome(filepath.Join(blocked, "child"))).prepareRuntimeHome(ctx)
+	require.Error(t, err)
+	_, err = NewAgent(WithHome(t.TempDir()), WithSeedFiles(map[string]string{"../escape": "x"})).prepareRuntimeHome(ctx)
+	require.Error(t, err)
+	originalStat := runtimeStat
+	t.Cleanup(func() { runtimeStat = originalStat })
+	runtimeStat = func(string) (os.FileInfo, error) { return nil, injected }
+	_, err = NewAgent(WithHome(t.TempDir())).prepareRuntimeHome(ctx)
+	require.ErrorIs(t, err, injected)
+	nonDirectory := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(nonDirectory, nil, 0o600))
+	runtimeStat = func(string) (os.FileInfo, error) { return os.Stat(nonDirectory) }
+	_, err = NewAgent(WithHome(t.TempDir())).prepareRuntimeHome(ctx)
+	require.ErrorContains(t, err, "must be a directory")
+	runtimeStat = originalStat
+
+	busyAuthority := authority
+	busyAuthority.reclaim = func() error { return ErrNativeTreeBusy }
+	busyRelease := runtimeHomeReleaser(busyAuthority, absTestPath("home"))
+	require.ErrorIs(t, busyRelease(), ErrNativeTreeBusy)
+	busyAuthority.reclaim = func() error { return nil }
+	// The releaser retains its guarded authority value, so a fresh releaser proves success and idempotence.
+	successRelease := runtimeHomeReleaser(busyAuthority, absTestPath("home"))
+	require.NoError(t, successRelease())
+	require.NoError(t, successRelease())
+	failingAuthority := authority
+	failingAuthority.reclaim = func() error { return injected }
+	failingRelease := runtimeHomeReleaser(failingAuthority, absTestPath("home"))
+	require.ErrorIs(t, failingRelease(), ErrContainmentIncomplete)
+	require.ErrorIs(t, failingRelease(), ErrContainmentIncomplete)
+	originalNativeTreeTimeout := runtimeNativeTreeTimeout
+	runtimeNativeTreeTimeout = 0
+	t.Cleanup(func() { runtimeNativeTreeTimeout = originalNativeTreeTimeout })
+	deadlineAuthority := reclaimDeadlineAuthority{HostAuthority: authority}
+	deadlineRelease := runtimeHomeReleaser(deadlineAuthority, absTestPath("home"))
+	require.ErrorIs(t, deadlineRelease(), ErrContainmentIncomplete)
+	require.ErrorIs(t, deadlineRelease(), context.DeadlineExceeded)
+	deadlineAgent := NewAgent(WithHostAuthority(deadlineAuthority))
+	deadlineAgent.retiredResidences = []retiredNativeResidence{{epoch: 1, tree: "/rollout", path: "/rollout/row"}}
+	err = deadlineAgent.reclaimRetiredResidences(ctx, 1)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.False(t, deadlineAgent.retiredResidences[0].reclaimed)
+
+	require.Equal(t, filepath.Clean("/native/codex"), NewAgent(WithHostAuthority(authorityCoverageHost{
+		environment: func() map[string]string { return map[string]string{"CODEX_HOME": "/native/codex"} },
+		prepare:     authority.prepare, reclaim: authority.reclaim, start: authority.start,
+	})).resolvedCodexHomeForEnv(nil))
+	require.Equal(t, filepath.Join("/native/home", ".codex"), NewAgent(WithHostAuthority(authority)).resolvedCodexHomeForEnv(nil))
+	emptyAuthority := authority
+	emptyAuthority.environment = func() map[string]string { return map[string]string{} }
+	emptyHome := NewAgent(WithHostAuthority(emptyAuthority))
+	emptyHome.options.implicitEnvironment = map[string]string{}
+	require.Empty(t, emptyHome.resolvedCodexHomeForEnv(nil))
+
+	peerAgent := NewAgent()
+	peerClient := newSpyCodexClient()
+	peerAgent.runtimeClient = peerClient
+	owner := newSession(peerAgent, "owner", absTestPath("tmp", "project"), nil, codex.Thread{ID: "owner"}, peerClient, sessionMeta{}, nil)
+	peerAgent.retainedThreads["peer"] = &retainedRuntimeThread{
+		sessionID: "peer", threadID: "peer", client: peerClient, epoch: peerAgent.runtimeEpoch,
+	}
+	require.ErrorIs(t, peerAgent.retireRuntimeGenerationOwned(ctx, peerClient, owner), errSharedRuntimeHasPeers)
+
+	waitAgent := NewAgent()
+	wait := make(chan struct{})
+	waitAgent.runtimeStarting = wait
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- waitAgent.retireRuntimeGenerationOwned(ctx, nil, nil) }()
+	close(wait)
+	require.NoError(t, <-waitResult)
+	closingAgent := NewAgent()
+	closing := make(chan struct{})
+	close(closing)
+	closingAgent.runtimeClosing = closing
+	closingAgent.runtimeCleanupErr = injected
+	require.ErrorIs(t, closingAgent.retireRuntimeGeneration(ctx, nil), injected)
+
+	latchAgent := NewAgent()
+	latchClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: ErrContainmentIncomplete}
+	latchAgent.runtimeClient = latchClient
+	err = latchAgent.retireRuntimeGeneration(ctx, latchClient)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, latchAgent.runtimeCleanupErr, ErrContainmentIncomplete)
+
+	attachErr := errors.New("subscribe failed")
+	attachClient := &failingSubscribeClient{spyCodexClient: newSpyCodexClient(), err: attachErr}
+	attachAgent := NewAgent()
+	attachSession := newSession(attachAgent, "attach", absTestPath("tmp", "project"), nil, codex.Thread{ID: "attach"}, attachClient, sessionMeta{}, nil)
+	require.ErrorIs(t, attachAgent.runtimeReadyCanaryWithConfig(ctx, attachClient, attachSession, map[string]any{"key": "value"}), attachErr)
+}
+
+type reclaimDeadlineAuthority struct {
+	HostAuthority
+}
+
+func (a reclaimDeadlineAuthority) ReclaimNativeTree(ctx context.Context, _ string) error {
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
 func TestRuntimeEnvironmentRejectsReservedSessionKeys(t *testing.T) {
 	for _, key := range []string{
 		"acp_go_codex_internal_spoof",
-		"acp_go_codex_runtime_id",
-		"ACP_GO_CODEX_SCRATCH_ROOT",
 		"CODEX_HOME",
 		"HOME",
 		"XDG_CONFIG_HOME",
@@ -1253,9 +1035,9 @@ func TestSessionEnvironmentDoesNotPinSharedRuntime(t *testing.T) {
 }
 
 func TestLifecycleFingerprintIncludesOrderedExtraPathDirs(t *testing.T) {
-	base := codexSessionStart{Cwd: "/tmp/project", Meta: sessionMeta{
+	base := codexSessionStart{Cwd: absTestPath("tmp", "project"), Meta: sessionMeta{
 		Env:           map[string]string{"SESSION": "one"},
-		ExtraPathDirs: []string{"/operation/first", "/operation/second"},
+		ExtraPathDirs: []string{absTestPath("operation", "first"), absTestPath("operation", "second")},
 	}}
 
 	changedEnv := base
@@ -1263,14 +1045,14 @@ func TestLifecycleFingerprintIncludesOrderedExtraPathDirs(t *testing.T) {
 	require.NotEqual(t, codexSessionStartFingerprint(base), codexSessionStartFingerprint(changedEnv))
 
 	reordered := base
-	reordered.Meta.ExtraPathDirs = []string{"/operation/second", "/operation/first"}
+	reordered.Meta.ExtraPathDirs = []string{absTestPath("operation", "second"), absTestPath("operation", "first")}
 	require.NotEqual(t, codexSessionStartFingerprint(base), codexSessionStartFingerprint(reordered))
 }
 
 func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	valid := &session{agent: agent, id: "s", codexThreadID: "thread", cwd: "/work"}
+	valid := &session{agent: agent, id: "s", codexThreadID: "thread", cwd: absTestPath("work")}
 	resumeFailure := &runtimeFailureClient{runtimeRecordingClient: newRuntimeRecordingClient(), resumeErr: errors.New("resume")}
 	_, err := agent.resumeRuntimeSession(ctx, resumeFailure, valid)
 	require.Error(t, err)
@@ -1282,7 +1064,7 @@ func TestRuntimeResumeAndCanaryFailureBranches(t *testing.T) {
 	require.NoError(t, agent.runtimeReadyCanary(ctx, newSpyCodexClient(), valid))
 	canarySession := func(client codex.Client) *session {
 		s := &session{
-			agent: agent, id: "s", codexThreadID: "thread", cwd: "/work", client: client,
+			agent: agent, id: "s", codexThreadID: "thread", cwd: absTestPath("work"), client: client,
 			mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example/mcp", nil)},
 		}
 		t.Cleanup(s.fenceSession)
@@ -1339,106 +1121,6 @@ func TestRuntimeReadyEventBranches(t *testing.T) {
 	require.False(t, runtimeReadyEvent(codex.Event{Kind: codex.EventToolCompleted, Tool: codex.ToolEvent{Title: "runtime_ready", Raw: map[string]any{"invalid": make(chan int)}}}, nonce))
 }
 
-func TestRuntimeRemainingResourceAndEpochBranches(t *testing.T) {
-	ctx := context.Background()
-	agent := NewAgent()
-	agent.options.RuntimeResourceHooks.AcquireNativeRoot = nil
-	agent.options.RuntimeResourceHooks.ReserveScratchRoot = nil
-	release, err := agent.acquireNativeRoot(ctx, RuntimeResourceRuntime)
-	require.NoError(t, err)
-	release()
-	release, err = agent.reserveScratchRoot(ctx, RuntimeResourceRuntime)
-	require.NoError(t, err)
-	release()
-
-	agent.options.RuntimeResourceHooks.AcquireNativeRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
-		return nil, errors.New("native admission failed")
-	}
-	_, err = agent.acquireNativeRoot(ctx, RuntimeResourceRuntime)
-	require.ErrorContains(t, err, "native admission failed")
-
-	agent.runtimeEpoch = 7
-	_, err = agent.handleCodexServerRequestForEpoch(ctx, 7, codex.ServerRequest{Method: codex.RequestAuthTokenRefresh})
-	require.ErrorContains(t, err, "not configured")
-
-	waiting := NewAgent()
-	waiting.runtimeStarting = make(chan struct{})
-	waiting.runtimeClient = newSpyCodexClient()
-	waiting.runtimeDead = true
-	ready := make(chan struct{})
-	go func() {
-		time.Sleep(time.Millisecond)
-		waiting.mu.Lock()
-		waiting.runtimeDead = false
-		close(waiting.runtimeStarting)
-		waiting.runtimeStarting = nil
-		waiting.mu.Unlock()
-		close(ready)
-	}()
-	client, err := waiting.sharedRuntime(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	<-ready
-
-	oldHome := runtimeUserHomeDir
-	t.Cleanup(func() { runtimeUserHomeDir = oldHome })
-	t.Setenv("CODEX_HOME", "")
-	t.Setenv("HOME", "")
-	runtimeUserHomeDir = func() (string, error) { return "/captured-home", nil }
-	require.Equal(t, "/captured-home/.codex", NewAgent().resolvedCodexHome())
-	runtimeUserHomeDir = func() (string, error) { return "", errors.New("home failed") }
-	require.Empty(t, NewAgent().resolvedCodexHome())
-	runtimeUserHomeDir = func() (string, error) { return "", nil }
-	require.Empty(t, NewAgent().resolvedCodexHome())
-}
-
-func TestRuntimeRemainingCanaryAndObserverBranches(t *testing.T) {
-	ctx := context.Background()
-	agent := NewAgent()
-	valid := &session{
-		agent: agent, id: "valid", codexThreadID: "thread", cwd: "/work",
-		mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example.test/mcp", nil)},
-	}
-	noMarker := &runtimeFailureClient{
-		runtimeRecordingClient: newRuntimeRecordingClient(),
-		events:                 []codex.Event{{Kind: codex.EventError}},
-	}
-	_, err := agent.resumeRuntimeSession(ctx, noMarker, valid)
-	require.NoError(t, err)
-	t.Cleanup(valid.fenceSession)
-	require.Error(t, agent.runtimeReadyCanary(ctx, noMarker, valid))
-	oldDeadline := runtimeReadyDeadline
-	t.Cleanup(func() { runtimeReadyDeadline = oldDeadline })
-	runtimeReadyDeadline = time.Nanosecond
-	require.Error(t, agent.runtimeReadyCanary(ctx, deadlineEventClient{runtimeRecordingClient: newRuntimeRecordingClient()}, valid))
-
-	var gotOptions codex.Options
-	var processObserved, startupObserved bool
-	launcher := NewAgent(
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ObserveProcess: func(context.Context, RuntimeProcessKind, int64) { processObserved = true },
-			ObserveStartupStage: func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error) {
-				startupObserved = true
-			},
-		}),
-		withClientFactory(func(_ context.Context, options codex.Options) (codex.Client, error) {
-			gotOptions = options
-
-			return newSpyCodexClient(), nil
-		}),
-	)
-	_, err = launcher.launchRuntimeClient(ctx, 1, "", minSupportedCodexVersion)
-	require.NoError(t, err)
-	gotOptions.ObserveProcess(ctx, string(RuntimeProcessProviderDescendant), 1)
-	gotOptions.ObserveStartupStage(ctx, string(RuntimeResourceRuntime), string(RuntimeStartupSpawn), time.Millisecond, nil)
-	require.True(t, processObserved)
-	require.True(t, startupObserved)
-
-	stale := &codexClientEventSink{agent: launcher, epoch: 99}
-	stale.Handle(ctx, codex.Event{Kind: codex.EventError})
-	launcher.applyCodexClientEvent(ctx, newSpyCodexClient(), codex.Event{Kind: codex.EventError})
-}
-
 // A provider turn failure is terminal for that turn, not for the shared
 // app-server. In particular, quota exhaustion must not force the next
 // session/new through generation recovery and stale-thread resume.
@@ -1471,6 +1153,7 @@ func TestProviderErrorEventDoesNotPoisonSharedRuntime(t *testing.T) {
 	agent.applyCodexClientEvent(ctx, runtimeClient, codex.Event{Kind: codex.EventError, Err: transportErr})
 	require.True(t, agent.runtimeDead)
 	require.True(t, loaded.clientDead)
+	require.False(t, codexRuntimeDied(nil))
 	require.True(t, codexRuntimeDied(&codex.ProcessExitError{Err: errors.New("exit")}))
 }
 
@@ -1601,47 +1284,13 @@ func (c *closingCanaryClient) RunTurn(context.Context, codex.TurnStartRequest) (
 // A stored rollout is generated by the trusted process and then handed to the
 // native identity. An unprovable handoff must leave no rollout behind and must
 // return the scratch admission it took.
-func TestMaterializeStoredRolloutDiscardsRolloutOnFailedOwnershipHandoff(t *testing.T) {
-	scratch := t.TempDir()
-	var released atomic.Int64
-	agent := NewAgent(
-		WithScratchDir(scratch),
-		WithProcessIsolation(foreignNativeIdentity()),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() { released.Add(1) }, nil
-			},
-		}),
-	)
-
-	path, release, err := agent.materializeStoredRollout(
-		t.Context(),
-		"session",
-		[]SessionStoreEntry{json.RawMessage(`{"type":"session_meta"}`)},
-	)
-	require.Error(t, err)
-	require.Empty(t, path)
-	require.Nil(t, release)
-	require.EqualValues(t, 1, released.Load())
-
-	remaining, err := os.ReadDir(scratch)
-	require.NoError(t, err)
-	require.Empty(t, remaining)
-}
-
 func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	path, release, err := agent.materializeStoredRollout(ctx, "", nil)
+	path, release, _, err := agent.materializeStoredRollout(ctx, nil, func() {})
 	require.NoError(t, err)
 	require.Empty(t, path)
 	release()
-	agent.options.RuntimeResourceHooks.ReserveScratchRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
-		return nil, errors.New("scratch admission failed")
-	}
-	_, _, err = agent.materializeStoredRollout(ctx, "", []SessionStoreEntry{json.RawMessage(`{}`)})
-	require.ErrorContains(t, err, "scratch admission failed")
-
 	require.Equal(t, map[string]string{"a": "b"}, cloneAny(map[string]string{"a": "b"}))
 
 	authMeta := map[string]any{codexMetaKey: map[string]any{authMetaAuthKey: map[string]any{
@@ -1693,60 +1342,6 @@ func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {
 	require.ErrorContains(t, err, "remove failed")
 }
 
-func TestRemainingSessionCanaryCleanupBranches(t *testing.T) {
-	ctx := context.Background()
-	server := HTTPMCPServer("marker", "https://example.test/mcp", nil)
-	entries := []SessionStoreEntry{json.RawMessage(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}`)}
-
-	newFailureClient := func() *runtimeFailureClient {
-		return &runtimeFailureClient{
-			runtimeRecordingClient: newRuntimeRecordingClient(),
-			events:                 []codex.Event{{Kind: codex.EventCompleted}},
-		}
-	}
-
-	resumeFailure := newFailureClient()
-	resumeStore := NewInMemorySessionStore()
-	require.NoError(t, resumeStore.Replace(ctx, SessionKey{SessionID: "native"}, []SessionStoreReplacement{{
-		Key:     SessionKey{SessionID: "native"},
-		Entries: entries,
-	}}))
-	resumeAgent := NewAgent(WithSessionStore(resumeStore), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return resumeFailure, nil
-	}))
-	_, err := resumeAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/work", WithSessionMCPServers(server)))
-	require.ErrorContains(t, err, "runtime_ready")
-
-	materializedFailure := newFailureClient()
-	materializedAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return materializedFailure, nil
-	}))
-	_, err = materializedAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", "/work", WithSessionMCPServers(server)), entries)
-	require.ErrorContains(t, err, "runtime_ready")
-	_, err = materializedAgent.loadMaterializedSession(ctx, LoadSessionRequest("stored", "/work", WithSessionMCPServers(server)), entries)
-	require.ErrorContains(t, err, "runtime_ready")
-
-	resumeErrClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: errors.New("fork resume failed")}
-	resumeErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return resumeErrClient, nil
-	}))
-	parent, err := resumeErrAgent.NewSession(ctx, NewSessionRequest("/work"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, resumeErrAgent.Close()) })
-	_, err = resumeErrAgent.forkSession(ctx, ForkSessionRequest(parent.SessionId, "/work"))
-	require.ErrorContains(t, err, "fork resume failed")
-
-	forkFailure := newFailureClient()
-	forkAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return forkFailure, nil
-	}))
-	parent, err = forkAgent.NewSession(ctx, NewSessionRequest("/work"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, forkAgent.Close()) })
-	_, err = forkAgent.forkSession(ctx, ForkSessionRequest(parent.SessionId, "/work", WithSessionMCPServers(server)))
-	require.ErrorContains(t, err, "runtime_ready")
-}
-
 func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 	ctx := context.Background()
 	entries := []SessionStoreEntry{json.RawMessage(`{"type":"session_meta","payload":{"id":"thread"}}`)}
@@ -1772,7 +1367,7 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		client := newSpyCodexClient()
 		agent.runtimeClient = client
 		agent.runtimeEpoch = 3
-		active := newSession(agent, "session", "/work", nil, codex.Thread{
+		active := newSession(agent, "session", absTestPath("work"), nil, codex.Thread{
 			ID:   "thread",
 			Path: "/native/rollout.jsonl",
 		}, client, sessionMeta{}, nil)
@@ -1797,14 +1392,14 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		require.NotNil(t, retained)
 		require.Equal(t, materialized, retained.materializedPath)
 		require.Empty(t, active.materializedPath)
-		require.NoError(t, cleanupRetainedRuntimeThread(retained))
+		require.NoError(t, agent.cleanupRetainedRuntimeThread(retained))
 		require.True(t, released)
 	})
 
 	t.Run("logical close without live runtime", func(t *testing.T) {
 		agent := NewAgent()
 		client := newSpyCodexClient()
-		active := newSession(agent, "session", "/work", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+		active := newSession(agent, "session", absTestPath("work"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 		agent.sessions[active.id] = active
 		agent.runtimeClient = client
 		agent.runtimeDead = true
@@ -1821,13 +1416,13 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		client := newSpyCodexClient()
 		agent.runtimeClient = client
 		agent.runtimeEpoch = 1
-		agent.sessions["requested"] = newSession(agent, "requested", "/work", nil, codex.Thread{ID: "self"}, client, sessionMeta{}, nil)
-		agent.sessions["unrelated"] = newSession(agent, "unrelated", "/work", nil, codex.Thread{ID: "other"}, client, sessionMeta{}, nil)
+		agent.sessions["requested"] = newSession(agent, "requested", absTestPath("work"), nil, codex.Thread{ID: "self"}, client, sessionMeta{}, nil)
+		agent.sessions["unrelated"] = newSession(agent, "unrelated", absTestPath("work"), nil, codex.Thread{ID: "other"}, client, sessionMeta{}, nil)
 		retained, err := agent.claimRetainedRuntimeThreadForStore("requested", "unclaimed")
 		require.ErrorIs(t, err, errNoRetainedRuntimeThread)
 		require.Nil(t, retained)
 
-		agent.sessions["peer"] = newSession(agent, "peer", "/work", nil, codex.Thread{ID: "claimed"}, client, sessionMeta{}, nil)
+		agent.sessions["peer"] = newSession(agent, "peer", absTestPath("work"), nil, codex.Thread{ID: "claimed"}, client, sessionMeta{}, nil)
 		_, err = agent.claimRetainedRuntimeThreadForStore("requested", "claimed")
 		require.ErrorContains(t, err, "active in another session")
 		retained, err = agent.claimRetainedRuntimeThreadForStore("missing", "")
@@ -1841,7 +1436,7 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 			client := newSpyCodexClient()
 			retained := newRetained(agent, client, "session")
 			retained.claimed = true
-			candidate := newSession(agent, "session", "/work", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+			candidate := newSession(agent, "session", absTestPath("work"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 
 			return agent, retained, candidate
 		}
@@ -1899,7 +1494,7 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 	})
 
 	t.Run("cleanup and end", func(t *testing.T) {
-		require.NoError(t, cleanupRetainedRuntimeThread(nil))
+		require.NoError(t, NewAgent().cleanupRetainedRuntimeThread(nil))
 		require.NoError(t, NewAgent().endRetainedRuntimeThread(nil))
 
 		agent := NewAgent()
@@ -1937,7 +1532,7 @@ func TestRetainedRuntimeOwnershipBranches(t *testing.T) {
 		retained := newRetained(agent, client, "failed")
 		retained.materializedPath = materialized
 		removeMaterializedRolloutFile = func(string) error { return errors.New("remove retained failed") }
-		require.ErrorContains(t, cleanupRetainedRuntimeThread(retained), "remove retained failed")
+		require.ErrorContains(t, agent.cleanupRetainedRuntimeThread(retained), "remove retained failed")
 		require.ErrorContains(t, agent.endRetainedRuntimeThread(retained), "remove retained failed")
 		require.ErrorContains(t, agent.releaseRetainedRuntimeThreads(client, 7), "remove retained failed")
 

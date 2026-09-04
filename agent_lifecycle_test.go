@@ -12,7 +12,7 @@ import (
 
 func TestLifecycleNegotiationAndReservedExtensionDispatch(t *testing.T) {
 	agent := NewAgent()
-	answer, err := agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1.0}}})
+	answer, err := agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"version": 1}})
 	require.NoError(t, err)
 	require.True(t, answer.Present())
 	require.NotNil(t, lifecycleResponseMeta(answer))
@@ -21,9 +21,8 @@ func TestLifecycleNegotiationAndReservedExtensionDispatch(t *testing.T) {
 	answer, err = agent.negotiateLifecycle(nil)
 	require.NoError(t, err)
 	require.False(t, answer.Present())
-	answer, err = agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{2.0}}})
-	require.NoError(t, err)
-	require.False(t, answer.Present())
+	_, err = agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"version": 2.0}})
+	require.Error(t, err)
 	_, err = agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: "bad"})
 	require.Error(t, err)
 	require.NoError(t, rejectLifecycleKey(nil))
@@ -71,52 +70,4 @@ func TestLifecycleReservedKeyRejectedAcrossAgentSurfaces(t *testing.T) {
 		ValueId: &acp.SetSessionConfigOptionValueId{Meta: meta},
 	})
 	require.Error(t, err)
-}
-
-// The negotiated answer is a fact about the active configuration — this adapter
-// on this platform under this containment mode — resolved on the agent that
-// enforces containment rather than from a compiled-in constant. Every mode this
-// adapter can select answers the same three negatives, so the answer is stated
-// once instead of tabulated; this pins that the statement really is mode
-// independent, so a mode that ever proves more cannot be answered for silently
-// by one that does not.
-func TestLifecycleFactsAreNegativeUnderEveryContainmentMode(t *testing.T) {
-	modes := []RuntimeContainmentMode{
-		RuntimeContainmentAuthoritative,
-		RuntimeContainmentBestEffort,
-		RuntimeContainmentSharedIdentity,
-		RuntimeContainmentUnavailable,
-		RuntimeContainmentMode("future-mode"),
-	}
-
-	for _, mode := range modes {
-		agent := NewAgent()
-		agent.containmentMode = mode
-		require.Equal(t, mode, agent.ContainmentMode())
-
-		facts := agent.provenLifecycleFacts()
-		require.True(t, facts.UpdatesOutsidePrompt, mode)
-		require.False(t, facts.AuthoritativeQuiescence, mode)
-		require.Empty(t, facts.QuiescenceSource, mode)
-		require.Equal(t, []lifecycle.ActivityKind{}, facts.ActivityKinds, mode)
-	}
-
-	// The answer this connection settles on is the one the agent proves, and the
-	// mode it enforces is the one the runtime reports.
-	agent := NewAgent()
-	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
-
-	answer, err := agent.negotiateLifecycle(map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1.0}}})
-	require.NoError(t, err)
-	require.True(t, answer.Present())
-
-	expected := agent.provenLifecycleFacts()
-	require.Equal(t, expected.UpdatesOutsidePrompt, answer.UpdatesOutsidePrompt)
-	require.Equal(t, expected.AuthoritativeQuiescence, answer.AuthoritativeQuiescence)
-	require.Equal(t, expected.QuiescenceSource, answer.QuiescenceSource)
-	require.Equal(t, expected.ActivityKinds, answer.ActivityKinds)
-
-	// A quiescence source is present exactly when a proof class was proven, so
-	// the negative answer omits it from the wire advertisement entirely.
-	require.NotContains(t, answer.Advertisement(), "quiescenceSource")
 }

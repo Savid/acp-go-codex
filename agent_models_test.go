@@ -21,7 +21,7 @@ func TestSessionConfigOptionsMutateTurnSettings(t *testing.T) {
 	agent.setAgentClient(conn)
 
 	ctx := context.Background()
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project",
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"),
 		WithSessionCodexOptions(NewCodexOptions(
 			WithCodexModel("gpt-initial"),
 			WithCodexEffort("low"),
@@ -122,7 +122,7 @@ func TestLifecycleConfigValuesPassThroughToNative(t *testing.T) {
 			agent.setAgentClient(newRecordingAgentClient())
 
 			resp, err := agent.NewSession(context.Background(), NewSessionRequest(
-				"/tmp/project",
+				absTestPath("tmp", "project"),
 				WithSessionCodexOptions(test.options),
 			))
 			require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestSetSessionConfigValuesPassThroughToNative(t *testing.T) {
 			}))
 			agent.setAgentClient(newRecordingAgentClient())
 
-			resp, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+			resp, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 			require.NoError(t, err)
 
 			updated, err := agent.SetSessionConfigOption(
@@ -216,7 +216,7 @@ func TestMeasuredNativeConfigRefusalsPropagate(t *testing.T) {
 		}))
 
 		_, err := agent.NewSession(context.Background(), NewSessionRequest(
-			"/tmp/project",
+			absTestPath("tmp", "project"),
 			WithSessionCodexOptions(CodexOptions{Personality: unknown}),
 		))
 		require.EqualError(t, err, nativePersonalityRefusal)
@@ -252,7 +252,7 @@ func TestMeasuredNativeConfigRefusalsPropagate(t *testing.T) {
 			}))
 			agent.setAgentClient(newRecordingAgentClient())
 
-			resp, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+			resp, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 			require.NoError(t, err)
 			_, err = agent.SetSessionConfigOption(
 				context.Background(),
@@ -305,7 +305,7 @@ func TestMeasuredNativeEffortIsAcceptedAtTheDoor(t *testing.T) {
 		agent, client := newDoorAgent(t)
 
 		resp, err := agent.NewSession(ctx, NewSessionRequest(
-			"/tmp/project",
+			absTestPath("tmp", "project"),
 			WithSessionCodexOptions(CodexOptions{Effort: unknown}),
 		))
 		require.NoError(t, err)
@@ -333,7 +333,7 @@ func TestMeasuredNativeEffortIsAcceptedAtTheDoor(t *testing.T) {
 		ctx := context.Background()
 		agent, _ := newDoorAgent(t)
 
-		resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+		resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 		require.NoError(t, err)
 
 		_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(resp.SessionId, configPersonality, unknown))
@@ -443,7 +443,7 @@ func TestSetSessionConfigOptionRejectionsCarryTheUniformUnsupportedShape(t *test
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestSessionConfigSettersRespectTurnLock(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -641,7 +641,7 @@ func TestSetSessionConfigOptionErrorBranches(t *testing.T) {
 	updateErr := errors.New("update failed")
 	agent = NewAgent()
 	agent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: updateErr})
-	session := newSession(agent, "session-1", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, newSpyCodexClient(), sessionMeta{}, nil)
+	session := newSession(agent, "session-1", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-1"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := agent.storeStartedSession(session); err != nil {
 		t.Fatalf("store session: %v", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -108,8 +107,8 @@ func TestPlaceholderSessionLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	newResp, err := agent.NewSession(ctx, acp.NewSessionRequest{
-		Cwd:                   "/tmp/project",
-		AdditionalDirectories: []string{"/tmp/other"},
+		Cwd:                   absTestPath("tmp", "project"),
+		AdditionalDirectories: []string{absTestPath("tmp", "other")},
 		McpServers:            []acp.McpServer{},
 	})
 	if err != nil {
@@ -189,7 +188,7 @@ func TestACPConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	}
 
 	newResp, err := clientConn.NewSession(ctx, acp.NewSessionRequest{
-		Cwd:        "/tmp/project",
+		Cwd:        absTestPath("tmp", "project"),
 		McpServers: []acp.McpServer{},
 	})
 	if err != nil {
@@ -248,7 +247,7 @@ func TestServeLocalConnectionStreamsPlaceholderUpdates(t *testing.T) {
 	if _, err := clientConn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	newResp, err := clientConn.NewSession(ctx, acp.NewSessionRequest{Cwd: "/tmp/project", McpServers: []acp.McpServer{}})
+	newResp, err := clientConn.NewSession(ctx, acp.NewSessionRequest{Cwd: absTestPath("tmp", "project"), McpServers: []acp.McpServer{}})
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -386,9 +385,9 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	agent := NewAgent()
 	client := newSpyCodexClient()
 	otherClient := newSpyCodexClient()
-	matching := newSession(agent, "matching", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, client, sessionMeta{}, nil)
-	sameClientOtherThread := newSession(agent, "other-thread", "/tmp/project", nil, codex.Thread{ID: "thread-2"}, client, sessionMeta{}, nil)
-	other := newSession(agent, "other-client", "/tmp/project", nil, codex.Thread{ID: "thread-1"}, otherClient, sessionMeta{}, nil)
+	matching := newSession(agent, "matching", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-1"}, client, sessionMeta{}, nil)
+	sameClientOtherThread := newSession(agent, "other-thread", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-2"}, client, sessionMeta{}, nil)
+	other := newSession(agent, "other-client", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-1"}, otherClient, sessionMeta{}, nil)
 	if err := agent.storeStartedSession(matching); err != nil {
 		t.Fatalf("store matching session: %v", err)
 	}
@@ -400,6 +399,9 @@ func TestCodexClientEventSinkUpdatesMatchingSessions(t *testing.T) {
 	}
 
 	sink := &codexClientEventSink{agent: agent}
+	staleSink := &codexClientEventSink{agent: agent, epoch: agent.runtimeEpoch + 1}
+	staleSink.Handle(context.Background(), codex.Event{Kind: codex.EventAccountUpdated})
+	require.Empty(t, staleSink.pending)
 	sink.Handle(context.Background(), codex.Event{Kind: codex.EventRaw})
 	sink.Handle(context.Background(), codex.Event{
 		Kind:     codex.EventAccountUpdated,
@@ -441,6 +443,49 @@ func TestCodexClientEventSinkStartupRetentionIsBoundedAndFailsClosed(t *testing.
 	sink.mu.Unlock()
 	require.ErrorIs(t, sink.SetClient(client), codex.ErrTurnEventOverflow)
 	require.False(t, agent.runtimeDead)
+}
+
+func TestAgentCloseRetriesBusyRuntimeAndNormalizesClosedSession(t *testing.T) {
+	busy := NewAgent()
+	busy.runtimeClient = newSpyCodexClient()
+	reclaims := 0
+	busy.runtimeNativeRelease = func() error {
+		reclaims++
+		if reclaims == 1 {
+			return ErrNativeTreeBusy
+		}
+
+		return nil
+	}
+	require.ErrorIs(t, busy.Close(), ErrNativeTreeBusy)
+	require.NoError(t, busy.Close())
+	require.Equal(t, 2, reclaims)
+
+	closedClient := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(), unsubscribeErr: codex.ErrConnectionClosed,
+	}
+	normalized := NewAgent()
+	normalized.runtimeClient = closedClient
+	active := newSession(normalized, "session", absTestPath("tmp", "project"), nil,
+		codex.Thread{ID: "thread"}, closedClient, sessionMeta{}, nil)
+	require.NoError(t, normalized.storeStartedSession(active))
+	require.NoError(t, normalized.Close())
+
+	memoized := NewAgent()
+	closeDone := make(chan struct{})
+	close(closeDone)
+	memoizedSession := &session{
+		agent: memoized,
+		id:    "memoized",
+		closeOperation: &sessionCloseOperation{
+			done: closeDone,
+			err:  codex.ErrConnectionClosed,
+		},
+		closeContained:  true,
+		closeCommitDone: true,
+	}
+	memoized.sessions[memoizedSession.id] = memoizedSession
+	require.NoError(t, memoized.Close())
 }
 
 type countingCloseCodexClient struct {
@@ -562,13 +607,13 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	if err := closedForStore.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
-	closedSession := newSession(closedForStore, "closed", "/tmp/project", nil, codex.Thread{ID: "closed"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
+	closedSession := newSession(closedForStore, "closed", absTestPath("tmp", "project"), nil, codex.Thread{ID: "closed"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
 	if err := closedForStore.storeStartedSession(closedSession); err == nil {
 		t.Fatal("storeStartedSession on closed agent succeeded")
 	}
 
 	limited := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
-	first := newSession(limited, "first", "/tmp/project", nil, codex.Thread{ID: "first"}, newSpyCodexClient(), sessionMeta{}, nil)
+	first := newSession(limited, "first", absTestPath("tmp", "project"), nil, codex.Thread{ID: "first"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := limited.storeStartedSession(first); err != nil {
 		t.Fatalf("store first session: %v", err)
 	}
@@ -577,7 +622,7 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	// on every error, so containing it here as well would run one session's
 	// containment boundary twice over one native thread.
 	backpressured := newSpyCodexClient()
-	second := newSession(limited, "second", "/tmp/project", nil, codex.Thread{ID: "second"}, backpressured, sessionMeta{}, nil)
+	second := newSession(limited, "second", absTestPath("tmp", "project"), nil, codex.Thread{ID: "second"}, backpressured, sessionMeta{}, nil)
 	if err := limited.storeStartedSession(second); err == nil {
 		t.Fatal("storeStartedSession ignored active session limit")
 	}
@@ -586,11 +631,11 @@ func TestAgentCoreBranchEdges(t *testing.T) {
 	}
 
 	replacing := NewAgent()
-	old := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
+	old := newSession(replacing, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "old"}, &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")}, sessionMeta{}, nil)
 	if err := replacing.storeStartedSession(old); err != nil {
 		t.Fatalf("store old session: %v", err)
 	}
-	newer := newSession(replacing, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
+	newer := newSession(replacing, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := replacing.storeStartedSession(newer); err != nil {
 		t.Fatalf("replace session: %v", err)
 	}
@@ -609,11 +654,11 @@ func TestSameIdInstallRefusesOverAnUnsettledSession(t *testing.T) {
 	child := filepath.Join(unsettledDir, "child")
 	require.NoError(t, os.WriteFile(child, []byte("x"), 0o600))
 
-	unsettled := newSession(agent, "same", "/tmp/project", nil, codex.Thread{ID: "old"}, newSpyCodexClient(), sessionMeta{}, nil)
+	unsettled := newSession(agent, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "old"}, newSpyCodexClient(), sessionMeta{}, nil)
 	unsettled.materializedPath = unsettledDir
 	require.NoError(t, agent.storeStartedSession(unsettled))
 
-	refused := newSession(agent, "same", "/tmp/project", nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
+	refused := newSession(agent, "same", absTestPath("tmp", "project"), nil, codex.Thread{ID: "new"}, newSpyCodexClient(), sessionMeta{}, nil)
 	require.Error(t, agent.storeStartedSession(refused))
 	require.Same(t, unsettled, agent.activeSession("same"),
 		"an incomplete boundary keeps its id, and everything it still owes with it")
@@ -671,7 +716,7 @@ func newSpyCodexClient() *spyCodexClient {
 		thread: codex.Thread{
 			ID:        "thread-1",
 			SessionID: "thread-1",
-			Cwd:       "/tmp/project",
+			Cwd:       absTestPath("tmp", "project"),
 			Model:     "gpt-initial",
 			Provider:  "openai",
 			Title:     "Thread",
@@ -1017,7 +1062,7 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 				return &errorCodexClient{
 					spyCodexClient: newSpyCodexClient(),
-					closeErr:       errors.Join(errors.New("close failed"), codex.ErrProcessContainmentIncomplete),
+					closeErr:       errors.Join(errors.New("close failed"), codex.ErrContainmentIncomplete),
 				}, nil
 			}),
 		)
@@ -1026,18 +1071,15 @@ func TestAgentServeAndNewClientEdges(t *testing.T) {
 	if _, err := clientConn.Initialize(context.Background(), acp.InitializeRequest{}); err != nil {
 		t.Fatalf("serve close-error initialize: %v", err)
 	}
-	if _, err := clientConn.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/project", McpServers: []acp.McpServer{}}); err != nil {
+	if _, err := clientConn.NewSession(context.Background(), acp.NewSessionRequest{Cwd: absTestPath("tmp", "project"), McpServers: []acp.McpServer{}}); err != nil {
 		t.Fatalf("serve close-error session: %v", err)
 	}
 	serveCancel()
 	_ = c2aW.Close()
 	_ = a2cR.Close()
 	serveErr := <-errCh
-	if !errors.Is(serveErr, ErrProcessContainmentIncomplete) {
-		t.Fatalf("Serve close-error returned %v, want ErrProcessContainmentIncomplete", serveErr)
-	}
-	if !errors.Is(ErrProcessContainmentIncomplete, codex.ErrProcessContainmentIncomplete) {
-		t.Fatalf("public process-tree error does not preserve internal identity")
+	if !errors.Is(serveErr, ErrContainmentIncomplete) {
+		t.Fatalf("Serve close-error returned %v, want ErrContainmentIncomplete", serveErr)
 	}
 	_ = c2aR.Close()
 	_ = a2cW.Close()
@@ -1090,7 +1132,7 @@ func TestServeJoinsIncompleteRuntimeLaunchBeforeReturning(t *testing.T) {
 
 				return &errorCodexClient{
 					spyCodexClient: newSpyCodexClient(),
-					closeErr:       codex.ErrProcessContainmentIncomplete,
+					closeErr:       codex.ErrContainmentIncomplete,
 				}, nil
 			}),
 		)
@@ -1103,10 +1145,10 @@ func TestServeJoinsIncompleteRuntimeLaunchBeforeReturning(t *testing.T) {
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	sessionErr := make(chan error, 1)
 	go func() {
-		_, err := clientConn.NewSession(sessionCtx, acp.NewSessionRequest{Cwd: "/tmp/project", McpServers: []acp.McpServer{}})
+		_, err := clientConn.NewSession(sessionCtx, acp.NewSessionRequest{Cwd: absTestPath("tmp", "project"), McpServers: []acp.McpServer{}})
 		sessionErr <- err
 	}()
-	<-factoryStarted
+	awaitTestSignal(t, factoryStarted, "factoryStarted")
 
 	serveCancel()
 	select {
@@ -1118,8 +1160,8 @@ func TestServeJoinsIncompleteRuntimeLaunchBeforeReturning(t *testing.T) {
 	close(releaseFactory)
 	select {
 	case err := <-serveErr:
-		if !errors.Is(err, ErrProcessContainmentIncomplete) {
-			t.Fatalf("Serve error = %v, want ErrProcessContainmentIncomplete", err)
+		if !errors.Is(err, ErrContainmentIncomplete) {
+			t.Fatalf("Serve error = %v, want ErrContainmentIncomplete", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not join the incomplete runtime launch")
@@ -1363,8 +1405,6 @@ func (c *blockingPermissionAgentClient) RequestPermissionRegistered(
 }
 
 func TestMain(m *testing.M) {
-	fakeMode := decodeFakeCodexMode(os.Getenv(fakeCodexModeEnv))
-
 	// When the process-death test relaunches this binary as the codex CLI, act
 	// as a fake app-server instead of running the suite.
 	if len(os.Args) > 1 {
@@ -1373,14 +1413,7 @@ func TestMain(m *testing.M) {
 			fmt.Println("codex-cli 0.144.1")
 			os.Exit(0)
 		case "app-server":
-			if fakeMode.Mode == fakeCodexCancelTreeMode {
-				runCancelTreeFakeCodexAppServer(fakeMode)
-			} else {
-				runFakeCodexAppServer()
-			}
-			os.Exit(0)
-		case fakeCodexDelayedChildArg:
-			runFakeCodexDelayedChild(fakeMode)
+			runFakeCodexAppServer()
 			os.Exit(0)
 		}
 	}
@@ -1399,56 +1432,7 @@ func TestMain(m *testing.M) {
 // process death surfaces a real diagnostic tail rather than a bare EOF.
 const fakeCodexStderrTail = "codex app-server: fatal: killed (out of memory)"
 
-const (
-	fakeCodexModeEnv              = "ACP_GO_CODEX_FAKE_MODE"
-	fakeCodexCancelTreeMode       = "cancel-tree"
-	fakeCodexDelayedChildArg      = "fake-delayed-child"
-	fakeCodexBlockingPrompt       = "START_DELAYED_CHILD"
-	fakeCodexReplacementPrompt    = "REPLACEMENT_TURN"
-	fakeCodexReplacementReply     = "REPLACEMENT_OK"
-	fakeCodexThreadID             = "thread-cancel-tree"
-	fakeCodexSessionID            = "session-cancel-tree"
-	fakeCodexBlockingTurnID       = "turn-blocking"
-	fakeCodexReplacementTurnID    = "turn-replacement"
-	fakeCodexBackgroundProcessID  = "background-target-process"
-	fakeCodexStalePeerThreadID    = "thread-stale-peer"
-	fakeCodexLateAbortRolloutRow  = `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-blocking"}}`
-	fakeCodexChildSentinelDelay   = 750 * time.Millisecond
-	fakeCodexChildObservationWait = 1250 * time.Millisecond
-)
-
-type fakeCodexMode struct {
-	Mode           string `json:"mode"`
-	ChildStarted   string `json:"childStarted"`
-	CancelReturned string `json:"cancelReturned"`
-	ChildSentinel  string `json:"childSentinel"`
-	RolloutPath    string `json:"rolloutPath"`
-}
-
-func decodeFakeCodexMode(raw string) fakeCodexMode {
-	var mode fakeCodexMode
-	_ = json.Unmarshal([]byte(raw), &mode)
-
-	return mode
-}
-
-func fakeCodexModeEnvMap(mode fakeCodexMode) map[string]string {
-	raw, err := json.Marshal(mode)
-	if err != nil {
-		panic(err)
-	}
-
-	return map[string]string{fakeCodexModeEnv: string(raw)}
-}
-
-func fakeCodexProcessIsolation(mode fakeCodexMode) ProcessIsolation {
-	isolation := testProcessIsolation()
-	for key, value := range fakeCodexModeEnvMap(mode) {
-		isolation.BaseEnvironment[key] = value
-	}
-
-	return isolation
-}
+const fakeCodexLateAbortRolloutRow = `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-blocking"}}`
 
 // runFakeCodexAppServer speaks just enough of the codex app-server JSON-RPC
 // protocol to complete the launch handshake, then dies mid-turn on turn/start so
@@ -1491,154 +1475,6 @@ func runFakeCodexAppServer() {
 	}
 }
 
-// runCancelTreeFakeCodexAppServer deliberately implements the native failure
-// observed in production: turn/interrupt acknowledges cancellation but leaves
-// a command descendant running. The fake exposes that descendant through the
-// same thread-scoped background-terminal API as Codex 0.144.4.
-func runCancelTreeFakeCodexAppServer(mode fakeCodexMode) {
-	rolloutPath := mode.RolloutPath
-
-	writeMessage := func(message map[string]any) {
-		payload, _ := json.Marshal(message)
-		payload = append(payload, '\n')
-		_, _ = os.Stdout.Write(payload)
-	}
-	writeReply := func(id any, result map[string]any) {
-		writeMessage(map[string]any{"jsonrpc": "2.0", "id": id, jsonFieldResult: result})
-	}
-	writeError := func(id any, message string) {
-		writeMessage(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      id,
-			jsonFieldError: map[string]any{
-				"code": -32602, "message": message,
-			},
-		})
-	}
-	writeNotification := func(method string, params map[string]any) {
-		writeMessage(map[string]any{"jsonrpc": "2.0", jsonFieldMethod: method, "params": params})
-	}
-
-	var backgroundChild *exec.Cmd
-	defer func() {
-		if backgroundChild != nil && backgroundChild.Process != nil {
-			_ = backgroundChild.Process.Kill()
-			_ = backgroundChild.Wait()
-		}
-	}()
-
-	decoder := json.NewDecoder(os.Stdin)
-	for {
-		var msg map[string]any
-		if err := decoder.Decode(&msg); err != nil {
-			return
-		}
-
-		id, hasID := msg["id"]
-		if !hasID {
-			continue
-		}
-
-		method, _ := msg[jsonFieldMethod].(string)
-		switch method {
-		case "thread/start":
-			if rolloutPath != "" {
-				if _, err := os.Stat(rolloutPath); errors.Is(err, os.ErrNotExist) {
-					_ = appendFakeCodexRolloutRow(
-						rolloutPath,
-						`{"type":"session_meta","payload":{"id":"`+fakeCodexThreadID+`"}}`,
-					)
-				}
-			}
-			writeReply(id, map[string]any{"thread": map[string]any{
-				"id": fakeCodexThreadID, "sessionId": fakeCodexSessionID, "path": rolloutPath,
-			}})
-		case "thread/resume":
-			params, _ := msg["params"].(map[string]any)
-			threadID, _ := params["threadId"].(string)
-			if threadID == fakeCodexStalePeerThreadID {
-				writeError(id, "no rollout found for thread id "+threadID)
-
-				continue
-			}
-			path, _ := params["path"].(string)
-			writeReply(id, map[string]any{"thread": map[string]any{
-				"id": fakeCodexThreadID, "sessionId": fakeCodexSessionID, "path": path,
-			}})
-		case "turn/start":
-			rawParams, _ := json.Marshal(msg["params"])
-			if strings.Contains(string(rawParams), fakeCodexBlockingPrompt) {
-				backgroundChild = newFakeCodexDelayedChildCommand()
-				backgroundChild.Env = os.Environ()
-				if err := backgroundChild.Start(); err != nil {
-					os.Exit(2)
-				}
-
-				writeReply(id, map[string]any{"turn": map[string]any{"id": fakeCodexBlockingTurnID}})
-				writeNotification("item/started", map[string]any{
-					"threadId": fakeCodexThreadID,
-					"turnId":   fakeCodexBlockingTurnID,
-					"item": map[string]any{
-						"id": fakeCodexBlockingTurnID + "-command", "type": "commandExecution", "command": "delayed child",
-					},
-				})
-
-				continue
-			}
-
-			writeReply(id, map[string]any{"turn": map[string]any{"id": fakeCodexReplacementTurnID}})
-			writeNotification("item/agentMessage/delta", map[string]any{
-				"threadId": fakeCodexThreadID, "turnId": fakeCodexReplacementTurnID, "delta": fakeCodexReplacementReply,
-			})
-			writeNotification("turn/completed", map[string]any{
-				"threadId": fakeCodexThreadID,
-				"turn":     map[string]any{"id": fakeCodexReplacementTurnID, "status": "completed"},
-			})
-		case "turn/interrupt":
-			// Intentionally acknowledge without touching the delayed child, and
-			// without stalling: a prompt settles behind the containment
-			// boundary, so an interrupt that waits on the cancelled prompt is a
-			// fixture that waits on itself.
-			writeReply(id, map[string]any{})
-		case "thread/backgroundTerminals/list":
-			params, _ := msg["params"].(map[string]any)
-			threadID, _ := params["threadId"].(string)
-			data := []any{}
-			if threadID == fakeCodexThreadID && backgroundChild != nil && backgroundChild.Process != nil {
-				data = append(data, map[string]any{
-					"itemId":    fakeCodexBlockingTurnID + "-command",
-					"processId": fakeCodexBackgroundProcessID,
-					"osPid":     backgroundChild.Process.Pid,
-				})
-			}
-			writeReply(id, map[string]any{"data": data, "nextCursor": nil})
-		case "thread/backgroundTerminals/terminate":
-			params, _ := msg["params"].(map[string]any)
-			threadID, _ := params["threadId"].(string)
-			processID, _ := params["processId"].(string)
-			terminated := false
-			if threadID == fakeCodexThreadID && processID == fakeCodexBackgroundProcessID && backgroundChild != nil {
-				if backgroundChild.Process != nil {
-					_ = backgroundChild.Process.Kill()
-				}
-				_ = backgroundChild.Wait()
-				backgroundChild = nil
-				terminated = true
-			}
-			// Native cleanup finishes the rollout as the contained descendant
-			// dies. Publishing the abort row here rather than at interrupt is
-			// what makes the durable copy a proof: a mirror that read before
-			// containment cannot hold this row.
-			if terminated && rolloutPath != "" {
-				_ = appendFakeCodexRolloutRow(rolloutPath, fakeCodexLateAbortRolloutRow)
-			}
-			writeReply(id, map[string]any{"terminated": terminated})
-		default:
-			writeReply(id, map[string]any{})
-		}
-	}
-}
-
 func appendFakeCodexRolloutRow(path string, row string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -1650,52 +1486,9 @@ func appendFakeCodexRolloutRow(path string, row string) error {
 	}
 	defer file.Close()
 
-	// The fake native process appends to this rollout as the isolated identity,
-	// so a file the test creates has to belong to that identity too. Only a
-	// privileged runner can hand it over; an unprivileged one holds a single
-	// identity and never launches the fake process as a second one.
-	uid, gid := testIsolationIdentity()
-	if os.Geteuid() == 0 && (uid != uint32(os.Getuid()) || gid != uint32(os.Getgid())) {
-		if err = file.Chown(int(uid), int(gid)); err != nil {
-			return err
-		}
-	}
-
 	_, err = fmt.Fprintln(file, row)
 
 	return err
-}
-
-func runFakeCodexDelayedChild(mode fakeCodexMode) {
-	ignoreFakeCodexChildTerminationSignals()
-
-	started := mode.ChildStarted
-	cancelReturned := mode.CancelReturned
-	sentinel := mode.ChildSentinel
-	if started == "" || cancelReturned == "" || sentinel == "" {
-		os.Exit(3)
-	}
-
-	identity, err := json.Marshal(currentFakeCodexChildIdentity())
-	if err != nil {
-		os.Exit(4)
-	}
-	if err := os.WriteFile(started, identity, 0o600); err != nil {
-		os.Exit(4)
-	}
-
-	deadline := time.Now().Add(fakeCodexChildSentinelDelay)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(cancelReturned); err == nil {
-			_ = os.WriteFile(sentinel, []byte("survived cancellation return"), 0o600)
-
-			return
-		}
-
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	_ = os.WriteFile(sentinel, []byte("delayed side effect"), 0o600)
 }
 
 type appendErrorStore struct{}
@@ -1836,25 +1629,6 @@ func TestServeReturnsImmediatelyOnCanceledContext(t *testing.T) {
 	err := Serve(canceledContext(), strings.NewReader(""), io.Discard)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Serve with canceled context = %v, want context.Canceled", err)
-	}
-}
-
-func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
-	base := map[string]string{"CANARY": "base"}
-	policy := &ProcessIsolation{
-		UID: 12, GID: 34, BaseEnvironment: base,
-		StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "/var/lib/codex",
-	}
-
-	converted := codexProcessIsolation(policy)
-	base["CANARY"] = "mutated"
-
-	if converted.UID != 12 || converted.GID != 34 || converted.BaseEnvironment["CANARY"] != "base" ||
-		converted.StandaloneOwnerID != "deployment-1" || converted.StandaloneStateRoot != "/var/lib/codex" {
-		t.Fatalf("converted isolation = %#v", converted)
-	}
-	if codexProcessIsolation(nil) != nil {
-		t.Fatal("nil isolation did not remain nil")
 	}
 }
 

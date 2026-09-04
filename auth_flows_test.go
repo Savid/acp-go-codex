@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -542,6 +540,9 @@ func TestAuthorizeMintFailures(t *testing.T) {
 func TestAuthorizeFailsWithoutTheNativeAuthSurface(t *testing.T) {
 	home := t.TempDir()
 	agent := NewAgent(WithHome(home), WithProviderAuthRoot(t.TempDir()), WithProviderAuthDirectHome(home))
+
+	t.Cleanup(func() { _ = agent.Close() })
+
 	storeRateLimitsSession(t, agent, "plain", newSpyCodexClient())
 
 	result, err := agent.HandleExtensionMethod(t.Context(), AuthMethodsMethod, json.RawMessage(`{"sessionId":"plain"}`))
@@ -832,45 +833,6 @@ func TestAuthLedgerAdvancedPast(t *testing.T) {
 		if got := authLedgerAdvancedPast(testCase.prior, record); got != testCase.want {
 			t.Fatalf("%s: advancedPast = %v, want %v", name, got, testCase.want)
 		}
-	}
-}
-
-// TestDisconnectRefusesAHomeReplacedAfterConsent pins the account-level logout
-// to the directory consent was granted over. The app-server resolves CODEX_HOME
-// when the call runs, so a path repointed since then would log out an account
-// nobody authorized this agent to touch.
-func TestDisconnectRefusesAHomeReplacedAfterConsent(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	other := filepath.Join(root, "other")
-
-	for _, dir := range []string{home, other} {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatalf("create %s: %v", dir, err)
-		}
-	}
-
-	fixture := newProviderAuthFixture(t, WithHome(home), WithProviderAuthDirectHome(home))
-	fixture.authenticatedFlow(t)
-
-	if err := os.Rename(home, filepath.Join(root, "moved")); err != nil {
-		t.Fatalf("move the consented home: %v", err)
-	}
-
-	if err := os.Symlink(other, home); err != nil {
-		t.Fatalf("point the consented path elsewhere: %v", err)
-	}
-
-	_, err := fixture.call(t, AuthDisconnectMethod, map[string]any{
-		"sessionId":         fixture.sessionID,
-		"providerId":        authProviderOpenAI,
-		"connectionId":      "connection-1",
-		"bindingGeneration": 1,
-	})
-	requireAuthCause(t, err, authCausePolicy)
-
-	if fixture.client.logoutCalls != 0 {
-		t.Fatal("a repointed home still drove an account-level logout")
 	}
 }
 

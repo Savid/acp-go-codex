@@ -144,22 +144,54 @@ func rolloutNativeTerminalIdentity(entries []SessionStoreEntry) nativeTurnIdenti
 			continue
 		}
 
-		turnID := firstNonEmpty(
-			rolloutIdentityString(row.raw, codexTurnIDMetaKey, "turn_id", "turnID"),
-			rolloutIdentityString(row.Payload, codexTurnIDMetaKey, "turn_id", "turnID"),
-		)
-		if turnID != "" {
-			if identity.turnID != "" && turnID != identity.turnID {
-				identity = nativeTurnIdentity{}
-			}
+		identity = advanceRolloutNativeIdentity(identity, row)
+	}
 
-			identity.turnID = turnID
+	return identity
+}
+
+func rolloutReachedNativeBoundary(entries []SessionStoreEntry, expected nativeTurnIdentity) bool {
+	if expected.turnID == "" {
+		return false
+	}
+
+	identity := nativeTurnIdentity{}
+
+	for _, entry := range entries {
+		row, err := decodeRolloutRow(entry)
+		if err != nil {
+			continue
 		}
 
-		if rolloutAssistantPayload(row.Payload) {
-			if messageID := rolloutIdentityString(row.Payload, "id", "itemId", codexMessageIDMetaKey, "uuid"); messageID != "" {
-				identity.messageID = messageID
-			}
+		identity = advanceRolloutNativeIdentity(identity, row)
+		terminalType := strings.ToLower(strings.TrimSpace(stringFromAny(row.Payload[jsonFieldType])))
+
+		terminalTurnID := rolloutIdentityString(row.Payload, codexTurnIDMetaKey, "turn_id", "turnID")
+		if row.Type == valueEventMsg &&
+			terminalTurnID == expected.turnID &&
+			identity.turnID == expected.turnID &&
+			(expected.messageID == "" || identity.messageID == expected.messageID) &&
+			(terminalType == "task_complete" || terminalType == "turn_aborted") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func advanceRolloutNativeIdentity(identity nativeTurnIdentity, row rolloutRow) nativeTurnIdentity {
+	turnID := rolloutIdentityString(row.Payload, codexTurnIDMetaKey, "turn_id", "turnID")
+	if turnID != "" {
+		if identity.turnID != "" && turnID != identity.turnID {
+			identity = nativeTurnIdentity{}
+		}
+
+		identity.turnID = turnID
+	}
+
+	if rolloutAssistantPayload(row.Payload) {
+		if messageID := rolloutIdentityString(row.Payload, "id", "itemId", codexMessageIDMetaKey, "uuid"); messageID != "" {
+			identity.messageID = messageID
 		}
 	}
 

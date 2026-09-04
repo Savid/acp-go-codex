@@ -141,7 +141,7 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 		return lifecycleErr
 	}
 
-	err = session.shutdownActiveTurnForNonce(ctx, false, route.TurnNonce)
+	err = session.shutdownActiveTurnForNonce(ctx, route.TurnNonce)
 
 	return cancelACPError(err, session.accountMetaSnapshot())
 }
@@ -184,7 +184,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	// can enter behind this boundary.
 	var shutdownErr error
 	if !retryCommit {
-		shutdownErr = errors.Join(gateErr, session.shutdownActiveTurn(ctx, true))
+		shutdownErr = errors.Join(gateErr, session.shutdownActiveTurn(ctx))
 		session.awaitPromptSettlement()
 	}
 
@@ -320,7 +320,7 @@ func (a *Agent) tearDownDeletedSession(ctx context.Context, id acp.SessionId) er
 
 	if active != nil {
 		gateErr := active.beginLifecycleClose(ctx)
-		shutdownErr := errors.Join(gateErr, active.shutdownActiveTurn(ctx, true))
+		shutdownErr := errors.Join(gateErr, active.shutdownActiveTurn(ctx))
 		active.awaitPromptSettlement()
 		active.sessionOps.Lock()
 
@@ -675,6 +675,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	meta = resolveActiveSessionCarriers(meta, a.activeSession(params.SessionId))
+
 	start := codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -688,6 +690,10 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 			return acp.ResumeSessionResponse{}, admissionErr
 		}
 		defer func() { resultErr = finish(resultErr) }()
+
+		if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
+			return acp.ResumeSessionResponse{}, err
+		}
 
 		models := modelList(ctx, session.client)
 		snapshot := session.snapshot()
@@ -724,8 +730,19 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	storedConfig, err := a.loadDurableSessionConfig(ctx, params.SessionId)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	meta, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
+
 	if active := a.activeSession(params.SessionId); active != nil {
-		return a.rebindActiveStoredSession(ctx, params, entries, meta, active, nil)
+		return a.rebindActiveStoredSession(ctx, params, entries, meta, active, func() error {
+			configureLoadedSessionPersistence(active, storedConfig, configMatches)
+
+			return active.commitPendingDurableSessionConfig(ctx)
+		})
 	}
 
 	retained, err := a.claimRetainedRuntimeThreadForStore(params.SessionId, rolloutNativeThreadID(entries))
@@ -736,35 +753,46 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	}
 
 	if retained != nil {
-		resp, _, resumeErr := a.resumeRetainedRuntimeSession(ctx, params, meta, retained)
+		resp, _, resumeErr := a.resumeRetainedRuntimeSession(ctx, params, meta, retained, loadedSessionPersistence{
+			config:  storedConfig,
+			matches: configMatches,
+		})
 
 		return resp, resumeErr
 	}
 
-	path, scratchRelease, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, err
-	}
-
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
 	if err != nil {
-		_ = removeMaterializedRollout(path)
-
-		scratchRelease()
-
 		return acp.ResumeSessionResponse{}, err
 	}
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
+	hydrated, materializedBytes, err := a.hydrateStoredRollout(ctx, params.SessionId, entries)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	residenceRelease, capacityErr := a.reserveNativeResidenceCapacity(ctx, materializedBytes)
+	if capacityErr != nil {
+		return acp.ResumeSessionResponse{}, capacityErr
+	}
+
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
-		_ = removeMaterializedRollout(path)
-
-		scratchRelease()
+		residenceRelease()
 
 		return acp.ResumeSessionResponse{}, err
 	}
+
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	a.mu.Lock()
+	materializedEpoch := a.runtimeEpoch
+	a.mu.Unlock()
 
 	threadID := firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId))
 
@@ -777,9 +805,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
-		_ = removeMaterializedRollout(path)
-
-		scratchRelease()
+		_ = a.retireMaterializedRolloutAtEpoch(path, materializedBytes, scratchRelease, materializedEpoch)
 
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
 	}
@@ -787,6 +813,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	id := params.SessionId
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
 		_ = session.Close(context.TODO())
 
@@ -795,6 +822,8 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 
 	session.materializedPath = path
 	session.materializedRelease = scratchRelease
+	session.materializedBytes = materializedBytes
+	session.materializedEpoch = materializedEpoch
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -806,6 +835,14 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	session.setAccount(clientAccountMeta(ctx, client))
 
 	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	configureLoadedSessionPersistence(session, storedConfig, configMatches)
+
+	if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
 		_ = session.Close(context.Background())
 
 		return acp.ResumeSessionResponse{}, err
@@ -831,6 +868,7 @@ func (a *Agent) resumeRetainedRuntimeSession(
 	params acp.ResumeSessionRequest,
 	meta sessionMeta,
 	retained *retainedRuntimeThread,
+	persistence ...loadedSessionPersistence,
 ) (acp.ResumeSessionResponse, *session, error) {
 	releaseClaim := true
 	defer func() {
@@ -918,6 +956,14 @@ func (a *Agent) resumeRetainedRuntimeSession(
 		return acp.ResumeSessionResponse{}, nil, rollback(err)
 	}
 
+	if len(persistence) != 0 {
+		configureLoadedSessionPersistence(session, persistence[0].config, persistence[0].matches)
+	}
+
+	if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
+		return acp.ResumeSessionResponse{}, nil, rollback(err)
+	}
+
 	if err := a.storeRetainedRuntimeSession(session, retained); err != nil {
 		return acp.ResumeSessionResponse{}, nil, rollback(err)
 	}
@@ -929,6 +975,11 @@ func (a *Agent) resumeRetainedRuntimeSession(
 		Meta:          sessionResponseMeta(snapshot),
 		ConfigOptions: sessionConfigOptions(session, models),
 	}, session, nil
+}
+
+type loadedSessionPersistence struct {
+	config  durableSessionConfig
+	matches bool
 }
 
 // rebindActiveStoredSession refreshes lifecycle configuration without
@@ -974,6 +1025,16 @@ func (a *Agent) rebindActiveStoredSession(
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
+	// Codex ignores thread/resume overrides for a thread the app-server still
+	// holds loaded, so the rotated configuration only lands once the thread is
+	// dropped from it. Admission already holds this session's turn, so no native
+	// turn can be running across the drop, and a resume that fails afterwards
+	// leaves the thread unloaded — the dead-client mark is what makes the next
+	// request revive it instead of prompting a thread the app-server released.
+	if unsubscribeErr := client.UnsubscribeThread(ctx, ownedThreadID); unsubscribeErr != nil {
+		return acp.ResumeSessionResponse{}, codexThreadACPError(unsubscribeErr, active.accountMetaSnapshot())
+	}
+
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      ownedThreadID,
 		Path:          ownedPath,
@@ -983,6 +1044,8 @@ func (a *Agent) rebindActiveStoredSession(
 		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
+		active.setClientDead(true)
+
 		return acp.ResumeSessionResponse{}, codexThreadACPError(err, active.accountMetaSnapshot())
 	}
 
@@ -1138,6 +1201,8 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 
+	meta = resolveActiveSessionCarriers(meta, a.activeSession(params.SessionId))
+
 	start := codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1159,6 +1224,24 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 		if len(storeEntries) == 0 {
 			return acp.LoadSessionResponse{}, newUnknownSession()
+		}
+
+		storedConfig, configErr := a.loadDurableSessionConfig(ctx, params.SessionId)
+		if configErr != nil {
+			return acp.LoadSessionResponse{}, configErr
+		}
+
+		_, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
+		if !configMatches && !existing.pendingDurableSessionConfig(storedConfig.Revision) {
+			return acp.LoadSessionResponse{}, errors.New("active Codex session configuration does not match its durable record")
+		}
+
+		if configMatches {
+			configureLoadedSessionPersistence(existing, storedConfig, true)
+		}
+
+		if err := existing.commitPendingDurableSessionConfig(ctx); err != nil {
+			return acp.LoadSessionResponse{}, err
 		}
 
 		if replayErr := existing.replayRollout(ctx, storeEntries); replayErr != nil {
@@ -1258,7 +1341,11 @@ func (a *Agent) loadStoredSession(ctx context.Context, sessionID acp.SessionId) 
 		return nil, err
 	}
 
-	return entries, nil
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	return validateStoredRolloutEntries(entries)
 }
 
 func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSessionRequest, entries []SessionStoreEntry) (acp.LoadSessionResponse, error) {
@@ -1271,8 +1358,21 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, err
 	}
 
+	storedConfig, err := a.loadDurableSessionConfig(ctx, params.SessionId)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	meta, configMatches := resolveStoredSessionCarriers(meta, storedConfig)
+
 	if active := a.activeSession(params.SessionId); active != nil {
 		resp, rebindErr := a.rebindActiveStoredSession(ctx, acp.ResumeSessionRequest(params), entries, meta, active, func() error {
+			configureLoadedSessionPersistence(active, storedConfig, configMatches)
+
+			if commitErr := active.commitPendingDurableSessionConfig(ctx); commitErr != nil {
+				return commitErr
+			}
+
 			return active.replayRollout(ctx, entries)
 		})
 		if rebindErr != nil {
@@ -1290,7 +1390,10 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	}
 
 	if retained != nil {
-		resp, active, resumeErr := a.resumeRetainedRuntimeSession(ctx, acp.ResumeSessionRequest(params), meta, retained)
+		resp, active, resumeErr := a.resumeRetainedRuntimeSession(ctx, acp.ResumeSessionRequest(params), meta, retained, loadedSessionPersistence{
+			config:  storedConfig,
+			matches: configMatches,
+		})
 		if resumeErr != nil {
 			return acp.LoadSessionResponse{}, resumeErr
 		}
@@ -1304,30 +1407,38 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse(resp), nil
 	}
 
-	path, scratchRelease, err := a.materializeStoredRollout(ctx, params.SessionId, entries)
-	if err != nil {
-		return acp.LoadSessionResponse{}, err
-	}
-
 	mcpServers, err := a.prepareMCPServers(ctx, params.SessionId, params.McpServers)
 	if err != nil {
-		_ = removeMaterializedRollout(path)
-
-		scratchRelease()
-
 		return acp.LoadSessionResponse{}, err
 	}
 
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
+	hydrated, materializedBytes, err := a.hydrateStoredRollout(ctx, params.SessionId, entries)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	residenceRelease, capacityErr := a.reserveNativeResidenceCapacity(ctx, materializedBytes)
+	if capacityErr != nil {
+		return acp.LoadSessionResponse{}, capacityErr
+	}
+
 	client, err := a.sharedRuntime(ctx)
 	if err != nil {
-		_ = removeMaterializedRollout(path)
-
-		scratchRelease()
+		residenceRelease()
 
 		return acp.LoadSessionResponse{}, err
 	}
+
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	a.mu.Lock()
+	materializedEpoch := a.runtimeEpoch
+	a.mu.Unlock()
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
@@ -1338,9 +1449,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		ExtraPathDirs: cloneStrings(meta.ExtraPathDirs),
 	})
 	if err != nil {
-		_ = removeMaterializedRollout(path)
-
-		scratchRelease()
+		_ = a.retireMaterializedRolloutAtEpoch(path, materializedBytes, scratchRelease, materializedEpoch)
 
 		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil)
 	}
@@ -1348,6 +1457,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	id := params.SessionId
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
+
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
 		_ = session.Close(context.TODO())
 
@@ -1356,6 +1466,8 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	session.materializedPath = path
 	session.materializedRelease = scratchRelease
+	session.materializedBytes = materializedBytes
+	session.materializedEpoch = materializedEpoch
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1367,6 +1479,14 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	session.setAccount(clientAccountMeta(ctx, client))
 
 	if err := a.runtimeReadyCanary(ctx, client, session); err != nil {
+		_ = session.Close(context.Background())
+
+		return acp.LoadSessionResponse{}, err
+	}
+
+	configureLoadedSessionPersistence(session, storedConfig, configMatches)
+
+	if err := session.commitPendingDurableSessionConfig(ctx); err != nil {
 		_ = session.Close(context.Background())
 
 		return acp.LoadSessionResponse{}, err
@@ -1517,6 +1637,15 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
+	parentSnapshot := parent.snapshot()
+	if !meta.EnvPresent {
+		meta.Env = cloneStringMap(parentSnapshot.env)
+	}
+
+	if !meta.ExtraPathDirsPresent {
+		meta.ExtraPathDirs = cloneStrings(parentSnapshot.extraPathDirs)
+	}
+
 	idValue, err := newSessionID()
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
@@ -1534,7 +1663,6 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	parentSnapshot := parent.snapshot()
 	config := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
 	thread, err := client.ForkThread(ctx, codex.ThreadForkRequest{
@@ -1554,7 +1682,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 		return acp.UnstableForkSessionResponse{}, errors.Join(
 			errors.New("codex fork acknowledgement omitted its child thread identity"),
-			a.quiesceRuntimeAfterCancel(cleanupCtx, client),
+			a.retireRuntimeGeneration(cleanupCtx, client),
 		)
 	}
 
@@ -1584,7 +1712,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		cleanupErr := a.cleanupUnregisteredFork(ctx, client, childThreadID, nil)
 		childOwned = false
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-		fenceErr := a.quiesceRuntimeAfterCancel(cleanupCtx, client)
+		fenceErr := a.retireRuntimeGeneration(cleanupCtx, client)
 
 		cancel()
 
@@ -1652,7 +1780,7 @@ func (a *Agent) cleanupUnregisteredFork(
 	cleanupErr = errors.Join(cleanupErr, deleteErr)
 
 	if deleteErr != nil {
-		cleanupErr = errors.Join(cleanupErr, a.quiesceRuntimeAfterCancel(cleanupCtx, client))
+		cleanupErr = errors.Join(cleanupErr, a.retireRuntimeGeneration(cleanupCtx, client))
 	}
 
 	return cleanupErr

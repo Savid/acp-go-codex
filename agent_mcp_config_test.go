@@ -76,12 +76,12 @@ func TestMCPConfigRejectsMissingTransport(t *testing.T) {
 	}, noTransportReqErr.Data)
 }
 
-func TestMCPConfigRejectsReservedProcessManagementEnvironment(t *testing.T) {
+func TestMCPConfigRejectsReservedEnvironment(t *testing.T) {
 	agent := NewAgent()
 	for _, key := range []string{
 		"acp_go_codex_internal_mode",
-		"ACP_GO_CODEX_RUNTIME_ID",
-		"acp_go_codex_scratch_root",
+		"CODEX_HOME",
+		"HOME",
 	} {
 		_, err := agent.prepareMCPServers(t.Context(), "s", []acp.McpServer{{
 			Stdio: &acp.McpServerStdio{

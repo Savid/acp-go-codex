@@ -69,7 +69,7 @@ func TestCodexAuthToken(t *testing.T) {
 	}
 }
 
-func TestIsolatedCodexHomeUsesFreshHomeWithProcessAuth(t *testing.T) {
+func TestFreshCodexHomeUsesProcessAuth(t *testing.T) {
 	t.Setenv(envOpenAIAPIKey, "api-key")
 	t.Setenv(envCodexHome, "")
 	t.Setenv("HOME", t.TempDir())

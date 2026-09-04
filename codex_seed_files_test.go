@@ -34,11 +34,11 @@ func TestWriteSeedFilesWritesUnderHome(t *testing.T) {
 
 	fileInfo, err := os.Stat(filepath.Join(home, "config.toml"))
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), fileInfo.Mode().Perm())
+	require.Equal(t, hostFilePerm(0o600), fileInfo.Mode().Perm())
 
 	dirInfo, err := os.Stat(filepath.Join(home, "prompts"))
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
+	require.Equal(t, hostDirPerm(0o700), dirInfo.Mode().Perm())
 }
 
 func TestWriteSeedFilesEmptyIsNoop(t *testing.T) {
@@ -96,9 +96,10 @@ func TestNewClientSeedsUnderHome(t *testing.T) {
 		}),
 	)
 
-	client, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion)
+	client, err := agent.sharedRuntime(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, client)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
 	got, err := os.ReadFile(filepath.Join(home, "config.toml"))
 	require.NoError(t, err)
@@ -114,9 +115,10 @@ func TestNewClientSeedFilesRequireHome(t *testing.T) {
 			return newSpyCodexClient(), nil
 		}),
 	)
+	agent.options.implicitEnvironment = map[string]string{}
 
-	_, err := agent.launchRuntimeClient(context.Background(), 1, "", minSupportedCodexVersion)
-	requireUnsupported(t, err)
+	_, err := agent.sharedRuntime(context.Background())
+	require.ErrorContains(t, err, "codex home must resolve to a canonical absolute path")
 }
 
 func TestWriteSeedFilesRecordsManifest(t *testing.T) {
@@ -341,7 +343,7 @@ func TestWriteSeedFilesReadManagedError(t *testing.T) {
 }
 
 // The three cases below each deny one write. None of them denies it with
-// directory permissions: a privileged identity carries CAP_DAC_OVERRIDE and
+// directory permissions: a process with filesystem override capability and
 // walks through a 0500 home, which left every one of them proving nothing when
 // the suite ran as root. Each obstruction is structural instead, so the write
 // fails for every identity.

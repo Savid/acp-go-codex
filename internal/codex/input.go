@@ -31,6 +31,10 @@ const (
 	inputMention    = "mention"
 
 	imageMediaTypePrefix = "image/"
+
+	// fileURIPrefix is the scheme-and-authority a host sends a local file under.
+	// The empty authority is the only one this adapter maps to a host path.
+	fileURIPrefix = "file://"
 )
 
 // PromptImage is one validated prompt image in its native transport form:
@@ -139,8 +143,8 @@ func imageUserInput(image PromptImage) (UserInput, error) {
 }
 
 func resourceLinkInput(resource acp.ContentBlockResourceLink) UserInput {
-	if strings.HasPrefix(resource.Uri, "file://") {
-		return UserInput{fieldType: inputMention, fieldName: firstNonEmpty(resource.Name, resource.Uri), fieldPath: strings.TrimPrefix(resource.Uri, "file://")}
+	if strings.HasPrefix(resource.Uri, fileURIPrefix) {
+		return UserInput{fieldType: inputMention, fieldName: firstNonEmpty(resource.Name, resource.Uri), fieldPath: nativeFileURIPath(resource.Uri)}
 	}
 
 	return UserInput{fieldType: inputText, inputText: resource.Uri}

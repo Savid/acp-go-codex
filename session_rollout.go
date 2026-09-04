@@ -1,12 +1,9 @@
 package codexacp
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 )
 
@@ -26,11 +23,72 @@ type rolloutMirrorRow struct {
 	entry SessionStoreEntry
 }
 
-func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
-	s.mirrorMu.Lock()
-	defer s.mirrorMu.Unlock()
+type managedNativeAppendLogError struct{ err error }
 
-	return s.mirrorRolloutLocked(ctx)
+func (e *managedNativeAppendLogError) Error() string {
+	return fmt.Sprintf("read managed native append log: %v", e.err)
+}
+
+func (e *managedNativeAppendLogError) Unwrap() error { return e.err }
+
+func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
+	return s.mirrorAndEmitRolloutThrough(ctx, nativeTurnIdentity{})
+}
+
+func (s *session) mirrorAndEmitRolloutThrough(ctx context.Context, expected nativeTurnIdentity) error {
+	return s.mirrorAndEmitRolloutThroughNativePump(ctx, expected, false)
+}
+
+func (s *session) mirrorAndEmitRolloutThroughNativePump(
+	ctx context.Context,
+	expected nativeTurnIdentity,
+	nativePumpOwned bool,
+) error {
+	s.mirrorMu.Lock()
+	err := s.mirrorRolloutLocked(ctx, expected)
+	s.mirrorMu.Unlock()
+
+	return s.handleManagedAppendLogFailure(err, nativePumpOwned)
+}
+
+func (s *session) captureRolloutEntries(ctx context.Context, startRow int) ([]SessionStoreEntry, error) {
+	if startRow < 0 {
+		return nil, errors.New("native append-log cursor is negative")
+	}
+
+	authority := s.agent.options.HostAuthority
+	if authority == nil {
+		return readOrdinaryNativeAppendLog(s.rolloutPath, uint64(startRow))
+	}
+
+	records, err := authority.ReadNativeAppendLog(ctx, s.rolloutPath, uint64(startRow))
+	if err != nil {
+		return nil, &managedNativeAppendLogError{err: err}
+	}
+
+	if startRow > int(^uint(0)>>1)-len(records) {
+		return nil, &managedNativeAppendLogError{err: errors.New("native append-log row count exceeds platform limit")}
+	}
+
+	entries := make([]SessionStoreEntry, len(records))
+	for index, record := range records {
+		entries[index] = record
+	}
+
+	return entries, nil
+}
+
+func (s *session) handleManagedAppendLogFailure(err error, nativePumpOwned bool) error {
+	var captureErr *managedNativeAppendLogError
+	if err == nil || !errors.As(err, &captureErr) || !latchRuntimeCleanup(captureErr.err) {
+		return err
+	}
+
+	if nativePumpOwned {
+		return s.agent.retainOpaqueNativeTreeFromNativePump(err, s)
+	}
+
+	return s.agent.retainOpaqueNativeTree(err)
 }
 
 // mirrorRolloutLocked is one mirror pass over the rollout file. The caller holds
@@ -42,7 +100,7 @@ func (s *session) mirrorAndEmitRollout(ctx context.Context) error {
 // holds nothing afterwards to say a durable prefix is still owed, so it latches
 // that failure instead — the close boundary's rung is the only thing left that
 // can make the capture the settlement never made.
-func (s *session) mirrorRolloutLocked(ctx context.Context) error {
+func (s *session) mirrorRolloutLocked(ctx context.Context, expected nativeTurnIdentity) error {
 	store := s.agent.options.SessionStore
 
 	if s.rolloutPath == "" || store == nil {
@@ -51,49 +109,35 @@ func (s *session) mirrorRolloutLocked(ctx context.Context) error {
 
 	startRow := s.mirroredRows
 
-	file, err := os.Open(s.rolloutPath)
+	entries, err := s.captureRolloutEntries(ctx, startRow)
 	if err != nil {
-		return s.latchCaptureFailure(store, err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(nil, maxSessionImportLineBytes)
-
-	row := 0
-	entries := make([]json.RawMessage, 0)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		if row >= startRow {
-			entries = append(entries, json.RawMessage(line))
-		}
-
-		row++
-	}
-
-	if scanErr := scanner.Err(); scanErr != nil {
-		return s.latchCaptureFailure(store, scanErr)
+		return s.latchCaptureFailure(store, expected, err)
 	}
 
 	if len(entries) == 0 {
+		if s.agent.options.HostAuthority != nil && nativeIdentityChanged(expected, nativeTurnIdentity{}) {
+			return s.latchCaptureFailure(store, expected, errors.New("native append log has not reached the completed turn"))
+		}
+
 		s.captureStands(store)
 
 		return nil
 	}
 
-	clean, _, err := validateSessionImportEntries(entries)
+	clean, err := validateSessionImportEntries(entries)
 	if err != nil {
-		return s.latchCaptureFailure(store, err)
+		return s.latchCaptureFailure(store, expected, err)
+	}
+
+	if s.agent.options.HostAuthority != nil &&
+		nativeIdentityChanged(expected, nativeTurnIdentity{}) &&
+		!rolloutReachedNativeBoundary(clean, expected) {
+		return s.latchCaptureFailure(store, expected, errors.New("native append log has not reached the completed turn"))
 	}
 
 	clean, err = s.prepareDurableImageRolloutEntries(ctx, clean)
 	if err != nil {
-		return s.latchCaptureFailure(store, err)
+		return s.latchCaptureFailure(store, expected, err)
 	}
 
 	// Everything the store is owed is in hand from here on: a commit that fails
@@ -113,18 +157,63 @@ func (s *session) mirrorRolloutLocked(ctx context.Context) error {
 	return nil
 }
 
-func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, int, error) {
+func validateSessionImportEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, error) {
+	clean, _, err := validateSessionImportRows(entries)
+
+	return clean, err
+}
+
+func validateSessionImportRows(entries []SessionStoreEntry) ([]SessionStoreEntry, []rolloutRow, error) {
 	clean := make([]SessionStoreEntry, 0, len(entries))
+
+	rows := make([]rolloutRow, 0, len(entries))
 	for index, entry := range entries {
-		var obj map[string]any
-		if err := json.Unmarshal(entry, &obj); err != nil || obj == nil {
-			return nil, index, fmt.Errorf("entry %d must be a JSON object", index)
+		row, err := decodeRolloutRow(entry)
+		if err != nil {
+			return nil, nil, fmt.Errorf("entry %d is not a valid rollout row: %w", index, err)
 		}
 
 		clean = append(clean, cloneStoreEntry(entry))
+		rows = append(rows, row)
 	}
 
-	return clean, len(clean), nil
+	return clean, rows, nil
+}
+
+func validateStoredRolloutEntries(entries []SessionStoreEntry) ([]SessionStoreEntry, error) {
+	clean, rows, err := validateSessionImportRows(entries)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		nativeThreadID   string
+		sessionMetaIndex = -1
+	)
+
+	for index, row := range rows {
+		if row.Type != "session_meta" {
+			continue
+		}
+
+		if sessionMetaIndex >= 0 {
+			return nil, fmt.Errorf("entry %d duplicates session_meta from entry %d", index, sessionMetaIndex)
+		}
+
+		current := stringFromAny(row.Payload["id"])
+		if current == "" {
+			return nil, fmt.Errorf("entry %d session_meta thread identity is required", index)
+		}
+
+		sessionMetaIndex = index
+		nativeThreadID = current
+	}
+
+	if nativeThreadID == "" {
+		return nil, errors.New("stored Codex thread identity is required")
+	}
+
+	return clean, nil
 }
 
 func appendRolloutEntries(ctx context.Context, store SessionStore, key SessionKey, entries []SessionStoreEntry) error {
@@ -193,6 +282,13 @@ func (s *session) commitRolloutEntries(
 		return nil
 	}
 
+	if err := s.commitDurableSessionConfig(ctx, store); err != nil {
+		s.unsyncedEntries = entries
+		s.unsyncedRow = nextRow
+
+		return err
+	}
+
 	if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, entries); err != nil {
 		s.unsyncedEntries = entries
 		s.unsyncedRow = nextRow
@@ -214,9 +310,12 @@ func (s *session) commitRolloutEntries(
 // durable prefix it was reading, and returns the failure unchanged. Only a pass
 // that was mirroring for a store latches: without one there is no durable prefix
 // to owe.
-func (s *session) latchCaptureFailure(store SessionStore, err error) error {
+func (s *session) latchCaptureFailure(store SessionStore, expected nativeTurnIdentity, err error) error {
 	if store != nil {
 		s.captureFailed = true
+		if nativeIdentityChanged(expected, nativeTurnIdentity{}) {
+			s.captureExpected = expected
+		}
 	}
 
 	return err
@@ -228,6 +327,7 @@ func (s *session) latchCaptureFailure(store SessionStore, err error) error {
 func (s *session) captureStands(store SessionStore) {
 	if store != nil {
 		s.captureFailed = false
+		s.captureExpected = nativeTurnIdentity{}
 	}
 }
 
@@ -240,7 +340,11 @@ func (s *session) ensureMirrorSynced(ctx context.Context) error {
 	defer s.mirrorMu.Unlock()
 
 	store := s.agent.options.SessionStore
-	if store == nil || len(s.unsyncedEntries) == 0 {
+	if store == nil {
+		return nil
+	}
+
+	if len(s.unsyncedEntries) == 0 && (s.durableConfigRevision == 0 || s.durableConfigCommitted) {
 		return nil
 	}
 
@@ -276,13 +380,17 @@ func (s *session) commitResumableSnapshot(ctx context.Context) error {
 // reaches the read.
 func (s *session) recaptureFailedMirror(ctx context.Context) error {
 	s.mirrorMu.Lock()
-	defer s.mirrorMu.Unlock()
 
 	if !s.captureFailed || s.persistenceFenced {
+		s.mirrorMu.Unlock()
+
 		return nil
 	}
 
-	return s.mirrorRolloutLocked(ctx)
+	err := s.mirrorRolloutLocked(ctx, s.captureExpected)
+	s.mirrorMu.Unlock()
+
+	return s.handleManagedAppendLogFailure(err, false)
 }
 
 // fencePersistence stops every later commit for this session. It takes the
@@ -296,4 +404,5 @@ func (s *session) fencePersistence() {
 	s.unsyncedEntries = nil
 	s.unsyncedRow = 0
 	s.captureFailed = false
+	s.captureExpected = nativeTurnIdentity{}
 }

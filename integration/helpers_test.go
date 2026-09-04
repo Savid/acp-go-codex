@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -588,17 +587,6 @@ type liveAgentPipes struct {
 	agentOutput io.Reader
 }
 
-// integrationContainmentOption opts the in-process agent into Darwin
-// containment, which fails every native launch closed without it. The option is
-// rejected off darwin, so elsewhere it leaves the options untouched.
-func integrationContainmentOption() codexacp.Option {
-	if runtime.GOOS == "darwin" {
-		return codexacp.WithDarwinBestEffortContainment()
-	}
-
-	return func(*codexacp.Options) {}
-}
-
 func serveLiveAgentRawForTest(
 	t *testing.T,
 	ctx context.Context,
@@ -613,7 +601,6 @@ func serveLiveAgentRawForTest(
 		codexacp.WithHome(codexHome),
 		codexacp.WithDefaultModel(os.Getenv(envModel)),
 		codexacp.WithLogger(integrationLogger),
-		integrationContainmentOption(),
 	}
 
 	c2aR, c2aW := io.Pipe()

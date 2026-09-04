@@ -78,10 +78,10 @@ func TestPrivateTempFileModesAndCleanup(t *testing.T) {
 	if resolveParentErr != nil || resolveScratchErr != nil || resolvedParent != resolvedScratch {
 		t.Fatalf("default private temp parent %q is not under the system temp directory", parent)
 	}
-	if info, statErr := os.Stat(parent); statErr != nil || info.Mode().Perm() != 0o700 {
+	if info, statErr := os.Stat(parent); statErr != nil || info.Mode().Perm() != hostDirPerm(0o700) {
 		t.Fatalf("private temp parent mode info=%v err=%v", info, statErr)
 	}
-	if info, statErr := os.Stat(name); statErr != nil || info.Mode().Perm() != 0o600 {
+	if info, statErr := os.Stat(name); statErr != nil || info.Mode().Perm() != hostFilePerm(0o600) {
 		t.Fatalf("private temp file mode info=%v err=%v", info, statErr)
 	}
 	if removeErr := removePrivateTempFile(name, "acp-go-codex-test-", os.Remove); removeErr != nil {
@@ -127,7 +127,7 @@ func TestPrivateTempFileUnderScratchDir(t *testing.T) {
 	if filepath.Dir(parent) != scratch {
 		t.Fatalf("private temp parent = %q, want under %q", parent, scratch)
 	}
-	if info, statErr := os.Stat(scratch); statErr != nil || info.Mode().Perm() != 0o700 {
+	if info, statErr := os.Stat(scratch); statErr != nil || info.Mode().Perm() != hostDirPerm(0o700) {
 		t.Fatalf("scratch parent mode info=%v err=%v", info, statErr)
 	}
 	if removeErr := removePrivateTempFile(name, "acp-go-codex-test-", os.Remove); removeErr != nil {

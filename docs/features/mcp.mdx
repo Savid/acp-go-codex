@@ -51,9 +51,8 @@ does. Any other value is rejected with invalid params.
   MCP server names must be non-empty, unique, and non-whitespace, and only stdio
   and streamable-HTTP transports are accepted. Any other transport is rejected
   with an invalid-params error at session start. Stdio MCP environment names
-  also reject `ACP_GO_CODEX_INTERNAL_*`, `ACP_GO_CODEX_RUNTIME_ID`, and
-  `ACP_GO_CODEX_SCRATCH_ROOT` case-insensitively so an MCP child cannot spoof
-  adapter process-management or Darwin correlation markers.
+  also reject `ACP_GO_CODEX_INTERNAL_*` case-insensitively so an MCP child
+  cannot spoof adapter-private state.
 </Note>
 
 After native-process replacement, only the addressed thread is resumed. Its own

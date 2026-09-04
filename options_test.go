@@ -77,11 +77,14 @@ func TestOptionsSetters(t *testing.T) {
 	}
 }
 
-func TestWithProcessIsolationClonesBaseEnvironment(t *testing.T) {
-	base := map[string]string{"PATH": "/policy/bin", "ONLY_POLICY": "present"}
-	options := applyOptions([]Option{WithProcessIsolation(ProcessIsolation{UID: 12, GID: 34, BaseEnvironment: base})})
-	base["ONLY_POLICY"] = "mutated"
-	if options.ProcessIsolation == nil || options.ProcessIsolation.BaseEnvironment["ONLY_POLICY"] != "present" {
-		t.Fatal("WithProcessIsolation did not clone the base environment")
+func TestCaptureAmbientEnvironmentFallsBackToUserHome(t *testing.T) {
+	t.Setenv(managedHomeEnv, "")
+	original := runtimeUserHomeDir
+	runtimeUserHomeDir = func() (string, error) { return "/fallback/home", nil }
+	t.Cleanup(func() { runtimeUserHomeDir = original })
+
+	environment := captureAmbientEnvironment()
+	if environment[managedHomeEnv] != "/fallback/home" {
+		t.Fatalf("HOME = %q", environment[managedHomeEnv])
 	}
 }

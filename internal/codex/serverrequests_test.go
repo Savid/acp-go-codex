@@ -109,10 +109,6 @@ func TestServerRequestSchemaAndMCPHelpers(t *testing.T) {
 	if IsMCPToolApproval(map[string]any{"_meta": map[string]any{mcpApprovalKindKey: "other"}}) {
 		t.Fatal("non-approval MCP elicitation was detected as tool approval")
 	}
-	nestedLegacyParams := map[string]any{"_meta": map[string]any{"codex": map[string]any{mcpApprovalKindKey: mcpToolApprovalKind}}}
-	if IsMCPToolApproval(nestedLegacyParams) {
-		t.Fatal("non-native nested MCP marker was accepted")
-	}
 	if title := MCPToolApprovalTitle(mcpApprovalParams); title != "Execute" {
 		t.Fatalf("MCP tool approval title = %q", title)
 	}

@@ -330,7 +330,7 @@ func TestPreparePromptImagesTransportsAndFailures(t *testing.T) {
 	require.FileExists(t, prepared.images[0].LocalPath)
 	info, err := os.Stat(prepared.images[0].LocalPath)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	require.Equal(t, hostFilePerm(0o600), info.Mode().Perm())
 	dir := filepath.Dir(prepared.images[0].LocalPath)
 	prepared.release()
 	require.NoDirExists(t, dir)
@@ -343,15 +343,6 @@ func TestPreparePromptImagesTransportsAndFailures(t *testing.T) {
 	require.NotEmpty(t, prepared.images[0].DataURL)
 	require.NotEmpty(t, prepared.images[1].LocalPath)
 	prepared.release()
-
-	reservationErr := errors.New("reserve")
-	reservationSession := &session{agent: NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-			return nil, reservationErr
-		},
-	}))}
-	_, err = reservationSession.preparePromptImages(ctx, []decodedPromptImage{{data: large, mimeType: "image/png"}})
-	require.ErrorIs(t, err, reservationErr)
 
 	blocked := filepath.Join(t.TempDir(), "blocked")
 	require.NoError(t, os.WriteFile(blocked, []byte("x"), 0o600))
@@ -370,19 +361,10 @@ func TestPreparePromptImagesTransportsAndFailures(t *testing.T) {
 	originalRemove := removePromptImageDir
 	removePromptImageDir = func(string) error { return errors.New("remove") }
 	t.Cleanup(func() { removePromptImageDir = originalRemove })
-	released := false
-	removeSession := &session{agent: NewAgent(
-		WithScratchDir(scratch),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return func() { released = true }, nil
-			},
-		}),
-	)}
+	removeSession := &session{agent: NewAgent(WithScratchDir(scratch))}
 	prepared, err = removeSession.preparePromptImages(ctx, []decodedPromptImage{{data: large, mimeType: "image/gif"}})
 	require.NoError(t, err)
 	prepared.release()
-	require.False(t, released)
 }
 
 func TestPortableImageExtensions(t *testing.T) {

@@ -88,7 +88,7 @@ func TestEstablishmentNeverOpensForNonExactJSONRPCResponses(t *testing.T) {
 	} {
 		t.Run(frame, func(t *testing.T) {
 			agent := NewAgent()
-			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+			agent.lifecycle = lifecycle.Negotiated{Version: 1}
 			s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, newSpyCodexClient(), sessionMeta{}, nil)
 			hooks := newEstablishmentHooks(agent.log)
 			obligation := armTestEstablishment(t, hooks, s, "1")
@@ -233,7 +233,7 @@ func TestLifecycleEstablishmentWaitsForExactResponseOnEveryPath(t *testing.T) {
 	} {
 		t.Run(method, func(t *testing.T) {
 			agent := NewAgent()
-			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+			agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 			recorder := newRecordingAgentClient()
 			agent.setAgentClient(recorder)
 			client := newSpyCodexClient()
@@ -285,7 +285,7 @@ func TestLifecycleEstablishmentWaitsForExactResponseOnEveryPath(t *testing.T) {
 func TestLifecycleEstablishmentWriteFailureContainsTheExactSession(t *testing.T) {
 	var logOutput lockedLogBuffer
 	agent := NewAgent(WithLogger(slog.New(slog.NewTextHandler(&logOutput, nil))))
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	agent.setAgentClient(newRecordingAgentClient())
 	client := newSpyCodexClient()
 	s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
@@ -321,7 +321,7 @@ func TestLifecycleEstablishmentWriteFailureContainsTheExactSession(t *testing.T)
 func TestLifecycleEstablishmentSnapshotFailureContainsTheExactSession(t *testing.T) {
 	deliveryErr := errors.New("snapshot delivery failed")
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	agent.setAgentClient(&failingLifecycleClient{
 		recordingAgentClient: newRecordingAgentClient(),
 		err:                  deliveryErr,
@@ -376,7 +376,7 @@ func TestLifecycleEstablishmentSnapshotFailureContainsTheExactSession(t *testing
 
 func TestLifecycleEstablishmentBlocksPreResponseServerRequest(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	client := newSpyCodexClient()
@@ -436,7 +436,7 @@ func TestLifecycleEstablishmentIsArmedBeforeSessionPublication(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return client, nil
 	}))
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	hooks := newEstablishmentHooks(agent.log)
@@ -448,7 +448,7 @@ func TestLifecycleEstablishmentIsArmedBeforeSessionPublication(t *testing.T) {
 		err   *acp.RequestError
 	}
 	handled := make(chan handlerResult, 1)
-	params := json.RawMessage(`{"cwd":"` + t.TempDir() + `","mcpServers":[],"` + establishmentHookParam + `":"77"}`)
+	params := json.RawMessage(`{"cwd":` + strconv.Quote(t.TempDir()) + `,"mcpServers":[],"` + establishmentHookParam + `":"77"}`)
 	go func() {
 		value, reqErr := conn.handle(t.Context(), acp.AgentMethodSessionNew, params)
 		handled <- handlerResult{value: value, err: reqErr}
@@ -548,7 +548,7 @@ func TestEstablishmentTaggingAndShortWrite(t *testing.T) {
 
 	hooks := newEstablishmentHooks(NewAgent().log)
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1}
 	s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, newSpyCodexClient(), sessionMeta{}, nil)
 	obligation := armTestEstablishment(t, hooks, s, "1")
 	wire := &gatedEstablishmentWriter{started: make(chan struct{}), release: make(chan struct{}), short: true}
@@ -694,7 +694,7 @@ func TestActiveRebindPublishesOnlyAfterExactSuccessfulResponse(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			agent := NewAgent()
-			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+			agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 			recorder := newRecordingAgentClient()
 			agent.setAgentClient(recorder)
 			client := newSpyCodexClient()
@@ -738,7 +738,7 @@ func TestActiveRebindPublishesOnlyAfterExactSuccessfulResponse(t *testing.T) {
 
 func TestRuntimeReadyCanaryPartitionsRacingAutonomousTurn(t *testing.T) {
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	recorder := newRecordingAgentClient()
 	agent.setAgentClient(recorder)
 	client := newSpyCodexClient()
@@ -786,7 +786,7 @@ func TestSameSessionDualResumeResponseOrders(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			agent := NewAgent()
-			agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+			agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 			agent.setAgentClient(newRecordingAgentClient())
 			client := newSpyCodexClient()
 			cwd := t.TempDir()

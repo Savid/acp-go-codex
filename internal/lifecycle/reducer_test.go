@@ -44,7 +44,7 @@ func TestReducerReportsWhatItValidatesAgainst(t *testing.T) {
 func TestReducerRefusesAnIneligibleCarrierBeforeOrdering(t *testing.T) {
 	t.Parallel()
 
-	reducer := NewReducer(Options{Negotiated: Negotiated{Versions: []int{1}}})
+	reducer := NewReducer(Options{Negotiated: Negotiated{Version: 1}})
 	delivery := deliver(9, SnapshotEvent("cycle-1", QuiescenceFact{}))
 	delivery.Carrier = CarrierIneligible
 
@@ -167,7 +167,7 @@ func TestSnapshotIsJudgedWholeBeforeItIsProjected(t *testing.T) {
 func TestForeignStreamIsStaleUnlessItOpensWithASnapshot(t *testing.T) {
 	t.Parallel()
 
-	reducer := openStream(t, Negotiated{Versions: []int{1}})
+	reducer := openStream(t, Negotiated{Version: 1})
 
 	foreign := Delivery{
 		StreamID: "strm-2",
@@ -182,7 +182,7 @@ func TestForeignStreamIsStaleUnlessItOpensWithASnapshot(t *testing.T) {
 func TestNextIncarnationAdoptsNothingFromTheOneItSupersedes(t *testing.T) {
 	t.Parallel()
 
-	reducer := openStream(t, Negotiated{Versions: []int{1}})
+	reducer := openStream(t, Negotiated{Version: 1})
 	require.NoError(t, reducer.Reduce(deliver(2, AcceptedEvent(Submission{SubmissionID: "s", ClientNonce: "n"}, "turn-1"))))
 
 	next := Delivery{
@@ -207,7 +207,7 @@ func TestNextIncarnationAdoptsNothingFromTheOneItSupersedes(t *testing.T) {
 func TestSupersededIncarnationNeverResurrects(t *testing.T) {
 	t.Parallel()
 
-	reducer := openStream(t, Negotiated{Versions: []int{1}})
+	reducer := openStream(t, Negotiated{Version: 1})
 
 	next := Delivery{
 		StreamID: "strm-2",
@@ -257,7 +257,7 @@ func TestEndingIdleRecordsHowTheTurnSettled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			reducer := openStream(t, Negotiated{Versions: []int{1}})
+			reducer := openStream(t, Negotiated{Version: 1})
 			submission := Submission{SubmissionID: "s", ClientNonce: "n"}
 			require.NoError(t, reducer.Reduce(deliver(2, AcceptedEvent(submission, "turn-1"))))
 			require.NoError(t, reducer.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
@@ -276,7 +276,7 @@ func TestEndingIdleRecordsHowTheTurnSettled(t *testing.T) {
 func TestTerminalTurnNeverReopens(t *testing.T) {
 	t.Parallel()
 
-	reducer := openStream(t, Negotiated{Versions: []int{1}})
+	reducer := openStream(t, Negotiated{Version: 1})
 	submission := Submission{SubmissionID: "s", ClientNonce: "n"}
 
 	require.NoError(t, reducer.Reduce(deliver(2, AcceptedEvent(submission, "turn-1"))))
@@ -294,7 +294,7 @@ func TestTerminalTurnNeverReopens(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			replay := openStream(t, Negotiated{Versions: []int{1}})
+			replay := openStream(t, Negotiated{Version: 1})
 			require.NoError(t, replay.Reduce(deliver(2, AcceptedEvent(submission, "turn-1"))))
 			require.NoError(t, replay.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
 			require.NoError(t, replay.Reduce(deliver(4, IdleEvent("cycle-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))))
@@ -308,7 +308,7 @@ func TestTerminalTurnNeverReopens(t *testing.T) {
 func TestSessionCausedIdleEndsNoTurn(t *testing.T) {
 	t.Parallel()
 
-	reducer := openStream(t, Negotiated{Versions: []int{1}})
+	reducer := openStream(t, Negotiated{Version: 1})
 	idle := Event{Type: EventStateUpdate, State: &StateTransition{
 		State:   ForegroundIdle,
 		CycleID: "cycle-2",
@@ -498,7 +498,7 @@ func TestQuiescenceIsRefusedWhenTheAnswerNamedAnotherClass(t *testing.T) {
 	t.Parallel()
 
 	negotiated := Negotiated{
-		Versions:                []int{1},
+		Version:                 1,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,
 	}
@@ -539,7 +539,7 @@ func TestSnapshotActivityStatesACompleteIdentity(t *testing.T) {
 func TestEndingIdleNamesATurnTheStreamOpened(t *testing.T) {
 	t.Parallel()
 
-	reducer := openStream(t, Negotiated{Versions: []int{1}})
+	reducer := openStream(t, Negotiated{Version: 1})
 	require.ErrorIs(t, reducer.Reduce(deliver(2, IdleEvent("cycle-1", "ghost", StopReasonEndTurn, OutcomeSuccess))),
 		&ViolationError{Kind: ViolationUnknownEntity})
 }

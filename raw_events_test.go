@@ -351,7 +351,7 @@ func TestRawEventsEmitFailureContainsExactTurn(t *testing.T) {
 	session := &session{
 		agent:         agent,
 		id:            "emit-fail",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		rawMessages:   rawMessageConfig{enabled: true},
 		client:        client,
@@ -362,7 +362,7 @@ func TestRawEventsEmitFailureContainsExactTurn(t *testing.T) {
 		_, err := session.Prompt(t.Context(), TextPromptRequest("emit-fail", "test-turn", "hi"))
 		done <- err
 	}()
-	require.Equal(t, [2]string{"thread", "turn"}, <-client.cancelStarted)
+	require.Equal(t, [2]string{"thread", "turn"}, awaitTestSignal(t, client.cancelStarted, "client.cancelStarted"))
 	select {
 	case err := <-done:
 		t.Fatalf("raw delivery failure returned before containment: %v", err)

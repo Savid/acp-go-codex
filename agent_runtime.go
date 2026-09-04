@@ -21,20 +21,26 @@ const (
 	runtimeReadyAttempts       = 5
 	runtimeReadyApprovalNever  = "never"
 	retainedRuntimeThreadLimit = 1024
+	retiredResidenceCountLimit = 64
+	retiredResidenceByteLimit  = 64 << 20
 )
+
+var runtimeNativeTreeTimeout = 5 * time.Second
 
 var runtimeReadyDeadline = 2 * time.Minute
 var runtimeRandRead = rand.Read
 var runtimeUserHomeDir = os.UserHomeDir
 var runtimeRemoveAll = os.RemoveAll
+var runtimeStat = os.Stat
 var runtimeProbeCodexVersion = codex.ProbeVersion
 var errNoRetainedRuntimeThread = errors.New("no retained Codex runtime thread")
-var errSharedRuntimeHasPeers = fmt.Errorf(
-	"%w: cannot fence shared Codex runtime while peer sessions still own it",
-	codex.ErrProcessContainmentIncomplete,
+var errSharedRuntimeHasPeers = errors.Join(
+	ErrContainmentIncomplete,
+	codex.ErrContainmentIncomplete,
+	errors.New("cannot retire shared Codex runtime while peer sessions still own it"),
 )
 
-// retainedRuntimeThread is native ownership that outlives an ACP
+// retainedRuntimeThread is a native thread reference that outlives an ACP
 // session/close but not the app-server generation that still owns the thread.
 // The ACP session ID and native thread ID form one inseparable identity; the
 // canonical rollout path is never selected from host-provided store data.
@@ -48,7 +54,18 @@ type retainedRuntimeThread struct {
 
 	materializedPath    string
 	materializedRelease func()
+	materializedBytes   int64
 	nativeEnded         bool
+}
+
+type retiredNativeResidence struct {
+	epoch     uint64
+	tree      string
+	path      string
+	bytes     int64
+	release   func()
+	remove    func(string) error
+	reclaimed bool
 }
 
 func (a *Agent) runtimeEpochIsCurrent(epoch uint64) bool {
@@ -66,40 +83,175 @@ func (a *Agent) handleCodexServerRequestForEpoch(ctx context.Context, epoch uint
 	return a.handleCodexServerRequest(ctx, req)
 }
 
-func (a *Agent) acquireNativeRoot(ctx context.Context, kind RuntimeResourceKind) (func(), error) {
-	hook := a.options.RuntimeResourceHooks.AcquireNativeRoot
-	if hook == nil {
+func (a *Agent) reserveNativeResidenceCapacity(ctx context.Context, additionalBytes int64) (func(), error) {
+	if a.options.HostAuthority == nil {
 		return func() {}, nil
 	}
 
-	release, err := hook(ctx, kind)
-	if err != nil {
-		return nil, err
+	if additionalBytes > retiredResidenceByteLimit {
+		return nil, acp.NewInvalidRequest(map[string]any{
+			jsonFieldError: "materialized Codex rollout exceeds the managed residence byte limit",
+			jsonFieldLimit: "retired_residence_bytes",
+		})
 	}
 
-	if release == nil {
-		return nil, errors.New("AcquireNativeRoot returned a nil release function")
-	}
+	for {
+		a.mu.Lock()
+		if a.runtimeCleanupErr != nil {
+			cleanupErr := a.runtimeCleanupErr
+			a.mu.Unlock()
 
-	return sync.OnceFunc(release), nil
+			return nil, toPublicAuthorityError(cleanupErr)
+		}
+
+		withinLimit := a.nativeResidenceCount < retiredResidenceCountLimit &&
+			a.retiredResidenceBytes+additionalBytes <= retiredResidenceByteLimit
+		if withinLimit {
+			a.nativeResidenceCount++
+			a.retiredResidenceBytes += additionalBytes
+		}
+
+		client := a.runtimeClient
+		starting := a.runtimeStarting
+		a.mu.Unlock()
+
+		if withinLimit {
+			return sync.OnceFunc(func() {
+				a.mu.Lock()
+				a.nativeResidenceCount--
+				a.retiredResidenceBytes -= additionalBytes
+				a.mu.Unlock()
+			}), nil
+		}
+
+		if starting != nil {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-starting:
+				continue
+			}
+		}
+
+		if client == nil {
+			return nil, errors.Join(
+				ErrContainmentIncomplete,
+				fmt.Errorf("%w: retired native residences cannot be reclaimed without a terminal runtime generation", codex.ErrContainmentIncomplete),
+			)
+		}
+
+		if err := a.retireRuntimeGeneration(context.WithoutCancel(ctx), client); err != nil {
+			return nil, err
+		}
+	}
 }
 
-func (a *Agent) reserveScratchRoot(ctx context.Context, kind RuntimeResourceKind) (func(), error) {
-	hook := a.options.RuntimeResourceHooks.ReserveScratchRoot
-	if hook == nil {
-		return func() {}, nil
+func (a *Agent) retireMaterializedRolloutAtEpoch(path string, bytes int64, release func(), epoch uint64) error {
+	return a.retireNativeResidenceAtEpoch(filepath.Dir(path), path, bytes, release, epoch, removeMaterializedRollout)
+}
+
+func (a *Agent) retireNativeResidenceAtEpoch(
+	tree string,
+	path string,
+	bytes int64,
+	release func(),
+	epoch uint64,
+	remove func(string) error,
+) error {
+	if path == "" {
+		if release != nil {
+			release()
+		}
+
+		return nil
 	}
 
-	release, err := hook(ctx, kind)
-	if err != nil {
-		return nil, err
+	if a.options.HostAuthority == nil {
+		err := remove(path)
+		if err == nil && release != nil {
+			release()
+		}
+
+		return err
 	}
 
-	if release == nil {
-		return nil, errors.New("ReserveScratchRoot returned a nil release function")
+	a.mu.Lock()
+	a.retiredResidences = append(a.retiredResidences, retiredNativeResidence{
+		epoch: epoch, tree: tree, path: path, bytes: bytes, release: release, remove: remove,
+	})
+	a.mu.Unlock()
+
+	return nil
+}
+
+func (a *Agent) reclaimRetiredResidences(ctx context.Context, epoch uint64) error {
+	if a.options.HostAuthority == nil {
+		return nil
 	}
 
-	return sync.OnceFunc(release), nil
+	a.mu.Lock()
+
+	candidates := make([]retiredNativeResidence, 0, len(a.retiredResidences))
+	for _, residence := range a.retiredResidences {
+		if residence.epoch == epoch {
+			candidates = append(candidates, residence)
+		}
+	}
+	a.mu.Unlock()
+
+	var result error
+
+	reclaimCtx, cancelReclaim := context.WithTimeout(context.WithoutCancel(ctx), runtimeNativeTreeTimeout)
+	defer cancelReclaim()
+
+	for _, residence := range candidates {
+		if !residence.reclaimed {
+			if err := a.options.HostAuthority.ReclaimNativeTree(reclaimCtx, residence.tree); err != nil {
+				if errors.Is(err, ErrNativeTreeBusy) {
+					result = errors.Join(result, err)
+
+					continue
+				}
+
+				result = errors.Join(result, ErrContainmentIncomplete,
+					fmt.Errorf("%w: reclaim native rollout tree: %w", codex.ErrContainmentIncomplete, err))
+
+				continue
+			}
+
+			a.mu.Lock()
+			for index := range a.retiredResidences {
+				if a.retiredResidences[index].path == residence.path && a.retiredResidences[index].epoch == residence.epoch {
+					a.retiredResidences[index].reclaimed = true
+
+					break
+				}
+			}
+			a.mu.Unlock()
+		}
+
+		if err := residence.remove(residence.path); err != nil {
+			result = errors.Join(result, err)
+
+			continue
+		}
+
+		if residence.release != nil {
+			residence.release()
+		}
+
+		a.mu.Lock()
+		for index := range a.retiredResidences {
+			if a.retiredResidences[index].path == residence.path && a.retiredResidences[index].epoch == residence.epoch {
+				a.retiredResidences = append(a.retiredResidences[:index], a.retiredResidences[index+1:]...)
+
+				break
+			}
+		}
+		a.mu.Unlock()
+	}
+
+	return result
 }
 
 // finalizeRuntimeResources releases admissions only after their corresponding
@@ -109,18 +261,16 @@ func (a *Agent) reserveScratchRoot(ctx context.Context, kind RuntimeResourceKind
 // truthful.
 func finalizeRuntimeResources(
 	runtimeErr error,
-	nativeRelease func(),
+	nativeRelease func() error,
 	scratchRoot string,
 	scratchRelease func(),
 ) error {
-	if errors.Is(runtimeErr, codex.ErrProcessContainmentIncomplete) {
+	if errors.Is(runtimeErr, ErrContainmentIncomplete) || errors.Is(runtimeErr, codex.ErrContainmentIncomplete) {
 		return runtimeErr
 	}
 
-	stageRetained := errors.Is(runtimeErr, codex.ErrPackageStageCleanupIncomplete)
-
 	if nativeRelease != nil {
-		nativeRelease()
+		runtimeErr = errors.Join(runtimeErr, nativeRelease())
 	}
 
 	var removeErr error
@@ -128,7 +278,7 @@ func finalizeRuntimeResources(
 		removeErr = runtimeRemoveAll(scratchRoot)
 	}
 
-	if removeErr == nil && !stageRetained && scratchRelease != nil {
+	if removeErr == nil && scratchRelease != nil {
 		scratchRelease()
 	}
 
@@ -136,23 +286,57 @@ func finalizeRuntimeResources(
 }
 
 func latchRuntimeCleanup(err error) bool {
-	return errors.Is(err, codex.ErrProcessContainmentIncomplete) ||
-		errors.Is(err, codex.ErrPackageStageCleanupIncomplete)
+	return errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) ||
+		errors.Is(err, codex.ErrContainmentIncomplete) || errors.Is(err, codex.ErrHostAuthorityUnavailable)
 }
 
-func closeRuntimeResources(
-	ctx context.Context,
-	client codex.Client,
-	nativeRelease func(),
-	scratchRoot string,
-	scratchRelease func(),
-) error {
-	var closeErr error
-	if client != nil {
-		closeErr = client.Close(ctx)
+func retainRuntimeResources(err error) bool {
+	return errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, codex.ErrContainmentIncomplete) ||
+		errors.Is(err, ErrNativeTreeBusy) || errors.Is(err, codex.ErrNativeTreeBusy)
+}
+
+func (a *Agent) retainOpaqueNativeTree(err error) error {
+	return a.retainOpaqueNativeTreeFromNativePump(err, nil)
+}
+
+func (a *Agent) retainOpaqueNativeTreeFromNativePump(err error, current *session) error {
+	if err == nil {
+		return nil
 	}
 
-	return finalizeRuntimeResources(closeErr, nativeRelease, scratchRoot, scratchRelease)
+	opaqueErr := errors.Join(err, ErrContainmentIncomplete, codex.ErrContainmentIncomplete)
+
+	a.mu.Lock()
+	if a.runtimeCleanupErr == nil {
+		a.runtimeCleanupErr = opaqueErr
+	}
+
+	a.runtimeDead = true
+	fanoutOwner := !a.opaqueNativeFanout
+	a.opaqueNativeFanout = true
+
+	fenced := make([]*session, 0, len(a.sessions))
+	for _, active := range a.sessions {
+		active.setClientDead(true)
+		fenced = append(fenced, active)
+	}
+	a.mu.Unlock()
+
+	if !fanoutOwner {
+		return opaqueErr
+	}
+
+	for _, active := range fenced {
+		if active == current {
+			active.deferFenceUntilNativePumpStops()
+
+			continue
+		}
+
+		active.fenceSession()
+	}
+
+	return opaqueErr
 }
 
 func (a *Agent) claimRetainedRuntimeThreadForStore(
@@ -270,10 +454,13 @@ func (a *Agent) storeRetainedRuntimeSession(session *session, retained *retained
 	session.mu.Lock()
 	session.materializedPath = retained.materializedPath
 	session.materializedRelease = retained.materializedRelease
+	session.materializedBytes = retained.materializedBytes
+	session.materializedEpoch = retained.epoch
 	session.mu.Unlock()
 
 	retained.materializedPath = ""
 	retained.materializedRelease = nil
+	retained.materializedBytes = 0
 
 	delete(a.retainedThreads, session.id)
 	a.sessions[session.id] = session
@@ -318,23 +505,23 @@ func (a *Agent) claimRetainedRuntimeThreadForDelete(sessionID acp.SessionId) (*r
 	return retained, nil
 }
 
-func cleanupRetainedRuntimeThread(retained *retainedRuntimeThread) error {
+func (a *Agent) cleanupRetainedRuntimeThread(retained *retainedRuntimeThread) error {
 	if retained == nil {
 		return nil
 	}
 
-	if retained.materializedPath != "" {
-		if err := removeMaterializedRollout(retained.materializedPath); err != nil {
-			return err
-		}
-	}
-
-	if retained.materializedRelease != nil {
-		retained.materializedRelease()
+	if err := a.retireMaterializedRolloutAtEpoch(
+		retained.materializedPath,
+		retained.materializedBytes,
+		retained.materializedRelease,
+		retained.epoch,
+	); err != nil {
+		return err
 	}
 
 	retained.materializedPath = ""
 	retained.materializedRelease = nil
+	retained.materializedBytes = 0
 
 	return nil
 }
@@ -354,7 +541,7 @@ func (a *Agent) endRetainedRuntimeThread(retained *retainedRuntimeThread) error 
 	retained.nativeEnded = true
 	a.mu.Unlock()
 
-	if err := cleanupRetainedRuntimeThread(retained); err != nil {
+	if err := a.cleanupRetainedRuntimeThread(retained); err != nil {
 		return err
 	}
 
@@ -381,7 +568,7 @@ func (a *Agent) releaseRetainedRuntimeThreads(client codex.Client, epoch uint64)
 	var cleanupErr error
 
 	for _, candidate := range retained {
-		if err := cleanupRetainedRuntimeThread(candidate); err != nil {
+		if err := a.cleanupRetainedRuntimeThread(candidate); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 
 			continue
@@ -414,7 +601,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			cleanupErr := a.runtimeCleanupErr
 			a.mu.Unlock()
 
-			return nil, cleanupErr
+			return nil, toPublicAuthorityError(cleanupErr)
 		}
 
 		if closing := a.runtimeClosing; closing != nil {
@@ -472,6 +659,13 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			cancelStart()
 
 			a.mu.Lock()
+			a.runtimeClient = oldClient
+			a.runtimeNativeRelease = oldRelease
+			a.runtimeScratchRoot = oldScratchRoot
+			a.runtimeScratchRelease = oldScratchRelease
+			a.runtimeEpoch = oldEpoch
+
+			a.runtimeDead = true
 			if latchRuntimeCleanup(cleanupErr) {
 				a.runtimeCleanupErr = cleanupErr
 			}
@@ -482,59 +676,34 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			close(wait)
 			a.mu.Unlock()
 
-			return nil, cleanupErr
+			return nil, toPublicAuthorityError(cleanupErr)
 		}
 
-		var (
-			nativeVersion = minSupportedCodexVersion
-			err           error
-		)
-		if !a.options.customClientFactory {
-			nativeVersion, err = a.probeRuntimeVersion(startCtx)
-		}
-
-		var scratchRelease func()
-		if err == nil {
-			scratchRelease, err = a.reserveScratchRoot(startCtx, RuntimeResourceRuntime)
-		}
-
-		var scratchRoot string
-		if err == nil {
-			scratchRoot, err = createPrivateTempDir(a.options.ScratchDir, "acp-go-codex-runtime-")
-			if err != nil {
-				scratchRelease()
-			}
-		}
-
-		var release func()
-		if err == nil {
-			release, err = a.acquireNativeRoot(startCtx, RuntimeResourceRuntime)
-			if err != nil {
-				err = finalizeRuntimeResources(err, nil, scratchRoot, scratchRelease)
-			}
-		}
-
-		var client codex.Client
-		if err == nil {
-			client, err = a.launchRuntimeClient(startCtx, epoch, scratchRoot, nativeVersion)
-			if err != nil {
-				err = finalizeRuntimeResources(err, release, scratchRoot, scratchRelease)
-			}
-		}
+		resources, err := a.startRuntimeGeneration(startCtx, epoch)
 
 		cancelStart()
 
 		a.mu.Lock()
-		if err == nil && !a.closed && a.runtimeEpoch == epoch {
-			a.runtimeClient = client
-			a.runtimeNativeRelease = release
-			a.runtimeScratchRoot = scratchRoot
-			a.runtimeScratchRelease = scratchRelease
+
+		switch {
+		case err == nil && !a.closed && a.runtimeEpoch == epoch:
+			a.runtimeClient = resources.client
+			a.runtimeNativeRelease = resources.nativeRelease
+			a.runtimeScratchRoot = resources.scratchRoot
+			a.runtimeScratchRelease = resources.scratchRelease
 			a.runtimeDead = false
-		} else if err == nil {
-			closeErr := client.Close(context.Background())
-			cleanupErr := finalizeRuntimeResources(closeErr, release, scratchRoot, scratchRelease)
+		case err == nil:
+			closeErr := resources.client.Close(context.Background())
+			cleanupErr := finalizeRuntimeResources(
+				closeErr, resources.nativeRelease, resources.scratchRoot, resources.scratchRelease,
+			)
 			err = errors.Join(newAgentClosedError(), cleanupErr)
+		case retainRuntimeResources(err):
+			a.runtimeNativeRelease = resources.nativeRelease
+			a.runtimeScratchRoot = resources.scratchRoot
+			a.runtimeScratchRelease = resources.scratchRelease
+			a.runtimeEpoch = epoch
+			a.runtimeDead = true
 		}
 
 		if latchRuntimeCleanup(err) {
@@ -548,10 +717,139 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 		a.mu.Unlock()
 
 		if err != nil {
-			return nil, err
+			return nil, toPublicAuthorityError(err)
 		}
 
-		return client, nil
+		return resources.client, nil
+	}
+}
+
+type runtimeGenerationResources struct {
+	client         codex.Client
+	nativeRelease  func() error
+	scratchRoot    string
+	scratchRelease func()
+}
+
+func (a *Agent) startRuntimeGeneration(ctx context.Context, epoch uint64) (runtimeGenerationResources, error) {
+	resources := runtimeGenerationResources{scratchRelease: func() {}}
+
+	scratchRoot, err := createPrivateTempDir(a.scratchDir, "acp-go-codex-runtime-")
+	if err != nil {
+		resources.scratchRelease()
+
+		return resources, err
+	}
+
+	resources.scratchRoot = scratchRoot
+
+	resources.nativeRelease, err = a.prepareRuntimeHome(ctx)
+	if err != nil {
+		removeErr := runtimeRemoveAll(resources.scratchRoot)
+		if removeErr == nil {
+			resources.scratchRelease()
+			resources.scratchRoot = ""
+			resources.scratchRelease = nil
+		}
+
+		return resources, errors.Join(err, removeErr)
+	}
+
+	nativeVersion := minSupportedCodexVersion
+	if !a.options.customClientFactory {
+		nativeVersion, err = a.probeRuntimeVersion(ctx)
+		if err != nil {
+			err = finalizeRuntimeResources(
+				err, resources.nativeRelease, resources.scratchRoot, resources.scratchRelease,
+			)
+			if !retainRuntimeResources(err) {
+				resources.nativeRelease = nil
+				resources.scratchRoot = ""
+				resources.scratchRelease = nil
+			}
+
+			return resources, err
+		}
+	}
+
+	resources.client, err = a.launchRuntimeClient(ctx, epoch, resources.scratchRoot, nativeVersion)
+	if err != nil {
+		err = finalizeRuntimeResources(
+			err, resources.nativeRelease, resources.scratchRoot, resources.scratchRelease,
+		)
+	}
+
+	return resources, err
+}
+
+func (a *Agent) prepareRuntimeHome(ctx context.Context) (func() error, error) {
+	home := a.resolvedCodexHomeForEnv(a.staticRuntimeEnv())
+	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return nil, errors.New("codex home must resolve to a canonical absolute path")
+	}
+
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return nil, fmt.Errorf("create Codex home before native preparation: %w", err)
+	}
+
+	if err := writeSeedFiles(home, a.options.SeedFiles); err != nil {
+		return nil, err
+	}
+
+	info, err := runtimeStat(home)
+	if err != nil {
+		return nil, fmt.Errorf("validate Codex home before native preparation: %w", err)
+	}
+
+	if !info.IsDir() {
+		return nil, errors.New("codex home must be a directory")
+	}
+
+	if a.options.HostAuthority == nil {
+		return func() error { return nil }, nil
+	}
+
+	if err := a.options.HostAuthority.PrepareNativeTree(ctx, home); err != nil {
+		return nil, a.retainOpaqueNativeTree(err)
+	}
+
+	return runtimeHomeReleaser(a.options.HostAuthority, home), nil
+}
+
+func runtimeHomeReleaser(authority HostAuthority, home string) func() error {
+	var (
+		reclaimMu  sync.Mutex
+		reclaimed  bool
+		reclaimErr error
+	)
+
+	return func() error {
+		reclaimMu.Lock()
+		defer reclaimMu.Unlock()
+
+		if reclaimed || reclaimErr != nil {
+			return reclaimErr
+		}
+
+		reclaimCtx, cancelReclaim := context.WithTimeout(context.Background(), runtimeNativeTreeTimeout)
+		err := authority.ReclaimNativeTree(reclaimCtx, home)
+
+		cancelReclaim()
+
+		if err != nil {
+			if errors.Is(err, ErrNativeTreeBusy) {
+				return err
+			}
+
+			reclaimErr = errors.Join(ErrContainmentIncomplete,
+				fmt.Errorf("%w: reclaim Codex home: %w", codex.ErrContainmentIncomplete, err))
+
+			return reclaimErr
+		}
+
+		reclaimed = true
+
+		return nil
 	}
 }
 
@@ -559,39 +857,25 @@ func (a *Agent) probeRuntimeVersion(ctx context.Context) (string, error) {
 	env := a.staticRuntimeEnv()
 	home := a.resolvedCodexHomeForEnv(env)
 
-	if err := validateNativeOwnedDirectory(home, a.options.ProcessIsolation); err != nil {
-		return "", err
-	}
+	scratchRelease := func() {}
 
-	scratchRelease, err := a.reserveScratchRoot(ctx, RuntimeResourceDiscovery)
-	if err != nil {
-		return "", err
-	}
-
-	scratchRoot, err := createPrivateTempDir(a.options.ScratchDir, "acp-go-codex-runtime-discovery-")
+	scratchRoot, err := createPrivateTempDir(a.scratchDir, "acp-go-codex-runtime-discovery-")
 	if err != nil {
 		scratchRelease()
 
 		return "", err
 	}
 
-	nativeRelease, err := a.acquireNativeRoot(ctx, RuntimeResourceDiscovery)
-	if err != nil {
-		return "", finalizeRuntimeResources(err, nil, scratchRoot, scratchRelease)
-	}
-
 	version, probeErr := runtimeProbeCodexVersion(ctx, codex.VersionProbeOptions{
 		CLIPath:             a.options.ExecutablePath,
 		CodexHome:           home,
-		WritableHome:        home,
 		Scratch:             scratchRoot,
 		ScratchParent:       filepath.Dir(scratchRoot),
-		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
 		Env:                 env,
 		ImplicitEnvironment: cloneStringMap(a.options.implicitEnvironment),
-		ProcessIsolation:    codexProcessIsolation(a.options.ProcessIsolation),
+		HostAuthority:       adaptHostAuthority(a.options.HostAuthority),
 	})
-	probeErr = finalizeRuntimeResources(probeErr, nativeRelease, scratchRoot, scratchRelease)
+	probeErr = finalizeRuntimeResources(probeErr, nil, scratchRoot, scratchRelease)
 
 	return version, probeErr
 }
@@ -626,6 +910,17 @@ func (a *Agent) resolvedCodexHomeForEnv(env map[string]string) string {
 		return filepath.Clean(value)
 	}
 
+	if a.options.HostAuthority != nil {
+		native := a.options.HostAuthority.NativeEnvironment()
+		if value := native["CODEX_HOME"]; value != "" {
+			return filepath.Clean(value)
+		}
+
+		if home := native["HOME"]; home != "" {
+			return filepath.Join(home, ".codex")
+		}
+	}
+
 	if value := a.options.implicitEnvironment["CODEX_HOME"]; value != "" {
 		return filepath.Clean(value)
 	}
@@ -648,26 +943,13 @@ func (a *Agent) markRuntimeDead(client codex.Client) {
 	a.mu.Unlock()
 }
 
-// quiesceRuntimeAfterCancel atomically fences the shared runtime generation
-// that accepted a cancelled turn, then closes it and waits for its native-tree
-// completion proof. A replacement generation cannot start until cleanup has
-// completed, and every logical session remains registered for lazy resume.
-func (a *Agent) quiesceRuntimeAfterCancel(ctx context.Context, expected codex.Client) error {
-	return a.quiesceRuntime(ctx, expected, nil)
+// retireRuntimeGeneration fences admission, shuts down the protocol transport,
+// waits for the native lease to become terminal, then reclaims its residences.
+func (a *Agent) retireRuntimeGeneration(ctx context.Context, expected codex.Client) error {
+	return a.retireRuntimeGenerationOwned(ctx, expected, nil)
 }
 
-// quiesceRuntimeAfterSessionClose fences a generation only when doing so cannot
-// destroy another logical session's native thread. Unsupported thread-scoped
-// containment is therefore a reported incomplete boundary while peers remain.
-func (a *Agent) quiesceRuntimeAfterSessionClose(
-	ctx context.Context,
-	expected codex.Client,
-	owner *session,
-) error {
-	return a.quiesceRuntime(ctx, expected, owner)
-}
-
-func (a *Agent) quiesceRuntime(ctx context.Context, expected codex.Client, owner *session) error {
+func (a *Agent) retireRuntimeGenerationOwned(ctx context.Context, expected codex.Client, owner *session) error {
 	a.mu.Lock()
 	if closing := a.runtimeClosing; closing != nil {
 		a.mu.Unlock()
@@ -687,7 +969,7 @@ func (a *Agent) quiesceRuntime(ctx context.Context, expected codex.Client, owner
 			}
 
 			candidate.mu.Lock()
-			peerOwnsGeneration := candidate.client == expected
+			peerOwnsGeneration := candidate.client == expected && !candidate.clientDead
 			candidate.mu.Unlock()
 
 			if peerOwnsGeneration {
@@ -747,13 +1029,6 @@ func (a *Agent) quiesceRuntime(ctx context.Context, expected codex.Client, owner
 		fenced = append(fenced, session)
 	}
 
-	if owner != nil {
-		// A retained owner is represented only for this containment call, so it
-		// is not necessarily present in a.sessions to receive the generation
-		// fence above. Its later unsubscribe must still recognize that the
-		// closed transport has already been superseded by this proof.
-		owner.setClientDead(true)
-	}
 	a.mu.Unlock()
 
 	// The generation every peer's incarnation was reading is gone, so each of
@@ -769,6 +1044,15 @@ func (a *Agent) quiesceRuntime(ctx context.Context, expected codex.Client, owner
 	)
 
 	a.mu.Lock()
+	if cleanupErr != nil {
+		a.runtimeClient = client
+		a.runtimeNativeRelease = release
+		a.runtimeScratchRoot = scratchRoot
+		a.runtimeScratchRelease = scratchRelease
+		a.runtimeEpoch = epoch
+		a.runtimeDead = true
+	}
+
 	if latchRuntimeCleanup(cleanupErr) {
 		a.runtimeCleanupErr = cleanupErr
 	}
@@ -992,18 +1276,27 @@ func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 	a.runtimeEpoch++
 	a.mu.Unlock()
 
-	cleanupErr := errors.Join(
-		latchedCleanupErr,
-		a.closeRuntimeGeneration(ctx, client, release, scratchRoot, scratchRelease, epoch),
-	)
-
-	if latchRuntimeCleanup(cleanupErr) {
-		a.mu.Lock()
-		a.runtimeCleanupErr = cleanupErr
-		a.mu.Unlock()
+	cleanupErr := latchedCleanupErr
+	if !retainRuntimeResources(cleanupErr) {
+		cleanupErr = errors.Join(
+			cleanupErr,
+			a.closeRuntimeGeneration(ctx, client, release, scratchRoot, scratchRelease, epoch),
+		)
 	}
 
 	a.mu.Lock()
+	if cleanupErr != nil {
+		a.runtimeClient = client
+		a.runtimeNativeRelease = release
+		a.runtimeScratchRoot = scratchRoot
+		a.runtimeScratchRelease = scratchRelease
+		a.runtimeEpoch = epoch
+	}
+
+	if latchRuntimeCleanup(cleanupErr) {
+		a.runtimeCleanupErr = cleanupErr
+	}
+
 	if a.runtimeClosing == closing {
 		a.runtimeClosing = nil
 
@@ -1017,15 +1310,27 @@ func (a *Agent) closeSharedRuntime(ctx context.Context) error {
 func (a *Agent) closeRuntimeGeneration(
 	ctx context.Context,
 	client codex.Client,
-	release func(),
+	release func() error,
 	scratchRoot string,
 	scratchRelease func(),
 	epoch uint64,
 ) error {
-	runtimeCloseErr := closeRuntimeResources(ctx, client, release, scratchRoot, scratchRelease)
-	if errors.Is(runtimeCloseErr, codex.ErrProcessContainmentIncomplete) {
+	var runtimeCloseErr error
+	if client != nil {
+		runtimeCloseErr = client.Close(ctx)
+	}
+
+	if runtimeCloseErr != nil {
 		return runtimeCloseErr
 	}
 
-	return errors.Join(runtimeCloseErr, a.releaseRetainedRuntimeThreads(client, epoch))
+	residenceErr := errors.Join(
+		a.releaseRetainedRuntimeThreads(client, epoch),
+		a.reclaimRetiredResidences(ctx, epoch),
+	)
+	if residenceErr != nil {
+		return residenceErr
+	}
+
+	return finalizeRuntimeResources(nil, release, scratchRoot, scratchRelease)
 }

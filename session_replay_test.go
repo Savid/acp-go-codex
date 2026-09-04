@@ -1,7 +1,9 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRolloutReplayResponseItemVariants(t *testing.T) {
@@ -83,9 +86,28 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	if _, err := decodeRolloutRow(SessionStoreEntry(" ")); err == nil {
 		t.Fatal("decodeRolloutRow accepted empty row")
 	}
-	row, err := decodeRolloutRow(SessionStoreEntry(`{"type":"event_msg"}`))
+	if _, err := decodeRolloutRow(SessionStoreEntry(`{"type":"event_msg"}`)); err == nil {
+		t.Fatal("decodeRolloutRow accepted a missing payload")
+	}
+	row, err := decodeRolloutRow(SessionStoreEntry(`{"type":"event_msg","payload":{}}`))
 	if err != nil || row.Payload == nil {
-		t.Fatalf("decodeRolloutRow payload default row=%#v err=%v", row, err)
+		t.Fatalf("decodeRolloutRow valid row=%#v err=%v", row, err)
+	}
+	ordinalRow, err := decodeRolloutRow(SessionStoreEntry(`{"timestamp":"2026-01-01T00:00:00Z","ordinal":7,"type":"event_msg","payload":{}}`))
+	if err != nil || ordinalRow.Type != "event_msg" {
+		t.Fatalf("decodeRolloutRow ordinal row=%#v err=%v", ordinalRow, err)
+	}
+	for _, invalid := range []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"event_msg","type":"event_msg","payload":{}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{"nested":1,"nested":2}}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{},"unknown":true}`),
+		SessionStoreEntry(`{"type":"event_msg","payload":{}} {}`),
+		SessionStoreEntry(`{"timestamp":1,"type":"event_msg","payload":{}}`),
+		SessionStoreEntry(`{"ordinal":-1,"type":"event_msg","payload":{}}`),
+	} {
+		if _, err := decodeRolloutRow(invalid); err == nil {
+			t.Fatalf("decodeRolloutRow accepted %s", invalid)
+		}
 	}
 	if updates, err := rolloutReplayUpdates([]SessionStoreEntry{SessionStoreEntry(`{"payload":{}}`)}); err == nil || updates != nil {
 		t.Fatalf("rolloutReplayUpdates invalid row updates=%#v err=%v", updates, err)
@@ -144,6 +166,13 @@ func TestReplayAdditionalBranches(t *testing.T) {
 	}
 }
 
+func TestConsumeRolloutJSONValueMalformedComposites(t *testing.T) {
+	for _, input := range []string{"{", "{1:2}", "[!", "]"} {
+		decoder := json.NewDecoder(bytes.NewBufferString(input))
+		require.Error(t, consumeRolloutJSONValue(decoder), input)
+	}
+}
+
 func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 	store := NewInMemorySessionStore()
 	client := newSpyCodexClient()
@@ -156,6 +185,7 @@ func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 	entries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"stored-session"}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_reasoning","text":"thinking"}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}`),
@@ -167,6 +197,7 @@ func TestLoadSessionReplaysRolloutHistory(t *testing.T) {
 	if err := store.Append(ctx, SessionKey{SessionID: "stored-session"}, entries); err != nil {
 		t.Fatalf("store Append returned error: %v", err)
 	}
+	appendTestDurableSessionConfig(t, store, "stored-session", nil, nil)
 
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest("stored-session", cwd)); err != nil {
 		t.Fatalf("LoadSession returned error: %v", err)

@@ -22,7 +22,6 @@ const (
 	handoffMetaKey      = "acp-go.dev/handoff"
 	handoffVersion      = 1
 	handoffVersionKey   = "version"
-	handoffVersionsKey  = "versions"
 	handoffDigestKey    = "digest"
 	handoffSizeBytesKey = "sizeBytes"
 	handoffURIScheme    = "file"
@@ -373,7 +372,7 @@ func handoffURIPath(uri string) (string, string) {
 		return "", handoffCauseURIHost
 	}
 
-	path := filepath.FromSlash(parsed.Path)
+	path := handoffURIFilePath(parsed.Path)
 	if !filepath.IsAbs(path) {
 		return "", handoffCauseURIRelative
 	}

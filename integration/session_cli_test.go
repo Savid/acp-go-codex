@@ -89,7 +89,7 @@ func TestCodexCLISessionCLICarrierRotation(t *testing.T) {
 		operationA2: tokenA2,
 		operationB:  tokenB,
 	})
-	requireStoreOmitsValues(t, store, tokenA1, tokenA2, tokenB)
+	requireRolloutOmitsValues(t, store, tokenA1, tokenA2, tokenB)
 
 	_, err = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: first.SessionId})
 	require.NoError(t, err)
@@ -262,16 +262,28 @@ func (s *sessionCLIGrantServer) requireIsolated(t *testing.T, expected map[strin
 	}
 }
 
-func requireStoreOmitsValues(t *testing.T, store *recordingSessionStore, values ...string) {
+// requireRolloutOmitsValues asserts the mirrored native rollout never carries a
+// session carrier. The adapter-owned durable session-configuration record is the
+// one place a carrier is persisted, deliberately, so a store-backed resume can
+// restore the session environment it was started with.
+func requireRolloutOmitsValues(t *testing.T, store *recordingSessionStore, values ...string) {
 	t.Helper()
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	for _, entries := range store.entries {
+	for key, entries := range store.entries {
+		if key.Subpath != codexacp.SessionStoreMainSubpath {
+			continue
+		}
+
 		for _, entry := range entries {
 			for _, value := range values {
-				require.False(t, bytes.Contains(entry, []byte(value)), "session store persisted a carrier bearer")
+				require.False(
+					t,
+					bytes.Contains(entry, []byte(value)),
+					"mirrored Codex rollout persisted a carrier bearer",
+				)
 			}
 		}
 	}

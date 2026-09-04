@@ -9,12 +9,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/stretchr/testify/require"
 )
@@ -28,14 +30,18 @@ func TestCodexNativeTwoThreadMCPRebindIsolation(t *testing.T) {
 	probe := newNativeMCPRebindProbe(t)
 	home := isolatedCodexHome(t)
 	codexPath := integrationCodexPath(t)
+	scratchParent := t.TempDir()
 	launch := func() *codex.AppServerClient {
+		scratch := filepath.Join(scratchParent, "scratch-"+uuid.NewString())
+		require.NoError(t, os.MkdirAll(scratch, 0o700))
+
 		client, err := codex.NewAppServerClient(ctx, codex.Options{
-			NativeVersion:    "0.144.1",
-			CLIPath:          codexPath,
-			CodexHome:        home,
-			SupervisorRoot:   t.TempDir(),
-			Logger:           integrationLogger,
-			DarwinBestEffort: runtime.GOOS == "darwin",
+			NativeVersion: "0.144.1",
+			CLIPath:       codexPath,
+			CodexHome:     home,
+			Scratch:       scratch,
+			ScratchParent: scratchParent,
+			Logger:        integrationLogger,
 		})
 		require.NoError(t, err)
 

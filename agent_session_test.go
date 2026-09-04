@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -72,7 +73,7 @@ func TestForkIsExtensionOnly(t *testing.T) {
 		return client, nil
 	}))
 
-	parent, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	parent, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestForkIsExtensionOnly(t *testing.T) {
 		t.Fatal("Agent exposes UnstableForkSession")
 	}
 
-	raw, err := json.Marshal(ForkSessionRequest(parent.SessionId, "/tmp/project"))
+	raw, err := json.Marshal(ForkSessionRequest(parent.SessionId, absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("marshal fork request: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestLocalDispatcherDoesNotRouteDeletedSessionMethods(t *testing.T) {
 	conn.initialized.Store(true)
 	ctx := context.Background()
 
-	raw, err := json.Marshal(ForkSessionRequest("parent", "/tmp/project"))
+	raw, err := json.Marshal(ForkSessionRequest("parent", absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("marshal fork request: %v", err)
 	}
@@ -134,14 +135,14 @@ func TestDeleteSessionTombstonesStoreAndBlocksLoadResume(t *testing.T) {
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
 
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 	if seedErr := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(resp.SessionId)},
 		Entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)},
-	}}); seedErr != nil {
+	}, testDurableSessionConfigReplacement(t, resp.SessionId, nil, nil)}); seedErr != nil {
 		t.Fatalf("seed store: %v", seedErr)
 	}
 
@@ -158,12 +159,12 @@ func TestDeleteSessionTombstonesStoreAndBlocksLoadResume(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("tombstoned entries = %#v", entries)
 	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, "/tmp/project")); err == nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession after delete succeeded")
 	} else {
 		requireUnknownSession(t, err)
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, "/tmp/project")); err == nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(resp.SessionId, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession after delete succeeded")
 	} else {
 		requireUnknownSession(t, err)
@@ -180,6 +181,7 @@ func TestDeleteRefusesLoadResumingAcrossTheTombstone(t *testing.T) {
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`),
 	}))
+	appendTestDurableSessionConfig(t, store, id, nil, nil)
 
 	client := &blockingLifecycleCodexClient{
 		spyCodexClient: newSpyCodexClient(),
@@ -195,10 +197,10 @@ func TestDeleteRefusesLoadResumingAcrossTheTombstone(t *testing.T) {
 	loadResult := make(chan error, 1)
 
 	go func() {
-		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, "/tmp/project"))
+		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, absTestPath("tmp", "project")))
 		loadResult <- loadErr
 	}()
-	<-client.resumeStarted
+	awaitTestSignal(t, client.resumeStarted, "client.resumeStarted")
 
 	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(id))
 	require.NoError(t, err)
@@ -228,6 +230,7 @@ func TestRefusedRegistrationContainsOnceAndSparesTheRuntime(t *testing.T) {
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(id)}, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`),
 	}))
+	appendTestDurableSessionConfig(t, store, id, nil, nil)
 
 	client := &postContainmentStrictClient{
 		blockingLifecycleCodexClient: &blockingLifecycleCodexClient{
@@ -245,10 +248,10 @@ func TestRefusedRegistrationContainsOnceAndSparesTheRuntime(t *testing.T) {
 	loadResult := make(chan error, 1)
 
 	go func() {
-		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, "/tmp/project"))
+		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, absTestPath("tmp", "project")))
 		loadResult <- loadErr
 	}()
-	<-client.resumeStarted
+	awaitTestSignal(t, client.resumeStarted, "client.resumeStarted")
 
 	generation := agent.runtimeGenerationSnapshot()
 
@@ -269,7 +272,7 @@ func TestRefusedRegistrationContainsOnceAndSparesTheRuntime(t *testing.T) {
 
 	// The generation is alive in more than name: a session opened next serves its
 	// prompt on the very generation the redundant containment would have retired.
-	peer, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	peer, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	promptResp, err := agent.Prompt(ctx, TextPromptRequest(peer.SessionId, "turn-nonce", "hello"))
 	require.NoError(t, err)
@@ -345,9 +348,9 @@ func TestRunningDeleteFencesLoadAndResumeAdmission(t *testing.T) {
 	}()
 	<-store.started
 
-	_, err := agent.LoadSession(ctx, LoadSessionRequest("session", "/tmp/project"))
+	_, err := agent.LoadSession(ctx, LoadSessionRequest("session", absTestPath("tmp", "project")))
 	requireSessionDeleteInProgress(t, err)
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("session", "/tmp/project"))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest("session", absTestPath("tmp", "project")))
 	requireSessionDeleteInProgress(t, err)
 	require.Zero(t, client.resumeCallCount(), "a fenced id never reaches the native harness")
 
@@ -355,7 +358,7 @@ func TestRunningDeleteFencesLoadAndResumeAdmission(t *testing.T) {
 	require.NoError(t, <-deleteResult)
 
 	// Once the tombstone is committed the same id earns the permanent verdict.
-	_, err = agent.LoadSession(ctx, LoadSessionRequest("session", "/tmp/project"))
+	_, err = agent.LoadSession(ctx, LoadSessionRequest("session", absTestPath("tmp", "project")))
 	requireUnknownSession(t, err)
 	require.NoError(t, agent.Close())
 }
@@ -368,8 +371,9 @@ func TestFailedDeleteLeavesRacingLoadRetriable(t *testing.T) {
 	ctx := context.Background()
 	store := &blockingDeleteSessionStore{
 		configurableStore: &configurableStore{
-			entries:   []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`)},
-			deleteErr: errors.New("store delete failed"),
+			entries:       []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-stored"}}`)},
+			configPresent: true,
+			deleteErr:     errors.New("store delete failed"),
 		},
 		started: make(chan struct{}),
 		release: make(chan struct{}),
@@ -389,7 +393,7 @@ func TestFailedDeleteLeavesRacingLoadRetriable(t *testing.T) {
 	}()
 	<-store.started
 
-	_, err := agent.LoadSession(ctx, LoadSessionRequest("session", "/tmp/project"))
+	_, err := agent.LoadSession(ctx, LoadSessionRequest("session", absTestPath("tmp", "project")))
 	requireSessionDeleteInProgress(t, err)
 
 	close(store.release)
@@ -398,7 +402,7 @@ func TestFailedDeleteLeavesRacingLoadRetriable(t *testing.T) {
 
 	// The retry the conflict invited now succeeds, which is the fact the
 	// unknown-session verdict would have contradicted.
-	loaded, err := agent.LoadSession(ctx, LoadSessionRequest("session", "/tmp/project"))
+	loaded, err := agent.LoadSession(ctx, LoadSessionRequest("session", absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	require.NotNil(t, agent.activeSession("session"))
 	require.NotNil(t, loaded.Meta)
@@ -408,7 +412,7 @@ func TestFailedDeleteLeavesRacingLoadRetriable(t *testing.T) {
 func TestDeleteFenceAdmissionBranches(t *testing.T) {
 	agent := NewAgent()
 	client := newSpyCodexClient()
-	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	active := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 	agent.sessions[active.id] = active
 
 	// Two concurrent deletes are both legal, and the fence outlives the later.
@@ -445,7 +449,7 @@ func TestDeleteFenceAdmissionBranches(t *testing.T) {
 
 	// Registration refuses a tombstoned id outright, and leaves the candidate's
 	// native thread to the caller that owns it until registration succeeds.
-	resumed := newSession(agent, "resumed", "/tmp/project", nil, codex.Thread{ID: "thread-resumed"}, client, sessionMeta{}, nil)
+	resumed := newSession(agent, "resumed", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread-resumed"}, client, sessionMeta{}, nil)
 	agent.deleted[resumed.id] = struct{}{}
 	requireUnknownSession(t, agent.storeStartedSession(resumed))
 	require.NotContains(t, agent.sessions, resumed.id)
@@ -467,7 +471,7 @@ func TestCloseAndDeleteContainActiveTurnBeforeSettlement(t *testing.T) {
 			}))
 			agent.setAgentClient(newRecordingAgentClient())
 
-			created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+			created, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 			require.NoError(t, err)
 			active := agent.activeSession(created.SessionId)
 
@@ -483,7 +487,7 @@ func TestCloseAndDeleteContainActiveTurnBeforeSettlement(t *testing.T) {
 				)
 				promptDone <- promptResult{response: response, err: promptErr}
 			}()
-			<-client.runStarted
+			awaitTestSignal(t, client.runStarted, "client.runStarted")
 
 			operationDone := make(chan error, 1)
 			go func() {
@@ -497,7 +501,7 @@ func TestCloseAndDeleteContainActiveTurnBeforeSettlement(t *testing.T) {
 				_, deleteErr := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(created.SessionId))
 				operationDone <- deleteErr
 			}()
-			<-client.interruptStarted
+			awaitTestSignal(t, client.interruptStarted, "client.interruptStarted")
 			interactionCtx, finishInteraction := active.beginInteraction(context.Background(), "during-containment")
 
 			select {
@@ -550,7 +554,7 @@ func TestCloseFencesUnknownTurnDispatchOutcome(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return client, nil
 	}))
-	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 
 	promptDone := make(chan error, 1)
@@ -561,13 +565,13 @@ func TestCloseFencesUnknownTurnDispatchOutcome(t *testing.T) {
 		)
 		promptDone <- promptErr
 	}()
-	<-client.started
+	awaitTestSignal(t, client.started, "client.started")
 
 	_, err = agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: created.SessionId})
 	require.ErrorContains(t, err, "dispatch outcome is unknown")
 	require.ErrorContains(t, <-promptDone, "dispatch outcome is unknown")
 	client.mu.Lock()
-	require.True(t, client.closed, "unknown dispatch must fence the sole generation")
+	require.False(t, client.closed, "session close must not retire the shared runtime")
 	client.mu.Unlock()
 	require.NoError(t, agent.Close())
 }
@@ -608,7 +612,7 @@ func TestDeleteAdmissionPreventsLateNativeTurn(t *testing.T) {
 	}))
 	agent.setAgentClient(newRecordingAgentClient())
 
-	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 
 	deleteDone := make(chan error, 1)
@@ -616,7 +620,7 @@ func TestDeleteAdmissionPreventsLateNativeTurn(t *testing.T) {
 		_, deleteErr := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(created.SessionId))
 		deleteDone <- deleteErr
 	}()
-	<-client.containStarted
+	awaitTestSignal(t, client.containStarted, "client.containStarted")
 
 	// The tombstone is already durable, so the wire answer is the uniform
 	// unknown-session verdict a host may treat as final; the wrapper behind it is
@@ -655,7 +659,7 @@ func TestDeleteStoreFailureLeavesTheSessionUntouched(t *testing.T) {
 		WithSessionStore(store),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
-	created, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 
@@ -701,14 +705,14 @@ func TestDeleteSessionSurfacesNativeCleanupErrorAfterTombstone(t *testing.T) {
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
 
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
 	if seedErr := store.Replace(ctx, SessionKey{SessionID: string(resp.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(resp.SessionId)},
 		Entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)},
-	}}); seedErr != nil {
+	}, testDurableSessionConfigReplacement(t, resp.SessionId, nil, nil)}); seedErr != nil {
 		t.Fatalf("seed store: %v", seedErr)
 	}
 
@@ -722,7 +726,7 @@ func TestDeleteSessionSurfacesNativeCleanupErrorAfterTombstone(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("tombstoned entries = %#v", entries)
 	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, "/tmp/project")); err == nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(resp.SessionId, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession after failed cleanup succeeded")
 	} else {
 		requireUnknownSession(t, err)
@@ -747,7 +751,7 @@ func TestDeleteHidesTheIdBeforeAFailedTeardownAndRetriesIt(t *testing.T) {
 	)
 	agent.setAgentClient(newRecordingAgentClient())
 
-	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	require.NotNil(t, active)
@@ -761,10 +765,10 @@ func TestDeleteHidesTheIdBeforeAFailedTeardownAndRetriesIt(t *testing.T) {
 	_, promptErr := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "late", "must not start"))
 	requireUnknownSession(t, promptErr)
 
-	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(created.SessionId, "/tmp/project"))
+	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(created.SessionId, absTestPath("tmp", "project")))
 	requireUnknownSession(t, loadErr)
 
-	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, absTestPath("tmp", "project")))
 	requireUnknownSession(t, resumeErr)
 
 	_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
@@ -796,7 +800,7 @@ func TestDeleteRacingACloseHidesTheIdAndDefersTheLadder(t *testing.T) {
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
 
-	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	require.NotNil(t, active)
@@ -858,7 +862,7 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 		listThreads: []codex.Thread{{
 			ID:        "thread-native",
 			SessionID: string(sessionID),
-			Cwd:       "/tmp/project",
+			Cwd:       absTestPath("tmp", "project"),
 			Title:     "Native",
 		}},
 	}
@@ -867,7 +871,7 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return nativeClient, nil }),
 	)
 
-	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd("/tmp/project")))
+	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(absTestPath("tmp", "project"))))
 	if err != nil {
 		t.Fatalf("ListSessions returned error: %v", err)
 	}
@@ -878,7 +882,7 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 		t.Fatalf("ListSessions should not need native cleanup without an in-process deleted set: %#v", nativeClient.deletedThreadSnapshot())
 	}
 
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, "/tmp/project")); err == nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession returned nil error")
 	} else {
 		requireUnknownSession(t, err)
@@ -887,7 +891,7 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 		t.Fatalf("LoadSession did not retry native cleanup: %#v", nativeClient.deletedThreadSnapshot())
 	}
 
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, "/tmp/project")); err == nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession returned nil error")
 	} else {
 		requireUnknownSession(t, err)
@@ -903,7 +907,7 @@ func TestDeleteRetainedRuntimeThreadReleasesOwnership(t *testing.T) {
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
 
-	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	require.NotNil(t, active)
@@ -1005,7 +1009,7 @@ func TestLifecycleMetaRejectsDeletedNamespaces(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionMeta(tc.meta))); err == nil {
+			if _, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"), WithSessionMeta(tc.meta))); err == nil {
 				t.Fatal("NewSession accepted deleted metadata")
 			} else {
 				requireUnsupportedFieldError(t, err, tc.field)
@@ -1015,7 +1019,7 @@ func TestLifecycleMetaRejectsDeletedNamespaces(t *testing.T) {
 
 	t.Run("foreign module path ignored", func(t *testing.T) {
 		meta := map[string]any{"github.com/savid/acp-go-codex": map[string]any{"anything": true}}
-		if _, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionMeta(meta))); err != nil {
+		if _, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"), WithSessionMeta(meta))); err != nil {
 			t.Fatalf("NewSession rejected foreign module-path _meta namespace instead of ignoring it: %v", err)
 		}
 	})
@@ -1028,13 +1032,13 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 	if err := closed.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
-	if _, err := closed.NewSession(ctx, NewSessionRequest("/tmp/project")); err == nil {
+	if _, err := closed.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("closed NewSession succeeded")
 	}
-	if _, err := closed.ResumeSession(ctx, ResumeSessionRequest("s", "/tmp/project")); err == nil {
+	if _, err := closed.ResumeSession(ctx, ResumeSessionRequest("s", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("closed ResumeSession succeeded")
 	}
-	if _, err := closed.LoadSession(ctx, LoadSessionRequest("s", "/tmp/project")); err == nil {
+	if _, err := closed.LoadSession(ctx, LoadSessionRequest("s", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("closed LoadSession succeeded")
 	}
 	if _, err := closed.ListSessions(ctx, acp.ListSessionsRequest{}); err == nil {
@@ -1046,23 +1050,23 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 	if _, err := agent.NewSession(ctx, NewSessionRequest("relative")); err == nil {
 		t.Fatal("NewSession accepted relative cwd")
 	}
-	if _, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
+	if _, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"), WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
 		t.Fatal("NewSession accepted invalid meta")
 	}
-	if _, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}))); err == nil {
+	if _, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}))); err == nil {
 		t.Fatal("NewSession accepted unsupported MCP server")
 	}
 
 	factoryErr := errors.New("factory failed")
 	factoryAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return nil, factoryErr }))
-	if _, err := factoryAgent.NewSession(ctx, NewSessionRequest("/tmp/project")); !errors.Is(err, factoryErr) {
+	if _, err := factoryAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"))); !errors.Is(err, factoryErr) {
 		t.Fatalf("NewSession factory err=%v", err)
 	}
 
 	startErr := errors.New("start failed")
 	startClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), startErr: startErr}
 	startAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return startClient, nil }))
-	if _, err := startAgent.NewSession(ctx, NewSessionRequest("/tmp/project")); !errors.Is(err, startErr) {
+	if _, err := startAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"))); !errors.Is(err, startErr) {
 		t.Fatalf("NewSession start err=%v", err)
 	}
 	if startClient.closed {
@@ -1073,10 +1077,10 @@ func TestAgentLifecycleErrorBranches(t *testing.T) {
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
 	)
-	if _, err := limitAgent.NewSession(ctx, NewSessionRequest("/tmp/project")); err != nil {
+	if _, err := limitAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"))); err != nil {
 		t.Fatalf("first limited NewSession returned error: %v", err)
 	}
-	if _, err := limitAgent.NewSession(ctx, NewSessionRequest("/tmp/other")); err == nil {
+	if _, err := limitAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "other"))); err == nil {
 		t.Fatal("NewSession ignored active session limit")
 	}
 }
@@ -1097,9 +1101,9 @@ func TestUnknownSessionUniformInvalidParams(t *testing.T) {
 	requireUnknownSession(t, configErr)
 	_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"})
 	requireUnknownSession(t, closeErr)
-	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest("missing", "/tmp/project"))
+	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest("missing", absTestPath("tmp", "project")))
 	requireUnknownSession(t, resumeErr)
-	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest("missing", "/tmp/project"))
+	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest("missing", absTestPath("tmp", "project")))
 	requireUnknownSession(t, loadErr)
 }
 
@@ -1107,7 +1111,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -1135,7 +1139,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 		WithSessionStore(NewInMemorySessionStore()),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return deleteCloseClient, nil }),
 	)
-	deleteCloseResp, err := deleteCloseAgent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	deleteCloseResp, err := deleteCloseAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("delete close NewSession returned error: %v", err)
 	}
@@ -1149,7 +1153,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	cancelErr := codex.ErrThreadNotFound
 	cancelClient := &cancelErrorClient{spyCodexClient: newSpyCodexClient(), cancelErr: cancelErr}
 	cancelAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return cancelClient, nil }))
-	cancelResp, err := cancelAgent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	cancelResp, err := cancelAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("cancel NewSession returned error: %v", err)
 	}
@@ -1159,7 +1163,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 
 	fatalClient := &runEventsClient{spyCodexClient: newSpyCodexClient(), runErr: codex.ErrConnectionClosed}
 	fatalAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return fatalClient, nil }))
-	fatalResp, err := fatalAgent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	fatalResp, err := fatalAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("fatal NewSession returned error: %v", err)
 	}
@@ -1173,7 +1177,7 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 	closeErr := errors.New("close failed")
 	closeClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: closeErr}
 	closeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return closeClient, nil }))
-	closeResp, err := closeAgent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	closeResp, err := closeAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("close NewSession returned error: %v", err)
 	}
@@ -1195,24 +1199,24 @@ func TestAgentSessionOperationErrorBranches(t *testing.T) {
 func TestListSessionsUsesActiveAndStoreAuthority(t *testing.T) {
 	ctx := context.Background()
 	store := &configurableStore{summaries: []SessionSummary{
-		{SessionID: "active", Cwd: "/tmp/project", UpdatedAtUnixMilli: 100, Title: "Active"},
-		{SessionID: "stored", Cwd: "/tmp/project", UpdatedAtUnixMilli: 200, Title: "Stored", Meta: map[string]any{"origin": "test"}},
-		{SessionID: "other", Cwd: "/tmp/other", UpdatedAtUnixMilli: 300},
+		{SessionID: "active", Cwd: absTestPath("tmp", "project"), UpdatedAtUnixMilli: 100, Title: "Active"},
+		{SessionID: "stored", Cwd: absTestPath("tmp", "project"), UpdatedAtUnixMilli: 200, Title: "Stored", Meta: map[string]any{"origin": "test"}},
+		{SessionID: "other", Cwd: absTestPath("tmp", "other"), UpdatedAtUnixMilli: 300},
 	}}
 	client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listErr: errors.New("native list must not be lifecycle authority")}
 	agent := NewAgent(
 		WithSessionStore(store),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
-	active := newSession(agent, "active", "/tmp/project", nil, codex.Thread{ID: "active-thread", Title: "Active"}, client, sessionMeta{}, nil)
+	active := newSession(agent, "active", absTestPath("tmp", "project"), nil, codex.Thread{ID: "active-thread", Title: "Active"}, client, sessionMeta{}, nil)
 	if err := agent.storeStartedSession(active); err != nil {
 		t.Fatalf("store active: %v", err)
 	}
-	activeOther := newSession(agent, "active-other", "/tmp/other", nil, codex.Thread{ID: "active-other-thread", Title: "Other"}, client, sessionMeta{}, nil)
+	activeOther := newSession(agent, "active-other", absTestPath("tmp", "other"), nil, codex.Thread{ID: "active-other-thread", Title: "Other"}, client, sessionMeta{}, nil)
 	if err := agent.storeStartedSession(activeOther); err != nil {
 		t.Fatalf("store other active: %v", err)
 	}
-	cwd := "/tmp/project"
+	cwd := absTestPath("tmp", "project")
 	list, err := agent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd})
 	if err != nil {
 		t.Fatalf("ListSessions returned error: %v", err)
@@ -1222,7 +1226,7 @@ func TestListSessionsUsesActiveAndStoreAuthority(t *testing.T) {
 	}
 
 	residualClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{{
-		ID: "residual-thread", SessionID: "residual", Cwd: "/tmp/project", Title: "Residual native thread",
+		ID: "residual-thread", SessionID: "residual", Cwd: absTestPath("tmp", "project"), Title: "Residual native thread",
 	}}}
 	nativeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return residualClient, nil }))
 	native, err := nativeAgent.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd})
@@ -1282,30 +1286,30 @@ func TestResumeLoadAndMaterializedBranches(t *testing.T) {
 		t.Fatal("LoadSession accepted relative cwd")
 	}
 	agent.deleted["deleted"] = struct{}{}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("deleted", "/tmp/project")); err == nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("deleted", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession deleted id succeeded")
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("deleted", "/tmp/project")); err == nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("deleted", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession deleted id succeeded")
 	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("s", "/tmp/project", WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("s", absTestPath("tmp", "project"), WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
 		t.Fatal("ResumeSession accepted invalid meta")
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("s", "/tmp/project", WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("s", absTestPath("tmp", "project"), WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
 		t.Fatal("LoadSession accepted invalid meta")
 	}
 	store.loadErr = errors.New("load failed")
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("s", "/tmp/project")); err == nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("s", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession ignored store load error")
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("s", "/tmp/project")); err == nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("s", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession ignored store load error")
 	}
 	store.loadErr = nil
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("s", "/tmp/project")); err == nil {
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest("s", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession explicit empty store succeeded")
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest("s", "/tmp/project")); err == nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest("s", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession explicit empty store succeeded")
 	}
 
@@ -1314,7 +1318,7 @@ func TestResumeLoadAndMaterializedBranches(t *testing.T) {
 	if resumeAgent.options.SessionStore == nil {
 		t.Fatal("NewAgent did not install the default in-memory session store")
 	}
-	if _, err := resumeAgent.ResumeSession(ctx, ResumeSessionRequest("native", "/tmp/project")); err == nil {
+	if _, err := resumeAgent.ResumeSession(ctx, ResumeSessionRequest("native", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession adopted a residual native thread absent from the default store")
 	}
 	if resumeAgent.activeSession("native") != nil {
@@ -1329,7 +1333,7 @@ func TestResumeLoadAndMaterializedBranches(t *testing.T) {
 
 	loadClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), listThreads: []codex.Thread{{ID: "native-load", SessionID: "native-load"}}}
 	loadAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return loadClient, nil }))
-	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("native-load", "/tmp/project")); err == nil {
+	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("native-load", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession adopted native history absent from the default store")
 	}
 	if loadAgent.activeSession("native-load") != nil {
@@ -1349,26 +1353,26 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	activeClient := newSpyCodexClient()
 	activeAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return activeClient, nil }))
 	activeID := acp.SessionId("active")
-	activeStart := codexSessionStart{Cwd: "/tmp/project", ResumeID: string(activeID)}
-	activeSession := newSession(activeAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{}, nil)
+	activeStart := codexSessionStart{Cwd: absTestPath("tmp", "project"), ResumeID: string(activeID)}
+	activeSession := newSession(activeAgent, activeID, absTestPath("tmp", "project"), nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, activeClient, sessionMeta{}, nil)
 	activeSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeAgent.storeStartedSession(activeSession); err != nil {
 		t.Fatalf("store active session: %v", err)
 	}
 	t.Cleanup(activeSession.fenceSession)
-	if _, err := activeAgent.ResumeSession(ctx, ResumeSessionRequest(activeID, "/tmp/project")); err != nil {
+	if _, err := activeAgent.ResumeSession(ctx, ResumeSessionRequest(activeID, absTestPath("tmp", "project"))); err != nil {
 		t.Fatalf("ResumeSession active returned error: %v", err)
 	}
-	if _, err := activeAgent.ResumeSession(ctx, ResumeSessionRequest(activeID, "/tmp/project", WithSessionAdditionalDirectories("/tmp/different"))); err == nil {
+	if _, err := activeAgent.ResumeSession(ctx, ResumeSessionRequest(activeID, absTestPath("tmp", "project"), WithSessionAdditionalDirectories(absTestPath("tmp", "different")))); err == nil {
 		t.Fatal("ResumeSession changed active binding without store rows succeeded")
 	}
 	if activeAgent.activeSession(activeID) != activeSession {
 		t.Fatal("ResumeSession changed active binding removed the usable session")
 	}
-	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
+	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession active session without store rows succeeded")
 	}
-	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project", WithSessionAdditionalDirectories("/tmp/different"))); err == nil {
+	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, absTestPath("tmp", "project"), WithSessionAdditionalDirectories(absTestPath("tmp", "different")))); err == nil {
 		t.Fatal("LoadSession changed active binding without store rows succeeded")
 	}
 	if activeAgent.activeSession(activeID) != activeSession {
@@ -1383,37 +1387,46 @@ func TestResumeLoadActiveSessionBranches(t *testing.T) {
 	}
 	if err := defaultStore.Replace(ctx, SessionKey{SessionID: string(activeID)}, []SessionStoreReplacement{{
 		Key: SessionKey{SessionID: string(activeID)},
-		Entries: []SessionStoreEntry{SessionStoreEntry(
-			`{"type":"event_msg","payload":{"type":"agent_message","message":"stored history"}}`,
-		)},
+		Entries: []SessionStoreEntry{
+			SessionStoreEntry(`{"type":"session_meta","payload":{"id":"active"}}`),
+			SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"stored history"}}`),
+		},
 	}}); err != nil {
 		t.Fatalf("seed active store: %v", err)
 	}
-	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err != nil {
+	appendTestDurableSessionConfig(t, defaultStore, activeID, nil, nil)
+
+	if _, err := activeAgent.LoadSession(ctx, LoadSessionRequest(activeID, absTestPath("tmp", "project"))); err != nil {
 		t.Fatalf("LoadSession active with store rows returned error: %v", err)
 	}
 
 	activeLoadErrAgent := NewAgent(WithSessionStore(&configurableStore{loadErr: errors.New("active load failed")}))
-	activeLoadSession := newSession(activeLoadErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, newSpyCodexClient(), sessionMeta{}, nil)
+	activeLoadSession := newSession(activeLoadErrAgent, activeID, absTestPath("tmp", "project"), nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, newSpyCodexClient(), sessionMeta{}, nil)
 	activeLoadSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeLoadErrAgent.storeStartedSession(activeLoadSession); err != nil {
 		t.Fatalf("store active load err session: %v", err)
 	}
 	t.Cleanup(activeLoadSession.fenceSession)
-	if _, err := activeLoadErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
+	if _, err := activeLoadErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession active ignored store load error")
 	}
 
-	activeReplayErrStore := &configurableStore{entries: []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`)}}
+	activeReplayErrStore := &configurableStore{
+		entries: []SessionStoreEntry{
+			SessionStoreEntry(`{"type":"session_meta","payload":{"id":"active"}}`),
+			SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}`),
+		},
+		configPresent: true,
+	}
 	activeReplayErrAgent := NewAgent(WithSessionStore(activeReplayErrStore))
 	activeReplayErrAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: errors.New("update failed")})
-	activeReplayErrSession := newSession(activeReplayErrAgent, activeID, "/tmp/project", nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, newSpyCodexClient(), sessionMeta{}, nil)
+	activeReplayErrSession := newSession(activeReplayErrAgent, activeID, absTestPath("tmp", "project"), nil, codex.Thread{ID: string(activeID), SessionID: string(activeID)}, newSpyCodexClient(), sessionMeta{}, nil)
 	activeReplayErrSession.fingerprint = codexSessionStartFingerprint(activeStart)
 	if err := activeReplayErrAgent.storeStartedSession(activeReplayErrSession); err != nil {
 		t.Fatalf("store active replay err session: %v", err)
 	}
 	t.Cleanup(activeReplayErrSession.fenceSession)
-	if _, err := activeReplayErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, "/tmp/project")); err == nil {
+	if _, err := activeReplayErrAgent.LoadSession(ctx, LoadSessionRequest(activeID, absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession active ignored rollout replay error")
 	}
 }
@@ -1426,7 +1439,7 @@ func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
 		{
 			name: "resume",
 			run: func(ctx context.Context, agent *Agent, id acp.SessionId, opts ...SessionRequestOption) error {
-				_, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, "/tmp/project", opts...))
+				_, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, absTestPath("tmp", "project"), opts...))
 
 				return err
 			},
@@ -1434,7 +1447,7 @@ func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
 		{
 			name: "load",
 			run: func(ctx context.Context, agent *Agent, id acp.SessionId, opts ...SessionRequestOption) error {
-				_, err := agent.LoadSession(ctx, LoadSessionRequest(id, "/tmp/project", opts...))
+				_, err := agent.LoadSession(ctx, LoadSessionRequest(id, absTestPath("tmp", "project"), opts...))
 
 				return err
 			},
@@ -1454,7 +1467,7 @@ func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
 			})
 
 			created, err := agent.NewSession(ctx, NewSessionRequest(
-				"/tmp/project",
+				absTestPath("tmp", "project"),
 				WithSessionMCPServers(server),
 				WithSessionCodexOptions(NewCodexOptions(WithCodexMCPToolApprovalMode("auto"))),
 			))
@@ -1462,9 +1475,9 @@ func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
 			require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 				Key: SessionKey{SessionID: string(created.SessionId)},
 				Entries: []SessionStoreEntry{SessionStoreEntry(
-					`{"type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp/project"}}`,
+					`{"type":"session_meta","payload":{"id":"thread-1","cwd":` + absTestPathJSON("tmp", "project") + `}}`,
 				)},
-			}}))
+			}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 
 			client.mu.Lock()
 			client.resumes = nil
@@ -1501,14 +1514,17 @@ func TestMCPToolApprovalModeChangeForcesActiveNativeRebind(t *testing.T) {
 
 func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	ctx := context.Background()
-	store := &configurableStore{}
+	store := &configurableStore{configPresent: true}
 	agent := NewAgent(WithSessionStore(store), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newSpyCodexClient(), nil
 	}))
 
-	materializedEntries := []SessionStoreEntry{SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"agent"}]}}`)}
+	materializedEntries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"stored"}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"agent"}]}}`),
+	}
 	store.entries = materializedEntries
-	resumeResp, err := agent.ResumeSession(ctx, ResumeSessionRequest("stored", "/tmp/project"))
+	resumeResp, err := agent.ResumeSession(ctx, ResumeSessionRequest("stored", absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("ResumeSession materialized returned error: %v", err)
 	}
@@ -1516,20 +1532,20 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 		t.Fatal("ResumeSession materialized returned nil meta")
 	}
 
-	loadAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+	loadAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries, configPresent: true}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return newSpyCodexClient(), nil
 	}))
-	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("stored", "/tmp/project")); err != nil {
+	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("stored", absTestPath("tmp", "project"))); err != nil {
 		t.Fatalf("LoadSession materialized returned error: %v", err)
 	}
 
-	resumeErrAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+	resumeErrAgent := NewAgent(WithSessionStore(&configurableStore{entries: materializedEntries, configPresent: true}), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: codex.ErrThreadNotFound}, nil
 	}))
-	if _, err := resumeErrAgent.ResumeSession(ctx, ResumeSessionRequest("stored", "/tmp/project")); err == nil {
+	if _, err := resumeErrAgent.ResumeSession(ctx, ResumeSessionRequest("stored", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("ResumeSession materialized ignored resume error")
 	}
-	if _, err := resumeErrAgent.LoadSession(ctx, LoadSessionRequest("stored", "/tmp/project")); err == nil {
+	if _, err := resumeErrAgent.LoadSession(ctx, LoadSessionRequest("stored", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("LoadSession materialized ignored resume error")
 	}
 
@@ -1537,16 +1553,16 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	if err := closedMaterialized.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
-	if _, err := closedMaterialized.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := closedMaterialized.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("resumeMaterializedSession on closed agent succeeded")
 	}
-	if _, err := closedMaterialized.loadMaterializedSession(ctx, LoadSessionRequest("stored", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := closedMaterialized.loadMaterializedSession(ctx, LoadSessionRequest("stored", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("loadMaterializedSession on closed agent succeeded")
 	}
-	if _, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("bad-meta", "/tmp/project", WithSessionMeta(map[string]any{codexMetaKey: "bad"})), materializedEntries); err == nil {
+	if _, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("bad-meta", absTestPath("tmp", "project"), WithSessionMeta(map[string]any{codexMetaKey: "bad"})), materializedEntries); err == nil {
 		t.Fatal("resumeMaterializedSession accepted invalid meta")
 	}
-	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-meta", "/tmp/project", WithSessionMeta(map[string]any{codexMetaKey: "bad"})), materializedEntries); err == nil {
+	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-meta", absTestPath("tmp", "project"), WithSessionMeta(map[string]any{codexMetaKey: "bad"})), materializedEntries); err == nil {
 		t.Fatal("loadMaterializedSession accepted invalid meta")
 	}
 	origCreateRollout := createMaterializedRolloutTemp
@@ -1554,40 +1570,40 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) {
 		return nil, errors.New("create rollout failed")
 	}
-	if _, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("bad-rollout", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("bad-rollout", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("resumeMaterializedSession ignored materialize error")
 	}
-	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-rollout", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-rollout", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("loadMaterializedSession ignored materialize error")
 	}
 	createMaterializedRolloutTemp = origCreateRollout
-	if _, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("bad-mcp", "/tmp/project", WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})), materializedEntries); err == nil {
+	if _, err := agent.resumeMaterializedSession(ctx, ResumeSessionRequest("bad-mcp", absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})), materializedEntries); err == nil {
 		t.Fatal("resumeMaterializedSession accepted unsupported MCP")
 	}
-	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-mcp", "/tmp/project", WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})), materializedEntries); err == nil {
+	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-mcp", absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})), materializedEntries); err == nil {
 		t.Fatal("loadMaterializedSession accepted unsupported MCP")
 	}
 	materializedFactoryAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return nil, errors.New("materialized factory failed")
 	}))
-	if _, err := materializedFactoryAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := materializedFactoryAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("resumeMaterializedSession ignored factory error")
 	}
-	if _, err := materializedFactoryAgent.loadMaterializedSession(ctx, LoadSessionRequest("stored", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := materializedFactoryAgent.loadMaterializedSession(ctx, LoadSessionRequest("stored", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("loadMaterializedSession ignored factory error")
 	}
 	materializedLimitAgent := NewAgent(
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
 	)
-	limitSession := newSession(materializedLimitAgent, "limit", "/tmp/project", nil, codex.Thread{ID: "limit"}, newSpyCodexClient(), sessionMeta{}, nil)
+	limitSession := newSession(materializedLimitAgent, "limit", absTestPath("tmp", "project"), nil, codex.Thread{ID: "limit"}, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := materializedLimitAgent.storeStartedSession(limitSession); err != nil {
 		t.Fatalf("store materialized limit session: %v", err)
 	}
-	if _, err := materializedLimitAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := materializedLimitAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("stored", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("resumeMaterializedSession ignored store backpressure")
 	}
-	if _, err := materializedLimitAgent.loadMaterializedSession(ctx, LoadSessionRequest("stored", "/tmp/project"), materializedEntries); err == nil {
+	if _, err := materializedLimitAgent.loadMaterializedSession(ctx, LoadSessionRequest("stored", absTestPath("tmp", "project")), materializedEntries); err == nil {
 		t.Fatal("loadMaterializedSession ignored store backpressure")
 	}
 	replayErrorAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
@@ -1599,14 +1615,230 @@ func TestResumeLoadMaterializedSessionBranches(t *testing.T) {
 	})
 	if _, err := replayErrorAgent.loadMaterializedSession(
 		ctx,
-		LoadSessionRequest("replay-error", "/tmp/project"),
+		LoadSessionRequest("replay-error", absTestPath("tmp", "project")),
 		materializedEntries,
 	); err == nil {
 		t.Fatal("loadMaterializedSession ignored post-start replay error")
 	}
-	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-replay", "/tmp/project"), []SessionStoreEntry{SessionStoreEntry(`not-json`)}); err == nil {
+	if _, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("bad-replay", absTestPath("tmp", "project")), []SessionStoreEntry{SessionStoreEntry(`not-json`)}); err == nil {
 		t.Fatal("loadMaterializedSession ignored replay error")
 	}
+}
+
+func TestSessionDurabilityAndMaterializationErrorCoverage(t *testing.T) {
+	ctx := t.Context()
+	injected := errors.New("injected")
+	entries := func(id string) []SessionStoreEntry {
+		return []SessionStoreEntry{SessionStoreEntry(
+			`{"type":"session_meta","payload":{"id":"thread-` + id + `"}}`,
+		)}
+	}
+	newStore := func(id string) *coverageSessionStore {
+		return &coverageSessionStore{configurableStore: &configurableStore{
+			entries: entries(id), configPresent: true,
+		}}
+	}
+	newFactory := func(client codex.Client) Option {
+		return withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil })
+	}
+
+	activeError := func(id string, forLoad bool, configErr error, appendErr error, env map[string]string) error {
+		store := newStore(id)
+		store.configErr = configErr
+		store.appendErr = appendErr
+		client := newSpyCodexClient()
+		agent := NewAgent(WithSessionStore(store), newFactory(client))
+		meta := sessionMeta{Env: env, EnvPresent: true, ExtraPathDirs: []string{}, ExtraPathDirsPresent: true}
+		active := newSession(agent, acp.SessionId(id), absTestPath("tmp", "project"), nil,
+			codex.Thread{ID: "thread-" + id}, client, meta, nil)
+		active.fingerprint = codexSessionStartFingerprint(codexSessionStart{Cwd: absTestPath("tmp", "project"), ResumeID: id, Meta: meta})
+		if appendErr != nil {
+			active.durableConfigRevision = 1
+			active.durableConfigCommitted = false
+		}
+		require.NoError(t, agent.storeStartedSession(active))
+		t.Cleanup(active.fenceSession)
+		if forLoad {
+			_, err := agent.LoadSession(ctx, LoadSessionRequest(acp.SessionId(id), absTestPath("tmp", "project")))
+
+			return err
+		}
+		_, err := agent.ResumeSession(ctx, ResumeSessionRequest(acp.SessionId(id), absTestPath("tmp", "project")))
+
+		return err
+	}
+
+	require.ErrorIs(t, activeError("active-config-load", true, injected, nil, nil), injected)
+	require.Error(t, activeError("active-mismatch", true, nil, nil, map[string]string{"TOKEN": "active"}))
+	require.ErrorIs(t, activeError("active-load-commit", true, nil, injected, map[string]string{"TOKEN": "active"}), injected)
+	require.ErrorIs(t, activeError("active-resume-commit", false, nil, injected, nil), injected)
+
+	mcpAgent := NewAgent(WithSessionStore(newStore("mcp")), newFactory(newSpyCodexClient()))
+	_, err := mcpAgent.resumeMaterializedSession(ctx, ResumeSessionRequest(
+		"mcp", absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}),
+	), entries("mcp"))
+	require.Error(t, err)
+	_, err = mcpAgent.loadMaterializedSession(ctx, LoadSessionRequest(
+		"mcp-load", absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}),
+	), entries("mcp-load"))
+	require.Error(t, err)
+
+	hydrateEntries := []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-hydrate"}}`),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"image_generation_call","result":{"artifactSubpath":"missing"}}}`),
+	}
+	hydrateStore := newStore("hydrate")
+	hydrateStore.entries = hydrateEntries
+	hydrateAgent := NewAgent(WithSessionStore(hydrateStore), newFactory(newSpyCodexClient()))
+	_, err = hydrateAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("hydrate", absTestPath("tmp", "project")), hydrateEntries)
+	require.Error(t, err)
+
+	capacityStore := newStore("capacity")
+	capacityAgent := NewAgent(WithSessionStore(capacityStore), WithHostAuthority(newTraceAuthority(t.TempDir())), newFactory(newSpyCodexClient()))
+	capacityAgent.runtimeCleanupErr = ErrContainmentIncomplete
+	_, err = capacityAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("capacity", absTestPath("tmp", "project")), entries("capacity"))
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	loadCapacityStore := newStore("capacity-load")
+	loadCapacityAgent := NewAgent(WithSessionStore(loadCapacityStore), WithHostAuthority(newTraceAuthority(t.TempDir())), newFactory(newSpyCodexClient()))
+	loadCapacityAgent.runtimeCleanupErr = ErrContainmentIncomplete
+	_, err = loadCapacityAgent.loadMaterializedSession(ctx, LoadSessionRequest("capacity-load", absTestPath("tmp", "project")), entries("capacity-load"))
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+
+	factoryStore := newStore("factory")
+	factoryAgent := NewAgent(WithSessionStore(factoryStore), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return nil, injected
+	}))
+	_, err = factoryAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("factory", absTestPath("tmp", "project")), entries("factory"))
+	require.ErrorIs(t, err, injected)
+	loadFactoryStore := newStore("factory-load")
+	loadFactoryAgent := NewAgent(WithSessionStore(loadFactoryStore), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		return nil, injected
+	}))
+	_, err = loadFactoryAgent.loadMaterializedSession(ctx, LoadSessionRequest("factory-load", absTestPath("tmp", "project")), entries("factory-load"))
+	require.ErrorIs(t, err, injected)
+
+	originalCreate := createMaterializedRolloutTemp
+	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) { return nil, injected }
+	materializeStore := newStore("materialize")
+	materializeAgent := NewAgent(WithSessionStore(materializeStore), newFactory(newSpyCodexClient()))
+	_, err = materializeAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("materialize", absTestPath("tmp", "project")), entries("materialize"))
+	require.ErrorIs(t, err, injected)
+	loadMaterializeStore := newStore("materialize-load")
+	loadMaterializeAgent := NewAgent(WithSessionStore(loadMaterializeStore), newFactory(newSpyCodexClient()))
+	_, err = loadMaterializeAgent.loadMaterializedSession(ctx, LoadSessionRequest("materialize-load", absTestPath("tmp", "project")), entries("materialize-load"))
+	require.ErrorIs(t, err, injected)
+	createMaterializedRolloutTemp = originalCreate
+
+	limitedStore := newStore("limited")
+	limited := NewAgent(WithSessionStore(limitedStore), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), newFactory(newSpyCodexClient()))
+	require.NoError(t, limited.storeStartedSession(newSession(limited, "occupied", absTestPath("tmp", "project"), nil, codex.Thread{ID: "occupied"}, newSpyCodexClient(), sessionMeta{}, nil)))
+	_, err = limited.resumeMaterializedSession(ctx, ResumeSessionRequest("limited", absTestPath("tmp", "project")), entries("limited"))
+	require.Error(t, err)
+	loadLimitedStore := newStore("limited-load")
+	loadLimited := NewAgent(WithSessionStore(loadLimitedStore), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), newFactory(newSpyCodexClient()))
+	require.NoError(t, loadLimited.storeStartedSession(newSession(loadLimited, "occupied", absTestPath("tmp", "project"), nil, codex.Thread{ID: "occupied"}, newSpyCodexClient(), sessionMeta{}, nil)))
+	_, err = loadLimited.loadMaterializedSession(ctx, LoadSessionRequest("limited-load", absTestPath("tmp", "project")), entries("limited-load"))
+	require.Error(t, err)
+
+	replayStore := newStore("replay")
+	replayAgent := NewAgent(WithSessionStore(replayStore), newFactory(newSpyCodexClient()))
+	replayAgent.setAgentClient(&errorAgentClient{recordingAgentClient: newRecordingAgentClient(), updateErr: injected})
+	replayEntries := append(entries("replay"), SessionStoreEntry(`{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}`))
+	_, err = replayAgent.loadMaterializedSession(ctx, LoadSessionRequest("replay", absTestPath("tmp", "project")), replayEntries)
+	require.ErrorIs(t, err, injected)
+
+	pendingMetaOption := WithSessionCodexOptions(NewCodexOptions(WithCodexEnv(map[string]string{"TOKEN": "new"})))
+	resumePendingStore := newStore("resume-pending")
+	resumePendingStore.appendErr = injected
+	resumePending := NewAgent(WithSessionStore(resumePendingStore), newFactory(newSpyCodexClient()))
+	_, err = resumePending.resumeMaterializedSession(ctx, ResumeSessionRequest(
+		"resume-pending", absTestPath("tmp", "project"), pendingMetaOption,
+	), entries("resume-pending"))
+	require.ErrorIs(t, err, injected)
+
+	loadPendingStore := newStore("load-pending")
+	loadPendingStore.appendErr = injected
+	loadPending := NewAgent(WithSessionStore(loadPendingStore), newFactory(newSpyCodexClient()))
+	_, err = loadPending.loadMaterializedSession(ctx, LoadSessionRequest(
+		"load-pending", absTestPath("tmp", "project"), pendingMetaOption,
+	), entries("load-pending"))
+	require.ErrorIs(t, err, injected)
+
+	activeStore := newStore("active-rebind")
+	activeStore.appendErr = injected
+	activeClient := newSpyCodexClient()
+	activeClient.thread.ID = "thread-active-rebind"
+	activeAgent := NewAgent(WithSessionStore(activeStore), newFactory(activeClient))
+	activeAgent.runtimeClient = activeClient
+	active := newSession(activeAgent, "active-rebind", absTestPath("tmp", "project"), nil,
+		codex.Thread{ID: "thread-active-rebind"}, activeClient, sessionMeta{}, nil)
+	require.NoError(t, activeAgent.storeStartedSession(active))
+	t.Cleanup(active.fenceSession)
+	_, err = activeAgent.loadMaterializedSession(ctx, LoadSessionRequest(
+		"active-rebind", absTestPath("tmp", "project"), pendingMetaOption,
+	), entries("active-rebind"))
+	require.ErrorIs(t, err, injected)
+
+	retainedStore := newStore("retained-pending")
+	retainedStore.appendErr = injected
+	retainedClient := newSpyCodexClient()
+	retainedAgent := NewAgent(WithSessionStore(retainedStore), newFactory(retainedClient))
+	retainedAgent.runtimeClient = retainedClient
+	retained := &retainedRuntimeThread{
+		sessionID: "retained-pending", threadID: "thread-retained-pending", client: retainedClient,
+		epoch: retainedAgent.runtimeEpoch, claimed: true,
+	}
+	retainedAgent.retainedThreads[retained.sessionID] = retained
+	_, _, err = retainedAgent.resumeRetainedRuntimeSession(
+		ctx,
+		ResumeSessionRequest("retained-pending", absTestPath("tmp", "project"), pendingMetaOption),
+		sessionMeta{Env: map[string]string{"TOKEN": "new"}, EnvPresent: true, ExtraPathDirs: []string{}, ExtraPathDirsPresent: true},
+		retained,
+		loadedSessionPersistence{config: durableSessionConfig{
+			Revision: 1, Env: map[string]string{}, ExtraPathDirs: []string{},
+		}, matches: false},
+	)
+	require.ErrorIs(t, err, injected)
+}
+
+func TestMaterializedAndForkRuntimeCanaryFailures(t *testing.T) {
+	injected := errors.New("canary randomness failed")
+	originalRead := runtimeRandRead
+	runtimeRandRead = func([]byte) (int, error) { return 0, injected }
+	t.Cleanup(func() { runtimeRandRead = originalRead })
+	server := HTTPMCPServer("marker", "https://example.test/mcp", nil)
+	entries := func(id string) []SessionStoreEntry {
+		return []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-` + id + `"}}`)}
+	}
+	newAgent := func(id string) *Agent {
+		return NewAgent(
+			WithSessionStore(&configurableStore{entries: entries(id), configPresent: true}),
+			withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }),
+		)
+	}
+
+	resume := newAgent("resume-canary")
+	_, err := resume.resumeMaterializedSession(t.Context(), ResumeSessionRequest(
+		"resume-canary", absTestPath("tmp", "project"), WithSessionMCPServers(server),
+	), entries("resume-canary"))
+	require.ErrorIs(t, err, injected)
+
+	load := newAgent("load-canary")
+	_, err = load.loadMaterializedSession(t.Context(), LoadSessionRequest(
+		"load-canary", absTestPath("tmp", "project"), WithSessionMCPServers(server),
+	), entries("load-canary"))
+	require.ErrorIs(t, err, injected)
+
+	client := newSpyCodexClient()
+	forkAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+	forkAgent.runtimeClient = client
+	parent := newSession(forkAgent, "parent", absTestPath("tmp", "project"), nil, codex.Thread{ID: "parent-thread"}, client, sessionMeta{}, nil)
+	require.NoError(t, forkAgent.storeStartedSession(parent))
+	t.Cleanup(parent.fenceSession)
+	_, err = forkAgent.forkSession(t.Context(), ForkSessionRequest(
+		parent.id, absTestPath("tmp", "project"), WithSessionMCPServers(server),
+	))
+	require.ErrorIs(t, err, injected)
 }
 
 type activeRolloutPathClient struct {
@@ -1656,6 +1888,26 @@ func (c *activeRolloutPathClient) ResumeThread(ctx context.Context, req codex.Th
 	return thread, nil
 }
 
+type activeRolloutPathCalls struct {
+	resumeCount  int
+	resume       codex.ThreadResumeRequest
+	unsubscribed []string
+}
+
+// snapshot reads the recorded native calls without leaving the client mutex
+// held: a failed assertion inside a manual lock/unlock pair unwinds through
+// Goexit and would deadlock the agent close that runs during cleanup.
+func (c *activeRolloutPathClient) snapshot() activeRolloutPathCalls {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return activeRolloutPathCalls{
+		resumeCount:  c.resumeCount,
+		resume:       c.resume,
+		unsubscribed: slices.Clone(c.unsubscribed),
+	}
+}
+
 func (c *activeRolloutPathClient) RunTurn(ctx context.Context, req codex.TurnStartRequest) (codex.Turn, error) {
 	c.mu.Lock()
 	c.lastTurn = req
@@ -1674,7 +1926,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	nativeThreadID := "thread-active"
 	nativePath := filepath.Join(t.TempDir(), "native-rollout.jsonl")
 	entries := []SessionStoreEntry{
-		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active","cwd":"/tmp/project"}}`),
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active","cwd":` + absTestPathJSON("tmp", "project") + `}}`),
 		SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"before interrupt"}}`),
 	}
 	var rollout bytes.Buffer
@@ -1691,26 +1943,14 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 		nativePath:     nativePath,
 		turnStarted:    make(chan struct{}),
 	}
-	var sessionScratchAdmissions int
 	agent := NewAgent(
 		WithSessionStore(store),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
-				if kind == RuntimeResourceSession {
-					sessionScratchAdmissions++
-
-					return nil, errors.New("active thread must not materialize its mirrored rollout")
-				}
-
-				return func() {}, nil
-			},
-		}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
 	agent.setAgentClient(newRecordingAgentClient())
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
 
-	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	require.NotNil(t, active)
@@ -1724,7 +1964,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 		resp, promptErr := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "interrupted-turn", "wait"))
 		promptDone <- promptResult{resp: resp, err: promptErr}
 	}()
-	<-client.turnStarted
+	awaitTestSignal(t, client.turnStarted, "client.turnStarted")
 	active.cancelTurn()
 	result := <-promptDone
 	require.NoError(t, result.err)
@@ -1737,72 +1977,69 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, agent.activeSession(created.SessionId))
 
-	client.mu.Lock()
-	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
-	require.Zero(t, client.resumeCount)
-	client.mu.Unlock()
+	calls := client.snapshot()
+	require.Equal(t, []string{nativeThreadID}, calls.unsubscribed)
+	require.Zero(t, calls.resumeCount)
 
 	hijackID := acp.SessionId("other-logical-session")
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(hijackID)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(hijackID)},
 		Entries: entries,
-	}}))
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(hijackID, "/tmp/project"))
+	}, testDurableSessionConfigReplacement(t, hijackID, nil, nil)}))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(hijackID, absTestPath("tmp", "project")))
 	require.ErrorContains(t, err, "retained by another session")
 
 	missingIdentity := []SessionStoreEntry{SessionStoreEntry(`{"type":"event_msg","payload":{"type":"user_message","message":"missing identity"}}`)}
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: missingIdentity,
-	}}))
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, absTestPath("tmp", "project")))
 	require.ErrorContains(t, err, "thread identity is required")
 
 	wrongRetainedIdentity := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-other"}}`)}
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: wrongRetainedIdentity,
-	}}))
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, absTestPath("tmp", "project")))
 	require.ErrorContains(t, err, "does not match the retained session")
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: entries,
-	}}))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 
 	resumed, err := agent.ResumeSession(ctx, ResumeSessionRequest(
 		created.SessionId,
-		"/tmp/project",
-		WithSessionAdditionalDirectories("/tmp/additional"),
+		absTestPath("tmp", "project"),
+		WithSessionAdditionalDirectories(absTestPath("tmp", "additional")),
 	))
 	require.NoError(t, err)
 	require.NotNil(t, resumed.Meta)
 	resumedActive := agent.activeSession(created.SessionId)
 	require.NotNil(t, resumedActive)
 	require.NotSame(t, active, resumedActive)
-	require.Zero(t, sessionScratchAdmissions)
 
-	client.mu.Lock()
-	require.Equal(t, 1, client.resumeCount)
-	require.Equal(t, nativeThreadID, client.resume.ThreadID)
-	require.Equal(t, nativePath, client.resume.Path)
-	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
-	client.mu.Unlock()
+	calls = client.snapshot()
+	require.Equal(t, 1, calls.resumeCount)
+	require.Equal(t, nativeThreadID, calls.resume.ThreadID)
+	require.Equal(t, nativePath, calls.resume.Path)
+	require.Equal(t, []string{nativeThreadID}, calls.unsubscribed)
 
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(
 		created.SessionId,
-		"/tmp/project",
-		WithSessionAdditionalDirectories("/tmp/load"),
+		absTestPath("tmp", "project"),
+		WithSessionAdditionalDirectories(absTestPath("tmp", "load")),
 	))
 	require.NoError(t, err)
 	require.Same(t, resumedActive, agent.activeSession(created.SessionId))
-	require.Zero(t, sessionScratchAdmissions)
 
-	client.mu.Lock()
-	require.Equal(t, 2, client.resumeCount)
-	require.Equal(t, nativePath, client.resume.Path)
-	require.Equal(t, []string{nativeThreadID}, client.unsubscribed)
-	client.mu.Unlock()
+	// The active rebind drops the thread from the app-server before resuming it,
+	// because Codex ignores resume overrides for a thread it still holds loaded.
+	calls = client.snapshot()
+	require.Equal(t, 2, calls.resumeCount)
+	require.Equal(t, nativePath, calls.resume.Path)
+	require.Equal(t, []string{nativeThreadID, nativeThreadID}, calls.unsubscribed)
 
 	agent.setAgentClient(&errorAgentClient{
 		recordingAgentClient: newRecordingAgentClient(),
@@ -1810,29 +2047,28 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	})
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(
 		created.SessionId,
-		"/tmp/project",
-		WithSessionAdditionalDirectories("/tmp/replay-error"),
+		absTestPath("tmp", "project"),
+		WithSessionAdditionalDirectories(absTestPath("tmp", "replay-error")),
 	))
 	require.ErrorContains(t, err, "replay update failed")
 	agent.setAgentClient(newRecordingAgentClient())
 
 	wrongEntries := []SessionStoreEntry{
-		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-other","cwd":"/tmp/project"}}`),
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-other","cwd":` + absTestPathJSON("tmp", "project") + `}}`),
 	}
 	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
 		Key:     SessionKey{SessionID: string(created.SessionId)},
 		Entries: wrongEntries,
-	}}))
+	}, testDurableSessionConfigReplacement(t, created.SessionId, nil, nil)}))
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(
 		created.SessionId,
-		"/tmp/project",
-		WithSessionAdditionalDirectories("/tmp/different"),
+		absTestPath("tmp", "project"),
+		WithSessionAdditionalDirectories(absTestPath("tmp", "different")),
 	))
 	require.ErrorContains(t, err, "stored Codex thread does not match the active session")
 
-	client.mu.Lock()
-	require.Equal(t, 3, client.resumeCount, "wrong-thread snapshot reached Codex")
-	client.mu.Unlock()
+	calls = client.snapshot()
+	require.Equal(t, 3, calls.resumeCount, "wrong-thread snapshot reached Codex")
 }
 
 type activeRebindEdgeClient struct {
@@ -1903,10 +2139,10 @@ func (c *loadedThreadCarrierClient) ResumeThread(ctx context.Context, req codex.
 func TestActiveStoredRebindFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
-	params := ResumeSessionRequest("session", "/tmp/project")
+	params := ResumeSessionRequest("session", absTestPath("tmp", "project"))
 
 	bind := func(agent *Agent, client codex.Client) *session {
-		active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+		active := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{
 			ID:   "thread-active",
 			Path: "/native/rollout.jsonl",
 		}, client, sessionMeta{}, nil)
@@ -1936,6 +2172,8 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		client := newSpyCodexClient()
 		agent := NewAgent()
 		bind(agent, client)
+		appendTestDurableSessionConfig(t, agent.options.SessionStore, "session", nil, nil)
+
 		_, err := agent.resumeMaterializedSession(ctx, params, entries)
 		require.NoError(t, err)
 	})
@@ -1962,11 +2200,28 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		client := newSpyCodexClient()
 		agent := NewAgent()
 		active := bind(agent, client)
-		invalid := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(acp.McpServer{
+		invalid := ResumeSessionRequest("session", absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{
 			Sse: &acp.McpServerSseInline{Name: "removed"},
 		}))
 		_, err := agent.rebindActiveStoredSession(ctx, invalid, entries, sessionMeta{}, active)
 		require.Error(t, err)
+	})
+
+	t.Run("unsubscribe failure keeps the thread loaded", func(t *testing.T) {
+		client := &errorCodexClient{
+			spyCodexClient: newSpyCodexClient(),
+			unsubscribeErr: errors.New("unsubscribe failed"),
+		}
+		agent := NewAgent()
+		active := bind(agent, client)
+		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
+		require.ErrorContains(t, err, "unsubscribe failed")
+		require.Empty(t, client.resume.ThreadID)
+
+		active.mu.Lock()
+		dead := active.clientDead
+		active.mu.Unlock()
+		require.False(t, dead)
 	})
 
 	t.Run("native resume failure", func(t *testing.T) {
@@ -1975,6 +2230,13 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		active := bind(agent, client)
 		_, err := agent.rebindActiveStoredSession(ctx, params, entries, sessionMeta{}, active)
 		require.ErrorContains(t, err, "resume failed")
+
+		// The thread was dropped from the app-server before the resume, so the
+		// dead mark is what makes the next request revive it.
+		active.mu.Lock()
+		dead := active.clientDead
+		active.mu.Unlock()
+		require.True(t, dead)
 	})
 
 	for _, tc := range []struct {
@@ -2028,7 +2290,7 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		}
 		agent := NewAgent()
 		active := bind(agent, client)
-		withMCP := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(
+		withMCP := ResumeSessionRequest("session", absTestPath("tmp", "project"), WithSessionMCPServers(
 			HTTPMCPServer("marker", "https://example.test/mcp", nil),
 		))
 		_, err := agent.rebindActiveStoredSession(ctx, withMCP, entries, sessionMeta{}, active)
@@ -2079,7 +2341,7 @@ func TestSameFingerprintResumeAndLoadShareActiveTurnAdmission(t *testing.T) {
 					foregroundCleanup = beginTestPromptTurn(t, s, "live-foreground", "foreground-turn")
 					defer foregroundCleanup()
 				} else {
-					agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}}
+					agent.lifecycle = lifecycle.Negotiated{Version: 1}
 					require.NoError(t, s.openLifecycleStream(t.Context(), agent.lifecycle))
 					s.lifecycleMu.Lock()
 					var err error
@@ -2127,7 +2389,7 @@ func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
 	}
 
 	agent := NewAgent()
-	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+	active := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{
 		ID: "thread-active", Path: "/native/rollout.jsonl",
 	}, client, sessionMeta{
 		Env:           map[string]string{"WAGIE_API_TOKEN": "old-token"},
@@ -2144,7 +2406,7 @@ func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
 	_, err := agent.rebindActiveStoredSession(
 		context.Background(),
-		ResumeSessionRequest("session", "/tmp/project"),
+		ResumeSessionRequest("session", absTestPath("tmp", "project")),
 		entries,
 		meta,
 		active,
@@ -2177,7 +2439,7 @@ func TestActiveRebindAppliesCarrierWithoutDetachingBroker(t *testing.T) {
 	client.thread.Path = "/native/rollout.jsonl"
 
 	agent := NewAgent()
-	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+	active := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{
 		ID: "thread-active", Path: client.thread.Path,
 	}, client, sessionMeta{
 		Env:           cloneStringMap(client.environment),
@@ -2190,7 +2452,7 @@ func TestActiveRebindAppliesCarrierWithoutDetachingBroker(t *testing.T) {
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
 	_, err := agent.rebindActiveStoredSession(
 		context.Background(),
-		ResumeSessionRequest("session", "/tmp/project"),
+		ResumeSessionRequest("session", absTestPath("tmp", "project")),
 		entries,
 		sessionMeta{
 			Env:           map[string]string{"WAGIE_OPERATION_ID": "operation-new"},
@@ -2210,7 +2472,7 @@ func TestActiveRebindAppliesCarrierWithoutDetachingBroker(t *testing.T) {
 func TestActiveRebindMaintainsExactBrokerDuringResume(t *testing.T) {
 	client := &joinedRebindClient{spyCodexClient: newSpyCodexClient(), checked: make(chan error, 1)}
 	agent := NewAgent()
-	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+	active := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{
 		ID: "thread-active", Path: "/native/rollout.jsonl",
 	}, client, sessionMeta{}, nil)
 	client.active = active
@@ -2221,12 +2483,12 @@ func TestActiveRebindMaintainsExactBrokerDuringResume(t *testing.T) {
 
 	_, err := agent.rebindActiveStoredSession(
 		context.Background(),
-		ResumeSessionRequest("session", "/tmp/project"),
+		ResumeSessionRequest("session", absTestPath("tmp", "project")),
 		[]SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)},
 		sessionMeta{}, active,
 	)
 	require.NoError(t, err)
-	require.NoError(t, <-client.checked)
+	require.NoError(t, awaitTestSignal(t, client.checked, "client.checked"))
 	active.lifecycleMu.Lock()
 	require.True(t, active.nativeEventSource)
 	require.True(t, active.nativeEventPumping)
@@ -2257,7 +2519,7 @@ func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
 		}
 
 		agent := NewAgent()
-		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+		agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 		s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread-active"}, newSpyCodexClient(), sessionMeta{}, nil)
 		require.Error(t, s.beginActiveNativeRebind(t.Context()), "an unopened negotiated lifecycle is pending establishment work")
 	})
@@ -2265,7 +2527,7 @@ func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
 	t.Run("agent event wins", func(t *testing.T) {
 		agent := NewAgent()
 		agent.options.SessionStore = nil
-		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+		agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 		agent.setAgentClient(newRecordingAgentClient())
 		client := newSpyCodexClient()
 		s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread-active"}, client, sessionMeta{}, nil)
@@ -2306,7 +2568,7 @@ func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
 
 		agent := NewAgent()
 		agent.options.SessionStore = nil
-		agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+		agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 		recorder := newRecordingAgentClient()
 		agent.setAgentClient(recorder)
 		s := newSession(agent, "session", t.TempDir(), nil, client.thread, client, sessionMeta{}, nil)
@@ -2374,7 +2636,7 @@ func recorderHasAgentText(recorder *recordingAgentClient, text string) bool {
 func TestRuntimeCrashRecoveryPreservesRotatedThreadCarrier(t *testing.T) {
 	rotatedPath := filepath.Join(t.TempDir(), "rotated-bin")
 	agent := NewAgent()
-	session := newSession(agent, "session", "/tmp/project", nil, codex.Thread{
+	session := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{
 		ID: "thread-active", Path: "/native/rollout.jsonl",
 	}, newSpyCodexClient(), sessionMeta{
 		Env: map[string]string{
@@ -2444,10 +2706,11 @@ func TestForkAppliesChildThreadCarrierToForkAndResume(t *testing.T) {
 func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
-	params := ResumeSessionRequest("session", "/tmp/project")
+	params := ResumeSessionRequest("session", absTestPath("tmp", "project"))
 
 	fixture := func(client codex.Client) (*Agent, *retainedRuntimeThread) {
 		agent := NewAgent()
+		appendTestDurableSessionConfig(t, agent.options.SessionStore, "session", nil, nil)
 		agent.runtimeClient = client
 		agent.runtimeEpoch = 9
 		retained := &retainedRuntimeThread{
@@ -2465,7 +2728,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 
 	t.Run("MCP validation", func(t *testing.T) {
 		agent, retained := fixture(newSpyCodexClient())
-		invalid := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(acp.McpServer{
+		invalid := ResumeSessionRequest("session", absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{
 			Sse: &acp.McpServerSseInline{Name: "removed"},
 		}))
 		_, _, err := agent.resumeRetainedRuntimeSession(ctx, invalid, sessionMeta{}, retained)
@@ -2541,7 +2804,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 			events:                 []codex.Event{{Kind: codex.EventCompleted}},
 		}
 		agent, retained := fixture(client)
-		withMCP := ResumeSessionRequest("session", "/tmp/project", WithSessionMCPServers(
+		withMCP := ResumeSessionRequest("session", absTestPath("tmp", "project"), WithSessionMCPServers(
 			HTTPMCPServer("marker", "https://example.test/mcp", nil),
 		))
 		_, _, err := agent.resumeRetainedRuntimeSession(ctx, withMCP, sessionMeta{}, retained)
@@ -2615,7 +2878,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 			recordingAgentClient: newRecordingAgentClient(),
 			updateErr:            errors.New("retained replay failed"),
 		})
-		_, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("session", "/tmp/project"), loadEntries)
+		_, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("session", absTestPath("tmp", "project")), loadEntries)
 		require.ErrorContains(t, err, "retained replay failed")
 
 		client = &activeRebindEdgeClient{
@@ -2627,7 +2890,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 		agent, retained = fixture(client)
 		retained.claimed = false
 		agent.setAgentClient(newRecordingAgentClient())
-		_, err = agent.loadMaterializedSession(ctx, LoadSessionRequest("session", "/tmp/project"), loadEntries)
+		_, err = agent.loadMaterializedSession(ctx, LoadSessionRequest("session", absTestPath("tmp", "project")), loadEntries)
 		require.NoError(t, err)
 	})
 
@@ -2636,14 +2899,14 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 		agent, retained := fixture(client)
 		retained.claimed = false
 		wrong := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"wrong"}}`)}
-		_, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("session", "/tmp/project"), wrong)
+		_, err := agent.loadMaterializedSession(ctx, LoadSessionRequest("session", absTestPath("tmp", "project")), wrong)
 		require.ErrorContains(t, err, "does not match")
 
 		agent, retained = fixture(client)
 		retained.claimed = false
 		_, err = agent.loadMaterializedSession(ctx, LoadSessionRequest(
 			"session",
-			"/tmp/project",
+			absTestPath("tmp", "project"),
 			WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "removed"}}),
 		), entries)
 		require.Error(t, err)
@@ -2709,7 +2972,7 @@ func (c *blockingLifecycleCodexClient) resumeCallCount() int {
 
 func TestCloseSessionSerializesRetainedResume(t *testing.T) {
 	ctx := context.Background()
-	store := &configurableStore{}
+	store := &configurableStore{configPresent: true}
 	client := &blockingLifecycleCodexClient{
 		spyCodexClient:     newSpyCodexClient(),
 		unsubscribeStarted: make(chan struct{}),
@@ -2720,7 +2983,7 @@ func TestCloseSessionSerializesRetainedResume(t *testing.T) {
 		WithSessionStore(store),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
 	)
-	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	store.entries = []SessionStoreEntry{SessionStoreEntry(fmt.Sprintf(
 		`{"type":"session_meta","payload":{"id":%q}}`, client.thread.ID,
@@ -2731,15 +2994,15 @@ func TestCloseSessionSerializesRetainedResume(t *testing.T) {
 		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: created.SessionId})
 		closeResult <- closeErr
 	}()
-	<-client.unsubscribeStarted
+	awaitTestSignal(t, client.unsubscribeStarted, "client.unsubscribeStarted")
 
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, absTestPath("tmp", "project")))
 	require.ErrorContains(t, err, "session close in progress")
 	require.Zero(t, client.resumeCallCount())
 
 	close(client.unsubscribeRelease)
 	require.NoError(t, <-closeResult)
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, "/tmp/project"))
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(created.SessionId, absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	require.Equal(t, 1, client.resumeCallCount())
 	client.mu.Lock()
@@ -2753,7 +3016,7 @@ func TestCloseSessionUnsubscribeFailureKeepsOwnership(t *testing.T) {
 	client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), unsubscribeErr: errors.New("unsubscribe failed")}
 	client.thread.Path = "/native/rollout.jsonl"
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	created, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	materialized, err := materializeRollout(t.TempDir(), []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta"}`)})
@@ -2802,10 +3065,10 @@ func retainedConcurrencyFixture(store SessionStore, client codex.Client) (*Agent
 func TestRetainedRuntimeClaimSerializesResumeAndDelete(t *testing.T) {
 	ctx := context.Background()
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-active"}}`)}
-	params := ResumeSessionRequest("session", "/tmp/project")
+	params := ResumeSessionRequest("session", absTestPath("tmp", "project"))
 
 	t.Run("double resume and delete lose to claimed resume", func(t *testing.T) {
-		store := &configurableStore{entries: entries}
+		store := &configurableStore{entries: entries, configPresent: true}
 		client := &blockingLifecycleCodexClient{
 			spyCodexClient: newSpyCodexClient(),
 			resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
@@ -2818,7 +3081,7 @@ func TestRetainedRuntimeClaimSerializesResumeAndDelete(t *testing.T) {
 			_, resumeErr := agent.ResumeSession(ctx, params)
 			firstResult <- resumeErr
 		}()
-		<-client.resumeStarted
+		awaitTestSignal(t, client.resumeStarted, "client.resumeStarted")
 
 		_, err := agent.ResumeSession(ctx, params)
 		require.ErrorContains(t, err, "lifecycle is already in progress")
@@ -2885,6 +3148,7 @@ func TestDeleteBeatsALoadAlreadyPastItsEntryCheck(t *testing.T) {
 	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
 		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"session"}}`),
 	}))
+	appendTestDurableSessionConfig(t, store, "session", nil, nil)
 
 	client := &blockingLifecycleCodexClient{
 		spyCodexClient: newSpyCodexClient(),
@@ -2901,7 +3165,7 @@ func TestDeleteBeatsALoadAlreadyPastItsEntryCheck(t *testing.T) {
 		loaded <- loadErr
 	}()
 
-	prepared := <-client.resumeStarted
+	prepared := awaitTestSignal(t, client.resumeStarted, "client.resumeStarted")
 	require.NotEmpty(t, prepared.Path, "the load materialized a rollout before its native resume")
 	require.FileExists(t, prepared.Path)
 
@@ -2935,7 +3199,7 @@ func TestSessionLifecycleGuardBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
 	client := newSpyCodexClient()
-	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
+	active := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
 	agent.sessions[active.id] = active
 
 	require.NoError(t, agent.validateSessionLifecycle(active.id, active))
@@ -2961,7 +3225,7 @@ func TestSessionLifecycleGuardBranches(t *testing.T) {
 	_, err = agent.beginSessionDelete(active.id)
 	require.ErrorContains(t, err, "session close in progress")
 	require.ErrorContains(t, agent.validateSessionLifecycle(active.id, active), "session close in progress")
-	_, err = agent.LoadSession(ctx, LoadSessionRequest(active.id, "/tmp/project"))
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(active.id, absTestPath("tmp", "project")))
 	require.ErrorContains(t, err, "session close in progress")
 	active.closing = false
 
@@ -2983,7 +3247,7 @@ func TestSessionLifecycleGuardBranches(t *testing.T) {
 
 func TestAcquireSessionLifecycleRevalidatesAfterWaiting(t *testing.T) {
 	agent := NewAgent()
-	active := newSession(agent, "session", "/tmp/project", nil, codex.Thread{ID: "thread"}, newSpyCodexClient(), sessionMeta{}, nil)
+	active := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread"}, newSpyCodexClient(), sessionMeta{}, nil)
 	agent.sessions[active.id] = active
 
 	// Hold both locks that follow the initial Agent lookup. Observing Agent.mu
@@ -3046,7 +3310,7 @@ func TestRetainedResumeRollbackUnsubscribeFailureStaysClaimed(t *testing.T) {
 
 	_, _, err := agent.resumeRetainedRuntimeSession(
 		ctx,
-		ResumeSessionRequest(retained.sessionID, "/tmp/project"),
+		ResumeSessionRequest(retained.sessionID, absTestPath("tmp", "project")),
 		sessionMeta{},
 		retained,
 	)
@@ -3063,20 +3327,20 @@ func TestRetainedResumeRollbackUnsubscribeFailureStaysClaimed(t *testing.T) {
 func TestForkSessionErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return newSpyCodexClient(), nil }))
-	if _, err := agent.forkSession(ctx, ForkSessionRequest("missing", "/tmp/project")); err == nil {
+	if _, err := agent.forkSession(ctx, ForkSessionRequest("missing", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("forkSession accepted missing parent")
 	}
-	parentResp, parentErr := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	parentResp, parentErr := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if parentErr != nil {
 		t.Fatalf("NewSession parent returned error: %v", parentErr)
 	}
 	if _, err := agent.forkSession(ctx, ForkSessionRequest(parentResp.SessionId, "relative")); err == nil {
 		t.Fatal("forkSession accepted relative cwd")
 	}
-	if _, err := agent.forkSession(ctx, ForkSessionRequest(parentResp.SessionId, "/tmp/project", WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
+	if _, err := agent.forkSession(ctx, ForkSessionRequest(parentResp.SessionId, absTestPath("tmp", "project"), WithSessionMeta(map[string]any{codexMetaKey: "bad"}))); err == nil {
 		t.Fatal("forkSession accepted invalid meta")
 	}
-	if _, err := agent.forkSession(ctx, ForkSessionRequest(parentResp.SessionId, "/tmp/project", WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}))); err == nil {
+	if _, err := agent.forkSession(ctx, ForkSessionRequest(parentResp.SessionId, absTestPath("tmp", "project"), WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}}))); err == nil {
 		t.Fatal("forkSession accepted unsupported MCP")
 	}
 
@@ -3084,22 +3348,22 @@ func TestForkSessionErrorBranches(t *testing.T) {
 	factoryErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return nil, errors.New("fork factory failed")
 	}))
-	factoryParent := newSession(factoryErrAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
+	factoryParent := newSession(factoryErrAgent, "parent", absTestPath("tmp", "project"), nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := factoryErrAgent.storeStartedSession(factoryParent); err != nil {
 		t.Fatalf("store factory parent: %v", err)
 	}
-	if _, err := factoryErrAgent.forkSession(ctx, ForkSessionRequest("parent", "/tmp/project")); err == nil {
+	if _, err := factoryErrAgent.forkSession(ctx, ForkSessionRequest("parent", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("forkSession ignored factory error")
 	}
 
 	forkErrAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
 		return &errorCodexClient{spyCodexClient: newSpyCodexClient(), forkErr: codex.ErrThreadNotFound}, nil
 	}))
-	forkParent := newSession(forkErrAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
+	forkParent := newSession(forkErrAgent, "parent", absTestPath("tmp", "project"), nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := forkErrAgent.storeStartedSession(forkParent); err != nil {
 		t.Fatalf("store fork parent: %v", err)
 	}
-	if _, err := forkErrAgent.forkSession(ctx, ForkSessionRequest("parent", "/tmp/project")); err == nil {
+	if _, err := forkErrAgent.forkSession(ctx, ForkSessionRequest("parent", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("forkSession ignored fork error")
 	}
 
@@ -3110,10 +3374,10 @@ func TestForkSessionErrorBranches(t *testing.T) {
 		return resumeFailureClient, nil
 	}))
 	resumeFailureParent := newSession(
-		resumeFailureAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil,
+		resumeFailureAgent, "parent", absTestPath("tmp", "project"), nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil,
 	)
 	require.NoError(t, resumeFailureAgent.storeStartedSession(resumeFailureParent))
-	_, resumeFailureErr := resumeFailureAgent.forkSession(ctx, ForkSessionRequest("parent", "/tmp/project"))
+	_, resumeFailureErr := resumeFailureAgent.forkSession(ctx, ForkSessionRequest("parent", absTestPath("tmp", "project")))
 	require.ErrorContains(t, resumeFailureErr, "child resume failed")
 	resumeFailureClient.mu.Lock()
 	require.Equal(t, []string{"fork-thread"}, resumeFailureClient.deletedThreads)
@@ -3124,11 +3388,11 @@ func TestForkSessionErrorBranches(t *testing.T) {
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}),
 		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return limitClient, nil }),
 	)
-	limitParent := newSession(limitAgent, "parent", "/tmp/project", nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
+	limitParent := newSession(limitAgent, "parent", absTestPath("tmp", "project"), nil, parentThread, newSpyCodexClient(), sessionMeta{}, nil)
 	if err := limitAgent.storeStartedSession(limitParent); err != nil {
 		t.Fatalf("store limit parent: %v", err)
 	}
-	if _, err := limitAgent.forkSession(ctx, ForkSessionRequest("parent", "/tmp/project")); err == nil {
+	if _, err := limitAgent.forkSession(ctx, ForkSessionRequest("parent", absTestPath("tmp", "project"))); err == nil {
 		t.Fatal("forkSession ignored store backpressure")
 	}
 	limitClient.mu.Lock()
@@ -3207,7 +3471,7 @@ func boundEstablishmentContext(t *testing.T) context.Context {
 }
 
 func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
-	negotiated := lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}`)}
 
 	t.Run("new", func(t *testing.T) {
@@ -3236,6 +3500,7 @@ func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
 		t.Run(operation.name, func(t *testing.T) {
 			client := newSpyCodexClient()
 			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
+			appendTestDurableSessionConfig(t, agent.options.SessionStore, "stored", nil, nil)
 			agent.lifecycle = negotiated
 			require.ErrorContains(t, operation.run(agent, boundEstablishmentContext(t)), "changed owner")
 		})
@@ -3279,7 +3544,7 @@ func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
 func TestRetainedResumeRollbackJoinsLifecycleRebindFailure(t *testing.T) {
 	client := &ambiguousCanaryFailureClient{runtimeRecordingClient: newRuntimeRecordingClient()}
 	agent := NewAgent()
-	agent.lifecycle = lifecycle.Negotiated{Versions: []int{1}, ActivityKinds: []lifecycle.ActivityKind{}}
+	agent.lifecycle = lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
 	agent.runtimeClient = client
 	retained := &retainedRuntimeThread{sessionID: "stored", threadID: "thread", client: client, claimed: true}
 	agent.retainedThreads[retained.sessionID] = retained
@@ -3380,7 +3645,7 @@ func TestCloseSessionRetriesRetainedRegistryPublication(t *testing.T) {
 func TestSessionHelperBranches(t *testing.T) {
 	agent := NewAgent()
 	start := codexSessionStart{
-		Cwd: "/tmp/project",
+		Cwd: absTestPath("tmp", "project"),
 		McpServers: []acp.McpServer{
 			HTTPMCPServer("z", "https://z.example", nil),
 			StdioMCPServer("a", "cmd", nil, nil),
@@ -3465,7 +3730,7 @@ func TestDeleteRetryAndConfigBranches(t *testing.T) {
 
 	configClient := newSpyCodexClient()
 	configAgent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return configClient, nil }))
-	resp, err := configAgent.NewSession(ctx, NewSessionRequest("/tmp/project", WithSessionCodexOptions(CodexOptions{ServiceTier: "flex", Personality: "friendly"})))
+	resp, err := configAgent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project"), WithSessionCodexOptions(CodexOptions{ServiceTier: "flex", Personality: "friendly"})))
 	if err != nil {
 		t.Fatalf("config NewSession returned error: %v", err)
 	}
@@ -3546,11 +3811,31 @@ func mapsEqual(got any, want map[string]any) bool {
 }
 
 type configurableStore struct {
-	entries   []SessionStoreEntry
-	summaries []SessionSummary
-	loadErr   error
-	listErr   error
-	deleteErr error
+	entries       []SessionStoreEntry
+	configEntries []SessionStoreEntry
+	configPresent bool
+	summaries     []SessionSummary
+	loadErr       error
+	listErr       error
+	deleteErr     error
+}
+
+type coverageSessionStore struct {
+	*configurableStore
+	configErr error
+	appendErr error
+}
+
+func (s *coverageSessionStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	if key.Subpath == sessionConfigStoreSubpath && s.configErr != nil {
+		return nil, s.configErr
+	}
+
+	return s.configurableStore.Load(ctx, key)
+}
+
+func (s *coverageSessionStore) Append(context.Context, SessionKey, []SessionStoreEntry) error {
+	return s.appendErr
 }
 
 type blockingDeleteSessionStore struct {
@@ -3574,9 +3859,30 @@ func (s *configurableStore) Append(context.Context, SessionKey, []SessionStoreEn
 	return nil
 }
 
-func (s *configurableStore) Load(context.Context, SessionKey) ([]SessionStoreEntry, error) {
+func (s *configurableStore) Load(_ context.Context, key SessionKey) ([]SessionStoreEntry, error) {
 	if s.loadErr != nil {
 		return nil, s.loadErr
+	}
+	if key.Subpath == sessionConfigStoreSubpath {
+		if !s.configPresent {
+			return nil, nil
+		}
+		if s.configEntries != nil {
+			return cloneStoreEntries(s.configEntries), nil
+		}
+
+		entry, err := json.Marshal(durableSessionConfig{
+			Version:       sessionConfigVersion,
+			SessionID:     key.SessionID,
+			Revision:      1,
+			Env:           map[string]string{},
+			ExtraPathDirs: []string{},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return []SessionStoreEntry{entry}, nil
 	}
 
 	return cloneStoreEntries(s.entries), nil
@@ -3613,7 +3919,7 @@ func (c *cancelErrorClient) CancelTurn(context.Context, string, string) error {
 
 func TestListSessionsListsStoreBackedSessionsWithoutCwd(t *testing.T) {
 	agent := NewAgent(WithSessionStore(&configurableStore{summaries: []SessionSummary{
-		{SessionID: "stored-a", Cwd: "/tmp/project-a", UpdatedAtUnixMilli: 2},
+		{SessionID: "stored-a", Cwd: absTestPath("tmp", "project-a"), UpdatedAtUnixMilli: 2},
 		{SessionID: "stored-b", Cwd: "", UpdatedAtUnixMilli: 1},
 	}}))
 
@@ -3625,7 +3931,7 @@ func TestListSessionsListsStoreBackedSessionsWithoutCwd(t *testing.T) {
 		t.Fatalf("store-backed sessions without cwd = %#v", resp.Sessions)
 	}
 
-	cwd := "/tmp/project-a"
+	cwd := absTestPath("tmp", "project-a")
 	filtered, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{Cwd: &cwd})
 	if err != nil {
 		t.Fatalf("ListSessions with cwd returned error: %v", err)
@@ -3634,7 +3940,7 @@ func TestListSessionsListsStoreBackedSessionsWithoutCwd(t *testing.T) {
 		t.Fatalf("cwd filter must retain empty-cwd summaries, got %#v", filtered.Sessions)
 	}
 
-	other := "/tmp/other"
+	other := absTestPath("tmp", "other")
 	otherFiltered, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{Cwd: &other})
 	if err != nil {
 		t.Fatalf("ListSessions with other cwd returned error: %v", err)

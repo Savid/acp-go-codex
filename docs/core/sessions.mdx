@@ -82,7 +82,10 @@ When a lifecycle request refreshes configuration for a session whose native
 thread is still owned by the current app-server, the adapter rebinds that same
 thread at its owned native rollout path. This applies both to an active wrapper
 session and to a thread retained after `session/close`. It never materializes
-the mirror as a second rollout. The native thread ID in the stored
+the mirror as a second rollout. Codex ignores `thread/resume` overrides for a
+thread its app-server still holds loaded, so an active rebind drops the thread
+from the app-server before resuming it; admission already holds the session's
+turn, so no native turn runs across the drop. The native thread ID in the stored
 `session_meta` row must match the active or retained thread; a mismatch is
 rejected before Codex is called.
 

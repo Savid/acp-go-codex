@@ -1,201 +1,278 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"os"
-	"os/exec"
+	"io"
 	"path/filepath"
-	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/savid/acp-go-codex/internal/homelock"
+	"github.com/stretchr/testify/require"
 )
 
-func TestProbeVersionFailureBranches(t *testing.T) {
-	originalSupervisor := versionSupervisorCommand
-	originalStart := versionStartProcess
-	originalPipe := supervisorPipe
-	t.Cleanup(func() {
-		versionSupervisorCommand = originalSupervisor
-		versionStartProcess = originalStart
-		supervisorPipe = originalPipe
+type prefixBlockingReadCloser struct {
+	prefix  *bytes.Reader
+	blocked *blockingAuthorityReadCloser
+}
+
+func newPrefixBlockingReadCloser(prefix string) *prefixBlockingReadCloser {
+	return &prefixBlockingReadCloser{
+		prefix: bytes.NewReader([]byte(prefix)), blocked: newBlockingAuthorityReadCloser(),
+	}
+}
+
+func (r *prefixBlockingReadCloser) Read(value []byte) (int, error) {
+	if r.prefix.Len() > 0 {
+		return r.prefix.Read(value)
+	}
+
+	return r.blocked.Read(value)
+}
+
+func (r *prefixBlockingReadCloser) Close() error { return r.blocked.Close() }
+
+type snapshotVersionProcess struct {
+	stdin  io.WriteCloser
+	stdout *prefixBlockingReadCloser
+	stderr *blockingAuthorityReadCloser
+
+	settleOnRevoke bool
+	terminal       atomic.Bool
+	stdinCalls     atomic.Int32
+	stdoutCalls    atomic.Int32
+	stderrCalls    atomic.Int32
+	waits          atomic.Int32
+	revokes        atomic.Int32
+}
+
+func (p *snapshotVersionProcess) Stdin() io.WriteCloser {
+	p.stdinCalls.Add(1)
+
+	return p.stdin
+}
+func (p *snapshotVersionProcess) Stdout() io.ReadCloser {
+	p.stdoutCalls.Add(1)
+
+	return p.stdout
+}
+func (p *snapshotVersionProcess) Stderr() io.ReadCloser {
+	p.stderrCalls.Add(1)
+
+	return p.stderr
+}
+func (p *snapshotVersionProcess) Wait(ctx context.Context) (NativeResult, error) {
+	p.waits.Add(1)
+	if p.terminal.Load() {
+		return NativeResult{Revoked: true}, nil
+	}
+
+	<-ctx.Done()
+
+	return NativeResult{}, ctx.Err()
+}
+func (p *snapshotVersionProcess) Revoke(ctx context.Context) error {
+	p.revokes.Add(1)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		panic("version revoke did not have a deadline")
+	}
+	if p.settleOnRevoke {
+		p.terminal.Store(true)
+		p.stdout.blocked.release()
+		p.stderr.release()
+	}
+
+	return nil
+}
+
+type orderedVersionReadCloser struct {
+	name  string
+	calls *[]string
+}
+
+type errorVersionWriteCloser struct{ err error }
+
+func (*errorVersionWriteCloser) Write(value []byte) (int, error) { return len(value), nil }
+func (w *errorVersionWriteCloser) Close() error                  { return w.err }
+
+func (*orderedVersionReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
+func (r *orderedVersionReadCloser) Close() error {
+	*r.calls = append(*r.calls, r.name+"-close")
+
+	return nil
+}
+
+func TestTerminalVersionProbeDrainsBufferedOutputBeforeClosingReaders(t *testing.T) {
+	calls := []string{}
+	stdoutDone := make(chan error)
+	stderrDone := make(chan error)
+	go func() {
+		calls = append(calls, "stdout-buffer-drained")
+		stdoutDone <- nil
+		calls = append(calls, "stderr-buffer-drained")
+		stderrDone <- nil
+	}()
+
+	err := settleVersionProbePipes(
+		true,
+		&orderedVersionReadCloser{name: "stdout", calls: &calls},
+		&orderedVersionReadCloser{name: "stderr", calls: &calls},
+		stdoutDone,
+		stderrDone,
+	)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"stdout-buffer-drained", "stderr-buffer-drained"}, calls[:2])
+	require.Equal(t, []string{"stdout-close", "stderr-close"}, calls[2:])
+}
+
+func TestProbeVersionOrdinaryBackend(t *testing.T) {
+	script := writeFakeCLI(t, t.TempDir(), "codex", fakeCLIVersionOnly)
+	version, err := ProbeVersion(t.Context(), VersionProbeOptions{
+		CLIPath: script, ScratchParent: t.TempDir(), ImplicitEnvironment: map[string]string{"PATH": "/bin"},
 	})
-	if _, err := ProbeVersion(context.Background(), VersionProbeOptions{
-		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 1},
-	}); err == nil || !strings.Contains(err.Error(), "base environment") {
-		t.Fatalf("version environment error = %v", err)
+	require.NoError(t, err)
+	require.Equal(t, "0.144.1", version)
+}
+
+func TestProbeVersionFailureBranches(t *testing.T) {
+	_, err := ProbeVersion(t.Context(), VersionProbeOptions{
+		CLIPath: filepath.Join(t.TempDir(), "missing"), ImplicitEnvironment: map[string]string{"PATH": "/bin"},
+	})
+	require.Error(t, err)
+
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: newAuthorityTestProcess("bad output")}
+	_, err = ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "host-codex", HostAuthority: host})
+	require.Error(t, err)
+
+	host.process = nil
+	_, err = ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "host-codex", HostAuthority: host})
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+}
+
+type cancelledVersionProcess struct{ *authorityTestProcess }
+
+func (p *cancelledVersionProcess) Wait(ctx context.Context) (NativeResult, error) {
+	if ctx.Err() != nil {
+		return NativeResult{}, ctx.Err()
 	}
 
-	t.Setenv("PATH", "")
-	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{})); err == nil {
-		t.Fatal("missing CLI version probe succeeded")
-	}
+	return p.authorityTestProcess.Wait(ctx)
+}
 
-	versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-		return nil, nil, errors.New("supervisor failed")
-	}
-	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); err == nil || !strings.Contains(err.Error(), "prepare") {
-		t.Fatalf("supervisor error = %v", err)
-	}
+func TestProbeVersionCancellationRevokesAndWaits(t *testing.T) {
+	base := newAuthorityTestProcess("")
+	process := &cancelledVersionProcess{authorityTestProcess: base}
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := ProbeVersion(ctx, VersionProbeOptions{CLIPath: "host-codex", HostAuthority: host})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, base.revokes)
+}
 
-	versionSupervisorCommand = func(_ context.Context, config supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-		if config.LifecycleKind != lifecycleDiscovery || !config.FramedInput {
-			t.Fatalf("version supervisor config = %#v", config)
-		}
+func TestProbeVersionWaitFailure(t *testing.T) {
+	waitErr := errors.New("wait failed")
+	process := &errorWaitVersionProcess{authorityTestProcess: newAuthorityTestProcess(""), err: waitErr}
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
+	_, err := ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "host-codex", HostAuthority: host})
+	require.ErrorIs(t, err, waitErr)
+}
 
-		return exec.Command("/usr/bin/true"), &supervisorProof{}, nil
-	}
-	supervisorPipe = func() (*os.File, *os.File, error) { return nil, nil, errors.New("pipe exhausted") }
-	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); err == nil || !strings.Contains(err.Error(), "control input") {
-		t.Fatalf("control input error = %v", err)
-	}
+func TestProbeVersionSnapshotsAndJoinsPipesOnCancellation(t *testing.T) {
+	originalTimeout := processContainmentTimeout
+	processContainmentTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { processContainmentTimeout = originalTimeout })
 
-	supervisorPipe = originalPipe
-	versionStartProcess = func(*exec.Cmd) (*supervisorWaiter, error) {
-		return nil, errors.New("start failed")
-	}
-	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); err == nil || !strings.Contains(err.Error(), "start") {
-		t.Fatalf("start error = %v", err)
-	}
-
-	versionStartProcess = startProcess
-	for name, script := range map[string]string{
-		"without stderr": "exit 7",
-		"with stderr":    "echo native-version-secret >&2; exit 7",
-	} {
-		t.Run(name, func(t *testing.T) {
-			versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-				return exec.Command("/bin/sh", "-c", script), &supervisorProof{}, nil
+	for _, settle := range []bool{true, false} {
+		t.Run(map[bool]string{true: "terminal retry", false: "incomplete retry"}[settle], func(t *testing.T) {
+			process := &snapshotVersionProcess{
+				stdin: &authorityTestWriteCloser{}, stdout: newPrefixBlockingReadCloser("codex-cli 0.144.1\n"),
+				stderr: newBlockingAuthorityReadCloser(), settleOnRevoke: settle,
 			}
-			_, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"}))
-			if err == nil {
-				t.Fatalf("wait error = %v", err)
+			host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			_, err := ProbeVersion(ctx, VersionProbeOptions{CLIPath: "host-codex", HostAuthority: host})
+			require.ErrorIs(t, err, context.Canceled)
+			if settle {
+				require.NotErrorIs(t, err, ErrContainmentIncomplete)
+			} else {
+				require.ErrorIs(t, err, ErrContainmentIncomplete)
 			}
-			if strings.Contains(err.Error(), "native-version-secret") {
-				t.Fatalf("raw native stderr reached the version error: %v", err)
+			require.EqualValues(t, 1, process.stdinCalls.Load())
+			require.EqualValues(t, 1, process.stdoutCalls.Load())
+			require.EqualValues(t, 1, process.stderrCalls.Load())
+			require.EqualValues(t, 2, process.waits.Load())
+			require.EqualValues(t, 1, process.revokes.Load())
+
+			select {
+			case <-process.stdout.blocked.done:
+			default:
+				t.Fatal("version close did not join stdout reader")
+			}
+			select {
+			case <-process.stderr.done:
+			default:
+				t.Fatal("version close did not join stderr reader")
 			}
 		})
 	}
-
-	started := filepath.Join(t.TempDir(), "started")
-	if err := os.WriteFile(started, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-		return exec.Command("/usr/bin/true"), &supervisorProof{
-			started: started, completion: filepath.Join(t.TempDir(), "missing"), completionWait: time.Millisecond,
-		}, nil
-	}
-	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("containment error = %v", err)
-	}
 }
 
-// TestProbeVersionHoldsSupervisorControlInputOpen pins the caller-liveness
-// contract the guardian relies on: a hangup on its control input means the
-// caller is gone, and the guardian then abandons agent identity acquisition.
-func TestProbeVersionHoldsSupervisorControlInputOpen(t *testing.T) {
-	originalSupervisor := versionSupervisorCommand
-	originalStart := versionStartProcess
-	t.Cleanup(func() {
-		versionSupervisorCommand = originalSupervisor
-		versionStartProcess = originalStart
-	})
-
-	versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.144.1"), &supervisorProof{}, nil
-	}
-	versionStartProcess = func(cmd *exec.Cmd) (*supervisorWaiter, error) {
-		control, ok := cmd.Stdin.(*os.File)
-		if !ok {
-			t.Fatalf("version probe control input = %T, want a file the supervisor can poll", cmd.Stdin)
-		}
-		if err := control.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
-
-		var probe [1]byte
-		if _, err := control.Read(probe[:]); !errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Fatalf("version probe control input was not held open: %v", err)
-		}
-		if err := control.SetReadDeadline(time.Time{}); err != nil {
-			t.Fatal(err)
-		}
-
-		return startProcess(cmd)
-	}
-
-	version, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"}))
-	if err != nil || version != minCodexVersion {
-		t.Fatalf("version = %q, err = %v", version, err)
-	}
+type errorWaitVersionProcess struct {
+	*authorityTestProcess
+	err error
 }
 
-func TestProbeVersionSuccessAndValidation(t *testing.T) {
-	originalSupervisor := versionSupervisorCommand
-	t.Cleanup(func() { versionSupervisorCommand = originalSupervisor })
-	versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-		return exec.Command("/bin/sh", "-c", "echo codex-cli 0.144.1"), &supervisorProof{}, nil
-	}
-	version, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"}))
-	if err != nil || version != minCodexVersion {
-		t.Fatalf("version = %q, err = %v", version, err)
-	}
-
-	versionSupervisorCommand = func(context.Context, supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-		return exec.Command("/bin/sh", "-c", "echo invalid"), &supervisorProof{}, nil
-	}
-	if _, err := ProbeVersion(context.Background(), withTestVersionIsolation(VersionProbeOptions{CLIPath: "/usr/bin/true"})); err == nil {
-		t.Fatal("invalid version output succeeded")
-	}
+type errorThenTerminalVersionProcess struct {
+	*authorityTestProcess
+	err   error
+	waits atomic.Int32
 }
 
-func TestOrdinaryVersionStartFailureReleasesHomeLock(t *testing.T) {
-	originalSupervisor := versionSupervisorCommand
-	originalStart := versionStartProcess
-	t.Cleanup(func() {
-		versionSupervisorCommand = originalSupervisor
-		versionStartProcess = originalStart
-	})
-
-	var lockRoot string
-	versionSupervisorCommand = func(_ context.Context, config supervisorConfig) (*exec.Cmd, *supervisorProof, error) {
-		lockRoot = config.Home
-		lock, err := homelock.Acquire(config.Home)
-		if err != nil {
-			t.Fatalf("acquire direct home lock: %v", err)
-		}
-
-		return exec.Command("/usr/bin/true"), &supervisorProof{ordinaryHomeLock: lock}, nil
-	}
-	versionStartProcess = func(*exec.Cmd) (*supervisorWaiter, error) {
-		return nil, errors.New("start failed")
+func (p *errorThenTerminalVersionProcess) Wait(context.Context) (NativeResult, error) {
+	if p.waits.Add(1) == 1 {
+		return NativeResult{}, p.err
 	}
 
-	parent := t.TempDir()
-	_, err := ProbeVersion(context.Background(), VersionProbeOptions{
-		CLIPath:       "/usr/bin/true",
-		CodexHome:     t.TempDir(),
-		WritableHome:  t.TempDir(),
-		Scratch:       t.TempDir(),
-		ScratchParent: parent,
-		ImplicitEnvironment: map[string]string{
-			"PATH": "/usr/bin:/bin",
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "start failed") {
-		t.Fatalf("ordinary version start failure = %v", err)
+	return NativeResult{}, nil
+}
+
+func TestProbeVersionPreservesInitialWaitErrorAfterTerminalRetry(t *testing.T) {
+	waitErr := errors.New("independent wait failure")
+	process := &errorThenTerminalVersionProcess{
+		authorityTestProcess: newAuthorityTestProcess("codex-cli 0.144.1\n"), err: waitErr,
 	}
-	if lockRoot == "" {
-		t.Fatal("version probe did not resolve a home lock root")
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
+
+	_, err := ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "host-codex", HostAuthority: host})
+	require.ErrorIs(t, err, waitErr)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+	require.EqualValues(t, 2, process.waits.Load())
+}
+
+func TestProbeVersionPreservesStdinCloseFailure(t *testing.T) {
+	closeErr := errors.New("close version stdin")
+	hostProcess := &snapshotVersionProcess{
+		stdin: &errorVersionWriteCloser{err: closeErr}, stdout: newPrefixBlockingReadCloser("codex-cli 0.144.1\n"),
+		stderr: newBlockingAuthorityReadCloser(),
 	}
-	lock, err := homelock.Acquire(lockRoot)
-	if err != nil {
-		t.Fatalf("version start failure retained home lock: %v", err)
+	hostProcess.terminal.Store(true)
+	hostProcess.stdout.blocked.release()
+	hostProcess.stderr.release()
+	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: hostProcess}
+
+	_, err := ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "host-codex", HostAuthority: host})
+	require.ErrorIs(t, err, closeErr)
+}
+
+func (p *errorWaitVersionProcess) Wait(context.Context) (NativeResult, error) {
+	if p.err == nil {
+		p.err = errors.New("wait failed")
 	}
-	if err := lock.Release(); err != nil {
-		t.Fatalf("release home lock: %v", err)
-	}
+
+	return NativeResult{}, p.err
 }

@@ -15,7 +15,7 @@ import (
 func storeRateLimitsSession(t *testing.T, agent *Agent, id string, client codex.Client) {
 	t.Helper()
 
-	session := newSession(agent, acp.SessionId(id), "/tmp/project", nil, codex.Thread{ID: id}, client, sessionMeta{}, nil)
+	session := newSession(agent, acp.SessionId(id), absTestPath("tmp", "project"), nil, codex.Thread{ID: id}, client, sessionMeta{}, nil)
 	require.NoError(t, agent.storeStartedSession(session))
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -605,12 +606,12 @@ func TestThreadRouterRejectsClosedDuplicateAndDisplacedOwnership(t *testing.T) {
 }
 
 func TestThreadRouterBoundsPendingStreamsAndClosesAllOwners(t *testing.T) {
-	cancelled := false
+	var cancelled atomic.Bool
 	client := &AppServerClient{
 		threads:        map[string]*threadStream{},
 		pendingThreads: make(map[string]*threadStream, pendingThreadLimit),
 		pendingCreates: 1,
-		procCancel:     func() { cancelled = true },
+		cancelProcess:  func() { cancelled.Store(true) },
 	}
 	for index := range pendingThreadLimit {
 		id := fmt.Sprintf("pending-%d", index)
@@ -618,7 +619,7 @@ func TestThreadRouterBoundsPendingStreamsAndClosesAllOwners(t *testing.T) {
 	}
 	client.dispatchThreadEvent(Event{Scope: EventScopeThread, ThreadID: "overflow"})
 	require.ErrorIs(t, client.routingFailure, ErrTurnEventOverflow)
-	require.True(t, cancelled)
+	require.Eventually(t, cancelled.Load, time.Second, time.Millisecond)
 
 	active := newThreadStream("active")
 	pending := newThreadStream("pending")

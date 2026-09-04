@@ -1,7 +1,6 @@
 #!/bin/sh
 set -eu
 
-# Official release source: https://github.com/openai/codex/releases/tag/rust-v0.146.0
 version=0.146.0
 case "$(uname -m)" in
   x86_64)

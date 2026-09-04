@@ -20,9 +20,18 @@ import (
 )
 
 const (
-	defaultSessionFile = "session.jsonl"
-	defaultPrompt      = "Reply with exactly RESUME_OK and do not use tools."
+	defaultSessionFile          = "session.jsonl"
+	defaultPrompt               = "Reply with exactly RESUME_OK and do not use tools."
+	sessionConfigurationSubpath = "session-config/v1"
 )
+
+type sessionConfiguration struct {
+	Version       int               `json:"version"`
+	SessionID     string            `json:"sessionId"`
+	Revision      int               `json:"revision"`
+	Env           map[string]string `json:"env"`
+	ExtraPathDirs []string          `json:"extraPathDirs"`
+}
 
 type client struct {
 	output io.Writer
@@ -149,9 +158,25 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 
 	store := codexacp.NewInMemorySessionStore()
+
+	// This closed record contains only JSON-native scalar, string-map, and string-slice fields.
+	configuration, _ := json.Marshal(sessionConfiguration{
+		Version:       1,
+		SessionID:     *sessionID,
+		Revision:      1,
+		Env:           map[string]string{},
+		ExtraPathDirs: []string{},
+	})
+
 	if err := store.Replace(ctx, codexacp.SessionKey{SessionID: *sessionID}, []codexacp.SessionStoreReplacement{{
 		Key:     codexacp.SessionKey{SessionID: *sessionID},
 		Entries: entries,
+	}, {
+		Key: codexacp.SessionKey{
+			SessionID: *sessionID,
+			Subpath:   sessionConfigurationSubpath,
+		},
+		Entries: []codexacp.SessionStoreEntry{configuration},
 	}}); err != nil {
 		return err
 	}

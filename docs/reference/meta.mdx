@@ -41,7 +41,7 @@ Accepted session lifecycle metadata:
 Session `env` is an object of string values installed on that session's Codex
 thread at `shell_environment_policy.set`. Peer threads on the same app-server do
 not share it. A raw `PATH` entry is rejected (case-insensitively on Windows), as
-are adapter-private process-management names, `CODEX_HOME`, `HOME`, and the XDG
+are adapter-private names, `CODEX_HOME`, `HOME`, and the XDG
 cache, config, data, runtime, and state roots. `WithHome` and the app-server's
 static launch environment remain authoritative.
 
@@ -97,7 +97,7 @@ in `agentCapabilities._meta`:
 {
   "agentCapabilities": {
     "_meta": {
-      "acp-go.dev/route": {"versions": [1]}
+      "acp-go.dev/route": {"version": 1}
     }
   }
 }
@@ -176,7 +176,7 @@ is configured, initialize also advertises the local handoff input transport:
 {
   "agentCapabilities": {
     "_meta": {
-      "acp-go.dev/handoff": {"versions": [1]}
+      "acp-go.dev/handoff": {"version": 1}
     }
   }
 }
@@ -190,13 +190,13 @@ documented with the [handoff input form](/docs/core/prompt-streaming).
 ## Lifecycle negotiation
 
 `acp-go.dev/lifecycle` is settled on `initialize` itself rather than through a
-capability object. The client offers the versions it implements on
+capability object. The client offers version 1 on
 `InitializeRequest._meta`:
 
 ```json
 {
   "_meta": {
-    "acp-go.dev/lifecycle": {"versions": [1]}
+    "acp-go.dev/lifecycle": {"version": 1}
   }
 }
 ```
@@ -209,7 +209,7 @@ the facts this adapter's own configuration proves:
 {
   "_meta": {
     "acp-go.dev/lifecycle": {
-      "versions": [1],
+      "version": 1,
       "updatesOutsidePrompt": true,
       "authoritativeQuiescence": false,
       "activityKinds": []
@@ -220,14 +220,16 @@ the facts this adapter's own configuration proves:
 
 | Field | Value | Why |
 | --- | --- | --- |
-| `versions` | `[1]` | The intersection of the offer with the one version this adapter implements. |
+| `version` | `1` | The lifecycle protocol version implemented by this adapter. |
 | `updatesOutsidePrompt` | `true` | A session owns one exact app-server thread stream for its native incarnation, so native events between prompts open and settle agent-origin lifecycle turns without loss. |
 | `authoritativeQuiescence` | `false` | Nothing here proves one session's descendants gone while the app-server generation they live in keeps serving its peers, so no quiescence proof class is claimed and no `quiescenceSource` is named. |
 | `activityKinds` | `[]` | Codex work reaches ACP as ordinary tool-call updates; this adapter reads no structured native activity registry, so it emits no `activity_update`. |
 
-An absent offer and an empty version intersection are both answered by omitting
-the key from the response, and such a connection emits no lifecycle envelope at
-all. `Serve` also omits the answer unless its output is an `*os.File`, exposes a
+An absent offer is answered by omitting the key from the response, and such a
+connection emits no lifecycle envelope at all. The capability decoder accepts
+only the exact object `{"version":1}` and refuses missing, duplicate, trailing,
+fractional, or differently typed values. `Serve` also omits the answer unless
+its output is an `*os.File`, exposes a
 write deadline, or implements `InterruptWrite() error`, because other carriers
 cannot guarantee that shutdown interrupts and joins a stalled lifecycle
 notification.

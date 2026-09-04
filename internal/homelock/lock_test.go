@@ -21,7 +21,7 @@ func TestAcquireFailsClosedForSecondClaimAndNeverUnlinksFiles(t *testing.T) {
 	for _, name := range []string{ClaimFileName, LivenessFileName} {
 		info, statErr := os.Stat(filepath.Join(home, name))
 		require.NoError(t, statErr)
-		require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+		require.Equal(t, hostFilePerm(0o600), info.Mode().Perm())
 	}
 
 	second, err := Acquire(home)

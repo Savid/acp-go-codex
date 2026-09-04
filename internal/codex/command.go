@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -23,173 +22,120 @@ const (
 	envXDGConfigHome = "XDG_CONFIG_HOME"
 	minCodexVersion  = "0.144.1"
 	appServerCommand = "app-server"
+	processExitGrace = 2 * time.Second
 )
 
-var execCommandContext = exec.CommandContext
 var processCloseGrace = 2 * time.Second
-var processSupervisorCloseWait = supervisorQuiesceWindow + time.Second
-var packagedCodexStageRemoveAll = os.RemoveAll
+var processContainmentTimeout = 5 * time.Second
 
-// launchAppServer starts the codex app-server. The request-scoped ctx bounds
-// the version check, while procCtx governs the lifetime of the spawned process
-// (see NewAppServerClient): binding the process to procCtx prevents
-// exec.CommandContext from SIGKILLing codex when the launching request returns.
 func launchAppServer(
 	ctx context.Context,
-	procCtx context.Context,
 	options Options,
-) (transport *lineTransport, command *exec.Cmd, version string, nativePath string, returnErr error) {
+) (transport *lineTransport, version string, nativePath string, returnErr error) {
 	nativeEnv, err := buildMergedEnv(options)
 	if err != nil {
-		return nil, nil, "", "", err
+		return nil, "", "", err
 	}
 
-	path, err := resolveCodexPath(options.CLIPath, nativeEnv, options.ProcessIsolation)
-	if err != nil {
-		return nil, nil, "", "", err
+	selector := strings.TrimSpace(options.CLIPath)
+	if selector == "" {
+		selector = defaultCodexExecutable
 	}
 
-	var ownedStageRoot string
-
-	if options.ProcessIsolation == nil {
-		path, nativeEnv, err = stagePackagedCodex(path, nativeEnv, options.SupervisorRoot)
-	} else {
-		path, nativeEnv, ownedStageRoot, err = stagePackagedCodexForProcess(
-			path,
-			nativeEnv,
-			options.SupervisorRoot,
-			options.SupervisorParent,
-			options.ProcessIsolation,
-		)
-	}
-
-	if err != nil {
-		return nil, nil, "", "", err
-	}
-
+	var packageCleanup func() error
 	defer func() {
-		if returnErr != nil && ownedStageRoot != "" {
-			returnErr = errors.Join(
-				returnErr,
-				packageStageCleanupError(packagedCodexStageRemoveAll(ownedStageRoot)),
-			)
+		if returnErr != nil && packageCleanup != nil {
+			returnErr = errors.Join(returnErr, packageCleanup())
 		}
 	}()
 
+	if options.HostAuthority == nil {
+		selector, err = resolveOrdinaryProcessExecutable(selector, nativeEnv)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("find codex CLI: %w", err)
+		}
+
+		selector, nativeEnv, packageCleanup, err = stagePackagedCodex(selector, nativeEnv, options.Scratch)
+		if err != nil {
+			return nil, "", "", err
+		}
+	} else if selectorErr := validateManagedSelector(selector); selectorErr != nil {
+		return nil, "", "", selectorErr
+	}
+
+	version, err = validateCodexVersionOutput(options.NativeVersion)
+	if err != nil {
+		return nil, "", "", err
+	}
+
 	nativePath = searchPathFromEnvironment(nativeEnv)
 
-	version, versionErr := validateCodexVersionOutput(options.NativeVersion)
-	if versionErr != nil {
-		return nil, nil, "", "", versionErr
+	request := NativeRequest{
+		Executable:  selector,
+		Arguments:   appServerArgs(options),
+		Environment: nativeEnv,
 	}
-
-	var cmd *exec.Cmd
-
-	var supervisor *supervisorProof
-
-	if options.skipSupervisor {
-		cmd = execCommandContext(procCtx, path, appServerArgs(options)...)
-
-		cmd.Env = nativeEnv
-		if credentialErr := applyProcessCredential(cmd, options.ProcessIsolation); credentialErr != nil {
-			return nil, nil, "", "", credentialErr
-		}
-	} else {
-		lockRoot, lockErr := HomeLockRoot(options.SupervisorParent, firstNonEmpty(options.WritableHome, options.CodexHome))
-		if lockErr != nil {
-			return nil, nil, "", "", lockErr
-		}
-
-		cmd, supervisor, err = supervisorCommand(procCtx, supervisorConfig{
-			NativePath:       path,
-			NativeArgs:       appServerArgs(options),
-			NativeEnv:        nativeEnv,
-			Isolation:        options.ProcessIsolation,
-			Home:             lockRoot,
-			Scratch:          options.SupervisorRoot,
-			ScratchParent:    options.SupervisorParent,
-			LifecycleKind:    lifecycleRuntime,
-			DarwinBestEffort: options.DarwinBestEffort,
-		})
-		if err != nil {
-			return nil, nil, "", "", err
-		}
-	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, nil, "", "", errors.Join(
-			err,
-			supervisor.closeInherited(),
-			supervisor.releaseOrdinaryHomeLock(),
-		)
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-
-		return nil, nil, "", "", errors.Join(
-			err,
-			supervisor.closeInherited(),
-			supervisor.releaseOrdinaryHomeLock(),
-		)
-	}
-
-	cmd.Stderr = io.Discard
 
 	spawnStarted := time.Now()
 
-	waiter, err := startProcess(cmd)
+	var native NativeProcess
+	if options.HostAuthority != nil {
+		native, err = options.HostAuthority.StartNative(ctx, request)
+	} else {
+		native, err = startOrdinaryNative(ctx, request, options)
+	}
+
+	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, err)
+
 	if err != nil {
-		cleanupErr := errors.Join(
-			supervisor.closeInherited(),
-			supervisor.releaseOrdinaryHomeLock(),
-		)
-
-		observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, err)
-
-		_ = stdin.Close()
-		_ = stdout.Close()
-
-		return nil, nil, "", "", errors.Join(err, cleanupErr)
+		return nil, "", "", err
 	}
 
-	if closeErr := supervisor.closeInherited(); closeErr != nil {
-		_ = cmd.Process.Kill()
+	if native == nil {
+		return nil, "", "", ErrHostAuthorityUnavailable
+	}
 
-		waiter.start()
-		<-waiter.result()
+	stdin, stdout, stderr := native.Stdin(), native.Stdout(), native.Stderr()
+	if stdin == nil || stdout == nil || stderr == nil {
+		_, _, cleanupErr := revokeAndWaitNative(native)
+		stdioErr := closeNativePipes(stdin, stdout, stderr)
 
-		return nil, nil, "", "", errors.Join(
-			fmt.Errorf("close inherited supervisor config: %w", closeErr),
-			supervisor.releaseOrdinaryHomeLock(),
+		return nil, "", "", errors.Join(
+			fmt.Errorf("%w: host returned incomplete native stdio", ErrHostAuthorityUnavailable),
+			cleanupErr, stdioErr,
 		)
 	}
 
-	observeCodexStartupStage(ctx, options, "runtime", "spawn", spawnStarted, nil)
-
+	stderrDone := make(chan struct{})
 	proc := &process{
-		cmd:              cmd,
-		stdin:            stdin,
-		stdout:           stdout,
-		supervisor:       supervisor,
-		processWaiter:    waiter,
-		observeProcess:   options.ObserveProcess,
-		packageStageRoot: ownedStageRoot,
+		native: native, stdin: stdin, stdout: stdout, stderr: stderr, stderrDone: stderrDone,
+		packageCleanup: packageCleanup,
 	}
-	ownedStageRoot = ""
+	packageCleanup = nil
 
-	if options.NewProcessSnapshotObserver != nil {
-		proc.processSnapshot = options.NewProcessSnapshotObserver(ctx)
-	}
+	go func() {
+		defer close(stderrDone)
 
-	return newLineTransport(stdout, stdin, proc), cmd, version, nativePath, nil
+		_, _ = io.Copy(io.Discard, stderr)
+	}()
+
+	return newLineTransport(proc.stdout, proc.stdin, proc), version, nativePath, nil
 }
 
-// appServerArgs builds the codex app-server argument list: the base launch
-// flags, per-key -c config overrides (emitted in sorted key order for
-// deterministic args), and any caller-supplied extra args.
+func filepathSlash(path string) string {
+	return strings.ReplaceAll(path, `\`, "/")
+}
+
+func validateManagedSelector(selector string) error {
+	for _, segment := range strings.Split(filepathSlash(strings.TrimSpace(selector)), "/") {
+		if segment == "node_modules" {
+			return errors.New("managed Codex executable must be staged and pinned by the host before adapter initialization")
+		}
+	}
+
+	return nil
+}
+
 func appServerArgs(options Options) []string {
 	args := []string{appServerCommand, "--listen", "stdio://", "--disable", "plugins"}
 
@@ -205,28 +151,6 @@ func appServerArgs(options Options) []string {
 	}
 
 	return append(args, options.ExtraArgs...)
-}
-
-func resolveCodexPath(path string, env []string, isolation *ProcessIsolation) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		path = defaultCodexExecutable
-	}
-
-	var (
-		resolved string
-		err      error
-	)
-	if isolation == nil {
-		resolved, err = resolveOrdinaryProcessExecutable(path, env)
-	} else {
-		resolved, err = resolveProcessExecutable(path, env)
-	}
-
-	if err != nil {
-		return "", fmt.Errorf("find codex CLI: %w", err)
-	}
-
-	return resolved, nil
 }
 
 func validateCodexVersionOutput(output string) (string, error) {
@@ -246,10 +170,6 @@ var codexVersionRE = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
 
 func parseCodexVersion(output string) string {
 	match := codexVersionRE.FindString(output)
-	if match == "" {
-		return ""
-	}
-
 	if cut, _, ok := strings.Cut(match, "-"); ok {
 		match = cut
 	}
@@ -263,13 +183,14 @@ func parseCodexVersion(output string) string {
 
 func compareSemver(left string, right string) int {
 	leftParts := semverParts(left)
-	rightParts := semverParts(right)
 
-	for i := 0; i < len(leftParts); i++ {
-		switch {
-		case leftParts[i] < rightParts[i]:
+	rightParts := semverParts(right)
+	for index := range leftParts {
+		if leftParts[index] < rightParts[index] {
 			return -1
-		case leftParts[i] > rightParts[i]:
+		}
+
+		if leftParts[index] > rightParts[index] {
 			return 1
 		}
 	}
@@ -281,9 +202,8 @@ func semverParts(value string) [3]int {
 	var out [3]int
 
 	parts := strings.Split(value, ".")
-	for i := 0; i < len(out) && i < len(parts); i++ {
-		part := parts[i]
-		out[i], _ = strconv.Atoi(part)
+	for index := 0; index < len(out) && index < len(parts); index++ {
+		out[index], _ = strconv.Atoi(parts[index])
 	}
 
 	return out
@@ -295,25 +215,12 @@ func buildMergedEnv(options Options) ([]string, error) {
 		managed[envCodexHome] = options.CodexHome
 	}
 
-	return buildProcessEnvironmentFrom(
-		options.ProcessIsolation,
-		options.ImplicitEnvironment,
-		withoutManagedRootOverrides(options.Env),
-		managed,
-	)
-}
-
-func upsertEnv(env []string, key string, value string) []string {
-	prefix := key + "="
-	for i, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
-			env[i] = prefix + value
-
-			return env
-		}
+	base := options.ImplicitEnvironment
+	if options.HostAuthority != nil {
+		base = options.HostAuthority.NativeEnvironment()
 	}
 
-	return append(env, prefix+value)
+	return buildProcessEnvironmentFrom(base, withoutManagedRootOverrides(options.Env), managed)
 }
 
 func shellValue(value any) string {
@@ -331,253 +238,224 @@ func shellValue(value any) string {
 	}
 }
 
-// processExitGrace bounds how long the transport waits for the app-server
-// process to be reaped after its stdout stream ends, so a mid-turn stream EOF
-// can be attributed to the real process exit status instead of a bare transport
-// fault. Transport death while the process is still running exceeds the grace
-// and stays cause:"transport". Each lineTransport captures it at construction;
-// there is no shared mutable grace state.
-const processExitGrace = 2 * time.Second
-
-// process owns the codex app-server child process and its single cmd.Wait reaper.
 type process struct {
-	cmd              *exec.Cmd
-	stdin            io.WriteCloser
-	stdout           io.ReadCloser
-	supervisor       *supervisorProof
-	processWaiter    *supervisorWaiter
-	packageStageRoot string
+	native NativeProcess
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
 
-	waitOnce                sync.Once
-	waitErr                 error
-	waitDone                chan struct{}
-	packageStageCleanupOnce sync.Once
-	packageStageCleanupErr  error
+	closeMu         sync.Mutex
+	inputCloseOnce  sync.Once
+	inputCloseErr   error
+	streamCloseOnce sync.Once
+	streamCloseErr  error
+	stderrDone      chan struct{}
+	terminalProven  bool
+	terminalErr     error
 
-	observationMu       sync.Mutex
-	processExited       bool
-	supervisorsObserved bool
-	observeProcess      func(context.Context, string, int64)
-	processSnapshot     ProcessSnapshotObserver
+	packageCleanup     func() error
+	packageCleanupOnce sync.Once
+	packageCleanupErr  error
 }
 
-func (p *process) markSupervisorsReady(ctx context.Context) {
-	if p == nil || p.supervisor == nil || p.supervisor.ordinaryHomeLock != nil {
-		return
-	}
+func (p *process) exited(grace time.Duration) bool {
+	exited, _ := p.waitTerminalWithin(grace)
 
-	p.observationMu.Lock()
-	if p.processExited || p.supervisorsObserved {
-		p.observationMu.Unlock()
-
-		return
-	}
-
-	p.supervisorsObserved = true
-	p.observationMu.Unlock()
-
-	if p.observeProcess != nil {
-		p.observeProcess(ctx, "home_lock_supervisor", 2)
-	}
-
-	p.observeProviderSnapshot(ctx)
+	return exited
 }
 
-func (p *process) observeProviderSnapshot(ctx context.Context) {
-	if p == nil || p.supervisor == nil || p.processSnapshot.Observe == nil {
-		return
+func (p *process) waitTerminalWithin(timeout time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	result, err := p.native.Wait(ctx)
+
+	terminalErr := terminalNativeProcessError(result, err)
+	if ctx.Err() != nil {
+		return false, terminalErr
 	}
 
-	if count, available := p.supervisor.readProviderSnapshot(); available {
-		p.processSnapshot.Observe(ctx, count)
-	}
+	return true, terminalErr
 }
 
-func (p *process) finishProviderSnapshot(ctx context.Context, err error) {
+func (p *process) waitTerminal() error {
+	_, err := p.waitTerminalWithin(processContainmentTimeout)
+
+	return err
+}
+
+func (p *process) Close() error {
 	if p == nil {
-		return
+		return nil
 	}
 
-	if errors.Is(err, ErrProcessContainmentIncomplete) {
-		if p.processSnapshot.Unproven != nil {
-			p.processSnapshot.Unproven()
-		}
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
 
-		return
+	inputErr := p.closeInput()
+
+	if p.native == nil {
+		return errors.Join(inputErr, p.closeStreams(), p.cleanupPackage())
 	}
 
-	if p.processSnapshot.Quiescent != nil {
-		p.processSnapshot.Quiescent(ctx)
+	if p.terminalProven {
+		return errors.Join(inputErr, p.closeStreams(), p.terminalErr, p.cleanupPackage())
 	}
+
+	graceCtx, cancelGrace := context.WithTimeout(context.Background(), processCloseGrace)
+	result, waitErr := p.native.Wait(graceCtx)
+	ownedGraceErr := graceCtx.Err()
+
+	cancelGrace()
+
+	if waitErr == nil {
+		p.terminalProven = true
+		p.terminalErr = terminalNativeProcessError(result, nil)
+
+		return errors.Join(inputErr, p.closeStreams(), p.terminalErr, p.cleanupPackage())
+	}
+
+	independentWaitErr := withoutExactErrorLeaves(waitErr, ownedGraceErr)
+	result, terminal, settlementErr := revokeAndWaitNative(p.native)
+	streamErr := p.closeStreams()
+
+	if !terminal {
+		return errors.Join(inputErr, streamErr, independentWaitErr, settlementErr)
+	}
+
+	p.terminalProven = true
+	p.terminalErr = terminalNativeProcessError(result, nil)
+
+	return errors.Join(inputErr, streamErr, independentWaitErr, settlementErr, p.terminalErr, p.cleanupPackage())
 }
 
-func (p *process) markExited() {
-	if p == nil {
-		return
-	}
-
-	p.observationMu.Lock()
-	p.processExited = true
-	observed := p.supervisorsObserved
-	p.supervisorsObserved = false
-	observe := p.observeProcess
-	p.observationMu.Unlock()
-
-	if observed && observe != nil {
-		observe(context.Background(), "home_lock_supervisor", -2)
-	}
-}
-
-// beginWait reaps the process exactly once in the background. Callers gate on
-// waitDone before reading waitErr.
-func (p *process) beginWait() {
-	p.waitOnce.Do(func() {
-		p.waitDone = make(chan struct{})
-
-		if p.cmd == nil || p.cmd.Process == nil {
-			close(p.waitDone)
-
-			return
+func (p *process) closeInput() error {
+	p.inputCloseOnce.Do(func() {
+		if p.stdin != nil {
+			p.inputCloseErr = processPipeCloseError(p.stdin.Close())
 		}
-
-		if p.processWaiter == nil {
-			p.waitErr = errors.New("codex process waiter is unavailable")
-			close(p.waitDone)
-
-			return
-		}
-
-		p.processWaiter.start()
-
-		go func() {
-			defer recoverCodexGoroutine(context.Background(), "Codex process waiter")
-			defer p.markExited()
-
-			if p.supervisor != nil {
-				waitErr, proofErr := p.supervisor.awaitCommand(p.processWaiter.result())
-				p.waitErr = errors.Join(waitErr, proofErr)
-			} else {
-				p.waitErr = <-p.processWaiter.result()
-			}
-
-			close(p.waitDone)
-		}()
 	})
+
+	return p.inputCloseErr
+}
+
+func (p *process) closeStreams() error {
+	p.streamCloseOnce.Do(func() {
+		if p.stdout != nil {
+			p.streamCloseErr = processPipeCloseError(p.stdout.Close())
+		}
+
+		if p.stderr != nil {
+			p.streamCloseErr = errors.Join(p.streamCloseErr, processPipeCloseError(p.stderr.Close()))
+		}
+
+		if p.stderrDone != nil {
+			<-p.stderrDone
+		}
+	})
+
+	return p.streamCloseErr
+}
+
+func processPipeCloseError(err error) error {
+	if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return nil
+	}
+
+	return err
+}
+
+func closeNativePipes(stdin io.WriteCloser, stdout, stderr io.ReadCloser) error {
+	var err error
+	if stdin != nil {
+		err = processPipeCloseError(stdin.Close())
+	}
+
+	if stdout != nil {
+		err = errors.Join(err, processPipeCloseError(stdout.Close()))
+	}
+
+	if stderr != nil {
+		err = errors.Join(err, processPipeCloseError(stderr.Close()))
+	}
+
+	return err
+}
+
+func revokeAndWaitNative(native NativeProcess) (NativeResult, bool, error) {
+	revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), processContainmentTimeout)
+	revokeErr := native.Revoke(revokeCtx)
+
+	cancelRevoke()
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), processContainmentTimeout)
+	result, waitErr := native.Wait(waitCtx)
+
+	cancelWait()
+
+	if waitErr != nil {
+		return result, false, errors.Join(ErrContainmentIncomplete, revokeErr, waitErr)
+	}
+
+	return result, true, revokeErr
+}
+
+func withoutExactErrorLeaves(err, discarded error) error {
+	if err == nil || discarded == nil {
+		return err
+	}
+
+	if err == discarded {
+		return nil
+	}
+
+	type joined interface{ Unwrap() []error }
+
+	if combined, ok := err.(joined); ok {
+		var retained error
+		for _, component := range combined.Unwrap() {
+			retained = errors.Join(retained, withoutExactErrorLeaves(component, discarded))
+		}
+
+		return retained
+	}
+
+	type wrapped interface{ Unwrap() error }
+	if single, ok := err.(wrapped); ok {
+		return withoutExactErrorLeaves(single.Unwrap(), discarded)
+	}
+
+	return err
+}
+
+func terminalNativeProcessError(result NativeResult, err error) error {
+	if err != nil {
+		return errors.Join(ErrContainmentIncomplete, err)
+	}
+
+	if result.ExitCode != 0 || result.Signal != 0 {
+		return fmt.Errorf("codex app-server exited with status %d signal %d", result.ExitCode, result.Signal)
+	}
+
+	return nil
+}
+
+func (p *process) cleanupPackage() error {
+	if p == nil {
+		return nil
+	}
+
+	p.packageCleanupOnce.Do(func() {
+		if p.packageCleanup != nil {
+			p.packageCleanupErr = p.packageCleanup()
+		}
+	})
+
+	return p.packageCleanupErr
 }
 
 func observeCodexStartupStage(ctx context.Context, options Options, lifecycle, stage string, started time.Time, err error) {
 	if options.ObserveStartupStage != nil {
 		options.ObserveStartupStage(ctx, lifecycle, stage, time.Since(started), err)
 	}
-}
-
-// exited reports whether the process terminates within grace.
-func (p *process) exited(grace time.Duration) bool {
-	p.beginWait()
-
-	select {
-	case <-p.waitDone:
-		return true
-	case <-time.After(grace):
-		return false
-	}
-}
-
-func (p *process) Close() (returnErr error) {
-	defer func() { returnErr = p.cleanupPackageStage(returnErr) }()
-
-	if p.stdin != nil {
-		_ = p.stdin.Close()
-	}
-
-	if p.stdout != nil {
-		_ = p.stdout.Close()
-	}
-
-	if p.cmd == nil || p.cmd.Process == nil {
-		return p.supervisor.releaseOrdinaryHomeLock()
-	}
-
-	p.beginWait()
-
-	if p.supervisor != nil && p.supervisor.ordinaryHomeLock == nil {
-		select {
-		case <-p.waitDone:
-			closeErr := processCloseError(p.waitErr)
-			p.finishProviderSnapshot(context.Background(), closeErr)
-
-			return closeErr
-		case <-time.After(processSupervisorCloseWait):
-			// The caller is done waiting, so retire the wait goroutine with it
-			// rather than leaving it polling markers past teardown.
-			p.supervisor.abandon()
-
-			closeErr := fmt.Errorf(
-				"%w: supervised process did not finish within %s",
-				ErrProcessContainmentIncomplete,
-				processSupervisorCloseWait,
-			)
-			p.finishProviderSnapshot(context.Background(), closeErr)
-
-			return closeErr
-		}
-	}
-
-	// Escalate: stdin EOF → SIGTERM → SIGKILL. The first grace window lets
-	// the app-server exit on its own after stdin closes so in-flight cleanup
-	// (e.g. MCP session termination) completes instead of being cut short.
-	select {
-	case <-p.waitDone:
-		return processCloseError(p.waitErr)
-	case <-time.After(processCloseGrace):
-	}
-
-	if err := terminateProcess(p.cmd); err != nil {
-		return err
-	}
-
-	select {
-	case <-p.waitDone:
-		return processCloseError(p.waitErr)
-	case <-time.After(processCloseGrace):
-		if err := killProcess(p.cmd); err != nil {
-			return err
-		}
-
-		<-p.waitDone
-
-		return nil
-	}
-}
-
-func (p *process) cleanupPackageStage(processErr error) error {
-	if p == nil || p.packageStageRoot == "" || errors.Is(processErr, ErrProcessContainmentIncomplete) {
-		return processErr
-	}
-
-	p.packageStageCleanupOnce.Do(func() {
-		p.packageStageCleanupErr = packageStageCleanupError(packagedCodexStageRemoveAll(p.packageStageRoot))
-	})
-
-	return errors.Join(processErr, p.packageStageCleanupErr)
-}
-
-func packageStageCleanupError(err error) error {
-	if err == nil {
-		return nil
-	}
-
-	return fmt.Errorf("%w: %v", ErrPackageStageCleanupIncomplete, err)
-}
-
-// exitStatusZero is the rendered status for a process that exited cleanly.
-const exitStatusZero = "exit status 0"
-
-// exitStatus renders a process wait result as a human-readable exit status.
-func exitStatus(err error) string {
-	if err == nil {
-		return exitStatusZero
-	}
-
-	return err.Error()
 }

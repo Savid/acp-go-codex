@@ -5,31 +5,24 @@ description: "Run acp-go-codex as a stdio ACP agent or embedded Go adapter."
 
 ## Standalone
 
-With no isolation flag, the command launches Codex as its current identity.
-It reports non-authoritative `shared_identity` on every platform where native
-launch and writable-home locking are supported, including Windows. It publishes
-no descendant inventory and makes no whole-tree quiescence claim. Add
-`-process-isolation-config=/absolute/path/process-isolation.json` on Linux for
-the explicit hardened identity, environment, ownership, and containment
-contract documented in the [CLI reference](/docs/reference/cli).
-
 ```sh
-acp-go-codex -process-isolation-config /etc/acp-go/codex-isolation.json -path /usr/local/bin/codex -home /var/lib/acp-go-codex -model gpt-5.5
+acp-go-codex -path codex -home /absolute/codex-home -model gpt-5.5
 ```
 
-The command speaks ACP JSON-RPC over stdin/stdout: stdout carries ACP JSON-RPC
-only; diagnostics go to stderr (and `-debug` when present).
+The command launches Codex as its current user and speaks ACP JSON-RPC over
+stdin/stdout. Diagnostics go to stderr. It supports the full session, MCP,
+image, lifecycle, and standard auth surface; provider auth is enabled only when
+a ledger root is configured.
 
 | Flag | Purpose |
 | --- | --- |
-| `-path` | Codex CLI executable path. |
-| `-home` | `CODEX_HOME` for launched Codex processes; an explicit value must equal policy `HOME`. |
-| `-scratch-dir` | Parent directory for ephemeral runtime generations. |
-| `-process-isolation-config` | Optional explicit Linux child identity and closed environment policy. |
-| `-model` | Default model preference for new sessions. |
+| `-path` | Codex CLI executable selector. |
+| `-home` | `CODEX_HOME` for launched Codex processes. |
+| `-scratch-dir` | Parent for private adapter materialization. |
+| `-model` | Default model preference. |
 | `-debug` | Write adapter diagnostics to stderr. |
-| `-version` | Print adapter version and exit. |
-| `-codex-allow-account-logout` | Permit ACP logout to mutate adapter-owned Codex auth. |
+| `-version` | Print the adapter version and exit. |
+| `-codex-allow-account-logout` | Permit ACP logout inside an explicit home boundary. |
 
 ## Login helpers
 
@@ -38,20 +31,21 @@ acp-go-codex login -path /usr/local/bin/codex -home /var/lib/acp-go-codex -codex
 acp-go-codex logout -path /usr/local/bin/codex -home /var/lib/acp-go-codex
 ```
 
+These ordinary commands share the writable-home exclusion used by the
+app-server. Login neutralizes native browser launchers; Windows login is refused
+while logout remains available.
+
 ## Embedded Go
 
 ```go
 err := codexacp.Serve(ctx, stdin, stdout,
-	codexacp.WithExecutablePath("/usr/local/bin/codex"),
-	codexacp.WithHome("/tmp/codex-home"),
-	codexacp.WithDefaultModel("gpt-5.5"),
+	codexacp.WithExecutablePath("host-pinned-codex"),
+	codexacp.WithHome("/srv/codex"),
+	codexacp.WithHostAuthority(authority),
 )
 ```
 
-Embedded mode exposes the same ACP surface as the standalone binary.
-Append `WithProcessIsolation(...)` only when the host explicitly selects the
-hardened policy; an invalid explicit policy fails before native spawn and is
-never retried in ordinary mode.
-On Darwin, append `WithDarwinBestEffortContainment()` only when the operator
-accepts that `setsid` descendants may escape and numeric PGID reuse can cause
-collateral signalling.
+Omit `WithHostAuthority` for ordinary same-user behavior. Supply it when the
+host owns native environments, prepared-tree transitions, and process leases.
+All managed version probes and app-server launches use that authority. Provider
+auth extensions are omitted in managed mode.

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -84,8 +83,8 @@ const (
 type AppServerClient struct {
 	options       Options
 	rpc           *rpcConn
-	cmd           *exec.Cmd
-	procCancel    context.CancelFunc
+	proc          *process
+	cancelProcess func()
 	nativeVersion string
 	// nativePath is the exact search path of the environment this app-server
 	// process was launched with. Every thread's derived PATH is composed
@@ -174,25 +173,16 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 		defer cancel()
 	}
 
-	// The codex app-server process must outlive the request that created the
-	// session: exec.CommandContext SIGKILLs the process when its context is
-	// done, so the process is bound to a dedicated context that is only
-	// cancelled by Close. The request ctx still bounds the launch handshake
-	// (version check and initialize) below.
-	procCtx, procCancel := context.WithCancel(context.Background())
-
-	transport, cmd, version, nativePath, err := launchAppServer(launchCtx, procCtx, options)
+	transport, version, nativePath, err := launchAppServer(launchCtx, options)
 	if err != nil {
-		procCancel()
-
 		return nil, err
 	}
 
 	client := &AppServerClient{
 		options:       options,
 		rpc:           newRPCConn(transport, options.RequestHandler),
-		cmd:           cmd,
-		procCancel:    procCancel,
+		proc:          transport.proc,
+		cancelProcess: func() { _ = transport.proc.Close() },
 		nativeVersion: version,
 		nativePath:    nativePath,
 	}
@@ -208,7 +198,6 @@ func NewAppServerClient(ctx context.Context, options Options) (*AppServerClient,
 	}
 
 	observeCodexStartupStage(ctx, options, "runtime", "readiness", readinessStarted, nil)
-	transport.proc.markSupervisorsReady(ctx)
 
 	return client, nil
 }
@@ -926,6 +915,19 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
 		done := c.closeDone
+		if done != nil {
+			select {
+			case <-done:
+				if errors.Is(c.closeErr, ErrContainmentIncomplete) {
+					c.closeDone = make(chan struct{})
+					done = c.closeDone
+
+					// #nosec G118 -- containment retry must outlive this caller's context.
+					go c.finishClose(done)
+				}
+			default:
+			}
+		}
 		c.mu.Unlock()
 
 		return c.waitClose(ctx, done)
@@ -943,13 +945,6 @@ func (c *AppServerClient) Close(ctx context.Context) error {
 }
 
 func (c *AppServerClient) finishClose(done chan struct{}) {
-	// The launched process is the owned cancellation path for the RPC reader,
-	// writers, server-request handlers, and event pump. Cancel it before joining
-	// those workers so Close never depends on an app-server choosing to exit.
-	if c.procCancel != nil {
-		c.procCancel()
-	}
-
 	err := discardOwnedCloseCancellation(c.rpc.CloseContext(context.Background()))
 	if pumpDone := c.eventPumpDone(); pumpDone != nil {
 		<-pumpDone
@@ -1300,8 +1295,8 @@ func (c *AppServerClient) failRoutingLocked(cause error) {
 	c.pendingCreates = 0
 	c.pendingEventCount = 0
 
-	if c.procCancel != nil {
-		c.procCancel()
+	if c.cancelProcess != nil {
+		go c.cancelProcess()
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -16,10 +17,14 @@ import (
 type rolloutRow struct {
 	Type    string         `json:"type"`
 	Payload map[string]any `json:"payload"`
-	raw     map[string]any
 }
 
 const valueAgentMessageCamel = "agentMessage"
+
+// rolloutFieldOrdinal is the monotonic row counter Codex writes alongside every
+// rollout row. The adapter never reads it: rows are placed by file order, and
+// the field is accepted so a strict row check does not refuse native output.
+const rolloutFieldOrdinal = "ordinal"
 
 func rolloutNativeThreadID(entries []SessionStoreEntry) string {
 	for _, entry := range entries {
@@ -154,26 +159,114 @@ func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 		return rolloutRow{}, errors.New(validationRequired)
 	}
 
-	var raw map[string]any
-	if err := json.Unmarshal(trimmed, &raw); err != nil {
+	if err := rejectDuplicateRolloutKeys(trimmed); err != nil {
 		return rolloutRow{}, err
 	}
 
-	row := rolloutRow{
-		Type:    stringFromAny(raw[jsonFieldType]),
-		Payload: mapFromAny(raw["payload"]),
-		raw:     raw,
+	members, err := decodeExactJSONObject(trimmed)
+	if err != nil {
+		return rolloutRow{}, errors.New("rollout row must be one JSON object")
 	}
 
-	if row.Type == "" {
-		return rolloutRow{}, fmt.Errorf("type is required")
+	for name := range members {
+		switch name {
+		case "timestamp", jsonFieldType, "payload", rolloutFieldOrdinal:
+		default:
+			return rolloutRow{}, fmt.Errorf("unknown rollout row field %q", name)
+		}
 	}
 
-	if row.Payload == nil {
-		row.Payload = map[string]any{}
+	var rowType string
+	if rawType, ok := members[jsonFieldType]; !ok || json.Unmarshal(rawType, &rowType) != nil || rowType == "" {
+		return rolloutRow{}, errors.New("type is required")
 	}
 
-	return row, nil
+	var payload map[string]any
+	if rawPayload, ok := members["payload"]; !ok || json.Unmarshal(rawPayload, &payload) != nil || payload == nil {
+		return rolloutRow{}, errors.New("payload must be an object")
+	}
+
+	if rawTimestamp, ok := members["timestamp"]; ok {
+		var timestamp string
+		if json.Unmarshal(rawTimestamp, &timestamp) != nil || timestamp == "" {
+			return rolloutRow{}, errors.New("timestamp must be a non-empty string")
+		}
+	}
+
+	if rawOrdinal, ok := members[rolloutFieldOrdinal]; ok {
+		var ordinal uint64
+		if json.Unmarshal(rawOrdinal, &ordinal) != nil {
+			return rolloutRow{}, errors.New("ordinal must be a non-negative integer")
+		}
+	}
+
+	return rolloutRow{Type: rowType, Payload: payload}, nil
+}
+
+func rejectDuplicateRolloutKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+
+	if err := consumeRolloutJSONValue(decoder); err != nil {
+		return err
+	}
+
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return errors.New("rollout row carries trailing input")
+	}
+
+	return nil
+}
+
+func consumeRolloutJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+
+	delim, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+
+		for decoder.More() {
+			keyToken, tokenErr := decoder.Token()
+			if tokenErr != nil {
+				return tokenErr
+			}
+
+			// encoding/json emits only string member names after an object opener.
+			key, _ := keyToken.(string)
+
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("rollout object repeats field %q", key)
+			}
+
+			seen[key] = struct{}{}
+
+			if valueErr := consumeRolloutJSONValue(decoder); valueErr != nil {
+				return valueErr
+			}
+		}
+	default: // encoding/json emits only an array opener for the other composite token.
+		for decoder.More() {
+			if valueErr := consumeRolloutJSONValue(decoder); valueErr != nil {
+				return valueErr
+			}
+		}
+	}
+
+	// encoding/json matches the closing delimiter to the opener; malformed
+	// input is reported by Token rather than returned as a mismatched token.
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func replayEventMsg(payload map[string]any) []acp.SessionUpdate {

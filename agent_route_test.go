@@ -11,10 +11,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRouteCapabilityScalar(t *testing.T) {
+	response, err := NewAgent().Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	route, ok := response.AgentCapabilities.Meta["acp-go.dev/route"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 1, route["version"])
+}
+
 func TestInitializeAdvertisesExactRouteEnvelopeCapability(t *testing.T) {
 	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
 	require.NoError(t, err)
-	require.Equal(t, map[string]any{routeVersionsKey: []int{routeVersion}}, resp.AgentCapabilities.Meta[routeMetaKey])
+	require.Equal(t, map[string]any{routeVersionKey: routeVersion}, resp.AgentCapabilities.Meta[routeMetaKey])
 	require.NotContains(t, resp.Meta, routeMetaKey)
 }
 
@@ -40,7 +48,7 @@ func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) 
 
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-	resp, err := agent.NewSession(context.Background(), NewSessionRequest("/work"))
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("work")))
 	require.NoError(t, err)
 	session := agent.sessionMust(resp.SessionId)
 	_ = session.beginTurn(context.Background(), "active")

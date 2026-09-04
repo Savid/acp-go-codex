@@ -18,17 +18,18 @@ const (
 	SessionStoreFormat = "codex-rollout-jsonl-v1"
 )
 
-// SessionStoreEntry is one opaque Codex rollout JSON object.
+// SessionStoreEntry is one JSON object in the session's main rollout or an
+// adapter-owned subrecord.
 //
 // Implementations should preserve the raw JSON bytes. The agent validates
 // rollout entries as single JSON objects before appending them.
 type SessionStoreEntry = json.RawMessage
 
-// SessionKey addresses one Codex rollout JSONL in a session store.
+// SessionKey addresses one session-store record.
 type SessionKey struct {
 	// SessionID is the ACP-visible session ID being stored.
 	SessionID string
-	// Subpath is empty for the main rollout or names a session-owned artifact.
+	// Subpath is empty for the main rollout or names a session-owned subrecord.
 	Subpath string
 }
 

@@ -61,6 +61,30 @@ records live under additional subpaths. Each generated image has one canonical
 record keyed by stable native identity and byte fingerprint; rollout rows carry
 only the artifact reference, while raw events carry sanitized metadata.
 
+The required `session-config/v1` subrecord is an append-only sequence with
+contiguous revisions. Every revision names the ACP session id and carries the
+complete validated session environment plus the ordered extra PATH directories.
+Cold load and resume restore an omitted carrier from the latest revision;
+explicit values remain intentional lifecycle inputs. A missing record,
+mismatched identity, revision gap, or malformed carrier refuses recovery before
+Codex is called.
+
+<Warning>
+The persisted session environment can contain bearer tokens, API keys, and
+other credential-bearing values. Treat the session store as a credential
+store: restrict access to the intended principal, protect data in transit and
+at rest, avoid logging entries, and apply an appropriate deletion and retention
+policy.
+</Warning>
+
+Every loaded rollout row is one closed JSON object containing `type`, `payload`,
+an optional non-empty string `timestamp`, and an optional non-negative integer
+`ordinal`. `type` must be a non-empty string, `payload` must be an object, and
+duplicate keys at any depth, unknown top-level members, malformed values, or
+trailing input are refused. Rows are placed by file order, so `ordinal` is
+accepted and never read. A stored rollout must
+contain exactly one `session_meta` row with a non-empty native thread id.
+
 The adapter derives the terminal native checkpoint from these unmodified rows:
 the last turn's `turn_id` and the final assistant `response_item.id` are exposed
 as `_meta.codex.turnId` and `_meta.codex.messageId`. Store-backed

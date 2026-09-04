@@ -21,6 +21,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHandoffCapabilityScalar(t *testing.T) {
+	without, err := NewAgent().Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	require.NotContains(t, without.AgentCapabilities.Meta, "acp-go.dev/handoff")
+
+	with, err := NewAgent(WithInputHandoffRoot(t.TempDir())).Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	handoff, ok := with.AgentCapabilities.Meta["acp-go.dev/handoff"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 1, handoff["version"])
+}
+
 // handoffFixture writes bytes into a handoff root and returns the block a host
 // would send for them.
 func handoffFixture(t *testing.T, root string, name string, data []byte) acp.ContentBlock {
@@ -50,7 +62,7 @@ func handoffEnvelopeFor(data []byte) map[string]any {
 func handoffBlock(path string, mimeType string, envelope any) acp.ContentBlock {
 	block := acp.ImageBlock("", mimeType)
 
-	uri := "file://" + filepath.ToSlash(path)
+	uri := handoffTestURI(path)
 	block.Image.Uri = &uri
 
 	if envelope != nil {
@@ -317,7 +329,7 @@ func TestValidatePromptImagesHandoffFormSelection(t *testing.T) {
 	// so an empty blob under a file URI stays missing_data.
 	blobMIME := mimeImagePNG
 	blob := acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{
-		Uri:      "file://" + filepath.ToSlash(filepath.Join(root, "valid.png")),
+		Uri:      handoffTestURI(filepath.Join(root, "valid.png")),
 		MimeType: &blobMIME,
 	}})
 	_, imageErr, _ = validatePromptImages(t.Context(), []acp.ContentBlock{blob}, defaultImageLimits(), root)
@@ -560,7 +572,7 @@ func TestHandoffURIDefects(t *testing.T) {
 	}
 
 	// A localhost authority names this host and is accepted.
-	localhost := "file://" + handoffLocalhost + filepath.ToSlash(path)
+	localhost := "file://" + handoffLocalhost + handoffTestURIPath(path)
 	block := acp.ImageBlock("", mimeImagePNG)
 	block.Image.Uri = &localhost
 	block.Image.Meta = map[string]any{handoffMetaKey: envelope}
@@ -622,7 +634,7 @@ func TestHandoffPathContainment(t *testing.T) {
 	t.Run("percent encoded traversal out of the root", func(t *testing.T) {
 		// The URI decoder resolves the escape before the path is ever built, so
 		// the traversal is an ordinary traversal by the time it is refused.
-		uri := "file://" + filepath.ToSlash(root) + "/..%2f" + filepath.Base(outside) + "%2fescaped.png"
+		uri := "file://" + handoffTestURIPath(root) + "/..%2f" + filepath.Base(outside) + "%2fescaped.png"
 
 		block := acp.ImageBlock("", mimeImagePNG)
 		block.Image.Uri = &uri
@@ -634,8 +646,9 @@ func TestHandoffPathContainment(t *testing.T) {
 	})
 
 	t.Run("windows drive spelling", func(t *testing.T) {
-		// A file:///C:/... uri is not a path under any posix root, and on
-		// Windows it is not absolute at all, so the form is refused either way.
+		// A file:///C:/... uri names a system file no adapter root contains: a
+		// path outside the root on a posix host, and the same volume-rooted
+		// path outside the root on Windows.
 		uri := "file:///C:/Windows/System32/config/SAM"
 
 		block := acp.ImageBlock("", mimeImagePNG)

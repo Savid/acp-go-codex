@@ -1,134 +1,99 @@
 package codex
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"io"
-	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
-// TestLineTransportCapturesProcessExit drives a real app-server process to death
-// and proves its raw stderr never enters the classified error.
-func TestLineTransportCapturesProcessExit(t *testing.T) {
-	const secret = "native-stderr-secret"
-	cmd := exec.Command("/bin/sh", "-c", "printf '"+secret+"\\n' >&2; exit 7")
-	cmd.Stderr = io.Discard
+type gatedWaitProcess struct {
+	stdout io.ReadCloser
+	wait   <-chan struct{}
+}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
+func (*gatedWaitProcess) Stdin() io.WriteCloser   { return &authorityTestWriteCloser{} }
+func (p *gatedWaitProcess) Stdout() io.ReadCloser { return p.stdout }
+func (*gatedWaitProcess) Stderr() io.ReadCloser   { return io.NopCloser(bytes.NewReader(nil)) }
+func (p *gatedWaitProcess) Wait(context.Context) (NativeResult, error) {
+	<-p.wait
+
+	return NativeResult{}, nil
+}
+func (*gatedWaitProcess) Revoke(context.Context) error { return nil }
+
+func TestLineTransportEOFAwaitsNativeWait(t *testing.T) {
+	reader, writer := io.Pipe()
+	wait := make(chan struct{})
+	native := &gatedWaitProcess{stdout: reader, wait: wait}
+	transport := newLineTransport(reader, io.Discard, &process{native: native, stdout: reader})
+
+	require.NoError(t, writer.Close())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := transport.Recv()
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("EOF published before NativeProcess.Wait completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
 	}
 
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
-	}
-
-	waiter, err := startProcess(cmd)
-	if err != nil {
-		t.Fatalf("start process: %v", err)
-	}
-
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, processWaiter: waiter}
-	transport := newLineTransport(stdout, stdin, proc)
-	t.Cleanup(func() { _ = transport.Close() })
-
-	_, _, recvErr := transport.Recv()
-
-	var pe *ProcessExitError
-	if !errors.As(recvErr, &pe) {
-		t.Fatalf("Recv error = %v, want *ProcessExitError", recvErr)
-	}
-	if pe.Error() != processExitText {
-		t.Fatalf("process-exit classification = %q", pe.Error())
-	}
-	if !errors.Is(recvErr, io.EOF) {
-		t.Fatalf("process-exit error does not unwrap to the underlying read error: %v", recvErr)
+	close(wait)
+	select {
+	case err := <-done:
+		var exit *ProcessExitError
+		require.ErrorAs(t, err, &exit)
+		require.ErrorIs(t, err, io.EOF)
+	case <-time.After(time.Second):
+		t.Fatal("EOF was not published after NativeProcess.Wait completed")
 	}
 }
 
-// TestLineTransportReadErrorProcessAlive verifies a read failure while the
-// process is still running is not misclassified as a process exit; it stays a
-// bare transport error (cause:"transport").
-func TestLineTransportReadErrorProcessAlive(t *testing.T) {
-	cmd := sleepCommand(t, "10")
+func TestLineTransportDeliversTrailingFrameBeforeWaitSettledEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	wait := make(chan struct{})
+	native := &gatedWaitProcess{stdout: reader, wait: wait}
+	transport := newLineTransport(reader, io.Discard, &process{native: native, stdout: reader})
 
-	cmd.Stderr = io.Discard
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := writer.Write([]byte(`{"jsonrpc":"2.0","method":"tail"}` + "\n"))
+		writeDone <- errors.Join(err, writer.Close())
+	}()
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
+	message, raw, err := transport.Recv()
+	require.NoError(t, err)
+	require.Equal(t, "tail", message.Method)
+	require.Contains(t, raw, "tail")
+	require.NoError(t, <-writeDone)
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, recvErr := transport.Recv()
+		done <- recvErr
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("terminal EOF beat NativeProcess.Wait: %v", err)
+	case <-time.After(25 * time.Millisecond):
 	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
-	}
-
-	waiter, err := startProcess(cmd)
-	if err != nil {
-		t.Fatalf("start process: %v", err)
-	}
-
-	proc := &process{cmd: cmd, stdin: stdin, stdout: stdout, processWaiter: waiter}
-	transport := newLineTransport(stdout, stdin, proc)
-	// Shrink this transport instance's exit grace so the alive-process
-	// classification path does not stall the test. The field is written before
-	// any other goroutine can observe the transport, so there is no shared
-	// mutable state (a package-level grace override here raced with readError
-	// in rpcConn read loops leaked past rpcConn.Close by earlier tests).
-	transport.grace = 10 * time.Millisecond
-
-	// Force a read failure while the process keeps running.
-	_ = stdout.Close()
-
-	_, _, recvErr := transport.Recv()
-	if recvErr == nil {
-		t.Fatal("Recv returned no error on a closed stream")
-	}
-
-	var pe *ProcessExitError
-	if errors.As(recvErr, &pe) {
-		t.Fatalf("live-process read error misclassified as process exit: %v", recvErr)
-	}
-
-	_ = killProcess(cmd)
-	<-proc.waitDone
-}
-
-// TestProcessBeginWaitNoProcess covers the reaper short-circuit when there is no
-// started process to wait on.
-func TestProcessBeginWaitNoProcess(t *testing.T) {
-	p := &process{}
-
-	if !p.exited(time.Second) {
-		t.Fatal("process without a command was not classified as exited")
-	}
+	close(wait)
+	require.Error(t, <-done)
 }
 
 func TestProcessExitErrorFormatting(t *testing.T) {
-	if got := (*ProcessExitError)(nil).Error(); got != "" {
-		t.Fatalf("nil ProcessExitError.Error() = %q, want empty", got)
-	}
-	if got := (*ProcessExitError)(nil).Unwrap(); got != nil {
-		t.Fatalf("nil ProcessExitError.Unwrap() = %v, want nil", got)
-	}
-
-	base := (&ProcessExitError{}).Error()
-	if base != processExitText {
-		t.Fatalf("bare error = %q", base)
-	}
-
-	underlying := errors.New("boom")
-	if got := (&ProcessExitError{Err: underlying}).Unwrap(); !errors.Is(got, underlying) {
-		t.Fatalf("Unwrap() = %v, want underlying", got)
-	}
-
-	if exitStatus(nil) != exitStatusZero {
-		t.Fatalf("exitStatus(nil) = %q", exitStatus(nil))
-	}
-	if exitStatus(errors.New("signal: killed")) != "signal: killed" {
-		t.Fatalf("exitStatus(err) mismatch")
-	}
+	cause := errors.New("cause")
+	err := &ProcessExitError{Err: cause}
+	require.Equal(t, processExitText, err.Error())
+	require.ErrorIs(t, err, cause)
+	var nilError *ProcessExitError
+	require.Empty(t, nilError.Error())
+	require.NoError(t, nilError.Unwrap())
 }

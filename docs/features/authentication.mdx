@@ -13,19 +13,14 @@ session is loaded, and logout first releases every loaded thread before
 mutating the account and closing the runtime. No thread can switch accounts
 independently.
 
-## Explicit-isolation credential input
+## Execution environment
 
-The explicit-isolation root supervisor never forwards its ambient environment.
-To pass `OPENAI_API_KEY`, name each variable explicitly in the
-`inheritEnvironment` array of the root-owned
-`-process-isolation-config` policy. The value must be set in the supervisor
-environment or startup fails; identity, path, loader, XDG/native-home, and
-adapter-private variables cannot be inherited. File-backed or provider-broker
-credentials must live only in the explicit target-owned native home described
-by the adapter. No standalone path reads root `HOME`, root native config, or
-an unlisted root credential. When isolation is omitted, the agent instead uses
-the environment captured at construction, after managed-home precedence and
-private-variable scrubbing.
+Ordinary execution starts from the environment captured when the Agent is
+constructed, applies configured values, and reserves adapter-managed home and
+private names. Managed execution starts from `HostAuthority.NativeEnvironment`
+and applies the same reserved-name checks. The embedding host decides which
+credential variables enter that environment; the adapter never restores a
+value withheld by host policy.
 
 ## Terminal login
 
@@ -37,16 +32,10 @@ acp-go-codex login -codex-device-auth
 acp-go-codex logout
 ```
 
-Terminal account commands use the same portable claim/liveness exclusion and
-selected process backend as app-server runtimes. They fail immediately when
-another cooperating process owns the selected `CODEX_HOME`, and they return
-after the directly owned command completes. Explicit authoritative Linux
-isolation additionally proves all descendants quiescent. Opted-in Darwin proves
-only direct-child reaping plus absence of the captured original process group;
-a descendant that escapes with `setsid` may survive. The command therefore
-cannot mutate credentials alongside an active cooperating app-server. Codex
-CLI 0.144.1 or newer and a supported local writable-home filesystem are
-required.
+Terminal account commands use the same writable-home exclusion as app-server
+runtimes. They fail immediately when another cooperating process owns the
+selected `CODEX_HOME`, and return only after the directly owned command has
+settled. Codex CLI 0.144.1 or newer is required.
 
 `login` also runs with every browser launcher neutralised. The Codex child
 receives a private scratch directory of no-op `open`, `xdg-open`,
@@ -58,7 +47,7 @@ completes a grant with no further action. The directory is removed with the
 command's scratch. On Windows the launch cannot be shadowed this way, so
 `login` refuses rather than opening a browser. Ordinary Windows `logout` is
 available: it opens nothing and keeps the environment it would otherwise have
-had. Explicit isolation remains Linux-only.
+had.
 
 During ACP initialize, the terminal auth method is advertised only when the
 client declares terminal auth support. The agent auth method
@@ -79,15 +68,21 @@ agent := codexacp.NewAgent(
 
 ## Logout boundary
 
-<Warning>
-  ACP logout is refused unless the adapter is started with
-  `-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. Enable it
-  only with an explicit adapter-owned `-home` or `WithHome`; otherwise a client could clear the
-  credentials of the operator's normal Codex install. When enabled, ACP logout
-  clears only adapter-owned session state and the Codex account.
-</Warning>
+ACP logout is refused unless the adapter is started with
+`-codex-allow-account-logout` or `WithCodexAllowAccountLogout(true)`. Enable it
+only with an explicit adapter-owned `-home` or `WithHome`; otherwise a client
+could clear the credentials of the operator's normal Codex install. When
+enabled, ACP logout clears only adapter-owned session state and the Codex
+account.
 
 ## Provider auth
+
+<Warning>
+Provider auth is available only when `WithHostAuthority` is omitted. A managed
+Agent advertises no provider-auth capability, creates no ledger, and returns
+method-not-found for every `_codex/auth/*` request. Standard ACP auth and the
+Agent runtime remain available.
+</Warning>
 
 A host that wants to sign a worker in to the Codex account without a terminal
 drives the `_codex/auth/*` extension methods listed in
@@ -97,8 +92,8 @@ acts as an OAuth client.
 
 ### Turning the surface on
 
-Six legs are advertised while `WithProviderAuthRoot` (`-provider-auth-root`) is
-configured: an absolute, durable, host-owned directory holding the adapter's
+In ordinary mode, six legs are advertised while `WithProviderAuthRoot`
+(`-provider-auth-root`) is configured: an absolute, durable, host-owned directory holding the adapter's
 values-free ledger. It sits outside session scratch and outlives every session
 and native generation. Unset — or set to a path that cannot be created, is not a
 directory, or is not writable — the capability key is absent and every leg

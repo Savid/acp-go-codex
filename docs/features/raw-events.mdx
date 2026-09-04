@@ -43,7 +43,8 @@ Each notification carries:
 | `sessionId` | The session the event belongs to. |
 | `sequence` | Monotonic per-session sequence number. |
 | `source` | Origin of the event. |
-| `event` | The raw Codex event object. |
+| `event` | The raw Codex `app-server` notification, plus the `method` that delivered it. |
+| `_meta` | The turn envelope, on every notification emitted inside a turn. |
 
 <Warning>
   Raw events contain unredacted Codex rollout JSON. The `event` field is capped

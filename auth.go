@@ -166,8 +166,8 @@ func newProviderAuth(agent *Agent) *providerAuth {
 // consentedHome is the CODEX_HOME the exact-home consent gate authorized, held
 // as the directory itself rather than as the name that reached it. The gate
 // decides once and the legs it enables run whenever the host asks, so a name is
-// not what consent can be granted over: anything at this agent's uid may
-// repoint one, and every read the account legs make would follow it.
+// not what consent can be granted over: local callers may repoint one, and
+// every read the account legs make would follow it.
 type consentedHome struct {
 	// name is the CODEX_HOME spelling the harness itself runs under. Its
 	// keystore item is partitioned by that string rather than by the directory
@@ -620,8 +620,8 @@ func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 			args = append(args, "-home", a.options.Home)
 		}
 
-		if a.options.ScratchDir != "" {
-			args = append(args, "-scratch-dir", a.options.ScratchDir)
+		if a.scratchDir != "" {
+			args = append(args, "-scratch-dir", a.scratchDir)
 		}
 
 		method := acp.AuthMethodTerminalInline{

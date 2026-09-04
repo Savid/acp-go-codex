@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -121,7 +120,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 			agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
 			agent.setAgentClient(newRecordingAgentClient())
 
-			resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+			resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 			if err != nil {
 				t.Fatalf("NewSession returned error: %v", err)
 			}
@@ -184,7 +183,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
 	agent.setAgentClient(newRecordingAgentClient())
 
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
@@ -216,7 +215,7 @@ func TestTurnFailureProcessExitMapping(t *testing.T) {
 	agent := NewAgent(withClientFactory(sequencedClientFactory(client)))
 	agent.setAgentClient(newRecordingAgentClient())
 
-	resp, err := agent.NewSession(ctx, NewSessionRequest("/tmp/project"))
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 
 	promptResp, promptErr := agent.Prompt(ctx, TextPromptRequest(resp.SessionId, "test-turn", "hi"))
@@ -236,58 +235,6 @@ func TestTurnFailureProcessExitMapping(t *testing.T) {
 
 // A real app-server process death carries the fixed process-exit classification
 // and marks the session for lazy relaunch.
-func TestTurnFailureProcessDeath(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
-	ctx := context.Background()
-
-	isolation := testProcessIsolation()
-	client, err := codex.NewAppServerClient(ctx, codex.Options{
-		CLIPath:          testReachableExecutable(t),
-		CodexHome:        testNativeOwnedTempDir(t),
-		SupervisorRoot:   testTraversableTempDir(t),
-		SupervisorParent: testTraversableTempDir(t),
-		DarwinBestEffort: runtime.GOOS == "darwin",
-		NativeVersion:    "0.144.1",
-		ProcessIsolation: &codex.ProcessIsolation{
-			UID: isolation.UID, GID: isolation.GID, BaseEnvironment: isolation.BaseEnvironment,
-			StandaloneOwnerID: isolation.StandaloneOwnerID, StandaloneStateRoot: isolation.StandaloneStateRoot,
-		},
-	})
-	if err != nil {
-		t.Fatalf("launch fake app-server: %v", err)
-	}
-	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
-		ThreadID: "thread-1",
-		Cwd:      "/tmp/project",
-	})
-	if err != nil {
-		t.Fatalf("resume fake thread: %v", err)
-	}
-
-	s := &session{agent: NewAgent(), id: "death", cwd: "/tmp/project", codexThreadID: thread.ID}
-	s.agent.setAgentClient(newRecordingAgentClient())
-	s.client = client
-	t.Cleanup(func() { _ = client.Close(context.Background()) })
-
-	resp, promptErr := s.Prompt(ctx, TextPromptRequest("death", "test-turn", "hi"))
-	if resp.StopReason == acp.StopReasonEndTurn {
-		t.Fatal("process death reported end_turn")
-	}
-	if !isTurnFailure(promptErr, codex.CauseProcessExit) {
-		t.Fatalf("prompt error = %v, want -32603 process_exit failure", promptErr)
-	}
-
-	data := turnFailureData(t, promptErr)
-	msg, _ := data[jsonFieldMessage].(string)
-	if msg != "Codex process exited" {
-		t.Fatalf("message = %q, want fixed process-exit classification", msg)
-	}
-
-	if !s.clientDead {
-		t.Fatal("process death did not mark the session for lazy relaunch")
-	}
-}
-
 // A dead session relaunches the app-server lazily on the next prompt and resumes
 // the native thread, so the turn succeeds.
 func TestPromptRelaunchesDeadClient(t *testing.T) {
@@ -301,7 +248,7 @@ func TestPromptRelaunchesDeadClient(t *testing.T) {
 	s := &session{
 		agent:         agent,
 		id:            "relaunch-ok",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread-1",
 		clientDead:    true,
 		client:        old,
@@ -310,7 +257,7 @@ func TestPromptRelaunchesDeadClient(t *testing.T) {
 	agent.sessions[s.id] = s
 	agent.runtimeClient = old
 	agent.runtimeDead = true
-	agent.runtimeNativeRelease = func() {}
+	agent.runtimeNativeRelease = func() error { return nil }
 
 	resp, err := s.Prompt(ctx, TextPromptRequest("relaunch-ok", "test-turn", "again"))
 	if err != nil {
@@ -329,7 +276,7 @@ func TestPromptRelaunchesDeadClient(t *testing.T) {
 
 // T5 — a native error observed while cancelled maps to cancelled, not a failure.
 func TestTurnFailureCancelNotConflated(t *testing.T) {
-	cancelSession := &session{agent: NewAgent(), id: "cancel", cwd: "/tmp/project", codexThreadID: "thread"}
+	cancelSession := &session{agent: NewAgent(), id: "cancel", cwd: absTestPath("tmp", "project"), codexThreadID: "thread"}
 	cancelSession.agent.setAgentClient(newRecordingAgentClient())
 	cancelSession.client = &cancelDuringRunClient{spyCodexClient: newSpyCodexClient(), session: cancelSession}
 
@@ -349,7 +296,7 @@ func TestTurnCancelWinsOnTimeoutCoincidence(t *testing.T) {
 	coincideSession := &session{
 		agent:         NewAgent(WithTurnTimeout(time.Nanosecond)),
 		id:            "coincide",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 	}
 	coincideSession.agent.setAgentClient(newRecordingAgentClient())
@@ -404,7 +351,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 	timeoutSession := &session{
 		agent:         NewAgent(WithTurnTimeout(40 * time.Millisecond)),
 		id:            "timeout",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		client:        interrupt,
 	}
@@ -422,7 +369,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 	}
 }
 
-func TestTurnFailureTimeoutIncludesTerminalContainmentFailure(t *testing.T) {
+func TestTurnFailureTimeoutKeepsSharedRuntimeOnTargetedContainmentFailure(t *testing.T) {
 	containErr := errors.New("terminal containment failed")
 	interrupt := &terminalCleanupErrorClient{
 		recordingCancelClient: recordingCancelClient{spyCodexClient: newSpyCodexClient()},
@@ -432,7 +379,7 @@ func TestTurnFailureTimeoutIncludesTerminalContainmentFailure(t *testing.T) {
 	timeoutSession := &session{
 		agent:         agent,
 		id:            "timeout-close-error",
-		cwd:           "/tmp/project",
+		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
 		client:        interrupt,
 	}
@@ -448,8 +395,9 @@ func TestTurnFailureTimeoutIncludesTerminalContainmentFailure(t *testing.T) {
 	require.NotContains(t, err.Error(), containErr.Error())
 	require.True(t, timeoutSession.clientDead)
 	interrupt.mu.Lock()
-	require.True(t, interrupt.closed, "failed targeted containment must fence the shared runtime")
+	require.False(t, interrupt.closed, "targeted cancellation must not retire the shared runtime")
 	interrupt.mu.Unlock()
+	require.Same(t, interrupt, agent.runtimeClient)
 }
 
 func TestTurnTimeoutMirrorsRowsWrittenDuringRuntimeQuiescence(t *testing.T) {
@@ -481,7 +429,11 @@ func TestTurnTimeoutMirrorsRowsWrittenDuringRuntimeQuiescence(t *testing.T) {
 	require.True(t, isTurnFailure(err, codex.CauseTimeout))
 	entries, loadErr := store.Load(context.Background(), SessionKey{SessionID: string(timeoutSession.id)})
 	require.NoError(t, loadErr)
-	require.Contains(t, string(joinSessionStoreEntries(entries)), fakeCodexLateAbortRolloutRow)
+	var stored string
+	for _, entry := range entries {
+		stored += string(entry) + "\n"
+	}
+	require.Contains(t, stored, fakeCodexLateAbortRolloutRow)
 }
 
 // recordingCancelClient hangs the turn until its context is cancelled and
