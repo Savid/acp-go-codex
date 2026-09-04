@@ -53,12 +53,16 @@ func readOrdinaryNativeAppendLog(path string, after uint64) ([]SessionStoreEntry
 	return records, nil
 }
 
-// scanTerminatedLines is bufio.ScanLines with one difference: a final line the
-// file does not terminate is not a record. Trailing whitespace is a complete
-// file; anything else after the last newline is a row still being appended.
+// scanTerminatedLines splits on newlines with two differences from
+// bufio.ScanLines: a record's bytes are returned exactly, with no carriage
+// return stripped, because the store mirrors native rows without
+// normalization and the managed broker reads the same file the same way; and a
+// final line the file does not terminate is not a record. Trailing whitespace
+// is a complete file; anything else after the last newline is a row still
+// being appended.
 func scanTerminatedLines(data []byte, atEOF bool) (int, []byte, error) {
 	if i := bytes.IndexByte(data, '\n'); i >= 0 {
-		return i + 1, bytes.TrimSuffix(data[:i], []byte{'\r'}), nil
+		return i + 1, data[:i], nil
 	}
 
 	if !atEOF {

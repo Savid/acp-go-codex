@@ -21,8 +21,10 @@ func TestOrdinaryNativeAppendLogFailsClosedOnAPartialTrailingRecord(t *testing.T
 
 	require.NoError(t, os.WriteFile(path, []byte("{\"type\":\"one\",\"payload\":{}}\r\n{\"type\":\"two\",\"payload\":{}}\n  \n\t"), 0o600))
 
+	// Records mirror the file's bytes exactly: a carriage return before the
+	// newline is part of the row, never normalized away.
 	records, err := readOrdinaryNativeAppendLog(path, 0)
 	require.NoError(t, err)
 	require.Len(t, records, 2)
-	require.Equal(t, SessionStoreEntry("{\"type\":\"one\",\"payload\":{}}"), records[0])
+	require.Equal(t, SessionStoreEntry("{\"type\":\"one\",\"payload\":{}}\r"), records[0])
 }
