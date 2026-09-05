@@ -25,7 +25,10 @@ owns the native environment, prepared-tree transitions, and every native
 process launch. Managed launch failures never fall back to ordinary execution.
 
 `HostAuthority` provides `NativeEnvironment`, `PrepareNativeTree`,
-`ReclaimNativeTree`, and `StartNative`. `StartNative` receives
+`ReadNativeAppendLog`, `WriteNativeAppendLog`, `ReclaimNativeTree`, and
+`StartNative`. The append-log operations capture native rollout records and
+restore stored rows beneath the prepared home through the host.
+`StartNative` receives
 `NativeRequest` and returns a `NativeProcess` with stdio, `Wait`, and
 `Revoke`. Cleanup closes the protocol, revokes if necessary, waits, reclaims,
 then removes adapter materialization.
