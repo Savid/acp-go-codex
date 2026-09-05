@@ -785,7 +785,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(hydrated, residenceRelease)
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, codexRestoreACPError(err, nil)
 	}
@@ -1433,7 +1433,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, err
 	}
 
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(hydrated, residenceRelease)
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
 	if err != nil {
 		return acp.LoadSessionResponse{}, codexRestoreACPError(err, nil)
 	}

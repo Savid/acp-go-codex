@@ -1287,7 +1287,7 @@ func (c *closingCanaryClient) RunTurn(context.Context, codex.TurnStartRequest) (
 func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	path, release, _, err := agent.materializeStoredRollout(nil, func() {})
+	path, release, _, err := agent.materializeStoredRollout(t.Context(), nil, func() {})
 	require.NoError(t, err)
 	require.Empty(t, path)
 	release()

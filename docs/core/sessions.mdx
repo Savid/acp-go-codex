@@ -121,6 +121,11 @@ resuming by thread id alone:
    One stored session always resolves to one path.
 3. The rows are staged beside that path and renamed into place, so a scan never
    sees a partial rollout for a thread it is about to be asked to resume.
+   With `WithHostAuthority`, `WriteNativeAppendLog` performs this write beneath
+   the already prepared home, creating native-owned directories with mode
+   `0700` and a native-owned file with mode `0600`. The adapter passes exact
+   records without LF delimiters and never opens the prepared path itself.
+   An omitted authority uses the ordinary same-identity file writer.
 4. `thread/resume` is called with the thread id and no path.
 
 From then on the resident file *is* that thread's rollout: Codex appends the

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -29,6 +28,7 @@ const (
 var materializedRolloutNow = time.Now
 
 func (a *Agent) materializeStoredRollout(
+	ctx context.Context,
 	entries []SessionStoreEntry,
 	release func(),
 ) (string, func(), int64, error) {
@@ -40,7 +40,7 @@ func (a *Agent) materializeStoredRollout(
 
 	bytes := materializedRolloutBytes(entries)
 
-	path, err := materializeRollout(a.resolvedCodexHome(), entries)
+	path, err := a.materializeRollout(ctx, entries)
 	if err != nil {
 		release()
 
@@ -71,23 +71,6 @@ func materializedRolloutBytes(entries []SessionStoreEntry) int64 {
 
 	return bytes
 }
-
-type materializedRolloutFile interface {
-	Name() string
-	Write([]byte) (int, error)
-	Close() error
-}
-
-var (
-	createMaterializedRolloutTemp = func(dir string) (materializedRolloutFile, error) {
-		// The staging name must not look like a rollout: Codex scans the whole
-		// `sessions/` subtree and parses every `rollout-*.jsonl` name it finds.
-		return os.CreateTemp(dir, ".acp-go-codex-rollout-*.staging")
-	}
-	renameMaterializedRolloutFile = os.Rename
-	removeMaterializedRolloutFile = os.Remove
-	mkdirMaterializedRolloutDir   = os.MkdirAll
-)
 
 // nativeRolloutResidence is the exact path a stored rollout must occupy inside
 // the app-server's home for `thread/resume` to adopt it by thread id.
@@ -152,70 +135,25 @@ func nativeRolloutResidenceStamp(entries []SessionStoreEntry) time.Time {
 	return materializedRolloutNow()
 }
 
-// materializeRollout writes the stored rows into the home as one whole file:
-// the staged copy is renamed into place, so Codex never scans a partial
-// rollout for a thread it is about to be asked to resume.
-func materializeRollout(home string, entries []SessionStoreEntry) (string, error) {
-	if len(entries) == 0 {
-		return "", nil
+// materializeRollout places a stored rollout through the owner of the home.
+func (a *Agent) materializeRollout(ctx context.Context, entries []SessionStoreEntry) (string, error) {
+	if a.options.HostAuthority == nil {
+		return materializeRollout(a.resolvedCodexHome(), entries)
 	}
 
-	target, err := nativeRolloutResidence(home, entries)
+	target, err := nativeRolloutResidence(a.resolvedCodexHome(), entries)
 	if err != nil {
 		return "", err
 	}
 
-	dir := filepath.Dir(target)
-	if mkdirErr := mkdirMaterializedRolloutDir(dir, 0o700); mkdirErr != nil {
-		return "", fmt.Errorf("create native rollout directory: %w", mkdirErr)
+	records := make([][]byte, len(entries))
+	for index, entry := range entries {
+		records[index] = entry
 	}
 
-	file, err := createMaterializedRolloutTemp(dir)
-	if err != nil {
-		return "", fmt.Errorf("create materialized rollout: %w", err)
-	}
-
-	staged := file.Name()
-
-	for _, entry := range entries {
-		if _, err := file.Write(entry); err != nil {
-			_ = file.Close()
-			_ = removeMaterializedRolloutFile(staged)
-
-			return "", fmt.Errorf("write materialized rollout: %w", err)
-		}
-
-		if _, err := file.Write([]byte{'\n'}); err != nil {
-			_ = file.Close()
-			_ = removeMaterializedRolloutFile(staged)
-
-			return "", fmt.Errorf("write materialized rollout newline: %w", err)
-		}
-	}
-
-	if err := file.Close(); err != nil {
-		_ = removeMaterializedRolloutFile(staged)
-
-		return "", fmt.Errorf("close materialized rollout: %w", err)
-	}
-
-	if err := renameMaterializedRolloutFile(staged, target); err != nil {
-		_ = removeMaterializedRolloutFile(staged)
-
-		return "", fmt.Errorf("place materialized rollout: %w", err)
+	if err := a.options.HostAuthority.WriteNativeAppendLog(ctx, target, records); err != nil {
+		return "", fmt.Errorf("place managed materialized rollout: %w", err)
 	}
 
 	return target, nil
-}
-
-func removeMaterializedRollout(path string) error {
-	if path == "" {
-		return nil
-	}
-
-	if err := removeMaterializedRolloutFile(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	return nil
 }

@@ -104,6 +104,21 @@ func (a *guardedHostAuthority) ReadNativeAppendLog(
 	return cloned, nil
 }
 
+func (a *guardedHostAuthority) WriteNativeAppendLog(ctx context.Context, path string, records [][]byte) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrHostAuthorityUnavailable
+		}
+	}()
+
+	cloned := make([][]byte, len(records))
+	for index, record := range records {
+		cloned[index] = append([]byte(nil), record...)
+	}
+
+	return a.authority.WriteNativeAppendLog(ctx, path, cloned)
+}
+
 func (a *guardedHostAuthority) ReclaimNativeTree(ctx context.Context, path string) (err error) {
 	defer func() {
 		if recover() != nil {

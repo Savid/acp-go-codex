@@ -56,6 +56,10 @@ func (*appendLogTestAuthority) NativeEnvironment() map[string]string {
 
 func (*appendLogTestAuthority) PrepareNativeTree(context.Context, string) error { return nil }
 
+func (a *appendLogTestAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (a *appendLogTestAuthority) ReadNativeAppendLog(
 	_ context.Context,
 	path string,

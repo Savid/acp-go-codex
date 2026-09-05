@@ -26,6 +26,10 @@ func (*unavailableAuthority) NativeEnvironment() map[string]string {
 	return map[string]string{"PATH": "/bin"}
 }
 func (*unavailableAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (*unavailableAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (*unavailableAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
 	return nil, nil
 }
@@ -40,6 +44,10 @@ func (a invalidEnvironmentAuthority) NativeEnvironment() map[string]string { ret
 func (a invalidEnvironmentAuthority) PrepareNativeTree(context.Context, string) error {
 	return errors.New("unexpected prepare")
 }
+func (a invalidEnvironmentAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (a invalidEnvironmentAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
 	return nil, errors.New("unexpected read")
 }
@@ -87,6 +95,10 @@ func (*orderingAuthority) NativeEnvironment() map[string]string {
 	return map[string]string{"PATH": "/bin", "HOME": "/tmp"}
 }
 func (*orderingAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (*orderingAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (*orderingAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
 	return nil, nil
 }
@@ -280,6 +292,27 @@ func (a *traceAuthority) ReadNativeAppendLog(_ context.Context, path string, aft
 	return nil, errors.New("native append log is outside a prepared tree")
 }
 
+func (a *traceAuthority) WriteNativeAppendLog(_ context.Context, path string, records [][]byte) error {
+	a.record("write:" + path)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for root, hidden := range a.prepared {
+		if !strings.HasPrefix(path, root+string(os.PathSeparator)) {
+			continue
+		}
+
+		nativePath := hidden + strings.TrimPrefix(path, root)
+		if err := os.MkdirAll(filepath.Dir(nativePath), 0o700); err != nil {
+			return err
+		}
+
+		return os.WriteFile(nativePath, append(bytes.Join(records, []byte{'\n'}), '\n'), 0o600)
+	}
+
+	return errors.New("native append log is outside a prepared tree")
+}
+
 func (a *traceAuthority) ReclaimNativeTree(_ context.Context, path string) error {
 	a.record("reclaim:" + path)
 
@@ -424,14 +457,18 @@ func TestMaterializedRolloutRetiresWithoutReclaimingItsDayDirectory(t *testing.T
 	authority := newTraceAuthority(root)
 	agent := NewAgent(WithHostAuthority(authority), WithHome(home), WithScratchDir(root))
 
+	require.NoError(t, os.Mkdir(home, 0o700))
+	require.NoError(t, authority.PrepareNativeTree(t.Context(), home))
 	release, err := agent.reserveNativeResidenceCapacity(t.Context(), 3)
 	require.NoError(t, err)
-	path, release, bytes, err := agent.materializeStoredRollout(testResidentRolloutEntries(), release)
+	path, release, bytes, err := agent.materializeStoredRollout(t.Context(), testResidentRolloutEntries(), release)
 	require.NoError(t, err)
-	require.FileExists(t, path)
+	nativePath := home + ".authority" + strings.TrimPrefix(path, home)
+	require.FileExists(t, nativePath)
+	require.NoFileExists(t, path)
 	require.True(t, strings.HasPrefix(path, filepath.Join(home, nativeSessionsDirName)+string(filepath.Separator)))
 	require.NoError(t, agent.retireMaterializedRolloutAtEpoch(path, bytes, release, 0))
-	require.FileExists(t, path, "retiring the residence removed the file before the generation was reclaimed")
+	require.FileExists(t, nativePath, "retiring the residence removed the file before the generation was reclaimed")
 
 	originalRemove := removeMaterializedRolloutFile
 	removeMaterializedRolloutFile = func(path string) error {
@@ -441,6 +478,7 @@ func TestMaterializedRolloutRetiresWithoutReclaimingItsDayDirectory(t *testing.T
 	}
 	t.Cleanup(func() { removeMaterializedRolloutFile = originalRemove })
 
+	require.NoError(t, authority.ReclaimNativeTree(t.Context(), home))
 	require.NoError(t, agent.reclaimRetiredResidences(t.Context(), 0))
 	require.NoFileExists(t, path)
 	require.Contains(t, authority.events(), "remove:"+path)
@@ -727,6 +765,7 @@ type authorityCoverageHost struct {
 	environment func() map[string]string
 	prepare     func() error
 	read        func() ([][]byte, error)
+	write       func(context.Context, string, [][]byte) error
 	reclaim     func() error
 	start       func() (NativeProcess, error)
 }
@@ -741,6 +780,10 @@ func (h authorityCoverageHost) PrepareNativeTree(context.Context, string) error 
 
 func (h authorityCoverageHost) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
 	return h.read()
+}
+
+func (h authorityCoverageHost) WriteNativeAppendLog(ctx context.Context, path string, records [][]byte) error {
+	return h.write(ctx, path, records)
 }
 
 func (h authorityCoverageHost) ReclaimNativeTree(context.Context, string) error {

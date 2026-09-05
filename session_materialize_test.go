@@ -206,6 +206,7 @@ func TestMaterializeStoredRolloutReleasesReservationOnFailure(t *testing.T) {
 	agent.options.implicitEnvironment = map[string]string{}
 
 	path, release, bytes, err := agent.materializeStoredRollout(
+		t.Context(),
 		testStoredRolloutEntries("thread-1", ""),
 		func() { released = true },
 	)
@@ -216,11 +217,81 @@ func TestMaterializeStoredRolloutReleasesReservationOnFailure(t *testing.T) {
 	require.True(t, released)
 }
 
+func TestManagedMaterializeUsesAuthorityAndNeverOpensTheResidence(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "inaccessible-home")
+	// An ordinary write would fail: the home's path is occupied by a file.
+	require.NoError(t, os.WriteFile(home, []byte("untouched"), 0o600))
+	entries := testStoredRolloutEntries("thread-managed", "2026-09-05T01:02:03Z")
+	entries = append(entries, SessionStoreEntry("  {\"type\":\"event_msg\",\"payload\":{}} \t"))
+	target, err := nativeRolloutResidence(home, entries)
+	require.NoError(t, err)
+	refusal := errors.New("write refused")
+	for _, outcome := range []string{"accepted", "refusal", "panic", "invalid thread"} {
+		t.Run(outcome, func(t *testing.T) {
+			calls := 0
+			ctx := t.Context()
+			authority := authorityCoverageHost{
+				environment: func() map[string]string { return map[string]string{"HOME": home} },
+				write: func(gotCtx context.Context, path string, records [][]byte) error {
+					calls++
+					require.Equal(t, ctx, gotCtx)
+					require.Equal(t, target, path)
+					require.Equal(t, [][]byte{[]byte(entries[0]), []byte(entries[1])}, records)
+					records[0][0] = '!'
+					if outcome == "panic" {
+						panic("write panicked")
+					}
+					if outcome == "refusal" {
+						return refusal
+					}
+
+					return nil
+				},
+			}
+			agent := NewAgent(WithHostAuthority(authority), WithHome(home))
+			input := entries
+			if outcome == "invalid thread" {
+				input = testStoredRolloutEntries("../escape", "")
+			}
+			released := false
+			path, release, size, writeErr := agent.materializeStoredRollout(ctx, input, func() { released = true })
+			require.Equal(t, byte('{'), entries[0][0], "the authority mutated store records")
+			if outcome == "accepted" {
+				require.NoError(t, writeErr)
+				require.Equal(t, target, path)
+				require.Equal(t, materializedRolloutBytes(entries), size)
+				require.False(t, released)
+				release()
+			} else {
+				require.Error(t, writeErr)
+				require.Empty(t, path)
+				require.Zero(t, size)
+				require.Nil(t, release)
+				if outcome == "refusal" {
+					require.ErrorIs(t, writeErr, refusal)
+				}
+				if outcome == "panic" {
+					require.ErrorIs(t, writeErr, ErrHostAuthorityUnavailable)
+				}
+			}
+			require.True(t, released)
+			if outcome == "invalid thread" {
+				require.Zero(t, calls)
+			} else {
+				require.Equal(t, 1, calls)
+			}
+			contents, readErr := os.ReadFile(home)
+			require.NoError(t, readErr)
+			require.Equal(t, "untouched", string(contents))
+		})
+	}
+}
+
 func TestMaterializeStoredRolloutEmptyEntries(t *testing.T) {
 	released := false
 	agent := NewAgent(WithHome(t.TempDir()))
 
-	path, release, bytes, err := agent.materializeStoredRollout(nil, func() { released = true })
+	path, release, bytes, err := agent.materializeStoredRollout(t.Context(), nil, func() { released = true })
 	require.NoError(t, err)
 	require.Empty(t, path)
 	require.NotNil(t, release)

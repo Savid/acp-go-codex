@@ -120,10 +120,14 @@ a store implementation:
   rollout must carry exactly one `session_meta` row whose id is a non-empty
   identifier of letters, digits, `-`, and `_`; anything else cannot be made
   resident.
-- **The adapter writes into `CODEX_HOME`.** Restoring a session creates a real
-  rollout file under the home the app-server runs with. Point
-  [`WithHome`](/docs/reference/go-api#agent-options) at a home the adapter owns
-  when a host restores sessions it did not start.
+- **Restore writes into `CODEX_HOME`.** Restoring a session creates a real
+  rollout file under the home the app-server runs with. Managed execution
+  calls `HostAuthority.WriteNativeAppendLog` to place exact records beneath
+  that already prepared home, with native-owned `0700` directories and a
+  `0600` file. The host validates its approved path and record bounds
+  (16,384 non-blank records, 10 MiB per record, 16 MiB total payload).
+  In ordinary execution, point
+  [`WithHome`](/docs/reference/go-api#agent-options) at a home the adapter owns.
 - **The restore is idempotent in place.** One stored session always resolves to
   one residence path, and the rows are renamed into place as a whole file, so a
   repeated restore replaces rather than accumulates.
