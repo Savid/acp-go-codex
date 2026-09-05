@@ -147,6 +147,18 @@ returns.
 | usage | usage update |
 | account change | session metadata update |
 
+`agent_message_chunk` and `agent_thought_chunk` are append-only deltas: a client
+renders a turn's assistant text as the in-order concatenation of every chunk it
+received, so a chunk is never a snapshot, a repeat, or a correction of text
+already sent. Codex emits a terminal `item/completed` frame carrying the whole
+assembled message after streaming its deltas; the adapter emits only the suffix
+those deltas did not carry, and nothing at all when they carried the whole of
+it. A turn with no deltas produces exactly one chunk with that text, and a turn
+carrying several native assistant messages produces each message's text once, in
+native order. A terminal frame is matched to its deltas on the native item
+identity rather than on text, so two native messages carrying the same words are
+two messages.
+
 Image tool updates carry complete content snapshots. A native failed image
 tool emits failed tool state without fabricated content. Successful output is
 decoded, raster-sniffed, bounded, and emitted live with its sniffed MIME.

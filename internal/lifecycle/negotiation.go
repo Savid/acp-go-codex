@@ -10,16 +10,29 @@ import (
 // they are read before any stream exists.
 const MetaPath = `_meta["` + MetaKey + `"]`
 
+// VerdictUnsupported names a value the host sent and this adapter refuses; a
+// present key on a surface that carries none, and a malformed member, are both
+// that. VerdictMissing names a value the contract requires and the host left
+// out. The two are distinct facts about one field path: a host reading
+// `missing` adds the key, a host reading `unsupported` on the bare path stops
+// sending it on that surface.
+const (
+	VerdictUnsupported = "unsupported"
+	VerdictMissing     = "missing"
+)
+
 // ParamError refuses a negotiation or correlation value. It names the exact member
 // path so a host can tell which value it got wrong, and it is the one family
 // literal this adapter validates on `initialize` itself.
 type ParamError struct {
 	// Field is the full request path, from MetaPath down to the offending member.
 	Field string
+	// Verdict is VerdictUnsupported or VerdictMissing.
+	Verdict string
 }
 
 // Error implements error.
-func (e *ParamError) Error() string { return "unsupported " + e.Field }
+func (e *ParamError) Error() string { return e.Verdict + " " + e.Field }
 
 func paramError(members ...string) *ParamError {
 	field := MetaPath
@@ -27,7 +40,13 @@ func paramError(members ...string) *ParamError {
 		field += "." + member
 	}
 
-	return &ParamError{Field: field}
+	return &ParamError{Field: field, Verdict: VerdictUnsupported}
+}
+
+// missingParamError refuses the absent prompt correlation value on a
+// negotiated connection.
+func missingParamError() *ParamError {
+	return &ParamError{Field: MetaPath, Verdict: VerdictMissing}
 }
 
 // RejectKey refuses the reserved literal on a surface that carries no lifecycle
@@ -104,7 +123,7 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 	case !negotiated.Present():
 		return Submission{}, nil
 	case !present:
-		return Submission{}, paramError()
+		return Submission{}, missingParamError()
 	}
 
 	fields, ok := raw.(map[string]any)

@@ -92,12 +92,15 @@ func TestAppServerClientMethodsAndParams(t *testing.T) {
 		t.Fatalf("empty personality was sent: %#v", transport.sentParams(methodThreadStart))
 	}
 
-	if _, resumeErr := client.ResumeThread(ctx, ThreadResumeRequest{ThreadID: "thread-1", Path: "/tmp/rollout.jsonl", Cwd: "/repo", Config: map[string]any{"mcp_servers": map[string]any{"marker": map[string]any{"url": "https://a"}}}}); resumeErr != nil {
+	if _, resumeErr := client.ResumeThread(ctx, ThreadResumeRequest{ThreadID: "thread-1", Cwd: "/repo", Config: map[string]any{"mcp_servers": map[string]any{"marker": map[string]any{"url": "https://a"}}}}); resumeErr != nil {
 		t.Fatalf("ResumeThread returned error: %v", resumeErr)
 	}
 	resume := transport.sentParams(methodThreadResume)
 	if resume["config"] == nil {
 		t.Fatalf("thread/resume omitted config: %#v", resume)
+	}
+	if _, sent := resume[fieldPath]; sent {
+		t.Fatalf("thread/resume sent a rollout path: %#v", resume)
 	}
 	if _, forkErr := client.ForkThread(ctx, ThreadForkRequest{ThreadID: "thread-1", Cwd: "/repo"}); forkErr != nil {
 		t.Fatalf("ForkThread returned error: %v", forkErr)
@@ -491,6 +494,23 @@ func TestAppServerEventMappingVariants(t *testing.T) {
 			t.Fatalf("%s mapped to %#v", tc.method, event)
 		}
 	}
+	// item/completed names its item inside the item object. The decoded event
+	// must carry that identity so a consumer can match the completed message
+	// with the deltas it already streamed for the same item.
+	completed := eventFromRPC(rpcEvent{
+		Method: "item/completed",
+		Params: mustRaw(map[string]any{"item": map[string]any{"id": "msg-1", "type": "agentMessage", "text": "hi"}}),
+	})
+	if completed.Kind != EventAgentMessageDelta || completed.ItemID != "msg-1" || !completed.Completed {
+		t.Fatalf("completed agent message mapped to %#v", completed)
+	}
+	if topLevel := eventFromRPC(rpcEvent{
+		Method: "item/completed",
+		Params: mustRaw(map[string]any{"itemId": "top", "item": map[string]any{"id": "inner", "type": "agentMessage", "text": "hi"}}),
+	}); topLevel.ItemID != "top" {
+		t.Fatalf("top-level itemId was overridden: %#v", topLevel)
+	}
+
 	guardian := eventFromRPC(rpcEvent{
 		Method: notifyGuardianWarning,
 		Params: mustRaw(map[string]any{"message": "guardian held a command", "threadId": "thread"}),

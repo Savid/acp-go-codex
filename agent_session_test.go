@@ -1717,16 +1717,21 @@ func TestSessionDurabilityAndMaterializationErrorCoverage(t *testing.T) {
 	_, err = loadFactoryAgent.loadMaterializedSession(ctx, LoadSessionRequest("factory-load", absTestPath("tmp", "project")), entries("factory-load"))
 	require.ErrorIs(t, err, injected)
 
+	// A store entry the adapter found but could not make resident is the restore
+	// verdict, not an unclassified internal failure, and the Go cause never
+	// reaches the wire.
 	originalCreate := createMaterializedRolloutTemp
+	t.Cleanup(func() { createMaterializedRolloutTemp = originalCreate })
+
 	createMaterializedRolloutTemp = func(string) (materializedRolloutFile, error) { return nil, injected }
 	materializeStore := newStore("materialize")
 	materializeAgent := NewAgent(WithSessionStore(materializeStore), newFactory(newSpyCodexClient()))
 	_, err = materializeAgent.resumeMaterializedSession(ctx, ResumeSessionRequest("materialize", absTestPath("tmp", "project")), entries("materialize"))
-	require.ErrorIs(t, err, injected)
+	requireRestoreFailed(t, err)
 	loadMaterializeStore := newStore("materialize-load")
 	loadMaterializeAgent := NewAgent(WithSessionStore(loadMaterializeStore), newFactory(newSpyCodexClient()))
 	_, err = loadMaterializeAgent.loadMaterializedSession(ctx, LoadSessionRequest("materialize-load", absTestPath("tmp", "project")), entries("materialize-load"))
-	require.ErrorIs(t, err, injected)
+	requireRestoreFailed(t, err)
 	createMaterializedRolloutTemp = originalCreate
 
 	limitedStore := newStore("limited")
@@ -1872,9 +1877,6 @@ func (c *activeRolloutPathClient) ResumeThread(ctx context.Context, req codex.Th
 	c.resumeCount++
 	if req.ThreadID != c.nativeThreadID {
 		return codex.Thread{}, fmt.Errorf("wrong active thread: %s", req.ThreadID)
-	}
-	if req.Path != c.nativePath {
-		return codex.Thread{}, fmt.Errorf("cannot resume running thread %s with stale path", req.ThreadID)
 	}
 
 	thread := c.thread
@@ -2023,7 +2025,6 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	calls = client.snapshot()
 	require.Equal(t, 1, calls.resumeCount)
 	require.Equal(t, nativeThreadID, calls.resume.ThreadID)
-	require.Equal(t, nativePath, calls.resume.Path)
 	require.Equal(t, []string{nativeThreadID}, calls.unsubscribed)
 
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(
@@ -2038,7 +2039,7 @@ func TestResumeInterruptedActiveThreadUsesOwnedRolloutPath(t *testing.T) {
 	// because Codex ignores resume overrides for a thread it still holds loaded.
 	calls = client.snapshot()
 	require.Equal(t, 2, calls.resumeCount)
-	require.Equal(t, nativePath, calls.resume.Path)
+	require.Equal(t, nativeThreadID, calls.resume.ThreadID)
 	require.Equal(t, []string{nativeThreadID, nativeThreadID}, calls.unsubscribed)
 
 	agent.setAgentClient(&errorAgentClient{
@@ -2116,7 +2117,7 @@ func (c *joinedRebindClient) ResumeThread(ctx context.Context, req codex.ThreadR
 	}
 
 	thread, err := c.spyCodexClient.ResumeThread(ctx, req)
-	thread.Path = req.Path
+	thread.Path = testNativeRolloutPath
 
 	return thread, err
 }
@@ -2130,7 +2131,7 @@ func (c *loadedThreadCarrierClient) ResumeThread(ctx context.Context, req codex.
 
 	thread, err := c.spyCodexClient.ResumeThread(ctx, req)
 	if thread.Path == "" {
-		thread.Path = req.Path
+		thread.Path = testNativeRolloutPath
 	}
 
 	return thread, err
@@ -2301,7 +2302,7 @@ func TestActiveStoredRebindFailureBranches(t *testing.T) {
 		agent := NewAgent()
 		client := &activeRebindEdgeClient{spyCodexClient: newSpyCodexClient()}
 		client.resume = func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
-			return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+			return codex.Thread{ID: req.ThreadID, Path: testNativeRolloutPath}, nil
 		}
 		active := bind(agent, client)
 		client.account = func(context.Context) (codex.Account, error) {
@@ -2385,7 +2386,7 @@ func TestActiveRebindRotatesThreadCarrier(t *testing.T) {
 	client.resume = func(_ context.Context, request codex.ThreadResumeRequest) (codex.Thread, error) {
 		resumed = request
 
-		return codex.Thread{ID: request.ThreadID, Path: request.Path}, nil
+		return codex.Thread{ID: request.ThreadID, Path: testNativeRolloutPath}, nil
 	}
 
 	agent := NewAgent()
@@ -2563,7 +2564,7 @@ func TestActiveRebindLinearizesRacingAgentOriginWork(t *testing.T) {
 				return codex.Thread{}, err
 			}
 
-			return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+			return codex.Thread{ID: req.ThreadID, Path: testNativeRolloutPath}, nil
 		}
 
 		agent := NewAgent()
@@ -2772,7 +2773,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 			require.Len(t, client.unsubscribed, 1)
 
 			client.resume = func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
-				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+				return codex.Thread{ID: req.ThreadID, Path: testNativeRolloutPath}, nil
 			}
 			claimed, claimErr := agent.claimRetainedRuntimeThreadForStore("session", "thread-active")
 			require.NoError(t, claimErr)
@@ -2823,7 +2824,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 		client := &activeRebindEdgeClient{
 			spyCodexClient: newSpyCodexClient(),
 			resume: func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
-				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+				return codex.Thread{ID: req.ThreadID, Path: testNativeRolloutPath}, nil
 			},
 		}
 		agent, retained := fixture(client)
@@ -2846,7 +2847,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 	t.Run("ownership changes before commit", func(t *testing.T) {
 		client := &activeRebindEdgeClient{spyCodexClient: newSpyCodexClient()}
 		client.resume = func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
-			return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+			return codex.Thread{ID: req.ThreadID, Path: testNativeRolloutPath}, nil
 		}
 		agent, retained := fixture(client)
 		client.account = func(context.Context) (codex.Account, error) {
@@ -2869,7 +2870,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 		client := &activeRebindEdgeClient{
 			spyCodexClient: newSpyCodexClient(),
 			resume: func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
-				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+				return codex.Thread{ID: req.ThreadID, Path: testNativeRolloutPath}, nil
 			},
 		}
 		agent, retained := fixture(client)
@@ -2884,7 +2885,7 @@ func TestRetainedRuntimeResumeFailureBranches(t *testing.T) {
 		client = &activeRebindEdgeClient{
 			spyCodexClient: newSpyCodexClient(),
 			resume: func(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {
-				return codex.Thread{ID: req.ThreadID, Path: req.Path}, nil
+				return codex.Thread{ID: req.ThreadID, Path: testNativeRolloutPath}, nil
 			},
 		}
 		agent, retained = fixture(client)
@@ -2957,7 +2958,7 @@ func (c *blockingLifecycleCodexClient) ResumeThread(ctx context.Context, req cod
 
 	thread, err := c.spyCodexClient.ResumeThread(ctx, req)
 	if thread.Path == "" {
-		thread.Path = req.Path
+		thread.Path = testNativeRolloutPath
 	}
 
 	return thread, err
@@ -3006,7 +3007,7 @@ func TestCloseSessionSerializesRetainedResume(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, client.resumeCallCount())
 	client.mu.Lock()
-	require.Equal(t, "/native/rollout.jsonl", client.resume.Path)
+	require.Equal(t, client.thread.ID, client.resume.ThreadID)
 	client.mu.Unlock()
 	require.NoError(t, agent.Close())
 }
@@ -3019,7 +3020,7 @@ func TestCloseSessionUnsubscribeFailureKeepsOwnership(t *testing.T) {
 	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
-	materialized, err := materializeRollout(t.TempDir(), []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta"}`)})
+	materialized, err := materializeRollout(t.TempDir(), testStoredRolloutEntries("thread-resident", ""))
 	require.NoError(t, err)
 	released := false
 	active.materializedPath = materialized
@@ -3155,7 +3156,8 @@ func TestDeleteBeatsALoadAlreadyPastItsEntryCheck(t *testing.T) {
 		resumeStarted:  make(chan codex.ThreadResumeRequest, 1),
 		resumeRelease:  make(chan struct{}),
 	}
-	agent := NewAgent(WithSessionStore(store))
+	home := t.TempDir()
+	agent := NewAgent(WithSessionStore(store), WithHome(home))
 	agent.runtimeClient = client
 
 	loaded := make(chan error, 1)
@@ -3166,8 +3168,13 @@ func TestDeleteBeatsALoadAlreadyPastItsEntryCheck(t *testing.T) {
 	}()
 
 	prepared := awaitTestSignal(t, client.resumeStarted, "client.resumeStarted")
-	require.NotEmpty(t, prepared.Path, "the load materialized a rollout before its native resume")
-	require.FileExists(t, prepared.Path)
+	require.Equal(t, "session", prepared.ThreadID)
+
+	residence, residenceErr := nativeRolloutResidence(home, []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"session"}}`),
+	})
+	require.NoError(t, residenceErr)
+	require.FileExists(t, residence, "the load made the stored rollout resident before its native resume")
 
 	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest("session"))
 	require.NoError(t, err)
@@ -3186,7 +3193,7 @@ func TestDeleteBeatsALoadAlreadyPastItsEntryCheck(t *testing.T) {
 
 	require.Nil(t, agent.activeSession("session"), "the losing load installed a wrapper anyway")
 	require.True(t, agent.isDeleted("session"), "installing cleared the deletion marker")
-	require.NoFileExists(t, prepared.Path, "the prepared replacement was never torn down")
+	require.NoFileExists(t, residence, "the prepared replacement was never torn down")
 
 	entries, err := store.Load(ctx, key)
 	require.NoError(t, err)
@@ -3234,7 +3241,7 @@ func TestSessionLifecycleGuardBranches(t *testing.T) {
 	agent.abortSessionClose(active.id, active)
 	agent.sessions[active.id] = active
 
-	materialized, err := materializeRollout(t.TempDir(), []SessionStoreEntry{SessionStoreEntry(`{"type":"session_meta"}`)})
+	materialized, err := materializeRollout(t.TempDir(), testStoredRolloutEntries("thread-resident", ""))
 	require.NoError(t, err)
 	released := false
 	active.materializedPath = materialized
@@ -3472,7 +3479,10 @@ func boundEstablishmentContext(t *testing.T) context.Context {
 
 func TestSessionEstablishmentArmFailuresRemainTransactional(t *testing.T) {
 	negotiated := lifecycle.Negotiated{Version: 1, ActivityKinds: []lifecycle.ActivityKind{}}
-	entries := []SessionStoreEntry{SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}`)}
+	entries := append(
+		testStoredRolloutEntries("stored-thread", ""),
+		SessionStoreEntry(`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}`),
+	)
 
 	t.Run("new", func(t *testing.T) {
 		client := newSpyCodexClient()
@@ -3707,6 +3717,10 @@ func TestDeleteRetryAndConfigBranches(t *testing.T) {
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return deleteClient, nil }))
 	if err := agent.deleteNativeCodexSession(ctx, "session", "known"); err != nil {
 		t.Fatalf("delete native with not-found returned error: %v", err)
+	}
+	deleteClient.deleteErr = codex.ErrThreadForkReferenced
+	if err := agent.deleteNativeCodexSession(ctx, "session", "known"); err != nil {
+		t.Fatalf("delete native with fork-referenced refusal returned error: %v", err)
 	}
 	deleteClient.deleteErr = errors.New("delete failed")
 	if err := agent.deleteNativeCodexSession(ctx, "session", "known"); err == nil {
@@ -3973,4 +3987,24 @@ func TestCodexThreadACPErrorBranches(t *testing.T) {
 	if err := codexThreadACPError(passthrough, nil); !errors.Is(err, passthrough) {
 		t.Fatalf("passthrough error = %v", err)
 	}
+}
+
+// A restore that did not fail answers nothing, and a cause that already has a
+// closed wire classification keeps it rather than being flattened into the
+// restore verdict.
+func TestRestoreVerdictKeepsAlreadyClassifiedCauses(t *testing.T) {
+	require.NoError(t, codexRestoreACPError(nil, nil))
+
+	unknown := codexRestoreACPError(codex.ErrThreadNotFound, nil)
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, unknown, &requestErr)
+	require.Equal(t, -32602, requestErr.Code)
+	require.Equal(t, map[string]any{
+		jsonFieldError: errValueUnknownSession,
+		jsonFieldField: jsonFieldSessionID,
+	}, requestErr.Data)
+
+	requireRestoreFailed(t, codexRestoreACPError(errors.New("unreplayable"), nil))
 }

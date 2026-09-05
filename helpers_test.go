@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,7 +9,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
+
+// testNativeRolloutPath is the rollout path a fake app-server reports for a
+// resumed thread. `thread/resume` carries no path, so the native side is the
+// only thing that can name one.
+const testNativeRolloutPath = "/native/rollout.jsonl"
 
 // runtimeGenerationSnapshot reads the shared app-server generation a test wants
 // to prove survived, or did not. The epoch is what distinguishes a generation
@@ -116,4 +125,57 @@ func hostDirPerm(mode os.FileMode) os.FileMode {
 	}
 
 	return 0o777
+}
+
+// requireRestoreFailed asserts the closed off-prompt verdict a store entry the
+// adapter could not bring back is answered with: the token alone, with no Go or
+// native cause text anywhere in the data.
+func requireRestoreFailed(t *testing.T, err error) {
+	t.Helper()
+
+	requireClosedInternalError(t, err, valueRestoreFailed)
+}
+
+// requireClosedInternalError asserts one -32603 answer carries exactly the
+// named token and nothing else a host could read a cause out of.
+func requireClosedInternalError(t *testing.T, err error, token string) {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) {
+		t.Fatalf("error is not an ACP request error: %v", err)
+	}
+
+	if requestErr.Code != -32603 {
+		t.Fatalf("error code = %d, want -32603 (%v)", requestErr.Code, err)
+	}
+
+	if requestErr.Message != "Internal error" {
+		t.Fatalf("error message = %q, want the JSON-RPC constant", requestErr.Message)
+	}
+
+	data, ok := requestErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error data is not an object: %#v", requestErr.Data)
+	}
+
+	if data[jsonFieldError] != token {
+		t.Fatalf("error data = %#v, want %q", data, token)
+	}
+
+	if _, present := data["message"]; present {
+		t.Fatalf("error data carries a message member: %#v", data)
+	}
+}
+
+// requireInvalidParamsData asserts one -32602 answer carries exactly the
+// uniform `{error, field}` object and nothing a host could read a cause out of.
+func requireInvalidParamsData(t *testing.T, err error, want map[string]any) {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+	require.Equal(t, -32602, requestErr.Code)
+	require.Equal(t, want, requestErr.Data)
 }

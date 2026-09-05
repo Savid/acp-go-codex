@@ -785,9 +785,9 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(hydrated, residenceRelease)
 	if err != nil {
-		return acp.ResumeSessionResponse{}, err
+		return acp.ResumeSessionResponse{}, codexRestoreACPError(err, nil)
 	}
 
 	a.mu.Lock()
@@ -798,7 +798,6 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      threadID,
-		Path:          path,
 		Cwd:           params.Cwd,
 		Config:        config,
 		Environment:   cloneStringMap(meta.Env),
@@ -807,7 +806,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	if err != nil {
 		_ = a.retireMaterializedRolloutAtEpoch(path, materializedBytes, scratchRelease, materializedEpoch)
 
-		return acp.ResumeSessionResponse{}, codexThreadACPError(err, nil)
+		return acp.ResumeSessionResponse{}, codexRestoreACPError(err, nil)
 	}
 
 	id := params.SessionId
@@ -824,6 +823,11 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	session.materializedRelease = scratchRelease
 	session.materializedBytes = materializedBytes
 	session.materializedEpoch = materializedEpoch
+	// The resident rollout is the store's own rows written back out, so the
+	// mirror already owes nothing for them. Its cursor starts past them; reading
+	// from the top would append the whole restored history to the store a second
+	// time and leave the session with two session_meta rows.
+	session.mirroredRows = len(hydrated)
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -886,7 +890,6 @@ func (a *Agent) resumeRetainedRuntimeSession(
 
 	thread, err := retained.client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      retained.threadID,
-		Path:          retained.path,
 		Cwd:           params.Cwd,
 		Config:        config,
 		Environment:   cloneStringMap(meta.Env),
@@ -1037,7 +1040,6 @@ func (a *Agent) rebindActiveStoredSession(
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      ownedThreadID,
-		Path:          ownedPath,
 		Cwd:           params.Cwd,
 		Config:        config,
 		Environment:   cloneStringMap(meta.Env),
@@ -1431,9 +1433,9 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, err
 	}
 
-	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(ctx, hydrated, residenceRelease)
+	path, scratchRelease, materializedBytes, err := a.materializeStoredRollout(hydrated, residenceRelease)
 	if err != nil {
-		return acp.LoadSessionResponse{}, err
+		return acp.LoadSessionResponse{}, codexRestoreACPError(err, nil)
 	}
 
 	a.mu.Lock()
@@ -1442,7 +1444,6 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	thread, err := client.ResumeThread(ctx, codex.ThreadResumeRequest{
 		ThreadID:      firstNonEmpty(rolloutNativeThreadID(entries), string(params.SessionId)),
-		Path:          path,
 		Cwd:           params.Cwd,
 		Config:        config,
 		Environment:   cloneStringMap(meta.Env),
@@ -1451,7 +1452,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	if err != nil {
 		_ = a.retireMaterializedRolloutAtEpoch(path, materializedBytes, scratchRelease, materializedEpoch)
 
-		return acp.LoadSessionResponse{}, codexThreadACPError(err, nil)
+		return acp.LoadSessionResponse{}, codexRestoreACPError(err, nil)
 	}
 
 	id := params.SessionId
@@ -1468,6 +1469,11 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	session.materializedRelease = scratchRelease
 	session.materializedBytes = materializedBytes
 	session.materializedEpoch = materializedEpoch
+	// The resident rollout is the store's own rows written back out, so the
+	// mirror already owes nothing for them. Its cursor starts past them; reading
+	// from the top would append the whole restored history to the store a second
+	// time and leave the session with two session_meta rows.
+	session.mirroredRows = len(hydrated)
 	session.fingerprint = codexSessionStartFingerprint(codexSessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: params.AdditionalDirectories,
@@ -1601,6 +1607,15 @@ func (a *Agent) deleteNativeCodexSession(ctx context.Context, sessionID acp.Sess
 	for threadID := range threadIDs {
 		err := client.DeleteThread(ctx, codex.ThreadDeleteRequest{ThreadID: threadID})
 		if errors.Is(err, codex.ErrThreadNotFound) {
+			continue
+		}
+
+		// A fork's history is the parent thread's rollout, so the app-server's
+		// refusal to delete a forked-from thread is the correct outcome rather
+		// than a cleanup failure. The refusal stands for as long as the child
+		// exists, so surfacing it would fail every delete of that id forever while
+		// the id is already tombstoned and hidden.
+		if errors.Is(err, codex.ErrThreadForkReferenced) {
 			continue
 		}
 
@@ -1903,6 +1918,27 @@ func codexThreadACPError(err error, account map[string]any) error {
 	return err
 }
 
+// codexRestoreACPError answers a store entry the adapter found but could not
+// bring back. The entry stays exactly as it was — neither deleted nor
+// tombstoned — so a host may retry it against a repaired runtime. A cause that
+// already has a closed wire classification (unknown thread, provider auth)
+// keeps it; everything else is the restore verdict rather than an unclassified
+// internal failure.
+func codexRestoreACPError(err error, account map[string]any) error {
+	if err == nil {
+		return nil
+	}
+
+	mapped := codexThreadACPError(err, account)
+
+	var reqErr *acp.RequestError
+	if errors.As(mapped, &reqErr) {
+		return mapped
+	}
+
+	return acp.NewInternalError(map[string]any{jsonFieldError: valueRestoreFailed})
+}
+
 func newUnknownSession() *acp.RequestError {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: "unknown session", jsonFieldField: jsonFieldSessionID})
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnknownSession, jsonFieldField: jsonFieldSessionID})
 }

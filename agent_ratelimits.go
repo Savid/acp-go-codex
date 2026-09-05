@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
@@ -95,7 +94,7 @@ func decodeRateLimitsParams(params json.RawMessage) error {
 
 	var req struct{}
 	if err := decoder.Decode(&req); err != nil {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return newUnsupportedExtensionParams()
 	}
 
 	return nil

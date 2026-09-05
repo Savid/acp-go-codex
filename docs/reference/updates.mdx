@@ -57,3 +57,21 @@ error (code `-32603`) whose `data` object carries the uniform
 
 An auth failure instead resolves with the ACP authentication-required error
 (code `-32000`) rather than `codex_turn_failed`.
+
+## Internal errors off the turn path
+
+Every other `-32603` this adapter emits — on `initialize`, a session lifecycle
+request, `session/close`, `session/delete`, or an extension method — keeps the
+JSON-RPC constant `"Internal error"` as its `message` and carries exactly one
+closed token in `data.error`. Nothing else rides `data`: no `message` member, no
+Go error text, and no native app-server text.
+
+| Token | Condition |
+| --- | --- |
+| `codex_invalid_options` | The Agent was built from an option set it will not serve under. `NewAgent` returns no error, so the verdict is delivered on `initialize` and on every session-establishing entry point. |
+| `codex_restore_failed` | `session/load` or `session/resume` found a store entry for the session and could not restore it ([Session store](/docs/features/session-store#restoring-on-a-fresh-host)). The entry is neither deleted nor tombstoned. |
+| `codex_runtime_unavailable` | The shared app-server is gone and its previous incarnation's process tree is still alive and un-containable ([Sessions](/docs/core/sessions#session-lifecycle)). A runtime that merely exited never produces this token — the next explicit operation replaces it. |
+| `codex_internal_failure` | Every failure the adapter cannot classify above. |
+
+The adapter emits no poisoned-session token: a session is never left in a state
+that refuses everything but close and delete.

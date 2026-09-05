@@ -284,9 +284,13 @@ func (c *AppServerClient) StartThread(ctx context.Context, req ThreadStartReques
 func (c *AppServerClient) ResumeThread(ctx context.Context, req ThreadResumeRequest) (Thread, error) {
 	c.ensureEventPump()
 
+	// 0.153.2 threads are paginated and indexed by thread id under CODEX_HOME.
+	// `thread/resume.path` is only ever accepted when it names the thread's own
+	// active rollout, so it can carry nothing this call does not already know;
+	// the adapter makes the stored rollout resident in the home instead and
+	// resumes by thread id alone.
 	params := map[string]any{}
 	setNonEmpty(params, fieldThreadID, req.ThreadID)
-	setNonEmpty(params, fieldPath, req.Path)
 	setNonEmpty(params, "cwd", req.Cwd)
 
 	config, err := c.threadConfig(req.Config, req.Environment, req.ExtraPathDirs)
@@ -1722,6 +1726,14 @@ func completedItemEvent(event Event, params map[string]any) Event {
 	item := mapValue(params, fieldItem)
 	if item == nil {
 		item = params
+	}
+
+	// item/completed names its item inside the item object rather than as a
+	// top-level itemId. That identity is what matches a completed message with
+	// the deltas already streamed for it, so an absent top-level itemId reads
+	// the item's own id instead of leaving the event unidentified.
+	if event.ItemID == "" {
+		event.ItemID = stringValue(item, fieldID)
 	}
 
 	switch stringValue(item, fieldType) {

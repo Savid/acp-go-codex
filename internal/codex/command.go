@@ -434,7 +434,8 @@ func terminalNativeProcessError(result NativeResult, err error) error {
 	}
 
 	if result.ExitCode != 0 || result.Signal != 0 {
-		return fmt.Errorf("codex app-server exited with status %d signal %d", result.ExitCode, result.Signal)
+		return fmt.Errorf("%w: codex app-server exited with status %d signal %d",
+			ErrNativeGenerationTerminated, result.ExitCode, result.Signal)
 	}
 
 	return nil

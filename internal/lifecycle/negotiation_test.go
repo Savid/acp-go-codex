@@ -121,6 +121,7 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 		negotiated Negotiated
 		meta       map[string]any
 		field      string
+		verdict    string
 		want       Submission
 	}{
 		{
@@ -133,7 +134,14 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 			meta:       map[string]any{MetaKey: map[string]any{}},
 			field:      MetaPath,
 		},
-		{name: "a negotiated connection requires the key", negotiated: negotiated, field: MetaPath},
+		// The host left the key out rather than misspelling it, which is the one
+		// case on this path a host fixes by adding the value it omitted.
+		{
+			name:       "a negotiated connection requires the key",
+			negotiated: negotiated,
+			field:      MetaPath,
+			verdict:    VerdictMissing,
+		},
 		{
 			name:       "a non-object value",
 			negotiated: negotiated,
@@ -234,8 +242,15 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 			got, refusal := DecodePromptCorrelation(tc.meta, tc.negotiated)
 
 			if tc.field != "" {
+				verdict := tc.verdict
+				if verdict == "" {
+					verdict = VerdictUnsupported
+				}
+
 				require.NotNil(t, refusal)
 				require.Equal(t, tc.field, refusal.Field)
+				require.Equal(t, verdict, refusal.Verdict)
+				require.Equal(t, verdict+" "+tc.field, refusal.Error())
 
 				return
 			}

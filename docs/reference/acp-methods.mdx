@@ -33,6 +33,15 @@ so a value Codex cannot use surfaces during the turn or not at all.
 `session/prompt` and active-turn `session/cancel` require the exact version-1
 `acp-go.dev/route` metadata described in [Sessions](/docs/core/sessions#turn-route-identity).
 Missing and stale turn nonces are invalid params; there is no unstamped path.
+The exact refusal shapes are in [`_meta` reference](/docs/reference/meta#turn-route).
+
+`session/new`, `session/load`, `session/resume`, and `_codex/session/fork`
+require an absolute `cwd`, and `session/list` requires one for its optional
+filter. A relative or empty value is invalid params carrying
+`{"error": "unsupported", "field": "cwd"}` before any native process or store
+entry exists. A `_codex/*` request whose params cannot be decoded, or do not
+validate as a whole, is invalid params carrying
+`{"error": "unsupported", "field": "params"}`.
 
 ## Extensions and unsupported methods
 

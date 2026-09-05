@@ -112,7 +112,12 @@ ChatGPT token refresh, guarded logout, and OpenTelemetry providers.
 - Store-authoritative lifecycle through a default in-memory `SessionStore`,
   replaceable by a host-provided durable store; stored rows are Codex rollout
   JSONL keyed by `{SessionID, Subpath}`, and residual native threads are never
-  listed, loaded, or resumed without those rows.
+  listed, loaded, or resumed without those rows. A session the current
+  app-server does not own is restored by making its stored rows resident in
+  `CODEX_HOME` the way Codex writes them itself, then resuming by thread id.
+- One shared `codex app-server` per Agent, whose loss fences a runtime
+  generation rather than the Agent: the next explicit operation starts exactly
+  one replacement and rebinds through it.
 - Ordinary same-user native execution when `WithHostAuthority` is omitted, and
   host-managed environment, prepared-tree, launch, wait, revoke, and reclaim
   seams when it is supplied. Managed failures never fall back to ordinary

@@ -304,13 +304,31 @@ func TestSessionCloseCoordinatesConcurrentCallersExactlyOnce(t *testing.T) {
 	agent.sessions[s.id] = s
 	agent.runtimeClient = client
 
+	// The winner is admitted first and parked inside the native unsubscribe, so
+	// every later caller provably finds a close operation still in flight and
+	// waits on it rather than memoizing a finished one. Each of those callers
+	// announces itself before entering Close, and the native side is released
+	// only once all of them have — so the waiting path, not the memoized one, is
+	// what the peers exercise.
 	const callers = 24
 	results := make(chan error, callers)
-	for range callers {
-		go func() { results <- s.Close(t.Context()) }()
-	}
+
+	go func() { results <- s.Close(t.Context()) }()
 	awaitTestSignal(t, client.started, "client.started")
 	require.Equal(t, int64(1), client.calls.Load())
+
+	entering := make(chan struct{}, callers-1)
+	for range callers - 1 {
+		go func() {
+			entering <- struct{}{}
+			results <- s.Close(t.Context())
+		}()
+	}
+
+	for range callers - 1 {
+		awaitTestSignal(t, entering, "peer entering Close")
+	}
+
 	close(client.release)
 	for range callers {
 		require.NoError(t, <-results)

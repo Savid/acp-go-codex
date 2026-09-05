@@ -21,6 +21,24 @@ are absorbed by design.
 | `session/prompt` fails with authentication-required (`-32000`) | Codex credentials are missing or expired. Run `acp-go-codex login` or supply a token refresher. |
 | ACP logout is refused | Logout is gated. Start with `-codex-allow-account-logout` for an adapter-owned `CODEX_HOME`. |
 | `codex_turn_failed` `cause: "process_exit"` / `"transport"` | The Codex process or its connection dropped. The session relaunches lazily; retry the prompt. |
+| Any request fails with `-32603` `codex_runtime_unavailable` | The shared app-server is gone and its previous incarnation's process tree is still alive and un-containable. Quarantine that tree; the Agent will not admit another generation until the host recovers the identity. `session/list` and `session/delete` keep working. |
+| `session/load` or `session/resume` fails with `-32603` `codex_restore_failed` | The session's store entry could not be brought back: no usable native thread id in its `session_meta` row, a rollout the adapter could not make resident under `CODEX_HOME`, or an app-server that refused to adopt it. The entry is left intact — check the home is writable and retry ([Session store](/docs/features/session-store#restoring-on-a-fresh-host)). |
+| `initialize` or a session request fails with `-32603` `codex_invalid_options` | The Agent was constructed from an option set it will not serve under. Fix the options; no request will succeed until then. |
+
+## Losing the shared app-server
+
+Killing the shared `codex app-server`, or having it exit on its own, fences that
+runtime generation and marks every bound thread unavailable. It does not brick
+the Agent: the next `session/new`, `session/load`, `session/resume`, or prompt
+on a session that needs one starts exactly one replacement generation and
+rebinds through it, and a store-backed session restores its history onto the
+replacement. No adapter restart is required, and `session/list` and
+`session/delete` never stop working.
+
+The single exception is an incarnation whose native process tree is still alive
+and un-containable. That state is latched deliberately and named on the wire as
+`codex_runtime_unavailable` so a host can tell it apart from an app-server that
+simply died.
 
 ## MCP tools missing after a native resume
 

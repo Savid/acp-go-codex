@@ -2128,7 +2128,7 @@ func TestAutonomousEventHandlingAndShutdownFailClosedAtEveryBoundary(t *testing.
 		var text strings.Builder
 
 		return &promptEventState{
-			snapshot: s.snapshot(), agentDeltaItems: map[string]struct{}{}, reasoningDeltaItems: map[string]struct{}{},
+			snapshot: s.snapshot(), agentDeltaItems: map[string]string{}, reasoningDeltaItems: map[string]string{},
 			agentText: &text, toolContents: make(map[acp.ToolCallId][]acp.ToolCallContent), imageTools: newImageToolState(),
 		}
 	}
@@ -2850,12 +2850,12 @@ func TestCancelRoutesBeforeItRefusesTheReservedKey(t *testing.T) {
 		{
 			name:  "a stale route beside the reserved key reports the route",
 			meta:  inboundRouteMeta("stale"),
-			field: "_meta." + routeMetaKey,
+			field: routeMetaPath + "." + routeTurnNonceKey,
 		},
 		{
 			name:  "a missing route beside the reserved key reports the route",
 			meta:  map[string]any{},
-			field: "_meta." + routeMetaKey,
+			field: routeMetaPath,
 		},
 		{
 			name:  "a valid route beside the reserved key reports the key",
@@ -2908,7 +2908,8 @@ func TestPromptRoutesBeforeItReadsTheLifecycleValue(t *testing.T) {
 
 	data, ok := requestErr.Data.(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "_meta."+routeMetaKey, data[jsonFieldField])
+	require.Equal(t, routeMetaPath, data[jsonFieldField])
+	require.Equal(t, errValueMissing, data[jsonFieldError])
 	require.Empty(t, client.lastTurn.ThreadID, "a refused prompt writes no native frame")
 }
 

@@ -16,6 +16,12 @@ var (
 	// it is a different fact from a containment attempt that failed.
 	ErrBackgroundTerminalsUnsupported = errors.New("codex app-server does not expose thread background terminals")
 	ErrThreadNotFound                 = errors.New("codex thread not found")
+	// ErrThreadForkReferenced reports that the app-server refuses to delete a
+	// thread because a forked thread still references its history. The refusal is
+	// terminal rather than transient: it stands for as long as the child exists,
+	// and the parent's rollout is the child's history, so deleting it is the wrong
+	// outcome rather than a retryable failure.
+	ErrThreadForkReferenced = errors.New("codex thread is still referenced by a forked thread")
 )
 
 const (
@@ -92,8 +98,12 @@ func isMethodNotFound(err error) bool {
 }
 
 func normalizeThreadError(err error) error {
-	if err == nil || errors.Is(err, ErrThreadNotFound) {
+	if err == nil || errors.Is(err, ErrThreadNotFound) || errors.Is(err, ErrThreadForkReferenced) {
 		return err
+	}
+
+	if isNativeForkReferenced(err) {
+		return fmt.Errorf("%w: %w", ErrThreadForkReferenced, err)
 	}
 
 	if !isNativeThreadNotFound(err) {
@@ -103,13 +113,25 @@ func normalizeThreadError(err error) error {
 	return fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 }
 
-func isNativeThreadNotFound(err error) bool {
-	text := strings.ToLower(err.Error())
-
+// nativeErrorText is the text a native classification reads: the app-server's
+// own message when the failure carries one, and the Go error text otherwise.
+func nativeErrorText(err error) string {
 	var nativeErr *rpcError
 	if errors.As(err, &nativeErr) {
-		text = strings.ToLower(nativeErr.Message)
+		return strings.ToLower(nativeErr.Message)
 	}
+
+	return strings.ToLower(err.Error())
+}
+
+// isNativeForkReferenced reports whether the app-server refused a thread delete
+// because a fork still references that thread's history.
+func isNativeForkReferenced(err error) bool {
+	return strings.Contains(nativeErrorText(err), "forked history still references")
+}
+
+func isNativeThreadNotFound(err error) bool {
+	text := nativeErrorText(err)
 
 	switch {
 	case strings.Contains(text, "not materialized yet"):

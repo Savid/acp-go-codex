@@ -40,14 +40,28 @@ retires the accepting generation; it never returns while an uncontained target
 tree is merely suspected.
 
 If the shared process dies, its runtime epoch is fenced and every bound thread
-is marked unavailable. The next explicit operation starts one replacement, but
-only the addressed logical session resumes with its own
-`thread/resume.config.mcp_servers`; peers stay unavailable until independently
-used. A stale peer therefore cannot block an unrelated session from loading or
-starting. For each MCP-bearing resumed thread, an adapter-owned `runtime_ready`
-marker turn must succeed within five attempts and two minutes before that
-session is rebound. Native MCP status is telemetry only, and no user prompt is
-replayed as a probe.
+is marked unavailable. The next explicit operation — `session/new`,
+`session/load`, `session/resume`, or a prompt on a session that needs one —
+starts exactly one replacement generation; the adapter never starts one
+speculatively and never requires a host to restart it. A process that exited on
+its own terms, however abruptly, is how that generation ended and not a verdict
+on the Agent: its non-zero status or signal is logged, its residences are
+reclaimed, and the replacement launches. `session/list` and `session/delete`
+need no runtime and keep working throughout.
+
+The one state that refuses a replacement is an incarnation whose native process
+tree is still alive and un-containable. That is latched, and every
+runtime-needing operation then answers `-32603` with
+`{"error":"codex_runtime_unavailable"}` until the host recovers the identity. A
+runtime that is provably gone never produces that token.
+
+After a replacement starts, only the addressed logical session resumes with its
+own `thread/resume.config.mcp_servers`; peers stay unavailable until
+independently used. A stale peer therefore cannot block an unrelated session
+from loading or starting. For each MCP-bearing resumed thread, an adapter-owned
+`runtime_ready` marker turn must succeed within five attempts and two minutes
+before that session is rebound. Native MCP status is telemetry only, and no user
+prompt is replayed as a probe.
 
 ## Turn route identity
 
@@ -80,14 +94,45 @@ and is not adopted.
 
 When a lifecycle request refreshes configuration for a session whose native
 thread is still owned by the current app-server, the adapter rebinds that same
-thread at its owned native rollout path. This applies both to an active wrapper
-session and to a thread retained after `session/close`. It never materializes
-the mirror as a second rollout. Codex ignores `thread/resume` overrides for a
-thread its app-server still holds loaded, so an active rebind drops the thread
-from the app-server before resuming it; admission already holds the session's
-turn, so no native turn runs across the drop. The native thread ID in the stored
+thread. This applies both to an active wrapper session and to a thread retained
+after `session/close`. Codex ignores `thread/resume` overrides for a thread its
+app-server still holds loaded, so an active rebind drops the thread from the
+app-server before resuming it; admission already holds the session's turn, so no
+native turn runs across the drop. The native thread ID in the stored
 `session_meta` row must match the active or retained thread; a mismatch is
 rejected before Codex is called.
+
+### Restoring a stored session
+
+Codex threads are paginated: the app-server resolves a thread by its id against
+the rollout files under its own `CODEX_HOME`, and it refuses a rollout handed to
+it from anywhere else. `thread/resume.path` is accepted only when it already
+names the thread's own active rollout, so it can carry nothing the call does not
+already know — the adapter never sends it.
+
+Restoring a session the current app-server does not own therefore means putting
+the stored rows back where Codex would have written them itself, and then
+resuming by thread id alone:
+
+1. The stored rollout's single `session_meta` row supplies the native thread id
+   and the session's start time.
+2. Those two values reconstruct the canonical residence path
+   `$CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-<YYYY-MM-DD>T<HH-MM-SS>-<threadId>.jsonl`.
+   One stored session always resolves to one path.
+3. The rows are staged beside that path and renamed into place, so a scan never
+   sees a partial rollout for a thread it is about to be asked to resume.
+4. `thread/resume` is called with the thread id and no path.
+
+From then on the resident file *is* that thread's rollout: Codex appends the
+next turns to it, and the adapter mirrors only what the native side adds after
+the restored rows. Closing the session retires the residence, and the store
+remains the authority for the next restore.
+
+A stored entry the adapter finds but cannot bring back — no usable native thread
+id in `session_meta`, a rollout it could not make resident, or an app-server
+that refuses to adopt it — answers `-32603` with
+`{"error":"codex_restore_failed"}`. The store entry is neither deleted nor
+tombstoned by that failure.
 
 Forking is exposed as the Codex extension method `_codex/session/fork`; the
 stable ACP `session/fork` method is intentionally not routed. See
@@ -118,3 +163,9 @@ the host can send another prompt after a timed-out turn returns.
 `session/delete` writes a store tombstone first, then closes any active session,
 and hides the session from list, load, and resume. Deleting the main subpath
 cascades to every subpath of that session.
+
+A thread another thread was forked from is the exception to native rollout
+removal. Codex refuses to delete a thread whose history a fork still
+references, and that refusal is terminal rather than transient, so the delete
+succeeds with the parent's native rollout left in place for the child that owns
+it. The ACP session is tombstoned and hidden either way.

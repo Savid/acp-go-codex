@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
@@ -672,6 +673,14 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 	var reqErr *acp.RequestError
 	if errors.As(err, &reqErr) {
 		return reqErr
+	}
+
+	// A shared runtime whose previous incarnation is still alive and
+	// un-containable is the one runtime state a host cannot wait out: it is
+	// named on the wire so a host can tell it apart from a runtime that merely
+	// died, which the next explicit operation replaces on its own.
+	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, codex.ErrContainmentIncomplete) {
+		return acp.NewInternalError(map[string]any{jsonFieldError: valueRuntimeUnavailable})
 	}
 
 	return acp.NewInternalError(map[string]any{jsonFieldError: valueInternalFailure})

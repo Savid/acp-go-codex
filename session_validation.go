@@ -8,13 +8,14 @@ import (
 
 const validationAbsolutePath = "must be an absolute path"
 
+// validateRequiredAbsolutePath refuses a path the adapter cannot resolve
+// identically from its own working directory. Absent and relative are one
+// verdict on one field: the value the caller supplied is not one this surface
+// accepts, reported in the uniform `{error, field}` shape rather than as a
+// message keyed by the field name.
 func validateRequiredAbsolutePath(field string, path string) error {
-	if path == "" {
-		return acp.NewInvalidParams(map[string]any{field: validationRequired})
-	}
-
 	if !filepath.IsAbs(path) {
-		return acp.NewInvalidParams(map[string]any{field: validationAbsolutePath})
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: field})
 	}
 
 	return nil

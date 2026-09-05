@@ -74,7 +74,6 @@ type ThreadStartRequest struct {
 
 type ThreadResumeRequest struct {
 	ThreadID      string
-	Path          string
 	Cwd           string
 	Config        map[string]any
 	Environment   map[string]string

@@ -188,19 +188,23 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 
 	mainCount := 0
 
-	// Two replacements naming one key are refused before anything is written,
-	// rather than resolved by letting the later one win: a set that names a key
-	// twice states two different truths about it, and picking one would commit a
-	// generation neither the caller nor any other store would agree on.
+	// Every replacement in one set belongs to one session, and no key is named
+	// twice. Both are checked over the whole set before a single key is written:
+	// a set reaching outside its session would commit a generation for a session
+	// the caller never addressed, and a set naming a key twice states two
+	// different truths about it, which picking one of would resolve into a
+	// generation neither the caller nor any other store would agree on. Each
+	// refusal names the exact key at fault so a caller can find it.
 	seen := make(map[SessionKey]struct{}, len(replacements))
 
 	for _, replacement := range replacements {
 		if replacement.Key.SessionID != main.SessionID {
-			return fmt.Errorf("replacement key does not match main session")
+			return fmt.Errorf("replacement key %s does not belong to session %q",
+				sessionKeyLabel(replacement.Key), main.SessionID)
 		}
 
 		if _, duplicate := seen[replacement.Key]; duplicate {
-			return fmt.Errorf("duplicate replacement key %q", replacement.Key.Subpath)
+			return fmt.Errorf("duplicate replacement key %s", sessionKeyLabel(replacement.Key))
 		}
 
 		seen[replacement.Key] = struct{}{}
@@ -363,6 +367,13 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 	slices.Sort(subpaths)
 
 	return subpaths, nil
+}
+
+// sessionKeyLabel renders one store key for a refusal. Both members are shown
+// because a key is the pair: a caller reading only a subpath cannot tell a
+// duplicate apart from a key that reached into another session.
+func sessionKeyLabel(key SessionKey) string {
+	return fmt.Sprintf("{sessionId:%q, subpath:%q}", key.SessionID, key.Subpath)
 }
 
 func cloneStoreEntry(entry SessionStoreEntry) SessionStoreEntry {
