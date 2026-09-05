@@ -143,8 +143,25 @@ claim becomes retryable.
 
 ## Generations and deletion
 
-`Replace` writes one complete committed generation for a session: the main key
-must be present exactly once, and unlisted subpaths are hidden atomically.
+`Replace` writes one complete committed generation for **one** session: the main
+key must be present exactly once, and unlisted subpaths are hidden atomically.
+
+Every replacement in the set belongs to the session `main` addresses, and no key
+appears twice. Both rules are checked over the whole set **before any key is
+written**, and each refusal names the exact key at fault:
+
+| Set | Refusal |
+| --- | --- |
+| a replacement whose `SessionID` differs from `main.SessionID` | `replacement key {sessionId:"other", subpath:"images/1"} does not belong to session "s"` |
+| the same `{SessionID, Subpath}` listed twice | `duplicate replacement key {sessionId:"s", subpath:"images/1"}` |
+
+A refused set writes nothing at all — not the main rollout, not a subrecord the
+set also named, and nothing under the session a reaching key pointed at. A store
+never resolves a duplicate by letting the later entry win: a set naming one key
+twice states two different truths about it, and picking one would commit a
+generation neither the caller nor any other store would agree on. A host store
+must answer the same way; `InMemorySessionStore` is the reference.
+
 `Delete` writes a tombstone first; deleting the main subpath cascades to every
 subpath and hides the session from list, load, and resume before residual native
 cleanup is attempted.

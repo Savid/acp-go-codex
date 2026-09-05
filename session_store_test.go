@@ -153,36 +153,78 @@ func TestInMemorySessionStoreReplaceValidation(t *testing.T) {
 	}
 }
 
-// TestInMemorySessionStoreReplaceRefusesDuplicateKeys pins the reference store's
-// answer to a set that names one key twice. Such a set states two truths about
-// the same key, so it is refused by name and before any key is written — never
-// resolved by letting the later entry win.
-func TestInMemorySessionStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+// Every `Replace` is one session's. The reference store proves both halves of
+// that rule the way a host store must: a key reaching outside the addressed
+// session and a key named twice are each refused by name, over the whole set,
+// before one key is written — never resolved by letting the later entry win and
+// never leaving a half-applied generation behind.
+func TestInMemorySessionStoreReplaceRefusesForeignAndDuplicateKeys(t *testing.T) {
 	ctx := context.Background()
-	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "s"}
 	artifact := SessionKey{SessionID: "s", Subpath: "images/1"}
+	foreign := SessionKey{SessionID: "other", Subpath: "images/1"}
 
-	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+	committed := []SessionStoreReplacement{
 		{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":0}`)}},
 		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"first"}`)}},
-	}))
+	}
 
-	err := store.Replace(ctx, main, []SessionStoreReplacement{
-		{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":1}`)}},
-		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"second"}`)}},
-		{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"third"}`)}},
-	})
-	require.ErrorContains(t, err, "images/1")
+	for name, tc := range map[string]struct {
+		replacements []SessionStoreReplacement
+		wantError    string
+	}{
+		"a key from another session": {
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":1}`)}},
+				{Key: foreign, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"second"}`)}},
+			},
+			wantError: `replacement key {sessionId:"other", subpath:"images/1"} does not belong to session "s"`,
+		},
+		"a key named twice": {
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":1}`)}},
+				{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"second"}`)}},
+				{Key: artifact, Entries: []SessionStoreEntry{SessionStoreEntry(`{"artifact":"third"}`)}},
+			},
+			wantError: `duplicate replacement key {sessionId:"s", subpath:"images/1"}`,
+		},
+		"the main key named twice": {
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":1}`)}},
+				{Key: main, Entries: []SessionStoreEntry{SessionStoreEntry(`{"row":2}`)}},
+			},
+			wantError: `duplicate replacement key {sessionId:"s", subpath:""}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			require.NoError(t, store.Replace(ctx, main, committed))
 
-	entries, err := store.Load(ctx, main)
-	require.NoError(t, err)
-	require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"row":0}`)}, entries,
-		"a refused set writes nothing at all")
+			err := store.Replace(ctx, main, tc.replacements)
+			require.EqualError(t, err, tc.wantError)
 
-	artifactEntries, err := store.Load(ctx, artifact)
-	require.NoError(t, err)
-	require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"artifact":"first"}`)}, artifactEntries)
+			// The committed generation is untouched: not the main rollout, not
+			// the subrecord the refused set also named, and not the foreign
+			// session a reaching key pointed at.
+			entries, loadErr := store.Load(ctx, main)
+			require.NoError(t, loadErr)
+			require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"row":0}`)}, entries,
+				"a refused set wrote the main key anyway")
+
+			artifactEntries, loadErr := store.Load(ctx, artifact)
+			require.NoError(t, loadErr)
+			require.Equal(t, []SessionStoreEntry{SessionStoreEntry(`{"artifact":"first"}`)}, artifactEntries,
+				"a refused set wrote a subrecord anyway")
+
+			foreignEntries, loadErr := store.Load(ctx, foreign)
+			require.NoError(t, loadErr)
+			require.Empty(t, foreignEntries, "a refused set wrote into another session")
+
+			subkeys, subErr := store.ListSubkeys(ctx, main)
+			require.NoError(t, subErr)
+			require.Equal(t, []string{"images/1"}, subkeys)
+		})
+	}
 }
 
 func TestInMemorySessionStoreEdgeBranches(t *testing.T) {
