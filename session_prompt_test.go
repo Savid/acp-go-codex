@@ -1253,7 +1253,7 @@ func TestAcceptedTurnRequestErrorDeliveryIsContainedAndPreserved(t *testing.T) {
 
 	agentText := &strings.Builder{}
 	result := promptTurnResult{accepted: true, state: &promptEventState{
-		snapshot: s.snapshot(), agentDeltaItems: map[string]struct{}{}, reasoningDeltaItems: map[string]struct{}{},
+		snapshot: s.snapshot(), agentDeltaItems: map[string]string{}, reasoningDeltaItems: map[string]string{},
 		toolContents: make(map[acp.ToolCallId][]acp.ToolCallContent), agentText: agentText,
 		stopReason: acp.StopReasonEndTurn, imageTools: newImageToolState(),
 	}}
@@ -1412,4 +1412,198 @@ func TestPromptSettlementKeepsTheNativeCauseWhenTheCommitAlsoFails(t *testing.T)
 	require.Equal(t, codex.CauseProvider, data[jsonFieldCause])
 	require.Equal(t, "Codex provider turn failed", data[jsonFieldMessage])
 	require.NotContains(t, err.Error(), "provider refused the turn")
+}
+
+// nativeStreamFixture is one turn's native event sequence, replayed through the
+// ordinary prompt path so the assertion is about what a host actually receives
+// rather than about an internal helper.
+type nativeStreamFixture struct {
+	name      string
+	events    []codex.Event
+	chunks    []string
+	thought   []string
+	divergent bool
+}
+
+// Assistant text is append-only: a chunk is a delta a client concatenates,
+// never a snapshot, a repeat, or a correction of text already sent. The
+// fixtures below are the three shapes 0.153.2 produces — a terminal
+// `item/completed` that repeats the streamed message, a harness turn with no
+// deltas at all, and a turn carrying several native messages.
+func TestAssistantTextChunksAreAppendOnly(t *testing.T) {
+	for _, fixture := range []nativeStreamFixture{
+		{
+			name: "a terminal frame repeating the streamed text adds nothing",
+			events: []codex.Event{
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn", Text: "MSG"},
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn", Text: "-ONE"},
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn",
+					Text: "MSG-ONE", Completed: true,
+				},
+				{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+			},
+			chunks: []string{"MSG", "-ONE"},
+		},
+		{
+			name: "a terminal frame contributes only the suffix the deltas missed",
+			events: []codex.Event{
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn", Text: "MSG"},
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn",
+					Text: "MSG-ONE", Completed: true,
+				},
+				{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+			},
+			chunks: []string{"MSG", "-ONE"},
+		},
+		{
+			name: "a deltas-free harness yields exactly one chunk",
+			events: []codex.Event{
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn",
+					Text: "WHOLE-MESSAGE", Completed: true,
+				},
+				{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+			},
+			chunks: []string{"WHOLE-MESSAGE"},
+		},
+		{
+			name: "a multi-message turn yields each message once",
+			events: []codex.Event{
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn", Text: "MSG"},
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn", Text: "-ONE"},
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn",
+					Text: "MSG-ONE", Completed: true,
+				},
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-2", ThreadID: "thread", TurnID: "turn", Text: "MSG"},
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-2", ThreadID: "thread", TurnID: "turn", Text: "-TWO"},
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-2", ThreadID: "thread", TurnID: "turn",
+					Text: "MSG-TWO", Completed: true,
+				},
+				{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+			},
+			chunks: []string{"MSG", "-ONE", "MSG", "-TWO"},
+		},
+		{
+			// Identity, not text, is what a terminal frame is matched on: two
+			// native messages carrying the same words are two messages.
+			name: "two identical native messages are two messages",
+			events: []codex.Event{
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn",
+					Text: "SAME", Completed: true,
+				},
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-2", ThreadID: "thread", TurnID: "turn",
+					Text: "SAME", Completed: true,
+				},
+				{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+			},
+			chunks: []string{"SAME", "SAME"},
+		},
+		{
+			// A terminal frame that is not a continuation of what was already
+			// streamed cannot be appended without rendering text twice, so the
+			// deltas stand and nothing more is emitted.
+			name: "a terminal frame diverging from the deltas adds nothing",
+			events: []codex.Event{
+				{Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn", Text: "STREAMED"},
+				{
+					Kind: codex.EventAgentMessageDelta, ItemID: "msg-1", ThreadID: "thread", TurnID: "turn",
+					Text: "REWRITTEN", Completed: true,
+				},
+				{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+			},
+			chunks:    []string{"STREAMED"},
+			divergent: true,
+		},
+		{
+			name: "reasoning text obeys the same rule",
+			events: []codex.Event{
+				{Kind: codex.EventReasoningDelta, ItemID: "why-1", ThreadID: "thread", TurnID: "turn", Text: "THINK"},
+				{
+					Kind: codex.EventReasoningDelta, ItemID: "why-1", ThreadID: "thread", TurnID: "turn",
+					Text: "THINKING", Completed: true,
+				},
+				{Kind: codex.EventCompleted, ThreadID: "thread", TurnID: "turn"},
+			},
+			thought: []string{"THINK", "ING"},
+		},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			agent := NewAgent()
+			conn := newRecordingAgentClient()
+			agent.setAgentClient(conn)
+
+			session := &session{
+				agent:         agent,
+				id:            "stream",
+				cwd:           absTestPath("tmp", "project"),
+				codexThreadID: "thread",
+				client:        &runEventsClient{events: fixture.events},
+			}
+
+			_, err := session.Prompt(context.Background(), TextPromptRequest("stream", "test-turn", "hi"))
+			require.NoError(t, err)
+
+			require.Equal(t, fixture.chunks, streamedTextChunks(conn.updates, false))
+			require.Equal(t, fixture.thought, streamedTextChunks(conn.updates, true))
+
+			// The whole point of the rule: concatenation renders the native
+			// final text exactly once.
+			if len(fixture.chunks) > 0 && !fixture.divergent {
+				require.Equal(t,
+					nativeFinalText(fixture.events, false),
+					strings.Join(fixture.chunks, ""),
+				)
+			}
+		})
+	}
+}
+
+func streamedTextChunks(updates []acp.SessionNotification, thought bool) []string {
+	var chunks []string
+
+	for _, update := range updates {
+		block := update.Update.AgentMessageChunk
+		if thought {
+			if update.Update.AgentThoughtChunk == nil {
+				continue
+			}
+
+			chunks = append(chunks, update.Update.AgentThoughtChunk.Content.Text.Text)
+
+			continue
+		}
+
+		if block == nil {
+			continue
+		}
+
+		chunks = append(chunks, block.Content.Text.Text)
+	}
+
+	return chunks
+}
+
+// nativeFinalText is what the harness said the turn's assistant text was, taken
+// from the terminal frames themselves.
+func nativeFinalText(events []codex.Event, thought bool) string {
+	kind := codex.EventAgentMessageDelta
+	if thought {
+		kind = codex.EventReasoningDelta
+	}
+
+	var text strings.Builder
+
+	for _, event := range events {
+		if event.Kind == kind && event.Completed {
+			text.WriteString(event.Text)
+		}
+	}
+
+	return text.String()
 }

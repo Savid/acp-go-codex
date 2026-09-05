@@ -26,10 +26,14 @@ const valueAgentMessageCamel = "agentMessage"
 // the field is accepted so a strict row check does not refuse native output.
 const rolloutFieldOrdinal = "ordinal"
 
+// rolloutTypeSessionMeta is the one rollout row that names the session's native
+// identity and start time.
+const rolloutTypeSessionMeta = "session_meta"
+
 func rolloutNativeThreadID(entries []SessionStoreEntry) string {
 	for _, entry := range entries {
 		row, err := decodeRolloutRow(entry)
-		if err != nil || row.Type != "session_meta" {
+		if err != nil || row.Type != rolloutTypeSessionMeta {
 			continue
 		}
 

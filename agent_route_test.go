@@ -32,19 +32,92 @@ func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, boundaryNonce, boundary.TurnNonce)
 
-	for name, meta := range map[string]map[string]any{
-		"missing":            nil,
-		"wrong version":      {routeMetaKey: map[string]any{routeVersionKey: 2, routeTurnNonceKey: "n"}},
-		"wrong version type": {routeMetaKey: map[string]any{routeVersionKey: "1", routeTurnNonceKey: "n"}},
-		"empty nonce":        {routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: ""}},
-		"oversized nonce":    {routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: strings.Repeat("n", routeTurnNonceMaxBytes+1)}},
-		"extra field":        {routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: "n", "extra": true}},
+	// A host reads two distinct facts off one field path: `missing` means it
+	// left the key out, `unsupported` means the value it sent is refused — named
+	// down to the member at fault, or on the bare key when the value as a whole
+	// is not an object.
+	for name, tc := range map[string]struct {
+		meta    map[string]any
+		verdict string
+		field   string
+	}{
+		"absent": {
+			meta: nil, verdict: errValueMissing, field: routeMetaPath,
+		},
+		"missing key beside another": {
+			meta: map[string]any{"other": 1}, verdict: errValueMissing, field: routeMetaPath,
+		},
+		"non-object": {
+			meta: map[string]any{routeMetaKey: "route"}, verdict: errValueUnsupported, field: routeMetaPath,
+		},
+		"absent version": {
+			meta:    map[string]any{routeMetaKey: map[string]any{routeTurnNonceKey: "n"}},
+			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+		},
+		"wrong version": {
+			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 2, routeTurnNonceKey: "n"}},
+			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+		},
+		"wrong version type": {
+			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: "1", routeTurnNonceKey: "n"}},
+			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+		},
+		"fractional version": {
+			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 1.5, routeTurnNonceKey: "n"}},
+			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+		},
+		"absent nonce": {
+			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 1}},
+			verdict: errValueUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
+		},
+		"empty nonce": {
+			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: ""}},
+			verdict: errValueUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
+		},
+		"oversized nonce": {
+			meta: map[string]any{routeMetaKey: map[string]any{
+				routeVersionKey: 1, routeTurnNonceKey: strings.Repeat("n", routeTurnNonceMaxBytes+1),
+			}},
+			verdict: errValueUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
+		},
+		"unknown member": {
+			meta: map[string]any{routeMetaKey: map[string]any{
+				routeVersionKey: 1, routeTurnNonceKey: "n", "extra": true,
+			}},
+			verdict: errValueUnsupported, field: routeMetaPath + ".extra",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, routeErr := parseInboundRoute(meta)
+			_, routeErr := parseInboundRoute(tc.meta)
 			require.Error(t, routeErr)
+
+			var requestErr *acp.RequestError
+
+			require.ErrorAs(t, routeInvalidParams(routeErr), &requestErr)
+			require.Equal(t, -32602, requestErr.Code)
+
+			data, ok := requestErr.Data.(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, map[string]any{jsonFieldError: tc.verdict, jsonFieldField: tc.field}, data)
 		})
 	}
+
+	require.Nil(t, routeInvalidParams(nil))
+	require.Equal(t, errValueMissing+" "+routeMetaPath, routeMissing().Error())
+	require.Equal(t,
+		errValueUnsupported+" "+routeMetaPath+"."+routeVersionKey,
+		routeUnsupported(routeVersionKey).Error(),
+	)
+
+	// A nonce that does not name the addressed session's current turn is a
+	// present, refused value like any other, so it names the member.
+	var staleErr *acp.RequestError
+
+	require.ErrorAs(t, routeInvalidParams(errTurnRouteMismatch), &staleErr)
+	require.Equal(t, map[string]any{
+		jsonFieldError: errValueUnsupported,
+		jsonFieldField: routeMetaPath + "." + routeTurnNonceKey,
+	}, staleErr.Data)
 
 	client := newSpyCodexClient()
 	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))

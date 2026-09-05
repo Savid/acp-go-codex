@@ -230,8 +230,8 @@ func (s *session) runPromptTurn(ctx context.Context, turnCtx context.Context, ru
 		snapshot: snapshot,
 		state: &promptEventState{
 			snapshot:            snapshot,
-			agentDeltaItems:     map[string]struct{}{},
-			reasoningDeltaItems: map[string]struct{}{},
+			agentDeltaItems:     map[string]string{},
+			reasoningDeltaItems: map[string]string{},
 			toolContents:        make(map[acp.ToolCallId][]acp.ToolCallContent),
 			agentText:           &agentText,
 			stopReason:          acp.StopReasonEndTurn,
@@ -544,8 +544,8 @@ func promptSettlement(result promptTurnResult) (acp.StopReason, lifecycle.Outcom
 
 type promptEventState struct {
 	snapshot            sessionSnapshot
-	agentDeltaItems     map[string]struct{}
-	reasoningDeltaItems map[string]struct{}
+	agentDeltaItems     map[string]string
+	reasoningDeltaItems map[string]string
 	agentText           *strings.Builder
 
 	streamedUsage              codex.Usage
@@ -699,7 +699,13 @@ func (s *session) applyPromptUsage(event codex.Event, state *promptEventState) {
 	}
 }
 
-func dedupeCompletedTextEvent(event codex.Event, agentDeltaItems map[string]struct{}, reasoningDeltaItems map[string]struct{}) codex.Event {
+// dedupeCompletedTextEvent keeps assistant text append-only. Chunks are deltas
+// a client concatenates, so a terminal frame that repeats the assembled message
+// contributes only what the deltas did not already carry, and nothing at all
+// when they carried the whole of it. Identity, not text, decides which deltas a
+// terminal frame belongs to: two native messages carrying the same words are
+// two messages.
+func dedupeCompletedTextEvent(event codex.Event, agentDeltaItems map[string]string, reasoningDeltaItems map[string]string) codex.Event {
 	switch event.Kind {
 	case codex.EventAgentMessageDelta:
 		return dedupeCompletedTextKind(event, agentDeltaItems)
@@ -710,24 +716,39 @@ func dedupeCompletedTextEvent(event codex.Event, agentDeltaItems map[string]stru
 	}
 }
 
-func dedupeCompletedTextKind(event codex.Event, deltaItems map[string]struct{}) codex.Event {
+func dedupeCompletedTextKind(event codex.Event, deltaItems map[string]string) codex.Event {
 	if event.ItemID == "" {
 		return event
 	}
 
 	if event.Completed {
-		if _, ok := deltaItems[event.ItemID]; ok {
-			event.Text = ""
-		}
+		event.Text = unstreamedTextSuffix(deltaItems[event.ItemID], event.Text)
 
 		return event
 	}
 
 	if event.Text != "" {
-		deltaItems[event.ItemID] = struct{}{}
+		deltaItems[event.ItemID] += event.Text
 	}
 
 	return event
+}
+
+// unstreamedTextSuffix is the part of a terminal full-message frame a client
+// has not been sent yet. A frame that diverges from the deltas is not a suffix
+// of anything already delivered, so nothing of it is emitted: the deltas are
+// what the client already concatenated, and re-sending their text would render
+// it twice.
+func unstreamedTextSuffix(streamed string, completed string) string {
+	if streamed == "" {
+		return completed
+	}
+
+	if !strings.HasPrefix(completed, streamed) {
+		return ""
+	}
+
+	return completed[len(streamed):]
 }
 
 func dedupeCompletedAggregateTextEvent(event codex.Event, priorText string) codex.Event {

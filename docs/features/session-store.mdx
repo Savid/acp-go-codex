@@ -95,10 +95,47 @@ An already-active wrapper remains usable for prompt, cancel, close, and
 `session/resume`; that resume reuses the existing binding and adopts nothing.
 `session/load` always requires committed store rows, including for an active
 wrapper, because replay is store-authoritative. When the current app-server
-still owns the stored thread, load/resume keep its native rollout path and
-require the stored `session_meta` thread ID as an exact identity check. Missing
-or mismatched identity is rejected; stored rows cannot redirect one logical
-session to another native thread or rollout path.
+still owns the stored thread, load/resume rebind that same thread and require
+the stored `session_meta` thread ID as an exact identity check. Missing or
+mismatched identity is rejected; stored rows cannot redirect one logical session
+to another native thread.
+
+## Restoring on a fresh host
+
+When no app-server owns the thread — a restarted adapter, a replacement runtime
+generation, or a different machine — the adapter restores the session by making
+the stored rows resident in the app-server's own `CODEX_HOME` the way Codex
+writes them itself, then resuming by thread id. The mechanics and the exact
+residence path are in
+[Sessions](/docs/core/sessions#restoring-a-stored-session). What that means for
+a store implementation:
+
+- **The rows are the whole session.** A stored generation restores on any host
+  that runs the same Codex major version against the same account; nothing
+  outside the store — no native `CODEX_HOME` state, no SQLite thread index, no
+  original rollout file — has to travel with it. Codex reindexes the rollout it
+  finds under `sessions/`.
+- **`session_meta` is load-bearing.** Its native thread id names the thread the
+  app-server is asked to resume, and its `timestamp` names the file. A stored
+  rollout must carry exactly one `session_meta` row whose id is a non-empty
+  identifier of letters, digits, `-`, and `_`; anything else cannot be made
+  resident.
+- **The adapter writes into `CODEX_HOME`.** Restoring a session creates a real
+  rollout file under the home the app-server runs with. Point
+  [`WithHome`](/docs/reference/go-api#agent-options) at a home the adapter owns
+  when a host restores sessions it did not start.
+- **The restore is idempotent in place.** One stored session always resolves to
+  one residence path, and the rows are renamed into place as a whole file, so a
+  repeated restore replaces rather than accumulates.
+- **After the restore the store keeps leading.** Codex appends the next turns to
+  the resident file and the adapter mirrors only the rows the native side adds
+  after the restored ones, so a restored session's stored generation grows by
+  exactly its new native rows.
+
+A store entry that cannot be restored — no usable `session_meta` thread id, a
+rollout the adapter could not make resident, or an app-server that refuses to
+adopt it — answers `-32603` with `{"error":"codex_restore_failed"}`, and the
+entry is left exactly as it was.
 One resume/load request claims retained ownership before making a native call.
 Concurrent resume, load, or delete requests fail closed until that claim is
 committed or rolled back; a failed native rebind is unsubscribed before the

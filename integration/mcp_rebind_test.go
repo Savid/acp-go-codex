@@ -82,7 +82,6 @@ func TestCodexNativeTwoThreadMCPRebindIsolation(t *testing.T) {
 		original := threads[route]
 		resumed, err := replacement.ResumeThread(ctx, codex.ThreadResumeRequest{
 			ThreadID: original.ID,
-			Path:     original.Path,
 			Cwd:      cwds[route],
 			Config:   configs[route],
 		})

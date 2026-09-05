@@ -1723,8 +1723,8 @@ func (s *session) openAutonomousTurnLocked(ctx context.Context, nativeTurnID str
 		turnID: nativeTurnID, nativeTurnID: nativeTurnID, turnNonce: cycleID,
 		autonomous: true, accepted: true,
 		state: &promptEventState{
-			snapshot: s.snapshot(), agentDeltaItems: map[string]struct{}{},
-			reasoningDeltaItems: map[string]struct{}{}, agentText: &text,
+			snapshot: s.snapshot(), agentDeltaItems: map[string]string{},
+			reasoningDeltaItems: map[string]string{}, agentText: &text,
 			stopReason: acp.StopReasonEndTurn, imageTools: newImageToolState(),
 			toolContents: make(map[acp.ToolCallId][]acp.ToolCallContent),
 		},

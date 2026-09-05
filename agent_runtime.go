@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,8 +147,13 @@ func (a *Agent) reserveNativeResidenceCapacity(ctx context.Context, additionalBy
 	}
 }
 
+// retireMaterializedRolloutAtEpoch retires one stored rollout made resident in
+// the app-server's own home. The home is the native tree the host authority
+// already prepared for this runtime generation, so the residence names no tree
+// of its own: reclaiming the day directory would reclaim rollouts this adapter
+// never wrote.
 func (a *Agent) retireMaterializedRolloutAtEpoch(path string, bytes int64, release func(), epoch uint64) error {
-	return a.retireNativeResidenceAtEpoch(filepath.Dir(path), path, bytes, release, epoch, removeMaterializedRollout)
+	return a.retireNativeResidenceAtEpoch("", path, bytes, release, epoch, removeMaterializedRollout)
 }
 
 func (a *Agent) retireNativeResidenceAtEpoch(
@@ -205,7 +211,7 @@ func (a *Agent) reclaimRetiredResidences(ctx context.Context, epoch uint64) erro
 	defer cancelReclaim()
 
 	for _, residence := range candidates {
-		if !residence.reclaimed {
+		if !residence.reclaimed && residence.tree != "" {
 			if err := a.options.HostAuthority.ReclaimNativeTree(reclaimCtx, residence.tree); err != nil {
 				if errors.Is(err, ErrNativeTreeBusy) {
 					result = errors.Join(result, err)
@@ -288,6 +294,15 @@ func finalizeRuntimeResources(
 func latchRuntimeCleanup(err error) bool {
 	return errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) ||
 		errors.Is(err, codex.ErrContainmentIncomplete) || errors.Is(err, codex.ErrHostAuthorityUnavailable)
+}
+
+// terminalNativeGeneration reports a native generation that ended on its own
+// terms — a non-zero status or a signal — with containment complete. The
+// exit is how the generation ended, never a reason the Agent cannot open the
+// next one.
+func terminalNativeGeneration(err error) bool {
+	return errors.Is(err, codex.ErrNativeGenerationTerminated) &&
+		!latchRuntimeCleanup(err) && !retainRuntimeResources(err)
 }
 
 func retainRuntimeResources(err error) bool {
@@ -1320,8 +1335,16 @@ func (a *Agent) closeRuntimeGeneration(
 		runtimeCloseErr = client.Close(ctx)
 	}
 
-	if runtimeCloseErr != nil {
+	// A generation whose process is proven gone is retired, not broken: its
+	// residences are reclaimable and a replacement may start. Only a close that
+	// could not prove containment stops the retirement here, because then the
+	// previous incarnation may still be running against the same native trees.
+	if runtimeCloseErr != nil && !terminalNativeGeneration(runtimeCloseErr) {
 		return runtimeCloseErr
+	}
+
+	if runtimeCloseErr != nil {
+		a.log.DebugContext(ctx, "codex app-server generation ended", slog.Uint64("epoch", epoch))
 	}
 
 	residenceErr := errors.Join(

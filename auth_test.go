@@ -88,7 +88,7 @@ func TestLogoutRejectsAnEnvironmentSelectedCodexHomeBeforeNativeCreation(t *test
 	)
 
 	_, err := agent.Logout(t.Context(), acp.LogoutRequest{})
-	if err == nil || !strings.Contains(err.Error(), valueInternalFailure) || strings.Contains(err.Error(), "WithHome") {
+	if err == nil || !strings.Contains(err.Error(), valueInvalidOptions) || strings.Contains(err.Error(), "WithHome") {
 		t.Fatalf("logout error = %v", err)
 	}
 	if client.loggedOut {

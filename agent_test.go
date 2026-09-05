@@ -23,7 +23,8 @@ import (
 // requireOptionsInternalError pins the construction-time option verdict to
 // internal error, not invalid params: the caller's params were valid and the
 // agent the embedding host built is what is broken. The data object carries
-// exactly one key because there is no wire field to name.
+// exactly one key — its own closed token — because there is no wire field to
+// name and no cause a host may read.
 func requireOptionsInternalError(t *testing.T, err error) {
 	t.Helper()
 
@@ -35,7 +36,7 @@ func requireOptionsInternalError(t *testing.T, err error) {
 
 	data := asType[map[string]any](t, requestErr.Data)
 	require.Len(t, data, 1)
-	require.NotEmpty(t, asType[string](t, data[jsonFieldError]))
+	require.Equal(t, valueInvalidOptions, asType[string](t, data[jsonFieldError]))
 }
 
 // asType performs a checked type assertion, failing the test if v is not a T.
@@ -1418,6 +1419,27 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// A restored session is made resident in the app-server's own CODEX_HOME, so
+	// an Agent built without an explicit home would write into the operator's
+	// real one. The suite owns a throwaway home for the whole process instead.
+	// goleak owns the exit, so the home is a fixed path this run reclaims on the
+	// way in rather than one it could only delete on the way out.
+	suiteHome := filepath.Join(os.TempDir(), "acp-go-codex-suite-home")
+	if err := os.RemoveAll(suiteHome); err != nil {
+		fmt.Fprintln(os.Stderr, "reclaim suite Codex home:", err)
+		os.Exit(1)
+	}
+
+	if err := os.MkdirAll(suiteHome, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "create suite Codex home:", err)
+		os.Exit(1)
+	}
+
+	if err := os.Setenv("CODEX_HOME", suiteHome); err != nil {
+		fmt.Fprintln(os.Stderr, "set suite CODEX_HOME:", err)
+		os.Exit(1)
+	}
+
 	// The Secret Service client keeps one library-owned session-bus connection
 	// for the process lifetime and exposes no way to close it, so the
 	// credential-residence matrix would otherwise report it as a leak.
@@ -1662,7 +1684,7 @@ func TestInitializeRejectsGlobalShellEnvironmentPolicyOverrides(t *testing.T) {
 		if !ok {
 			t.Fatalf("Initialize accepted process-global shell environment override %q: %T %v", key, err, err)
 		}
-		if fmt.Sprint(reqErr.Data) != "map[error:"+valueInternalFailure+"]" {
+		if fmt.Sprint(reqErr.Data) != "map[error:"+valueInvalidOptions+"]" {
 			t.Fatalf("shell environment override %q data = %#v", key, reqErr.Data)
 		}
 	}

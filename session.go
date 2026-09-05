@@ -320,7 +320,6 @@ func (s *session) threadConfig() map[string]any {
 func (s *session) resumeRequest() codex.ThreadResumeRequest {
 	s.mu.Lock()
 	threadID := s.codexThreadID
-	path := s.materializedPath
 	cwd := s.cwd
 	servers := cloneMCPServers(s.mcpServers)
 	approvalMode := s.mcpApprovalMode
@@ -330,7 +329,6 @@ func (s *session) resumeRequest() codex.ThreadResumeRequest {
 
 	return codex.ThreadResumeRequest{
 		ThreadID:      threadID,
-		Path:          path,
 		Cwd:           cwd,
 		Config:        codex.MCPServerThreadConfig(servers, approvalMode),
 		Environment:   env,

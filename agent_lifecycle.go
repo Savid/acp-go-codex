@@ -74,7 +74,7 @@ func lifecycleResponseMeta(negotiated lifecycle.Negotiated) map[string]any {
 // exact member path the closed decoder reached.
 func lifecycleInvalidParams(refusal *lifecycle.ParamError) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: errValueUnsupported,
+		jsonFieldError: refusal.Verdict,
 		jsonFieldField: refusal.Field,
 	})
 }

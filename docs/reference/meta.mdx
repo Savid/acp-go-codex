@@ -116,10 +116,25 @@ steer to a newer turn.
 | agent to host | `elicitation/create` | `version`, `sessionId`, `turnNonce`, and exactly one of `toolCallId` or `requestId`. |
 
 The inbound object is read before anything else the request asks for, so a
-prompt, cancel, or steer that fails routing is refused before it reaches Codex. A
-`turnNonce` is a non-empty string of at most 4096 bytes, and on `session/cancel`
-it must name the session's active turn. Every rejection is invalid params whose
-`field` is `_meta.acp-go.dev/route`.
+prompt, cancel, or steer that fails routing is refused before it reaches Codex,
+and before the lifecycle correlation value is examined. A `turnNonce` is a
+non-empty string of at most 4096 bytes, and on `session/cancel` it must name the
+session's active turn.
+
+Every rejection is invalid params carrying `{error, field}` and nothing else,
+and a host reads two distinct verdicts off one field path:
+
+| Case | `error` | `field` |
+| --- | --- | --- |
+| the key is absent | `missing` | `_meta["acp-go.dev/route"]` |
+| the value is not an object | `unsupported` | `_meta["acp-go.dev/route"]` |
+| `version` is absent or not exactly `1` | `unsupported` | `_meta["acp-go.dev/route"].version` |
+| `turnNonce` is absent, not a string, empty, over 4096 bytes, or does not name the active turn | `unsupported` | `_meta["acp-go.dev/route"].turnNonce` |
+| any other member is present | `unsupported` | `_meta["acp-go.dev/route"].<member>` |
+
+`missing` means the host left the key out and should add it; `unsupported`
+means the value it sent is refused. `session/cancel` is a notification and
+answers nothing, so its refusal is wire-silent — the cancel is never applied.
 
 ## Media envelope
 
@@ -252,6 +267,14 @@ under the same key, and a prompt that omits it is refused before dispatch:
 non-empty opaque handle of at most 4096 bytes. On a connection where the
 extension was not negotiated, the key on `session/prompt` is itself the
 rejection.
+
+The same three-way split the route envelope uses applies here, on this key's own
+path: a prompt on a negotiated connection that omits the key is
+`{"error": "missing", "field": "_meta[\"acp-go.dev/lifecycle\"]"}`; a malformed
+value is `unsupported` naming the offending member path, down to
+`_meta["acp-go.dev/lifecycle"].submission.<member>`; and the key on a surface
+where it has no meaning is `unsupported` on the bare path. Route validation runs
+first, so a prompt that fails both reports the route refusal alone.
 
 Every lifecycle event rides `_meta["acp-go.dev/lifecycle"]` on an identity-only
 `session_info_update` notification, carrying `version`, `streamId`, `sequence`,

@@ -1287,7 +1287,7 @@ func (c *closingCanaryClient) RunTurn(context.Context, codex.TurnStartRequest) (
 func TestRemainingMaterializationCloneAuthAndStoreBranches(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
-	path, release, _, err := agent.materializeStoredRollout(ctx, nil, func() {})
+	path, release, _, err := agent.materializeStoredRollout(nil, func() {})
 	require.NoError(t, err)
 	require.Empty(t, path)
 	release()
@@ -1575,4 +1575,123 @@ func TestRetainedRuntimeThreadRegistryBoundAndRetryRetirement(t *testing.T) {
 	require.True(t, retained)
 	require.Nil(t, agent.activeSession(target.id))
 	require.Same(t, client, agent.retainedThreads[target.id].client)
+}
+
+// A shared app-server that died is a fence on one generation, not a verdict on
+// the Agent. The next explicit operation admits a replacement generation, and
+// the exit status the dead incarnation reported is how it ended rather than a
+// reason nothing may start after it.
+func TestDeadRuntimeGenerationIsReplacedByTheNextOperation(t *testing.T) {
+	ctx := context.Background()
+
+	dead := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(),
+		closeErr: errors.Join(
+			codex.ErrNativeGenerationTerminated,
+			errors.New("codex app-server exited with status -1 signal 9"),
+		),
+	}
+	replacement := newSpyCodexClient()
+
+	launched := 0
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		launched++
+		if launched == 1 {
+			return dead, nil
+		}
+
+		return replacement, nil
+	}))
+
+	t.Cleanup(func() { _ = agent.Close() })
+
+	first, err := agent.sharedRuntime(ctx)
+	require.NoError(t, err)
+	require.Same(t, dead, first)
+
+	fenced := agent.runtimeGenerationSnapshot()
+
+	// The native pump reports the transport gone the way a killed app-server
+	// does, which fences the generation without retiring it.
+	agent.markRuntimeDead(dead)
+
+	next, err := agent.sharedRuntime(ctx)
+	require.NoError(t, err, "a dead app-server refused a replacement generation")
+	require.Same(t, replacement, next)
+	require.Equal(t, 2, launched)
+
+	after := agent.runtimeGenerationSnapshot()
+	require.Greater(t, after.epoch, fenced.epoch)
+	require.False(t, after.dead)
+
+	agent.mu.Lock()
+	latched := agent.runtimeCleanupErr
+	agent.mu.Unlock()
+	require.NoError(t, latched, "a proven-terminal exit latched the Agent")
+
+	// The replacement serves ordinary work: a session opens on it without the
+	// host restarting the adapter.
+	created, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
+	require.NoError(t, err)
+	require.NotEmpty(t, created.SessionId)
+}
+
+// The one runtime state that refuses recovery is an incarnation whose process
+// tree is still alive and un-containable. That is latched, and it is the only
+// runtime condition with a name on the wire.
+func TestUncontainableRuntimeLatchesAndNamesItselfOnTheWire(t *testing.T) {
+	ctx := context.Background()
+
+	retained := &errorCodexClient{
+		spyCodexClient: newSpyCodexClient(),
+		closeErr:       errors.Join(codex.ErrContainmentIncomplete, errors.New("native tree still alive")),
+	}
+
+	launched := 0
+	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+		launched++
+
+		return retained, nil
+	}))
+
+	t.Cleanup(func() { _ = agent.Close() })
+
+	_, err := agent.sharedRuntime(ctx)
+	require.NoError(t, err)
+	agent.markRuntimeDead(retained)
+
+	_, err = agent.sharedRuntime(ctx)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, 1, launched, "an un-containable incarnation was replaced anyway")
+
+	agent.mu.Lock()
+	latched := agent.runtimeCleanupErr
+	agent.mu.Unlock()
+	require.ErrorIs(t, latched, codex.ErrContainmentIncomplete)
+
+	// The latched state answers every runtime-needing operation with its own
+	// closed token, so a host can tell it apart from a runtime that merely died.
+	_, err = agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
+	require.Error(t, err)
+	requireClosedInternalError(t, requestError(ctx, err), valueRuntimeUnavailable)
+
+	// Everything the operation could not classify keeps the general token.
+	requireClosedInternalError(t, requestError(ctx, errors.New("something else")), valueInternalFailure)
+}
+
+// terminalNativeGeneration reads one fact: the incarnation is provably gone.
+// An exit joined with a containment or lease failure is not that fact.
+func TestTerminalNativeGenerationIgnoresUncontainedOutcomes(t *testing.T) {
+	require.False(t, terminalNativeGeneration(nil))
+	require.False(t, terminalNativeGeneration(errors.New("close failed")))
+	require.True(t, terminalNativeGeneration(codex.ErrNativeGenerationTerminated))
+	require.False(t, terminalNativeGeneration(
+		errors.Join(codex.ErrNativeGenerationTerminated, codex.ErrContainmentIncomplete),
+	))
+	require.False(t, terminalNativeGeneration(
+		errors.Join(codex.ErrNativeGenerationTerminated, ErrNativeTreeBusy),
+	))
+	require.False(t, terminalNativeGeneration(
+		errors.Join(codex.ErrNativeGenerationTerminated, ErrHostAuthorityUnavailable),
+	))
 }

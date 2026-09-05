@@ -7,6 +7,14 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// newUnsupportedExtensionParams refuses an extension request whose params
+// cannot be decoded or do not validate as a whole. The refusal names `params`
+// rather than a Go decoder message, so the shape is the same closed
+// `{error, field}` object every other uniform rejection uses.
+func newUnsupportedExtensionParams() *acp.RequestError {
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldParams})
+}
+
 // HandleExtensionMethod handles Codex-specific ACP extension methods.
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	if err := a.ensureOpen(); err != nil {
@@ -28,11 +36,11 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	case ForkSessionMethod:
 		var req acp.UnstableForkSessionRequest
 		if err := json.Unmarshal(params, &req); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+			return nil, newUnsupportedExtensionParams()
 		}
 
 		if err := req.Validate(); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+			return nil, newUnsupportedExtensionParams()
 		}
 
 		return a.forkSession(ctx, req)
@@ -54,7 +62,7 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 func (a *Agent) handleSteerExtension(ctx context.Context, params json.RawMessage) (any, error) {
 	var request acp.PromptRequest
 	if err := json.Unmarshal(params, &request); err != nil {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: "invalid steer request"})
+		return nil, newUnsupportedExtensionParams()
 	}
 
 	// Exact route ownership is decided before the reserved lifecycle literal,
@@ -78,7 +86,7 @@ func (a *Agent) handleSteerExtension(ctx context.Context, params json.RawMessage
 	}
 
 	if err := request.Validate(); err != nil {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: "invalid steer request"})
+		return nil, newUnsupportedExtensionParams()
 	}
 
 	if err := session.steerTurn(ctx, route.TurnNonce, request.Prompt); err != nil {

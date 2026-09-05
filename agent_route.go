@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 
 const (
 	routeMetaKey           = "acp-go.dev/route"
+	routeMetaPath          = `_meta["` + routeMetaKey + `"]`
 	routeVersion           = 1
 	routeTurnNonceMaxBytes = 4 * 1024
 	routeVersionKey        = "version"
@@ -60,29 +62,60 @@ func turnRouteMetaFromContext(ctx context.Context) map[string]any {
 	return inboundRouteMeta(turnNonce)
 }
 
+// routeParamError refuses the reserved route envelope. It carries the verdict
+// and the exact member at fault so a host reads one fact from one field path:
+// `missing` means it left the key out, `unsupported` means the value it sent is
+// refused — on the bare path when the value as a whole is not an object, and on
+// the member path otherwise.
+type routeParamError struct {
+	verdict string
+	member  string
+}
+
+// Error implements error.
+func (e *routeParamError) Error() string { return e.verdict + " " + e.field() }
+
+func (e *routeParamError) field() string {
+	if e.member == "" {
+		return routeMetaPath
+	}
+
+	return routeMetaPath + "." + e.member
+}
+
+func routeMissing() error {
+	return &routeParamError{verdict: errValueMissing}
+}
+
+func routeUnsupported(member string) error {
+	return &routeParamError{verdict: errValueUnsupported, member: member}
+}
+
 func parseInboundRoute(meta map[string]any) (inboundRoute, error) {
 	raw, ok := meta[routeMetaKey]
 	if !ok {
-		return inboundRoute{}, fmt.Errorf("_meta.%s is required", routeMetaKey)
+		return inboundRoute{}, routeMissing()
 	}
 
 	value, ok := raw.(map[string]any)
-	if !ok || len(value) != 2 {
-		return inboundRoute{}, fmt.Errorf("_meta.%s must contain exactly version and turnNonce", routeMetaKey)
+	if !ok {
+		return inboundRoute{}, routeUnsupported("")
+	}
+
+	for key := range value {
+		if key != routeVersionKey && key != routeTurnNonceKey {
+			return inboundRoute{}, routeUnsupported(key)
+		}
 	}
 
 	version, ok := routeInteger(value[routeVersionKey])
 	if !ok || version != routeVersion {
-		return inboundRoute{}, fmt.Errorf("_meta.%s.version must be %d", routeMetaKey, routeVersion)
+		return inboundRoute{}, routeUnsupported(routeVersionKey)
 	}
 
 	nonce, ok := value[routeTurnNonceKey].(string)
-	if !ok || strings.TrimSpace(nonce) == "" {
-		return inboundRoute{}, fmt.Errorf("_meta.%s.turnNonce must be a non-empty string", routeMetaKey)
-	}
-
-	if len(nonce) > routeTurnNonceMaxBytes {
-		return inboundRoute{}, fmt.Errorf("_meta.%s.turnNonce exceeds the maximum size", routeMetaKey)
+	if !ok || strings.TrimSpace(nonce) == "" || len(nonce) > routeTurnNonceMaxBytes {
+		return inboundRoute{}, routeUnsupported(routeTurnNonceKey)
 	}
 
 	return inboundRoute{TurnNonce: nonce}, nil
@@ -171,10 +204,18 @@ func elicitationRouteRequestID(requestID *acp.RequestId) (string, error) {
 	return string(*requestID.Str), nil
 }
 
+// routeInvalidParams renders one route refusal. A nonce that does not name the
+// addressed session's current turn is a present, refused value like any other,
+// so it names the `turnNonce` member rather than the bare key.
 func routeInvalidParams(err error) error {
 	if err == nil {
 		return nil
 	}
 
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error(), jsonFieldField: "_meta." + routeMetaKey})
+	var routeErr *routeParamError
+	if !errors.As(err, &routeErr) {
+		routeErr = &routeParamError{verdict: errValueUnsupported, member: routeTurnNonceKey}
+	}
+
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: routeErr.verdict, jsonFieldField: routeErr.field()})
 }

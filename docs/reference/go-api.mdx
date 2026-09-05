@@ -139,7 +139,9 @@ type ImageLimits struct {
 }
 ```
 
-Negative values make initialization fail with an internal error. The prompt total
+Negative values make initialization fail with the construction verdict
+`-32603` `{"error":"codex_invalid_options"}`
+([Updates](/docs/reference/updates#internal-errors-off-the-turn-path)). The prompt total
 is across every image in one request. The tool-call total is across the
 complete image content snapshot for one native image tool call.
 

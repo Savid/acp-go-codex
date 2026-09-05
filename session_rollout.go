@@ -192,7 +192,7 @@ func validateStoredRolloutEntries(entries []SessionStoreEntry) ([]SessionStoreEn
 	)
 
 	for index, row := range rows {
-		if row.Type != "session_meta" {
+		if row.Type != rolloutTypeSessionMeta {
 			continue
 		}
 

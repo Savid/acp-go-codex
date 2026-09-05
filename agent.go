@@ -27,18 +27,21 @@ const (
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
 
-	jsonFieldError      = "error"
-	jsonFieldCode       = "code"
-	jsonFieldData       = "data"
-	jsonFieldMessage    = "message"
-	jsonFieldCwd        = "cwd"
-	jsonFieldEntries    = "entries"
-	jsonFieldIndex      = "index"
-	jsonFieldSessionID  = "sessionId"
-	jsonFieldField      = "field"
-	validationRequired  = "required"
-	validationDuplicate = "duplicate"
-	errValueUnsupported = "unsupported"
+	jsonFieldError         = "error"
+	jsonFieldCode          = "code"
+	jsonFieldData          = "data"
+	jsonFieldMessage       = "message"
+	jsonFieldCwd           = "cwd"
+	jsonFieldEntries       = "entries"
+	jsonFieldIndex         = "index"
+	jsonFieldSessionID     = "sessionId"
+	jsonFieldField         = "field"
+	jsonFieldParams        = "params"
+	validationRequired     = "required"
+	validationDuplicate    = "duplicate"
+	errValueUnsupported    = "unsupported"
+	errValueMissing        = "missing"
+	errValueUnknownSession = "unknown session"
 
 	jsonFieldSource          = "source"
 	jsonFieldSequence        = "sequence"
@@ -98,8 +101,15 @@ const (
 	jsonFieldStatusCode   = "statusCode"
 	jsonFieldProviderCode = "providerCode"
 
-	valueTurnFailed      = "codex_turn_failed"
-	valueInternalFailure = "codex_internal_failure"
+	// The off-prompt -32603 vocabulary. Every internal error the adapter can
+	// answer with carries exactly one of these tokens in `data.error`, and
+	// `message` stays the JSON-RPC constant. Nothing else rides `data`: no Go
+	// error text, no native harness text, and no `message` member.
+	valueTurnFailed         = "codex_turn_failed"
+	valueInvalidOptions     = "codex_invalid_options"
+	valueRestoreFailed      = "codex_restore_failed"
+	valueRuntimeUnavailable = "codex_runtime_unavailable"
+	valueInternalFailure    = "codex_internal_failure"
 
 	modeDefault acp.SessionModeId = "default"
 	modePlan    acp.SessionModeId = "plan"
@@ -483,7 +493,7 @@ func (a *Agent) optionsError() error {
 		return nil
 	}
 
-	wireErr := acp.NewInternalError(map[string]any{jsonFieldError: valueInternalFailure})
+	wireErr := acp.NewInternalError(map[string]any{jsonFieldError: valueInvalidOptions})
 	if errors.Is(a.optionsErr, ErrHostAuthorityUnavailable) {
 		return errors.Join(a.optionsErr, wireErr)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -358,18 +359,79 @@ func TestHostAuthorityPreparedTreeExclusivity(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// A tree the adapter prepared through the authority is the authority's until
+// the authority hands it back: the adapter never removes one before reclaim has
+// run on it. A prompt image scratch directory is such a tree — it is prepared on
+// the way in, retired when the turn releases it, and only removed once the
+// generation's residences are reclaimed.
 func TestHostAuthorityReclaimPrecedesRemoval(t *testing.T) {
 	root := t.TempDir()
 	authority := newTraceAuthority(root)
 	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
+	active := &session{agent: agent}
+
+	prepared, err := active.preparePromptImages(t.Context(), []decodedPromptImage{{
+		data: make([]byte, codexInlineImageEnvelopeSize), mimeType: mimeImagePNG,
+	}})
+	require.NoError(t, err)
+	require.NotEmpty(t, prepared.images)
+
+	tree := filepath.Dir(prepared.images[0].LocalPath)
+	require.Contains(t, authority.events(), "prepare:"+tree)
+
+	// The authority holds the prepared tree, so the adapter cannot even see it.
+	_, statErr := os.Stat(tree)
+	require.ErrorIs(t, statErr, fs.ErrNotExist)
+
+	originalRemove := removePromptImageDir
+	removePromptImageDir = func(path string) error {
+		authority.record("remove:" + path)
+
+		return originalRemove(path)
+	}
+
+	t.Cleanup(func() { removePromptImageDir = originalRemove })
+
+	// Releasing the residence retires it; nothing is removed yet, because the
+	// authority has not been asked for the tree back.
+	prepared.release()
+	require.NotContains(t, authority.events(), "reclaim:"+tree)
+	require.NotContains(t, authority.events(), "remove:"+tree)
+
+	require.NoError(t, agent.reclaimRetiredResidences(t.Context(), agent.runtimeEpoch))
+
+	_, statErr = os.Stat(tree)
+	require.ErrorIs(t, statErr, fs.ErrNotExist)
+
+	events := authority.events()
+	reclaimed := slices.Index(events, "reclaim:"+tree)
+	removed := slices.Index(events, "remove:"+tree)
+	require.NotEqual(t, -1, reclaimed)
+	require.NotEqual(t, -1, removed)
+	require.Less(t, reclaimed, removed, "the adapter removed a prepared tree before the authority reclaimed it")
+	require.Zero(t, agent.nativeResidenceCount)
+}
+
+// A stored rollout is made resident inside the app-server's own home, which is
+// the native tree the host authority already prepared for this generation. It
+// therefore names no tree of its own: reclaiming the day directory would
+// reclaim rollouts this adapter never wrote. What the authority still governs
+// is when the file may go — removal waits for the generation's residences to be
+// reclaimed, never for the request that retired it.
+func TestMaterializedRolloutRetiresWithoutReclaimingItsDayDirectory(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	authority := newTraceAuthority(root)
+	agent := NewAgent(WithHostAuthority(authority), WithHome(home), WithScratchDir(root))
 
 	release, err := agent.reserveNativeResidenceCapacity(t.Context(), 3)
 	require.NoError(t, err)
-	path, release, bytes, err := agent.materializeStoredRollout(t.Context(), []SessionStoreEntry{[]byte(`{}`)}, release)
+	path, release, bytes, err := agent.materializeStoredRollout(testResidentRolloutEntries(), release)
 	require.NoError(t, err)
-	_, err = os.Stat(path)
-	require.ErrorIs(t, err, os.ErrNotExist)
+	require.FileExists(t, path)
+	require.True(t, strings.HasPrefix(path, filepath.Join(home, nativeSessionsDirName)+string(filepath.Separator)))
 	require.NoError(t, agent.retireMaterializedRolloutAtEpoch(path, bytes, release, 0))
+	require.FileExists(t, path, "retiring the residence removed the file before the generation was reclaimed")
 
 	originalRemove := removeMaterializedRolloutFile
 	removeMaterializedRolloutFile = func(path string) error {
@@ -380,10 +442,19 @@ func TestHostAuthorityReclaimPrecedesRemoval(t *testing.T) {
 	t.Cleanup(func() { removeMaterializedRolloutFile = originalRemove })
 
 	require.NoError(t, agent.reclaimRetiredResidences(t.Context(), 0))
-	_, err = os.Stat(path)
-	require.ErrorIs(t, err, os.ErrNotExist)
-	events := authority.events()
-	require.Less(t, slices.Index(events, "reclaim:"+filepath.Dir(path)), slices.Index(events, "remove:"+path))
+	require.NoFileExists(t, path)
+	require.Contains(t, authority.events(), "remove:"+path)
+	require.NotContains(t, authority.events(), "reclaim:"+filepath.Dir(path))
+	require.Zero(t, agent.nativeResidenceCount)
+}
+
+// testResidentRolloutEntries is one stored rollout the adapter can place: the
+// residence path is reconstructed from the session's own `session_meta` row, so
+// rows without one name no file.
+func testResidentRolloutEntries() []SessionStoreEntry {
+	return []SessionStoreEntry{
+		SessionStoreEntry(`{"type":"session_meta","payload":{"id":"thread-resident","timestamp":"2026-01-02T03:04:05Z"}}`),
+	}
 }
 
 func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
@@ -564,39 +635,6 @@ func TestHostAuthorityPrepareFailureRemainsOpaque(t *testing.T) {
 	require.Equal(t, []string{"prepare:" + filepath.Join(root, "home")}, authority.events())
 }
 
-func TestHostAuthorityRolloutPrepareFailureRemainsOpaque(t *testing.T) {
-	root := t.TempDir()
-	authority := newTraceAuthority(root)
-	injected := errors.New("rollout prepare failed after transfer")
-	authority.prepareErr = injected
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(root))
-	originalRemove := removeMaterializedRolloutFile
-	removeCalls := 0
-	removeMaterializedRolloutFile = func(path string) error {
-		removeCalls++
-
-		return originalRemove(path)
-	}
-	t.Cleanup(func() { removeMaterializedRolloutFile = originalRemove })
-
-	release, err := agent.reserveNativeResidenceCapacity(t.Context(), 3)
-	require.NoError(t, err)
-	path, returnedRelease, _, err := agent.materializeStoredRollout(
-		t.Context(), []SessionStoreEntry{[]byte(`{}`)}, release,
-	)
-	require.Empty(t, path)
-	require.Nil(t, returnedRelease)
-	require.ErrorIs(t, err, injected)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
-	require.Equal(t, 1, agent.nativeResidenceCount)
-	require.Len(t, authority.events(), 1)
-	require.True(t, strings.HasPrefix(authority.events()[0], "prepare:"))
-	require.NotContains(t, strings.Join(authority.events(), "\n"), "reclaim:")
-	require.Zero(t, removeCalls)
-	_, err = agent.reserveNativeResidenceCapacity(t.Context(), 1)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
-}
-
 func TestHostAuthorityPromptImagePrepareFailureRemainsOpaque(t *testing.T) {
 	root := t.TempDir()
 	authority := newTraceAuthority(root)
@@ -659,7 +697,7 @@ func TestNativeTreeBusyBlocksAdmissionUntilReclaimRetry(t *testing.T) {
 	agent.runtimeDead = false
 	agent.nativeResidenceCount = retiredResidenceCountLimit
 
-	path, err := materializeRollout(root, []SessionStoreEntry{[]byte(`{}`)})
+	path, err := materializeRollout(root, testResidentRolloutEntries())
 	require.NoError(t, err)
 	require.NoError(t, authority.PrepareNativeTree(t.Context(), filepath.Dir(path)))
 	agent.retiredResidences = []retiredNativeResidence{{
