@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -255,7 +254,7 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 		for key, raw := range typed {
 			str, ok := raw.(string)
 			if !ok {
-				return nil, unsupportedField("_meta.codex.options." + metaEnvKey + "." + key)
+				return nil, unsupportedField(envOptionPath + "." + key)
 			}
 
 			out[key] = str
@@ -263,33 +262,8 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 
 		return validatedSessionEnv(out)
 	default:
-		return nil, unsupportedField("_meta.codex.options." + metaEnvKey)
+		return nil, unsupportedField(envOptionPath)
 	}
-}
-
-// validatedSessionEnv rejects the two classes of session environment key the
-// adapter owns: its private names and PATH. The thread PATH is
-// derived from extraPathDirs plus the app-server's native PATH, so a raw
-// session PATH would be a second, silently losing owner of the same value.
-func validatedSessionEnv(env map[string]string) (map[string]string, error) {
-	for key := range env {
-		if isPathEnvKey(key) || reservedCodexEnvKey(key) {
-			return nil, unsupportedField("_meta.codex.options." + metaEnvKey + "." + key)
-		}
-	}
-
-	return env, nil
-}
-
-// pathEnvKey is the search-path variable this adapter derives for every native
-// thread. Windows environment keys are case insensitive, so "Path" is the same
-// owner there; on other platforms only the exact name is.
-const pathEnvKey = "PATH"
-
-var caseInsensitiveEnvKeys = runtime.GOOS == "windows"
-
-func isPathEnvKey(key string) bool {
-	return key == pathEnvKey || (caseInsensitiveEnvKeys && strings.EqualFold(key, pathEnvKey))
 }
 
 // extraPathDirsFromMeta accepts both decoded forms of an ordered directory

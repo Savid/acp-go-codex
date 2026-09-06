@@ -40,10 +40,22 @@ Accepted session lifecycle metadata:
 
 Session `env` is an object of string values installed on that session's Codex
 thread at `shell_environment_policy.set`. Peer threads on the same app-server do
-not share it. A raw `PATH` entry is rejected (case-insensitively on Windows), as
-are adapter-private names, `CODEX_HOME`, `HOME`, and the XDG
-cache, config, data, runtime, and state roots. `WithHome` and the app-server's
-static launch environment remain authoritative.
+not share it. `WithHome` and the app-server's static launch environment remain
+authoritative.
+
+Session `env` names are checked in sorted key order on every establishing
+request, so the first refusal is the same each time. A key is accepted when
+it is non-empty and free of `=` and NUL and its value is free of NUL; case is
+not a rule, so `https_proxy` and `HTTPS_PROXY` are two ordinary variables.
+Blocked names fail as `{"error":"unsupported","field":"_meta.codex.options.env.<key>"}`
+naming the key exactly as sent: `PATH`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `CODEX_HOME`, `HOME`, the XDG cache, config, data, runtime, and state roots, and `ACP_GO_CODEX_INTERNAL_*`. All but the adapter's own
+namespace compare through the platform identity, exact on Unix and
+case-insensitive on Windows; the adapter namespace is refused under every
+spelling. Two keys that resolve to one variable under that identity fail as
+`{"error":"ambiguous","field":"_meta.codex.options.env.<later key in sorted order>"}`.
+An empty value is delivered as `KEY=`. `ValidateCodexSessionMeta` runs this
+parsing on a `_meta` map without an agent, so a host can check a request
+before sending it.
 
 `effort` and `personality` are nonempty native values. The adapter does not
 compare them with its advertised config-option menus: it carries them through

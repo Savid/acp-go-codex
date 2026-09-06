@@ -282,7 +282,7 @@ func validateRuntimeEnvironment(environment map[string]string) error {
 			return errors.New("invalid Codex environment entry")
 		}
 
-		if strings.HasPrefix(upperKey, "ACP_GO_CODEX_INTERNAL_") || managedCodexRootEnvKey(upperKey) {
+		if strings.HasPrefix(upperKey, privateAdapterEnvPrefix) || managedCodexRootEnvKey(upperKey) {
 			return errors.New("codex environment contains a reserved key")
 		}
 	}
@@ -290,9 +290,13 @@ func validateRuntimeEnvironment(environment map[string]string) error {
 	return nil
 }
 
-func managedCodexRootEnvKey(key string) bool {
-	switch strings.ToUpper(key) {
-	case managedCodexHomeEnvironment, managedHomeEnv, "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+// managedCodexRootEnvKey reports whether name, already resolved to the
+// identity its caller compares under, is a state root the adapter writes
+// itself.
+func managedCodexRootEnvKey(name string) bool {
+	switch name {
+	case managedCodexHomeEnvironment, managedHomeEnv,
+		envXDGCacheHomeKey, envXDGConfigHomeKey, envXDGDataHomeKey, envXDGRuntimeDirKey, envXDGStateHomeKey:
 		return true
 	default:
 		return false
@@ -302,7 +306,7 @@ func managedCodexRootEnvKey(key string) bool {
 func reservedCodexEnvKey(key string) bool {
 	upperKey := strings.ToUpper(key)
 
-	return strings.HasPrefix(upperKey, "ACP_GO_CODEX_INTERNAL_") || managedCodexRootEnvKey(upperKey)
+	return strings.HasPrefix(upperKey, privateAdapterEnvPrefix) || managedCodexRootEnvKey(upperKey)
 }
 
 func validateManagedExecutableSelector(selector string) error {
