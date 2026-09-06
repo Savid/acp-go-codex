@@ -1440,10 +1440,31 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// A runtime generation keeps its scratch under os.TempDir until the Agent
+	// closes, and most tests never close the Agents they start, so the suite
+	// owns one temp root that goleak removes on the way out. TMP and TEMP cover
+	// the Windows lookup.
+	suiteTemp, err := os.MkdirTemp("", "acp-go-codex-suite-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create suite temp root:", err)
+		os.Exit(1)
+	}
+
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		if err = os.Setenv(name, suiteTemp); err != nil {
+			fmt.Fprintln(os.Stderr, "set suite "+name+":", err)
+			os.Exit(1)
+		}
+	}
+
 	// The Secret Service client keeps one library-owned session-bus connection
 	// for the process lifetime and exposes no way to close it, so the
 	// credential-residence matrix would otherwise report it as a leak.
 	goleak.VerifyTestMain(m,
+		goleak.Cleanup(func(exitCode int) {
+			_ = os.RemoveAll(suiteTemp)
+			os.Exit(exitCode)
+		}),
 		goleak.IgnoreAnyFunction("github.com/godbus/dbus/v5.(*Conn).inWorker"),
 		goleak.IgnoreAnyFunction("github.com/godbus/dbus/v5.(*Conn).outWorker"),
 		goleak.IgnoreAnyFunction("github.com/godbus/dbus/v5.newConn.func1"),
