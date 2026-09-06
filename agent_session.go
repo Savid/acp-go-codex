@@ -80,7 +80,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
-		_ = session.Close(context.TODO())
+		_ = session.Close(context.WithoutCancel(ctx))
 
 		return acp.NewSessionResponse{}, err
 	}
@@ -814,7 +814,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
-		_ = session.Close(context.TODO())
+		_ = session.Close(context.WithoutCancel(ctx))
 
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -1460,7 +1460,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, thread, client, meta, mcpServers)
 
 	if err := session.armLifecycleEstablishment(establishmentFromContext(ctx)); err != nil {
-		_ = session.Close(context.TODO())
+		_ = session.Close(context.WithoutCancel(ctx))
 
 		return acp.LoadSessionResponse{}, err
 	}

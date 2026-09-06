@@ -466,7 +466,7 @@ func (s *session) prepareNativeEventRebind() error {
 		})
 	}
 
-	stopCtx, cancelStop := context.WithTimeout(context.TODO(), closeTimeout)
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), closeTimeout)
 	stopErr := s.stopNativeEventsContext(stopCtx)
 
 	cancelStop()
@@ -1292,7 +1292,7 @@ func (s *session) routeNativeEventWithPumpOwnership(event codex.Event, nativePum
 
 	defer s.lifecycleRouteMu.Unlock()
 
-	routeCtx, cancel := context.WithTimeout(context.TODO(), promptSettlementTimeout)
+	routeCtx, cancel := context.WithTimeout(context.Background(), promptSettlementTimeout)
 	defer cancel()
 
 	s.lifecycleMu.Lock()
@@ -2069,7 +2069,7 @@ func (s *session) failNativeIncarnationWithPumpOwnership(err error, nativePumpOw
 			current.terminating = boundary
 			s.lifecycleMu.Unlock()
 			_ = s.completeAutonomousSettlement(
-				context.TODO(), current, boundary, err, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed, nativePumpOwned,
+				context.Background(), current, boundary, err, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed, nativePumpOwned,
 			)
 			s.lifecycleMu.Lock()
 		}
@@ -2147,7 +2147,7 @@ func (s *session) fenceSessionAfterNativePump() {
 }
 
 func (s *session) fenceSessionWithNativeEvents(stopNativeEvents bool) {
-	closeCtx, cancelClose := context.WithTimeout(context.TODO(), closeTimeout)
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), closeTimeout)
 	_ = s.beginLifecycleClose(closeCtx)
 	gateErr := lockLifecycleRoute(closeCtx, &s.lifecycleRouteMu)
 	s.lifecycleMu.Lock()
@@ -2168,7 +2168,7 @@ func (s *session) fenceSessionWithNativeEvents(stopNativeEvents bool) {
 		s.lifecycleMu.Unlock()
 		cancelClose()
 
-		stopCtx, cancel := context.WithTimeout(context.TODO(), closeTimeout)
+		stopCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 
 		_ = s.stopLifecycleDeliveries(stopCtx)
 		if stopNativeEvents {
@@ -2191,7 +2191,7 @@ func (s *session) fenceSessionWithNativeEvents(stopNativeEvents bool) {
 
 	if boundary != nil {
 		_ = s.completeAutonomousSettlement(
-			context.TODO(), current, boundary, nil, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed, false,
+			context.Background(), current, boundary, nil, lifecycle.ActionFailed, "", lifecycle.OutcomeFailed, false,
 		)
 	}
 
@@ -2207,7 +2207,7 @@ func (s *session) fenceSessionWithNativeEvents(stopNativeEvents bool) {
 	s.lifecycleRouteMu.Unlock()
 	cancelClose()
 
-	stopCtx, cancel := context.WithTimeout(context.TODO(), closeTimeout)
+	stopCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 
 	_ = s.stopLifecycleDeliveries(stopCtx)
 	if stopNativeEvents {

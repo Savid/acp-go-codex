@@ -138,7 +138,7 @@ func TestSessionInteractionCancellationBranches(t *testing.T) {
 	}
 	release()
 
-	interactionCtx, finish := session.beginInteraction(context.TODO(), "")
+	interactionCtx, finish := session.beginInteraction(t.Context(), "")
 	if interactionCtx.Err() != nil {
 		t.Fatal("interaction without parent started canceled")
 	}
