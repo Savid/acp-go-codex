@@ -48,7 +48,7 @@ func TestSessionEntryPointsRefuseARelativeCwd(t *testing.T) {
 
 	t.Cleanup(func() { _ = agent.Close() })
 
-	want := map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldCwd}
+	want := map[string]any{jsonFieldError: valUnsupported, jsonFieldField: jsonFieldCwd}
 
 	for _, cwd := range []string{"", "relative/project"} {
 		_, err := agent.NewSession(ctx, NewSessionRequest(cwd))

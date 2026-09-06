@@ -12,7 +12,7 @@ import (
 // rather than a Go decoder message, so the shape is the same closed
 // `{error, field}` object every other uniform rejection uses.
 func newUnsupportedExtensionParams() *acp.RequestError {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldParams})
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: jsonFieldParams})
 }
 
 // HandleExtensionMethod handles Codex-specific ACP extension methods.

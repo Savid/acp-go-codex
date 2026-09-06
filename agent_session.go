@@ -261,7 +261,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 
 	ctx = a.observe.Extract(ctx, params.Meta)
 	if params.SessionId == "" {
-		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
+		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: valRequired})
 	}
 
 	if err := a.ensureOpen(); err != nil {
@@ -1940,5 +1940,5 @@ func codexRestoreACPError(err error, account map[string]any) error {
 }
 
 func newUnknownSession() *acp.RequestError {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnknownSession, jsonFieldField: jsonFieldSessionID})
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, jsonFieldField: jsonFieldSessionID})
 }

@@ -118,9 +118,9 @@ func TestThreadSessionConfigRejectsCompetingOwners(t *testing.T) {
 		})
 	}
 
-	original := caseInsensitiveEnvKeys
-	caseInsensitiveEnvKeys = true
-	t.Cleanup(func() { caseInsensitiveEnvKeys = original })
+	original := Platform
+	Platform = platformWindows
+	t.Cleanup(func() { Platform = original })
 	_, err := threadSessionConfig(nil, map[string]string{"Path": "/operator"}, nil, nativePath)
 	require.ErrorContains(t, err, "environment must not set Path")
 }

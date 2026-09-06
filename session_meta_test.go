@@ -137,9 +137,7 @@ func TestLifecycleMetaRejectsRawPATH(t *testing.T) {
 	_, err := sessionMetaFromLifecycle(CodexOptions{Env: map[string]string{"PATH": "/operation/bin"}}.Meta())
 	requireInvalidParamsField(t, err, "_meta.codex.options.env.PATH")
 
-	original := caseInsensitiveEnvKeys
-	caseInsensitiveEnvKeys = true
-	t.Cleanup(func() { caseInsensitiveEnvKeys = original })
+	simulateCaseInsensitiveEnv(t, true)
 	_, err = sessionMetaFromLifecycle(CodexOptions{Env: map[string]string{"Path": "/operation/bin"}}.Meta())
 	requireInvalidParamsField(t, err, "_meta.codex.options.env.Path")
 }
@@ -154,7 +152,7 @@ func requireInvalidParamsField(t *testing.T, err error, field string) {
 	require.ErrorAs(t, err, &requestErr)
 	require.Equal(t, -32602, requestErr.Code)
 	require.Equal(t, map[string]any{
-		jsonFieldError: errValueUnsupported,
+		jsonFieldError: valUnsupported,
 		jsonFieldField: field,
 	}, requestErr.Data)
 }

@@ -3,16 +3,20 @@ package codexacp
 import (
 	"testing"
 
+	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/stretchr/testify/require"
 )
 
 func simulateCaseInsensitiveEnv(t *testing.T, enabled bool) {
 	t.Helper()
 
-	previous := caseInsensitiveEnvKeys
-	t.Cleanup(func() { caseInsensitiveEnvKeys = previous })
+	previous := codex.Platform
+	t.Cleanup(func() { codex.Platform = previous })
 
-	caseInsensitiveEnvKeys = enabled
+	codex.Platform = "linux"
+	if enabled {
+		codex.Platform = "windows"
+	}
 }
 
 func requireAmbiguousField(t *testing.T, err error, field string) {

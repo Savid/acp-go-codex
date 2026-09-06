@@ -2909,7 +2909,7 @@ func TestPromptRoutesBeforeItReadsTheLifecycleValue(t *testing.T) {
 	data, ok := requestErr.Data.(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, routeMetaPath, data[jsonFieldField])
-	require.Equal(t, errValueMissing, data[jsonFieldError])
+	require.Equal(t, valMissing, data[jsonFieldError])
 	require.Empty(t, client.lastTurn.ThreadID, "a refused prompt writes no native frame")
 }
 

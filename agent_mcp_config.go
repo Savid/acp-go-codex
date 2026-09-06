@@ -16,11 +16,11 @@ func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []
 		case server.Stdio != nil, server.Http != nil:
 			name := mcpServerName(server)
 			if strings.TrimSpace(name) == "" {
-				return nil, acp.NewInvalidParams(map[string]any{fmt.Sprintf("mcpServers[%d].name", index): validationRequired})
+				return nil, acp.NewInvalidParams(map[string]any{fmt.Sprintf("mcpServers[%d].name", index): valRequired})
 			}
 
 			if _, duplicate := seen[name]; duplicate {
-				return nil, acp.NewInvalidParams(map[string]any{fmt.Sprintf("mcpServers[%d].name", index): validationDuplicate})
+				return nil, acp.NewInvalidParams(map[string]any{fmt.Sprintf("mcpServers[%d].name", index): valDuplicate})
 			}
 
 			seen[name] = struct{}{}
@@ -34,13 +34,13 @@ func (a *Agent) prepareMCPServers(_ context.Context, _ acp.SessionId, servers []
 			}
 		case server.Sse != nil:
 			return nil, acp.NewInvalidParams(map[string]any{
-				jsonFieldError:  errValueUnsupported,
+				jsonFieldError:  valUnsupported,
 				jsonFieldField:  fmt.Sprintf("mcpServers[%d]", index),
 				jsonFieldServer: server.Sse.Name,
 			})
 		case server.Acp != nil:
 			return nil, acp.NewInvalidParams(map[string]any{
-				jsonFieldError:  errValueUnsupported,
+				jsonFieldError:  valUnsupported,
 				jsonFieldField:  fmt.Sprintf("mcpServers[%d]", index),
 				jsonFieldServer: server.Acp.Name,
 			})

@@ -4002,7 +4002,7 @@ func TestRestoreVerdictKeepsAlreadyClassifiedCauses(t *testing.T) {
 	require.ErrorAs(t, unknown, &requestErr)
 	require.Equal(t, -32602, requestErr.Code)
 	require.Equal(t, map[string]any{
-		jsonFieldError: errValueUnknownSession,
+		jsonFieldError: valUnknownSession,
 		jsonFieldField: jsonFieldSessionID,
 	}, requestErr.Data)
 

@@ -15,7 +15,7 @@ const validationAbsolutePath = "must be an absolute path"
 // message keyed by the field name.
 func validateRequiredAbsolutePath(field string, path string) error {
 	if !filepath.IsAbs(path) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: field})
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: field})
 	}
 
 	return nil
@@ -42,7 +42,7 @@ func validateAbsolutePaths(field string, paths []string) error {
 		if path == "" {
 			return acp.NewInvalidParams(map[string]any{field: map[string]any{
 				jsonFieldIndex: index,
-				jsonFieldError: validationRequired,
+				jsonFieldError: valRequired,
 			}})
 		}
 

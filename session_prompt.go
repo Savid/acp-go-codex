@@ -42,7 +42,7 @@ const (
 // promptToCodex maps validated ACP prompt content into native Codex input.
 func promptToCodex(blocks []acp.ContentBlock, images []codex.PromptImage) ([]codex.UserInput, error) {
 	if len(blocks) == 0 {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: jsonFieldPrompt})
 	}
 
 	input, err := codex.PromptToUserInput(blocks, images)
@@ -50,7 +50,7 @@ func promptToCodex(blocks []acp.ContentBlock, images []codex.PromptImage) ([]cod
 		return input, nil
 	}
 
-	return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
+	return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: jsonFieldPrompt})
 }
 
 func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBlock) (

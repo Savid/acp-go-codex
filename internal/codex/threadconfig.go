@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"runtime"
 	"strings"
 )
 
@@ -14,13 +13,8 @@ const (
 	pathEnvKey                = "PATH"
 )
 
-// caseInsensitiveEnvKeys reports whether the running platform treats
-// environment names case insensitively. Windows does, so "Path" owns the same
-// value as "PATH" there; elsewhere only the exact name does.
-var caseInsensitiveEnvKeys = runtime.GOOS == platformWindows
-
 func isPathEnvKey(key string) bool {
-	return key == pathEnvKey || (caseInsensitiveEnvKeys && strings.EqualFold(key, pathEnvKey))
+	return EnvironmentKey(key) == pathEnvKey
 }
 
 // threadSessionConfig deep-clones the caller's thread config and installs the

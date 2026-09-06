@@ -35,7 +35,7 @@ func TestExtensionParamsRefusalNamesParams(t *testing.T) {
 
 	t.Cleanup(func() { _ = agent.Close() })
 
-	want := map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldParams}
+	want := map[string]any{jsonFieldError: valUnsupported, jsonFieldField: jsonFieldParams}
 
 	for name, params := range map[string]string{
 		"undecodable fork":  ForkSessionMethod + "\x00[]",

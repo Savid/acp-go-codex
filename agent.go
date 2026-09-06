@@ -27,21 +27,21 @@ const (
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
 
-	jsonFieldError         = "error"
-	jsonFieldCode          = "code"
-	jsonFieldData          = "data"
-	jsonFieldMessage       = "message"
-	jsonFieldCwd           = "cwd"
-	jsonFieldEntries       = "entries"
-	jsonFieldIndex         = "index"
-	jsonFieldSessionID     = "sessionId"
-	jsonFieldField         = "field"
-	jsonFieldParams        = "params"
-	validationRequired     = "required"
-	validationDuplicate    = "duplicate"
-	errValueUnsupported    = "unsupported"
-	errValueMissing        = "missing"
-	errValueUnknownSession = "unknown session"
+	jsonFieldError     = "error"
+	jsonFieldCode      = "code"
+	jsonFieldData      = "data"
+	jsonFieldMessage   = "message"
+	jsonFieldCwd       = "cwd"
+	jsonFieldEntries   = "entries"
+	jsonFieldIndex     = "index"
+	jsonFieldSessionID = "sessionId"
+	jsonFieldField     = "field"
+	jsonFieldParams    = "params"
+	valRequired        = "required"
+	valDuplicate       = "duplicate"
+	valUnsupported     = "unsupported"
+	valMissing         = "missing"
+	valUnknownSession  = "unknown session"
 
 	jsonFieldSource          = "source"
 	jsonFieldSequence        = "sequence"
@@ -205,7 +205,7 @@ func NewAgent(opts ...Option) *Agent {
 		optionsErr = errors.Join(optionsErr, validateManagedExecutableSelector(options.ExecutablePath))
 	}
 
-	optionsErr = errors.Join(optionsErr, validateRuntimeEnvironment(options.Env))
+	optionsErr = errors.Join(optionsErr, validateAgentEnv(options.Env))
 	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
 	optionsErr = errors.Join(optionsErr, validateInputHandoffRoot(options.InputHandoffRoot))
 	optionsErr = errors.Join(optionsErr, validateProviderAuthOptions(options))

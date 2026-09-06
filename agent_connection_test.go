@@ -715,7 +715,7 @@ func TestEstablishmentReservationCollisionRefusesBeforeSessionDispatch(t *testin
 // must not be reported as a cancellation even when the error itself wraps
 // context.Canceled.
 func TestRequestErrorCancelPrecedence(t *testing.T) {
-	invalidParams := acp.NewInvalidParams(map[string]any{jsonFieldError: errValueUnsupported, jsonFieldField: jsonFieldPrompt})
+	invalidParams := acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: jsonFieldPrompt})
 
 	for name, test := range map[string]struct {
 		cause    error

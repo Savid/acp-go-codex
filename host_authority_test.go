@@ -958,12 +958,14 @@ func TestHostAuthorityValidationAndAdapters(t *testing.T) {
 
 	for _, environment := range []map[string]string{
 		{"": "value"}, {"BAD=KEY": "value"}, {"BAD\x00KEY": "value"}, {"KEY": "bad\x00value"},
-		{"acp_go_codex_internal_test": "value"}, {"xdg_cache_home": "/tmp"},
+		{"acp_go_codex_internal_test": "value"}, {"XDG_CACHE_HOME": "/tmp"},
+		{"NODE_OPTIONS": "--require x"}, {"BASH_ENV": "/init"}, {"ENV": "/init"}, {"LD_PRELOAD": "/lib"},
 	} {
-		require.Error(t, validateRuntimeEnvironment(environment))
+		require.Error(t, validateAgentEnv(environment))
 	}
-	require.NoError(t, validateRuntimeEnvironment(map[string]string{"SAFE": "value"}))
-	require.True(t, reservedCodexEnvKey("codex_home"))
+	require.NoError(t, validateAgentEnv(map[string]string{"SAFE": "value", "PATH": "/usr/bin", "https_proxy": "", "xdg_cache_home": "own"}))
+	require.Equal(t, codex.EnvironmentKey("codex_home") == managedCodexHomeEnvironment, reservedCodexEnvKey("codex_home"))
+	require.True(t, reservedCodexEnvKey("CODEX_HOME"))
 	require.False(t, reservedCodexEnvKey("safe"))
 
 	for _, environment := range []map[string]string{

@@ -84,11 +84,11 @@ func (e *routeParamError) field() string {
 }
 
 func routeMissing() error {
-	return &routeParamError{verdict: errValueMissing}
+	return &routeParamError{verdict: valMissing}
 }
 
 func routeUnsupported(member string) error {
-	return &routeParamError{verdict: errValueUnsupported, member: member}
+	return &routeParamError{verdict: valUnsupported, member: member}
 }
 
 func parseInboundRoute(meta map[string]any) (inboundRoute, error) {
@@ -214,7 +214,7 @@ func routeInvalidParams(err error) error {
 
 	var routeErr *routeParamError
 	if !errors.As(err, &routeErr) {
-		routeErr = &routeParamError{verdict: errValueUnsupported, member: routeTurnNonceKey}
+		routeErr = &routeParamError{verdict: valUnsupported, member: routeTurnNonceKey}
 	}
 
 	return acp.NewInvalidParams(map[string]any{jsonFieldError: routeErr.verdict, jsonFieldField: routeErr.field()})

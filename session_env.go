@@ -1,16 +1,18 @@
 package codexacp
 
 import (
+	"fmt"
 	"maps"
-	"runtime"
 	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 const (
-	errValueAmbiguous = "ambiguous"
+	valAmbiguous = "ambiguous"
 
 	envOptionPath = "_meta.codex.options." + metaEnvKey
 
@@ -28,46 +30,66 @@ const (
 	envXDGStateHomeKey  = "XDG_STATE_HOME"
 )
 
-var caseInsensitiveEnvKeys = runtime.GOOS == "windows"
-
-// sessionEnvIdentity is the name the target platform resolves an environment
-// key by: the exact bytes on Unix, where PATH and path are two variables, and
-// the upper-cased spelling on Windows, where they are one.
-func sessionEnvIdentity(key string) string {
-	if caseInsensitiveEnvKeys {
-		return strings.ToUpper(key)
-	}
-
-	return key
-}
-
 func validEnvName(key string) bool {
 	return key != "" && !strings.ContainsAny(key, "=\x00")
 }
 
-// blockedSessionEnvKey reports whether a session env key names a variable the
-// adapter refuses to install on a thread. The private adapter namespace is
-// refused under every spelling. PATH is derived from extraPathDirs and the
-// app-server's own search path, so a raw session PATH would be a second,
-// silently losing owner of the same value; the managed roots and the loader
-// and shell injection names are read by the native process under an exact
-// platform spelling, so those compare through the platform identity.
-func blockedSessionEnvKey(key string) bool {
+// blockedAgentEnvKey reports whether a caller-supplied env key names a
+// variable the adapter refuses on every surface. The private adapter
+// namespace is refused under every spelling; the managed roots and the
+// loader, node, and shell injection names are read by the native process
+// under an exact platform spelling, so those compare through the platform
+// identity.
+func blockedAgentEnvKey(key string) bool {
 	if strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
 		return true
 	}
 
-	name := sessionEnvIdentity(key)
+	name := codex.EnvironmentKey(key)
 	if managedCodexRootEnvKey(name) {
 		return true
 	}
 
 	switch name {
-	case envPathKey, envNodeOptionsKey, envBashEnvKey, envShellEnvKey:
+	case envNodeOptionsKey, envBashEnvKey, envShellEnvKey:
 		return true
 	default:
 		return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
 	}
+}
+
+// blockedSessionEnvKey additionally refuses PATH in a session env. The thread
+// PATH is derived from extraPathDirs and the app-server's own search path, so
+// a raw session PATH would be a second, silently losing owner of the same
+// value.
+func blockedSessionEnvKey(key string) bool {
+	return blockedAgentEnvKey(key) || codex.EnvironmentKey(key) == envPathKey
+}
+
+// validateAgentEnv applies the session name rule to the static Agent-scoped
+// environment, with PATH allowed because that surface establishes the
+// app-server's native base search path. A refusal fails Agent construction.
+func validateAgentEnv(env map[string]string) error {
+	seen := make(map[string]string, len(env))
+
+	for _, key := range slices.Sorted(maps.Keys(env)) {
+		if !validEnvName(key) || strings.ContainsRune(env[key], '\x00') {
+			return fmt.Errorf("environment key %q is not a variable name", key)
+		}
+
+		if blockedAgentEnvKey(key) {
+			return fmt.Errorf("environment key %q is reserved", key)
+		}
+
+		identity := codex.EnvironmentKey(key)
+		if previous, duplicate := seen[identity]; duplicate {
+			return fmt.Errorf("environment keys %q and %q name the same variable", previous, key)
+		}
+
+		seen[identity] = key
+	}
+
+	return nil
 }
 
 // validatedSessionEnv checks a session environment in sorted key order, so the
@@ -84,7 +106,7 @@ func validatedSessionEnv(env map[string]string) (map[string]string, error) {
 			return nil, unsupportedField(envOptionPath + "." + key)
 		}
 
-		identity := sessionEnvIdentity(key)
+		identity := codex.EnvironmentKey(key)
 		if _, duplicate := seen[identity]; duplicate {
 			return nil, ambiguousField(envOptionPath + "." + key)
 		}
@@ -97,7 +119,7 @@ func validatedSessionEnv(env map[string]string) (map[string]string, error) {
 
 func ambiguousField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: errValueAmbiguous,
+		jsonFieldError: valAmbiguous,
 		jsonFieldField: path,
 	})
 }

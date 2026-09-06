@@ -316,7 +316,7 @@ func extraPathDirField(index int) string {
 
 func unsupportedField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: errValueUnsupported,
+		jsonFieldError: valUnsupported,
 		jsonFieldField: path,
 	})
 }

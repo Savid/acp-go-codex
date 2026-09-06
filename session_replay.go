@@ -160,7 +160,7 @@ func rolloutReplayUpdatesWithImages(
 func decodeRolloutRow(entry SessionStoreEntry) (rolloutRow, error) {
 	trimmed := bytes.TrimSpace(entry)
 	if len(trimmed) == 0 {
-		return rolloutRow{}, errors.New(validationRequired)
+		return rolloutRow{}, errors.New(valRequired)
 	}
 
 	if err := rejectDuplicateRolloutKeys(trimmed); err != nil {

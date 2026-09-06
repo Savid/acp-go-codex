@@ -42,49 +42,49 @@ func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) 
 		field   string
 	}{
 		"absent": {
-			meta: nil, verdict: errValueMissing, field: routeMetaPath,
+			meta: nil, verdict: valMissing, field: routeMetaPath,
 		},
 		"missing key beside another": {
-			meta: map[string]any{"other": 1}, verdict: errValueMissing, field: routeMetaPath,
+			meta: map[string]any{"other": 1}, verdict: valMissing, field: routeMetaPath,
 		},
 		"non-object": {
-			meta: map[string]any{routeMetaKey: "route"}, verdict: errValueUnsupported, field: routeMetaPath,
+			meta: map[string]any{routeMetaKey: "route"}, verdict: valUnsupported, field: routeMetaPath,
 		},
 		"absent version": {
 			meta:    map[string]any{routeMetaKey: map[string]any{routeTurnNonceKey: "n"}},
-			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+			verdict: valUnsupported, field: routeMetaPath + "." + routeVersionKey,
 		},
 		"wrong version": {
 			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 2, routeTurnNonceKey: "n"}},
-			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+			verdict: valUnsupported, field: routeMetaPath + "." + routeVersionKey,
 		},
 		"wrong version type": {
 			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: "1", routeTurnNonceKey: "n"}},
-			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+			verdict: valUnsupported, field: routeMetaPath + "." + routeVersionKey,
 		},
 		"fractional version": {
 			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 1.5, routeTurnNonceKey: "n"}},
-			verdict: errValueUnsupported, field: routeMetaPath + "." + routeVersionKey,
+			verdict: valUnsupported, field: routeMetaPath + "." + routeVersionKey,
 		},
 		"absent nonce": {
 			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 1}},
-			verdict: errValueUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
+			verdict: valUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
 		},
 		"empty nonce": {
 			meta:    map[string]any{routeMetaKey: map[string]any{routeVersionKey: 1, routeTurnNonceKey: ""}},
-			verdict: errValueUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
+			verdict: valUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
 		},
 		"oversized nonce": {
 			meta: map[string]any{routeMetaKey: map[string]any{
 				routeVersionKey: 1, routeTurnNonceKey: strings.Repeat("n", routeTurnNonceMaxBytes+1),
 			}},
-			verdict: errValueUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
+			verdict: valUnsupported, field: routeMetaPath + "." + routeTurnNonceKey,
 		},
 		"unknown member": {
 			meta: map[string]any{routeMetaKey: map[string]any{
 				routeVersionKey: 1, routeTurnNonceKey: "n", "extra": true,
 			}},
-			verdict: errValueUnsupported, field: routeMetaPath + ".extra",
+			verdict: valUnsupported, field: routeMetaPath + ".extra",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -103,9 +103,9 @@ func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) 
 	}
 
 	require.Nil(t, routeInvalidParams(nil))
-	require.Equal(t, errValueMissing+" "+routeMetaPath, routeMissing().Error())
+	require.Equal(t, valMissing+" "+routeMetaPath, routeMissing().Error())
 	require.Equal(t,
-		errValueUnsupported+" "+routeMetaPath+"."+routeVersionKey,
+		valUnsupported+" "+routeMetaPath+"."+routeVersionKey,
 		routeUnsupported(routeVersionKey).Error(),
 	)
 
@@ -115,7 +115,7 @@ func TestInboundRouteRequiresExactShapeAndCancelMatchesActiveTurn(t *testing.T) 
 
 	require.ErrorAs(t, routeInvalidParams(errTurnRouteMismatch), &staleErr)
 	require.Equal(t, map[string]any{
-		jsonFieldError: errValueUnsupported,
+		jsonFieldError: valUnsupported,
 		jsonFieldField: routeMetaPath + "." + routeTurnNonceKey,
 	}, staleErr.Data)
 

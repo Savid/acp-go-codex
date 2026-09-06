@@ -275,21 +275,6 @@ func (p nativeProcessAdapter) Wait(ctx context.Context) (codex.NativeResult, err
 	return codex.NativeResult(result), toInternalAuthorityError(err)
 }
 
-func validateRuntimeEnvironment(environment map[string]string) error {
-	for key, value := range environment {
-		upperKey := strings.ToUpper(key)
-		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
-			return errors.New("invalid Codex environment entry")
-		}
-
-		if strings.HasPrefix(upperKey, privateAdapterEnvPrefix) || managedCodexRootEnvKey(upperKey) {
-			return errors.New("codex environment contains a reserved key")
-		}
-	}
-
-	return nil
-}
-
 // managedCodexRootEnvKey reports whether name, already resolved to the
 // identity its caller compares under, is a state root the adapter writes
 // itself.
@@ -303,10 +288,12 @@ func managedCodexRootEnvKey(name string) bool {
 	}
 }
 
+// reservedCodexEnvKey reports whether an MCP server env name is one the
+// adapter owns: its private namespace under every spelling, or a managed root
+// under the platform identity.
 func reservedCodexEnvKey(key string) bool {
-	upperKey := strings.ToUpper(key)
-
-	return strings.HasPrefix(upperKey, privateAdapterEnvPrefix) || managedCodexRootEnvKey(upperKey)
+	return strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) ||
+		managedCodexRootEnvKey(codex.EnvironmentKey(key))
 }
 
 func validateManagedExecutableSelector(selector string) error {
