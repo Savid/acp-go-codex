@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -128,22 +127,16 @@ func newLocalAgentConnection(agent *Agent, output io.Writer, input io.Reader) *l
 	return conn
 }
 
+// interruptibleOutput reports whether InterruptTransport can unblock a write
+// stalled on output. Closing a carrier is itself an interruption: the stalled
+// write returns with the close error.
 func interruptibleOutput(output io.Writer) bool {
-	if output == nil {
+	switch output.(type) {
+	case writeInterrupter, writeDeadlineSetter, io.Closer:
+		return true
+	default:
 		return false
 	}
-
-	if _, ok := output.(writeDeadlineSetter); ok {
-		return true
-	}
-
-	if _, ok := output.(writeInterrupter); ok {
-		return true
-	}
-
-	_, ok := output.(*os.File)
-
-	return ok
 }
 
 func (c *localAgentConnection) LifecycleDeliverySupported() bool {
@@ -617,6 +610,10 @@ func (c *localAgentConnection) InterruptTransport() error {
 		c.establishment.failAll(errEstablishmentCancelled)
 	}
 
+	if !interruptibleOutput(c.output) {
+		return errors.New("ACP output transport cannot interrupt a stalled write")
+	}
+
 	var interruptErr error
 	if interrupter, ok := c.output.(writeInterrupter); ok {
 		interruptErr = interrupter.InterruptWrite()
@@ -628,12 +625,6 @@ func (c *localAgentConnection) InterruptTransport() error {
 
 	if closer, ok := c.output.(io.Closer); ok {
 		interruptErr = errors.Join(interruptErr, closer.Close())
-
-		return interruptErr
-	}
-
-	if !interruptibleOutput(c.output) {
-		return errors.New("ACP output transport cannot interrupt a stalled write")
 	}
 
 	return interruptErr

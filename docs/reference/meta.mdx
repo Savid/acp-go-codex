@@ -256,10 +256,9 @@ An absent offer is answered by omitting the key from the response, and such a
 connection emits no lifecycle envelope at all. The capability decoder accepts
 only the exact object `{"version":1}` and refuses missing, duplicate, trailing,
 fractional, or differently typed values. `Serve` also omits the answer unless
-its output is an `*os.File`, exposes a
-write deadline, or implements `InterruptWrite() error`, because other carriers
-cannot guarantee that shutdown interrupts and joins a stalled lifecycle
-notification.
+its output implements `InterruptWrite() error`, exposes a write deadline, or
+can be closed, because any other carrier cannot guarantee that shutdown
+interrupts and joins a stalled lifecycle notification.
 
 While version 1 is negotiated, `session/prompt` carries its submission identity
 under the same key, and a prompt that omits it is refused before dispatch:

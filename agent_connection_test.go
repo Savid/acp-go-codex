@@ -170,6 +170,50 @@ func TestLifecycleNegotiationOmitsNonInterruptibleCarrier(t *testing.T) {
 	}
 }
 
+func TestLifecycleNegotiationAcceptsClosableCarrierAndInterruptsItsStalledWrite(t *testing.T) {
+	inputR, inputW := io.Pipe()
+	outputR, outputW := io.Pipe()
+	t.Cleanup(func() {
+		_ = inputR.Close()
+		_ = inputW.Close()
+		_ = outputR.Close()
+		_ = outputW.Close()
+	})
+	require.True(t, interruptibleOutput(outputW))
+
+	agent := NewAgent()
+	conn := newLocalAgentConnection(agent, outputW, inputR)
+	agent.setAgentClient(conn)
+
+	params, err := json.Marshal(map[string]any{
+		"protocolVersion":    1,
+		"clientCapabilities": map[string]any{},
+		"_meta":              map[string]any{lifecycle.MetaKey: map[string]any{"version": 1}},
+	})
+	require.NoError(t, err)
+	result, reqErr := conn.handle(t.Context(), acp.AgentMethodInitialize, params)
+	require.Nil(t, reqErr)
+	response := asType[acp.InitializeResponse](t, result)
+	require.Contains(t, response.Meta, lifecycle.MetaKey)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	delivered := make(chan error, 1)
+	go func() {
+		delivered <- conn.SessionUpdateLifecycle(ctx, acp.SessionNotification{
+			SessionId: "session",
+			Update:    acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}},
+		})
+	}()
+
+	first := make([]byte, 1)
+	_, err = io.ReadFull(outputR, first)
+	require.NoError(t, err)
+	cancel()
+	err = <-delivered
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, io.ErrClosedPipe.Error())
+}
+
 func TestACPTransportLoggerRedactsEveryOpaqueSDKAttribute(t *testing.T) {
 	var logs lockedLogBuffer
 	agent := NewAgent(WithLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))))
