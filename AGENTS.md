@@ -1,11 +1,12 @@
 # AGENTS.md
 
-Shared instructions for automated coding agents working in this repository.
+Instructions for automated coding agents working in this repository.
 
 ## Purpose
 
-This project is a Go implementation of an ACP agent for Codex CLI. It builds on
-`github.com/coder/acp-go-sdk` and wraps the local `codex app-server` protocol.
+This Go ACP agent wraps the local `codex app-server` protocol using
+`github.com/coder/acp-go-sdk`. One Agent owns a shared app-server; logical
+sessions retain their own configuration, callbacks, routes, and store state.
 
 ## Project Map
 
@@ -14,40 +15,36 @@ This project is a Go implementation of an ACP agent for Codex CLI. It builds on
   session load, auth, MCP bridge, and extension methods.
 - `internal/codex`: Codex provider boundary. Keep Codex CLI/app-server details
   here instead of leaking them into ACP handlers.
+- `internal/lifecycle`: lifecycle negotiation, reducer, and event vocabulary.
+- `internal/observer`: OpenTelemetry instrumentation.
+- `docs/` and `examples/`: public behavior and embedding examples.
 
 ## Commands
 
 ```sh
-go test ./...
-go build ./...
-go test -tags=integration ./integration/...
+make audit
+make test
+make lint
 make test-integration-smoke
 make test-integration-live
 make test-integration-attended
 make test-integration-keystore
 ```
 
-Integration tests are opt-in. `make test-integration-smoke` requires a local
-`codex` CLI and runs live app-server checks that do not spend model tokens.
-`make test-integration-live` also sets `ACP_GO_CODEX_RUN_LIVE_TOKENS=1` and may spend model
-tokens. Use `ACP_GO_CODEX_HARNESS_PATH`, `ACP_GO_CODEX_HOME`,
-`ACP_GO_CODEX_MODEL`, and `ACP_GO_CODEX_AGENT_BINARY` to point tests at a
-specific CLI, source Codex home, model, or compiled agent binary. Integration
-tests always launch Codex with an isolated temp `CODEX_HOME`.
-`make test-integration-attended` sets `ACP_GO_CODEX_RUN_ATTENDED=1` and runs the
-provider-auth flows a human must approve at the provider; it fails rather than
-skips when nobody answers. `make test-integration-keystore` sets
-`ACP_GO_CODEX_RUN_KEYSTORE=1` and runs the credential-residence matrix in all
-three configurations: the keystore-present and keystore-absent Linux halves
-inside the container fixture in `integration/keystore`, and the macOS third on a
-macOS host. The same fixture runs the account-command browser legs on Linux,
-where `xdg-open` and the other launchers a macOS host never execs are the ones
-that matter. It fails rather than skips when no container runtime is available.
-Neither joins `make audit`. When `OPENAI_API_KEY`
-is set and `ACP_GO_CODEX_HOME` is unset, tests use a fresh temp home. Otherwise
-they copy the source home into the temp home and clear copied auth refresh
-tokens. If neither env auth nor copied `auth.json` is available, tests fail
-instead of launching without isolated auth.
+`make audit` runs local formatting, lint, build, race tests with statement
+coverage reporting, platform cross-compilation, module, vulnerability,
+modernization, and documentation checks. Inspect targets before running them.
+
+Integration runs require explicit operator intent and
+`ACP_GO_CODEX_RUN_INTEGRATION=1`. The targets set this gate. Smoke runs use the
+real CLI without model tokens. Live, attended auth, and keystore targets also
+set `ACP_GO_CODEX_RUN_LIVE_TOKENS=1`, `ACP_GO_CODEX_RUN_ATTENDED=1`, or
+`ACP_GO_CODEX_RUN_KEYSTORE=1`, respectively; none joins `make audit`. Attended
+runs fail when nobody approves. Keystore runs require a container runtime for
+the Linux present/absent matrix and a macOS host for its third configuration.
+
+Use `ACP_GO_CODEX_HARNESS_PATH`, `ACP_GO_CODEX_HOME`, `ACP_GO_CODEX_MODEL`, and
+`ACP_GO_CODEX_AGENT_BINARY` for the CLI, source home, model, and compiled adapter.
 
 ## Coding Rules
 
@@ -56,43 +53,38 @@ instead of launching without isolated auth.
 - Prefer structured request/response types over ad hoc JSON maps.
 - Return explicit method-not-found or unsupported errors for ACP methods that are
   outside the Codex adapter contract.
+- Keep public code and documentation self-contained and describe current behavior.
 
 ## Testing Rules
 
 - Use `testify/require` for assertions.
 - Prefer table-driven tests for Codex app-server mapping and event-decoding
   cases in `internal/codex`.
-- Run `go test ./...` for ordinary changes.
-- Run `go test -race ./...` or `make test` for session, MCP bridge, concurrency,
-  or cancellation changes.
-- Run `golangci-lint run ./...` before considering work complete.
-- Integration tests are double-gated: `ACP_GO_CODEX_RUN_INTEGRATION=1` opts into
-  the live suite, and `ACP_GO_CODEX_RUN_LIVE_TOKENS=1`,
-  `ACP_GO_CODEX_RUN_ATTENDED=1`, or `ACP_GO_CODEX_RUN_KEYSTORE=1` each select one
-  further tier. `make test-integration-smoke` runs live
-  app-server checks that do not spend tokens.
-- Live integration tests launch the actual `codex` binary from `PATH` (or
-  `ACP_GO_CODEX_HARNESS_PATH`). Use `ACP_GO_CODEX_AGENT_BINARY` to exercise a
-  compiled agent and `ACP_GO_CODEX_MODEL` to override the model.
+- Run `go test ./...` for ordinary changes; use `make test` for session, MCP,
+  concurrency, or cancellation changes, and run `make lint` before completion.
+- Report statement coverage and preserve canonical lifecycle fixtures. Do not add
+  tests or production seams solely to increase coverage.
 - Unit tests may use in-memory transports and the placeholder Codex client.
-- Local helper processes in integration tests are deterministic MCP stdio
-  servers, not real Codex.
+- Native compatibility claims require the real CLI. Deterministic transports and
+  compiled initialize/EOF tests prove only adapter behavior and startup.
 - Keep live prompts deterministic with exact sentinel replies, and assert the
   ACP stop reason plus streamed updates where practical.
 
 ## Security And Boundaries
 
-- **IMPORTANT**: Do not silently bypass permission prompts. Mapping Codex
+- Do not silently bypass permission prompts. Mapping Codex
   `item/permissions/requestApproval` onto the ACP `session/request_permission`
   flow is load-bearing for user trust in this agent.
-- **IMPORTANT**: Do not manage Codex CLI authentication state. ACP `logout`
-  only clears adapter-owned session state, and is refused unless
+- Do not alter borrowed Codex CLI authentication state. ACP `logout`
+  closes adapter sessions and calls native account logout, and is refused unless
   `WithCodexAllowAccountLogout` is set for an adapter-owned `CODEX_HOME`.
 - Do not log auth material (`auth.json` contents, refresh tokens, ChatGPT
   tokens), user secrets, prompts, tool input, tool output, or raw Codex
   app-server event bodies. Account metadata surfaced over ACP is redacted.
-- Keep Codex CLI/app-server protocol details inside `internal/codex`; return
-  explicit method-not-found or unsupported errors for ACP methods outside the
-  adapter contract.
+- Managed native launches and prepared-tree transitions use `HostAuthority`
+  without ordinary fallback. A prepared tree stays opaque until successful
+  reclaim; failed preparation leaves its cleanup with the host.
 - Integration tests must launch Codex with a hermetic temp `CODEX_HOME`, clear
   copied refresh tokens, and fail rather than launch without isolated auth.
+  `OPENAI_API_KEY` with no explicit source home uses a fresh home; otherwise
+  tests copy the configured source home and require env auth or copied `auth.json`.

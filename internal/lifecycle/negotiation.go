@@ -1,8 +1,10 @@
 package lifecycle
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
+	"strings"
 )
 
 // MetaPath is the request path a rejection names. Negotiation and correlation
@@ -35,12 +37,14 @@ type ParamError struct {
 func (e *ParamError) Error() string { return e.Verdict + " " + e.Field }
 
 func paramError(members ...string) *ParamError {
-	field := MetaPath
+	var field strings.Builder
+	field.WriteString(MetaPath)
+
 	for _, member := range members {
-		field += "." + member
+		field.WriteString("." + member)
 	}
 
-	return &ParamError{Field: field, Verdict: VerdictUnsupported}
+	return &ParamError{Field: field.String(), Verdict: VerdictUnsupported}
 }
 
 // missingParamError refuses the absent prompt correlation value on a
@@ -74,9 +78,9 @@ func DecodeOffer(meta map[string]any) (Offer, bool, *ParamError) {
 		return Offer{}, false, nil
 	}
 
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return Offer{}, false, paramError()
+	fields, refusal := negotiationObject(raw)
+	if refusal != nil {
+		return Offer{}, false, refusal
 	}
 
 	for key := range fields {
@@ -126,9 +130,9 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 		return Submission{}, missingParamError()
 	}
 
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return Submission{}, paramError()
+	fields, refusal := negotiationObject(raw)
+	if refusal != nil {
+		return Submission{}, refusal
 	}
 
 	for key := range fields {
@@ -164,16 +168,7 @@ const (
 	overMaxIntFloat = -minIntFloat
 )
 
-// integerValue reads one JSON integer. A decoded wire value arrives as a float64 and
-// an embedding Go host writes an int, so both are the same integer; a fractional
-// value is neither.
-//
-// The pinned SDK pre-decodes `_meta` to map[string]any, so no lexeme survives for
-// this surface to apply the lexical rule to: integrality is judged on the value. A
-// float64 is this integer only when it is integral and exactly representable as
-// one — the test is what was lost, not what is merely large, so a magnitude past
-// the int range, an infinity, and a NaN each name no integer at all, whatever the
-// truncation says about them.
+// integerValue preserves exact wire integers and accepts integral Go values.
 func integerValue(raw any) (int, bool) {
 	switch value := raw.(type) {
 	case float64:
@@ -184,19 +179,24 @@ func integerValue(raw any) (int, bool) {
 		return int(value), true
 	case int:
 		return value, true
+	case json.RawMessage:
+		return integerValue(json.Number(strings.TrimSpace(string(value))))
 	case json.Number:
 		number, err := value.Int64()
+		if err != nil || number < math.MinInt || number > math.MaxInt {
+			return 0, false
+		}
 
-		return int(number), err == nil
+		return int(number), true
 	default:
 		return 0, false
 	}
 }
 
 func decodeSubmission(raw any) (Submission, *ParamError) {
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return Submission{}, paramError(fieldSubmission)
+	fields, refusal := negotiationObject(raw, fieldSubmission)
+	if refusal != nil {
+		return Submission{}, refusal
 	}
 
 	for key := range fields {
@@ -242,11 +242,66 @@ func correlationIdentifier(fields map[string]any, key string, required bool) (st
 	}
 
 	value, ok := raw.(string)
+	if encoded, wire := raw.(json.RawMessage); wire {
+		ok = json.Unmarshal(encoded, &value) == nil
+	}
+
 	if !ok || value == "" || len(value) > IdentifierBound {
 		return "", paramError(fieldSubmission, key)
 	}
 
 	return value, nil
+}
+
+func negotiationObject(raw any, members ...string) (map[string]any, *ParamError) {
+	if refusal, ok := raw.(*ParamError); ok {
+		return nil, refusal
+	}
+
+	if fields, ok := raw.(map[string]any); ok {
+		return fields, nil
+	}
+
+	encoded, ok := raw.(json.RawMessage)
+	if !ok {
+		return nil, paramError(members...)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	opening, err := decoder.Token()
+
+	if err != nil || opening != json.Delim('{') {
+		return nil, paramError(members...)
+	}
+
+	fields := make(map[string]any)
+
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, paramError(members...)
+		}
+
+		key, _ := token.(string) // Object member tokens are strings.
+		path := append(append([]string(nil), members...), key)
+
+		if _, duplicate := fields[key]; duplicate {
+			return nil, paramError(path...)
+		}
+
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, paramError(path...)
+		}
+
+		fields[key] = value
+	}
+
+	if _, err := decoder.Token(); err != nil || !json.Valid(encoded) {
+		return nil, paramError(members...)
+	}
+
+	return fields, nil
 }
 
 // ActionCorrelation names one pending permission or elicitation on the stream that

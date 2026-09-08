@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -183,13 +184,7 @@ func seedTargetExists(path string) (bool, error) {
 
 // manifestOwns reports whether rel is a seed-managed relative path.
 func manifestOwns(manifest []string, rel string) bool {
-	for _, entry := range manifest {
-		if entry == rel {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(manifest, rel)
 }
 
 // loadSeedManifest reads the ownership manifest fresh from the seed root,
@@ -336,10 +331,8 @@ func resolveSeedPath(home string, name string) (string, string, error) {
 		return "", "", unsupportedField(field)
 	}
 
-	for _, segment := range strings.Split(slashed, "/") {
-		if segment == ".." {
-			return "", "", unsupportedField(field)
-		}
+	if slices.Contains(strings.Split(slashed, "/"), "..") {
+		return "", "", unsupportedField(field)
 	}
 
 	return filepath.Join(home, filepath.FromSlash(slashed)), slashed, nil

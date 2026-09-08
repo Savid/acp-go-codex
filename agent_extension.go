@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
 // newUnsupportedExtensionParams refuses an extension request whose params
@@ -61,9 +62,15 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 
 func (a *Agent) handleSteerExtension(ctx context.Context, params json.RawMessage) (any, error) {
 	var request acp.PromptRequest
-	if err := json.Unmarshal(params, &request); err != nil {
+
+	sanitized, retained := preserveWireMetadata(params, true, true)
+	if err := json.Unmarshal(sanitized, &request); err != nil {
 		return nil, newUnsupportedExtensionParams()
 	}
+
+	request.Meta = lifecycle.RetainRequestMetadata(request.Meta, params)
+	restoreWireNumberValue(request.Meta, routeMetaKey, retained.route)
+	retained.restorePrompt(&request)
 
 	// Exact route ownership is decided before the reserved lifecycle literal,
 	// matching prompt and cancel admission on this turn-scoped surface.

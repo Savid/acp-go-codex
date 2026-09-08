@@ -336,7 +336,7 @@ func tagEstablishingRequest(line []byte) ([]byte, error) {
 	}
 
 	methodJSON, _ := json.Marshal(method)
-	hookID, _ := json.Marshal(establishmentResponseID(rawMessagePointer(frame["id"])))
+	hookID, _ := json.Marshal(establishmentResponseID(new(frame["id"])))
 	params := bytes.TrimSpace(frame["params"])
 	inner := bytes.TrimSpace(params[1 : len(params)-1])
 	newline := bytes.HasSuffix(line, []byte("\n"))
@@ -488,8 +488,6 @@ func validJSONRPCError(raw json.RawMessage) bool {
 
 	return json.Unmarshal(members[jsonFieldMessage], &message) == nil
 }
-
-func rawMessagePointer(raw json.RawMessage) *json.RawMessage { return &raw }
 
 func establishingMethod(method string) bool {
 	switch method {

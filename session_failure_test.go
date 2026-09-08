@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,11 +430,11 @@ func TestTurnTimeoutMirrorsRowsWrittenDuringRuntimeQuiescence(t *testing.T) {
 	require.True(t, isTurnFailure(err, codex.CauseTimeout))
 	entries, loadErr := store.Load(context.Background(), SessionKey{SessionID: string(timeoutSession.id)})
 	require.NoError(t, loadErr)
-	var stored string
+	var stored strings.Builder
 	for _, entry := range entries {
-		stored += string(entry) + "\n"
+		stored.WriteString(string(entry) + "\n")
 	}
-	require.Contains(t, stored, fakeCodexLateAbortRolloutRow)
+	require.Contains(t, stored.String(), fakeCodexLateAbortRolloutRow)
 }
 
 // recordingCancelClient hangs the turn until its context is cancelled and

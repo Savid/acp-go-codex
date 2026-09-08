@@ -168,9 +168,8 @@ type promptMedia struct {
 }
 
 // validatePromptImages runs the pinned input gate order over every media-bearing
-// block in request order and stops at the first failure. Indexes are assigned in
-// that same order across every gated block, so one rejection always names
-// exactly one block.
+// block in request order and stops at the first failure. Image and blob blocks
+// consume media indexes; text resources only spend the aggregate byte budget.
 //
 // A gate refusal and an abort are different answers: the refusal describes a
 // block the host can fix, while the error return means the caller stopped
@@ -262,7 +261,9 @@ func validatePromptImages(
 			})
 		}
 
-		index++
+		if media.kind != promptMediaTextResource {
+			index++
+		}
 	}
 
 	return images, nil, nil

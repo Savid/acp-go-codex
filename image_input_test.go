@@ -557,7 +557,7 @@ func TestValidatePromptImagesChargesTextResourcesToThePromptAggregate(t *testing
 	require.Equal(t, imageErrorTooLarge, imageErr.code)
 	require.Equal(t, int64(len(body))*2, imageErr.sizeBytes)
 	require.Equal(t, promptResourceField, imageErr.field)
-	require.Equal(t, 1, imageErr.index)
+	require.Zero(t, imageErr.index)
 
 	// Text shares the aggregate with image bytes rather than running beside it.
 	png := testdataFixture(t, "valid.png")
@@ -573,7 +573,7 @@ func TestValidatePromptImagesChargesTextResourcesToThePromptAggregate(t *testing
 	require.NotNil(t, imageErr)
 	require.Equal(t, imageErrorTooLarge, imageErr.code)
 	require.Equal(t, int64(len(body)+len(png)), imageErr.sizeBytes)
-	require.Equal(t, 1, imageErr.index)
+	require.Zero(t, imageErr.index)
 	require.Equal(t, promptImageField, imageErr.field)
 
 	// A text resource reaches no image transport and no image byte limit: the
@@ -586,6 +586,22 @@ func TestValidatePromptImagesChargesTextResourcesToThePromptAggregate(t *testing
 	)
 	require.Nil(t, imageErr)
 	require.Empty(t, images)
+
+	for _, invalid := range []acp.ContentBlock{
+		acp.ImageBlock("!", mimeImagePNG),
+		blobResourceBlock("blob://invalid", "application/octet-stream", "!"),
+	} {
+		_, imageErr, err = validatePromptImages(t.Context(), []acp.ContentBlock{
+			text(body),
+			acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimeImagePNG),
+			text(body),
+			invalid,
+		}, ImageLimits{}, "")
+		require.NoError(t, err)
+		require.NotNil(t, imageErr)
+		require.Equal(t, imageErrorInvalidBase64, imageErr.code)
+		require.Equal(t, 1, imageErr.index)
+	}
 }
 
 func TestPromptInputErrorsNameTheInboundBlockType(t *testing.T) {

@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +57,7 @@ func TestMain(m *testing.M) {
 	slog.SetDefault(integrationLogger)
 
 	code := m.Run()
+	cleanupIntegrationBinary()
 
 	slog.SetDefault(previousLogger)
 	os.Exit(code)
@@ -359,21 +362,21 @@ func (c *blockingPermissionClient) RequestPermission(
 
 func integrationCodexPath(t *testing.T) string {
 	t.Helper()
-
 	if os.Getenv(envRunIntegration) != "1" {
-		t.Skipf("set %s=1 to run live Codex integration tests", envRunIntegration)
+		t.Skipf("set %s=1 to run codex integration tests", envRunIntegration)
 	}
-
 	path := os.Getenv(envCodexPath)
 	if path == "" {
 		path = "codex"
 	}
-	codexPath, err := exec.LookPath(path)
+	resolved, err := exec.LookPath(path)
 	if err != nil {
-		t.Fatalf("find codex CLI: %v", err)
+		if os.Getenv(envLiveTurn) == "1" || os.Getenv("ACP_GO_CODEX_RUN_ATTENDED") == "1" || os.Getenv("ACP_GO_CODEX_RUN_KEYSTORE") == "1" {
+			t.Fatalf("requested codex integration tier requires the CLI: %v", err)
+		}
+		t.Skipf("codex CLI absent for smoke: %v; set ACP_GO_CODEX_HARNESS_PATH", err)
 	}
-
-	return codexPath
+	return resolved
 }
 
 func integrationCodexHome(t *testing.T) string {
@@ -675,10 +678,7 @@ func connectLiveAgentBinary(
 ) *acp.ClientSideConnection {
 	t.Helper()
 
-	agentPath := os.Getenv(envAgentBinary)
-	if agentPath == "" {
-		t.Skipf("set %s to run compiled binary integration coverage", envAgentBinary)
-	}
+	agentPath := integrationBinaryPath(t)
 
 	codexPath := integrationCodexPath(t)
 	codexHome := isolatedCodexHome(t)
@@ -687,50 +687,17 @@ func connectLiveAgentBinary(
 		args = append(args, "-model", model)
 	}
 
-	cmd := exec.Command(agentPath, args...) // #nosec G204,G702 -- path is the test-built agent binary.
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("agent stdin pipe: %v", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("agent stdout pipe: %v", err)
-	}
+	cmd := exec.CommandContext(ctx, agentPath, args...) // #nosec G204,G702 -- test-built adapter.
 
-	var stderr lockedBuffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start compiled agent: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	t.Cleanup(func() {
-		_ = stdin.Close()
-		select {
-		case err := <-done:
-			if err != nil && ctx.Err() == nil {
-				t.Logf("compiled agent exited with error: %v; stderr: %s", err, stderr.String())
-			}
-		case <-time.After(5 * time.Second):
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			err := <-done
-			if err != nil && ctx.Err() == nil {
-				t.Logf("compiled agent killed during cleanup: %v; stderr: %s", err, stderr.String())
-			}
-		}
-	})
+	process := startIntegrationProcess(t, cmd)
+	stdin, stdout := process.stdin, process.stdout
+	stderr := &process.stderr
 
 	clientConn := acp.NewClientSideConnection(client, stdin, stdout)
 	if initReq.ProtocolVersion == 0 {
 		initReq.ProtocolVersion = acp.ProtocolVersionNumber
 	}
-	_, err = clientConn.Initialize(ctx, initReq)
+	_, err := clientConn.Initialize(ctx, initReq)
 	if err != nil {
 		t.Fatalf("initialize compiled agent: %v; stderr: %s", err, stderr.String())
 	}
@@ -810,13 +777,7 @@ func authAgentMethodIDs(methods []acp.AuthMethod) []string {
 }
 
 func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(values, target)
 }
 
 func codexMeta(meta map[string]any) map[string]any {
@@ -838,4 +799,69 @@ func rawValueContains(value any, text string) bool {
 	}
 
 	return strings.Contains(string(data), text)
+}
+
+func TestIntegrationHarnessPrerequisites(t *testing.T) {
+	if os.Args[len(os.Args)-1] == "harness-prerequisite-child" {
+		path := integrationCodexPath(t)
+		t.Log("resolved harness " + path)
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, integration, tier, value, outcome string
+		available                               bool
+	}{
+		{name: "ungated", outcome: "SKIP"},
+		{name: "disabled", integration: "0", outcome: "SKIP"},
+		{name: "invalid_gate", integration: "true", outcome: "SKIP"},
+		{name: "missing_smoke", integration: "1", outcome: "SKIP"},
+		{name: "disabled_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "0", outcome: "SKIP"},
+		{name: "missing_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "1", outcome: "FAIL"},
+		{name: "missing_attended", integration: "1", tier: "RUN_ATTENDED", value: "1", outcome: "FAIL"},
+		{name: "missing_keystore", integration: "1", tier: "RUN_KEYSTORE", value: "1", outcome: "FAIL"},
+		{name: "fake_path", integration: "1", outcome: "PASS", available: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, suffix := range []string{"RUN_INTEGRATION", "RUN_LIVE_TOKENS", "RUN_ATTENDED", "RUN_KEYSTORE"} {
+				t.Setenv("ACP_GO_CODEX_"+suffix, "0")
+			}
+			t.Setenv("ACP_GO_CODEX_RUN_INTEGRATION", tc.integration)
+			if tc.tier != "" {
+				t.Setenv("ACP_GO_CODEX_"+tc.tier, tc.value)
+			}
+			dir := t.TempDir()
+			harness := filepath.Join(dir, "codex")
+			if runtime.GOOS == "windows" {
+				harness += ".exe"
+			}
+			if tc.available {
+				// Resolution only: this file is never executed.
+				if err := os.WriteFile(harness, []byte("fake harness path"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ACP_GO_CODEX_HARNESS_PATH", harness)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestIntegrationHarnessPrerequisites$", "-test.v", "--", "harness-prerequisite-child")
+			cmd.WaitDelay = time.Second
+			output, runErr := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatal(ctx.Err())
+			}
+			if (runErr != nil) != (tc.outcome == "FAIL") {
+				t.Fatalf("unexpected child result: %v\n%s", runErr, output)
+			}
+			if !strings.Contains(string(output), "--- "+tc.outcome+": TestIntegrationHarnessPrerequisites") {
+				t.Fatalf("want child %s:\n%s", tc.outcome, output)
+			}
+			if tc.available && !strings.Contains(string(output), "resolved harness "+harness) {
+				t.Fatalf("fake harness selection was lost:\n%s", output)
+			}
+		})
+	}
 }

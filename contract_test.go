@@ -147,9 +147,8 @@ func TestCommandContractSlashTextPassesThroughRunTurn(t *testing.T) {
 }
 
 func TestCommandContractSkillsAreNotCommands(t *testing.T) {
-	clientType := reflect.TypeOf((*codex.Client)(nil)).Elem()
-	for i := range clientType.NumMethod() {
-		method := clientType.Method(i)
+	clientType := reflect.TypeFor[codex.Client]()
+	for method := range clientType.Methods() {
 		name := strings.ToLower(method.Name)
 		if strings.Contains(name, "skill") || strings.Contains(name, "command") {
 			t.Fatalf("Codex provider boundary exposes %s; skills and commands must not be projected as AvailableCommand entries", method.Name)

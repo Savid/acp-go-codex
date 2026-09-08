@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,10 +128,8 @@ func filepathSlash(path string) string {
 }
 
 func validateManagedSelector(selector string) error {
-	for _, segment := range strings.Split(filepathSlash(strings.TrimSpace(selector)), "/") {
-		if segment == "node_modules" {
-			return errors.New("managed Codex executable must be staged and pinned by the host before adapter initialization")
-		}
+	if slices.Contains(strings.Split(filepathSlash(strings.TrimSpace(selector)), "/"), "node_modules") {
+		return errors.New("managed Codex executable must be staged and pinned by the host before adapter initialization")
 	}
 
 	return nil

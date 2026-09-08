@@ -415,8 +415,8 @@ func topLevelTOMLScalar(contents string, key string) (string, bool) {
 func tomlScalarValue(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if quoted, ok := strings.CutPrefix(trimmed, `"`); ok {
-		if end := strings.Index(quoted, `"`); end >= 0 {
-			return quoted[:end]
+		if before, _, closed := strings.Cut(quoted, `"`); closed {
+			return before
 		}
 
 		return quoted

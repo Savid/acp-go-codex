@@ -3,10 +3,12 @@ package codex
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -43,7 +45,7 @@ func environmentMap(entries []string) map[string]string {
 	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")
 		if ok && key != "" {
-			values[key] = value
+			values[EnvironmentKey(key)] = value
 		}
 	}
 
@@ -71,13 +73,9 @@ func buildProcessEnvironmentFrom(base map[string]string, overlays ...map[string]
 		base = captureProcessEnvironment()
 	}
 
-	if err := validateEnvironmentMap(base); err != nil {
-		return nil, err
-	}
+	values := make(map[string]string, len(base))
 
-	values := cloneEnvironment(base)
-
-	for _, overlay := range overlays {
+	for _, overlay := range append([]map[string]string{base}, overlays...) {
 		if overlay == nil {
 			continue
 		}
@@ -86,8 +84,8 @@ func buildProcessEnvironmentFrom(base map[string]string, overlays ...map[string]
 			return nil, err
 		}
 
-		for key, value := range overlay {
-			values[key] = value
+		for _, key := range slices.Sorted(maps.Keys(overlay)) {
+			values[EnvironmentKey(key)] = overlay[key]
 		}
 	}
 
@@ -105,19 +103,6 @@ func privateProcessEnvironmentKey(key string) bool {
 }
 
 func captureProcessEnvironment() map[string]string { return environmentMap(processEnviron()) }
-
-func cloneEnvironment(environment map[string]string) map[string]string {
-	if environment == nil {
-		return nil
-	}
-
-	cloned := make(map[string]string, len(environment))
-	for key, value := range environment {
-		cloned[key] = value
-	}
-
-	return cloned
-}
 
 func withoutManagedRootOverrides(environment map[string]string) map[string]string {
 	filtered := make(map[string]string, len(environment))
@@ -178,17 +163,7 @@ func resolveOrdinaryProcessExecutable(path string, environment []string) (string
 }
 
 func ordinaryEnvironmentValue(values map[string]string, key string) string {
-	if value, ok := values[key]; ok || processGOOS != platformWindows {
-		return value
-	}
-
-	for candidate, value := range values {
-		if strings.EqualFold(candidate, key) {
-			return value
-		}
-	}
-
-	return ""
+	return values[EnvironmentKey(key)]
 }
 
 func resolveOrdinaryExecutableCandidate(path string, environment []string) (string, error) {
@@ -235,7 +210,7 @@ func ordinaryWindowsExecutableExtensions(value string) []string {
 
 	extensions := make([]string, 0)
 
-	for _, extension := range strings.Split(value, ";") {
+	for extension := range strings.SplitSeq(value, ";") {
 		if extension == "" {
 			continue
 		}

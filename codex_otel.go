@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"maps"
 	"os"
 	"strings"
 
@@ -36,7 +37,5 @@ func envMapFromEnviron(environ []string) map[string]string {
 }
 
 func overlayStringMap(base map[string]string, overlay map[string]string) {
-	for key, value := range overlay {
-		base[key] = value
-	}
+	maps.Copy(base, overlay)
 }

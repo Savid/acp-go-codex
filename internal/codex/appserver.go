@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -411,9 +412,7 @@ func (c *AppServerClient) ReadThread(ctx context.Context, req ThreadReadRequest)
 	safeItems := sanitizedThreadHistoryItems(items)
 
 	safeResponse := make(map[string]any, len(resp))
-	for key, value := range resp {
-		safeResponse[key] = value
-	}
+	maps.Copy(safeResponse, resp)
 
 	if _, ok := resp["items"]; ok {
 		safeResponse["items"] = safeItems
@@ -1779,9 +1778,7 @@ func imageEventFromItem(params map[string]any) ImageEvent {
 
 func sanitizedImageEventParams(params map[string]any) json.RawMessage {
 	safe := make(map[string]any, len(params))
-	for key, value := range params {
-		safe[key] = value
-	}
+	maps.Copy(safe, params)
 
 	if item := mapValue(params, fieldItem); item != nil {
 		safe[fieldItem] = sanitizedImageItem(item)

@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,22 +35,6 @@ type observedDoneContext struct {
 
 func (c *observedDoneContext) Done() <-chan struct{} {
 	c.once.Do(func() { close(c.observed) })
-
-	return c.Context.Done()
-}
-
-// countedDoneContext closes second on the second Done call, which lets a
-// test order itself after a select statement re-consults the context.
-type countedDoneContext struct {
-	context.Context //nolint:containedctx // Test wrapper observes the exact Done calls.
-	second          chan struct{}
-	calls           atomic.Int64
-}
-
-func (c *countedDoneContext) Done() <-chan struct{} {
-	if c.calls.Add(1) == 2 {
-		close(c.second)
-	}
 
 	return c.Context.Done()
 }
@@ -357,7 +341,7 @@ func TestReadySharedRuntimeNewSessionDeterministicProviderFreePerformanceGate(t 
 		durations = append(durations, elapsed)
 	}
 
-	sort.Slice(durations, func(left, right int) bool { return durations[left] < durations[right] })
+	slices.Sort(durations)
 	p95Index := (95*len(durations)+99)/100 - 1
 	p95 := durations[p95Index]
 	t.Logf("deterministic provider-free ready shared runtime NewSession p95=%s samples=%v", p95, durations)

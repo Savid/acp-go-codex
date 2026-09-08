@@ -3,7 +3,7 @@ set -euo pipefail
 
 provider=codex
 packages=(./internal/codex)
-selector='^(TestOrdinaryWindowsNativeRuntimeAndLogout|TestWindowsEnvironmentOverlayAndLookupShareOnePath)$'
+selector='^(TestConfigureProcessDarwin|TestHomeLockRootRefusesAnUnprotectableRoot|TestResolveOrdinaryProcessExecutableEdges|TestOrdinaryNativeWaitAndRevoke)$'
 
 # The hosted image supplies MinGW-w64; Go's race runtime requires its
 # synchronization library (https://go.dev/doc/articles/race_detector).

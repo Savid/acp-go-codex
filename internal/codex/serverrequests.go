@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -370,7 +371,7 @@ func ToolUserInputForm(params map[string]any, meta map[string]any) (*acp.Unstabl
 		Message: toolUserInputMessage(questions),
 		Mode:    modeForm,
 		RequestedSchema: acp.UnstableElicitationSchema{
-			Title:      acp.Ptr("Codex input"),
+			Title:      new("Codex input"),
 			Type:       acp.UnstableElicitationSchemaTypeObject,
 			Properties: properties,
 			Required:   required,
@@ -785,10 +786,8 @@ func secretMarkedSchema(value any) bool {
 			}
 		}
 	case []any:
-		for _, nested := range typed {
-			if secretMarkedSchema(nested) {
-				return true
-			}
+		if slices.ContainsFunc(typed, secretMarkedSchema) {
+			return true
 		}
 	}
 

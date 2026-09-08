@@ -103,14 +103,14 @@ func TestImageEventUpdatesLifecycleLimitsAndDedupe(t *testing.T) {
 	_, err = atLimit.imageEventUpdates(ctx, codex.Event{
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "at-limit", Status: "completed", Result: encodedPNG},
-	}, ptrImageToolState(newImageToolState()))
+	}, new(newImageToolState()))
 	require.NoError(t, err)
 
 	perImage := outputSession(t, WithImageLimits(ImageLimits{MaxOutputBytesPerImage: int64(len(png) - 1)}))
 	large, err := perImage.imageEventUpdates(ctx, codex.Event{
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "large", Status: "completed", Result: encodedPNG},
-	}, ptrImageToolState(newImageToolState()))
+	}, new(newImageToolState()))
 	requireImageRefusal(t, large, err, imageGuidanceTooLarge)
 
 	atAggregate := outputSession(t, WithImageLimits(ImageLimits{MaxOutputBytesPerToolCall: int64(len(png) + len(jpeg))}))
@@ -144,7 +144,7 @@ func TestImageEventUpdatesLifecycleLimitsAndDedupe(t *testing.T) {
 	_, err = storageSession.imageEventUpdates(ctx, codex.Event{
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "storage", Status: "completed", Result: encodedPNG},
-	}, ptrImageToolState(newImageToolState()))
+	}, new(newImageToolState()))
 	require.ErrorAs(t, err, &outputErr)
 	require.Equal(t, imageOutputStorageFailure, outputErr.reason)
 
@@ -165,14 +165,10 @@ func TestImageEventUpdatesLifecycleLimitsAndDedupe(t *testing.T) {
 	_, err = s.imageEventUpdates(ctx, codex.Event{
 		Kind:  codex.EventImageCompleted,
 		Image: codex.ImageEvent{ID: "missing-ref", Status: "completed", ArtifactRef: imageArtifactStorePrefix + "missing"},
-	}, ptrImageToolState(newImageToolState()))
+	}, new(newImageToolState()))
 	require.ErrorAs(t, err, &outputErr)
 	require.Equal(t, imageOutputStorageFailure, outputErr.reason)
 	require.Contains(t, outputErr.Error(), "load image output")
-}
-
-func ptrImageToolState(state imageToolState) *imageToolState {
-	return &state
 }
 
 func TestMaterializeImageEventAndRasterSniffing(t *testing.T) {
@@ -848,7 +844,7 @@ func TestImageOutputFrameCapEnforcedRegardlessOfPolicy(t *testing.T) {
 		updates, err := s.imageEventUpdates(ctx, codex.Event{
 			Kind:  codex.EventImageCompleted,
 			Image: codex.ImageEvent{ID: "oversize", Status: "completed", Result: encoded},
-		}, ptrImageToolState(newImageToolState()))
+		}, new(newImageToolState()))
 
 		requireImageRefusal(t, updates, err, imageGuidanceTooLarge)
 

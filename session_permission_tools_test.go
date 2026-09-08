@@ -923,7 +923,7 @@ func TestPermissionAndCompletionWaitForSuccessfulStartPublication(t *testing.T) 
 func TestPermissionToolRegistryIsBoundedAndFailsClosed(t *testing.T) {
 	t.Run("tools", func(t *testing.T) {
 		session := &session{}
-		for index := 0; index < permissionToolLimit; index++ {
+		for index := range permissionToolLimit {
 			_, err := session.preparePermissionToolEvent(t.Context(), codex.Event{
 				Kind: codex.EventToolCompleted,
 				Tool: codex.ToolEvent{ID: fmt.Sprintf("tool-%d", index), Kind: toolKindMcpToolCall},
@@ -943,7 +943,7 @@ func TestPermissionToolRegistryIsBoundedAndFailsClosed(t *testing.T) {
 		registry := &permissionToolRegistry{}
 		registry.mu.Lock()
 		require.NoError(t, registry.ensure())
-		for index := 0; index < permissionAliasLimit; index++ {
+		for index := range permissionAliasLimit {
 			require.NoError(t, registry.addAlias(fmt.Sprintf("alias-%d", index), "tool"))
 		}
 		err := registry.addAlias("overflow", "tool")

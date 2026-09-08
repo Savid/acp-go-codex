@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -650,30 +651,27 @@ func TestRegisteredActionBarrierHandlesEarlyAndCancelledRequests(t *testing.T) {
 	})
 
 	t.Run("early request returns after successful registration write", func(t *testing.T) {
-		writer := newRequestRegistrationWriter(io.Discard)
-		// The barrier consults ctx.Done() once in its outer select and a second
-		// time only after it has taken the early response, so the second call
-		// proves the early branch is armed before the registration write lands.
-		observedCtx := &countedDoneContext{Context: t.Context(), second: make(chan struct{})}
-		done := make(chan registeredActionResult[int], 1)
-		go func() {
-			value, callErr := registeredActionRequest[int](observedCtx, writer, "success", nil, nil, func(context.Context) (int, error) {
-				return 13, errors.New("early")
-			})
-			done <- registeredActionResult[int]{value: value, err: callErr}
-		}()
-		require.Eventually(t, func() bool {
-			writer.mu.Lock()
-			defer writer.mu.Unlock()
-
-			return writer.pending["success"] != nil
-		}, time.Second, time.Millisecond)
-		<-observedCtx.second
-		_, err := writer.Write(wirePayload("success"))
-		require.NoError(t, err)
-		result := <-done
-		require.Equal(t, 13, result.value)
-		require.ErrorContains(t, result.err, "early")
+		synctest.Test(t, func(t *testing.T) {
+			writer := newRequestRegistrationWriter(io.Discard)
+			done := make(chan registeredActionResult[int], 1)
+			go func() {
+				value, callErr := registeredActionRequest[int](t.Context(), writer, "success", nil, nil, func(context.Context) (int, error) {
+					return 13, errors.New("early")
+				})
+				done <- registeredActionResult[int]{value: value, err: callErr}
+			}()
+			synctest.Wait()
+			select {
+			case <-done:
+				t.Fatal("early response bypassed request registration")
+			default:
+			}
+			_, err := writer.Write(wirePayload("success"))
+			require.NoError(t, err)
+			result := <-done
+			require.Equal(t, 13, result.value)
+			require.ErrorContains(t, result.err, "early")
+		})
 	})
 
 	t.Run("registration failure cancels and joins an active request", func(t *testing.T) {
@@ -1055,7 +1053,7 @@ func testPermissionRequest() acp.RequestPermissionRequest {
 		SessionId: "session-1",
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: "tool-1",
-			Title:      acp.Ptr("Run"),
+			Title:      new("Run"),
 			Kind:       acp.Ptr(acp.ToolKindExecute),
 			Status:     acp.Ptr(acp.ToolCallStatusPending),
 			Content:    []acp.ToolCallContent{acp.ToolContent(acp.TextBlock("cmd"))},

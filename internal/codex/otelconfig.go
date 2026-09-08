@@ -326,7 +326,7 @@ func codexOTELEnvironment(env map[string]string) string {
 func parseOTELResourceAttributes(value string) map[string]string {
 	out := map[string]string{}
 
-	for _, item := range strings.Split(value, ",") {
+	for item := range strings.SplitSeq(value, ",") {
 		key, rawValue, ok := strings.Cut(item, "=")
 		if !ok {
 			continue

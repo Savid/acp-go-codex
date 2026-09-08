@@ -342,12 +342,56 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 
 func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.RawMessage) (Req, *acp.RequestError) {
 	var value Req
-	if err := json.Unmarshal(params, &value); err != nil {
+
+	_, prompt := any(&value).(*acp.PromptRequest)
+	_, cancel := any(&value).(*acp.CancelNotification)
+
+	sanitized, retained := preserveWireMetadata(params, prompt, prompt || cancel)
+	if err := json.Unmarshal(sanitized, &value); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
 	if err := ReqPtr(&value).Validate(); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+
+	var meta *map[string]any
+
+	switch request := any(&value).(type) {
+	case *acp.InitializeRequest:
+		meta = &request.Meta
+	case *acp.PromptRequest:
+		meta = &request.Meta
+		retained.restorePrompt(request)
+	case *acp.AuthenticateRequest:
+		meta = &request.Meta
+	case *acp.LogoutRequest:
+		meta = &request.Meta
+	case *acp.CancelNotification:
+		meta = &request.Meta
+	case *acp.CloseSessionRequest:
+		meta = &request.Meta
+	case *acp.UnstableDeleteSessionRequest:
+		meta = &request.Meta
+	case *acp.ListSessionsRequest:
+		meta = &request.Meta
+	case *acp.LoadSessionRequest:
+		meta = &request.Meta
+	case *acp.NewSessionRequest:
+		meta = &request.Meta
+	case *acp.ResumeSessionRequest:
+		meta = &request.Meta
+	case *acp.SetSessionConfigOptionRequest:
+		if request.Boolean != nil {
+			meta = &request.Boolean.Meta
+		} else if request.ValueId != nil {
+			meta = &request.ValueId.Meta
+		}
+	}
+
+	if meta != nil {
+		*meta = lifecycle.RetainRequestMetadata(*meta, params)
+		restoreWireNumberValue(*meta, routeMetaKey, retained.route)
 	}
 
 	return value, nil

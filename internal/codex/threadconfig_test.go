@@ -156,9 +156,7 @@ func TestAppServerThreadCarrierRPCsNeverCrossConcurrentThreads(t *testing.T) {
 	errs := make(chan error, len(operations))
 	var wg sync.WaitGroup
 	for _, operation := range operations {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 
 			environment := map[string]string{
@@ -183,7 +181,7 @@ func TestAppServerThreadCarrierRPCsNeverCrossConcurrentThreads(t *testing.T) {
 				})
 				errs <- err
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

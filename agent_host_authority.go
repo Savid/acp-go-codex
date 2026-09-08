@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -15,6 +16,7 @@ const managedCodexHomeEnvironment = "CODEX_HOME"
 type guardedHostAuthority struct {
 	authority   HostAuthority
 	environment map[string]string
+	trees       nativeTreeAccess
 }
 
 func normalizeHostAuthority(authority HostAuthority, supplied bool) (HostAuthority, error) {
@@ -76,6 +78,20 @@ func (a *guardedHostAuthority) PrepareNativeTree(ctx context.Context, path strin
 		}
 	}()
 
+	a.trees.mu.Lock()
+	defer a.trees.mu.Unlock()
+
+	if _, prepared := a.trees.roots[path]; prepared {
+		return errOpaqueNativeImagePath
+	}
+
+	if a.trees.roots == nil {
+		a.trees.roots = make(map[string]struct{})
+	}
+
+	// A refused or panicking prepare also transfers cleanup to the host.
+	a.trees.roots[path] = struct{}{}
+
 	return a.authority.PrepareNativeTree(ctx, path)
 }
 
@@ -126,7 +142,16 @@ func (a *guardedHostAuthority) ReclaimNativeTree(ctx context.Context, path strin
 		}
 	}()
 
-	return a.authority.ReclaimNativeTree(ctx, path)
+	a.trees.mu.Lock()
+	defer a.trees.mu.Unlock()
+
+	if err := a.authority.ReclaimNativeTree(ctx, path); err != nil {
+		return err
+	}
+
+	delete(a.trees.roots, path)
+
+	return nil
 }
 
 func (a *guardedHostAuthority) StartNative(ctx context.Context, request NativeRequest) (process NativeProcess, err error) {
@@ -297,10 +322,8 @@ func reservedCodexEnvKey(key string) bool {
 }
 
 func validateManagedExecutableSelector(selector string) error {
-	for _, segment := range strings.Split(strings.ReplaceAll(strings.TrimSpace(selector), `\`, "/"), "/") {
-		if segment == "node_modules" {
-			return errors.New("managed Codex executable must be staged and pinned by the host before adapter initialization")
-		}
+	if slices.Contains(strings.Split(strings.ReplaceAll(strings.TrimSpace(selector), `\`, "/"), "/"), "node_modules") {
+		return errors.New("managed Codex executable must be staged and pinned by the host before adapter initialization")
 	}
 
 	return nil

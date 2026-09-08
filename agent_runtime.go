@@ -603,7 +603,7 @@ func (a *Agent) releaseRetainedRuntimeThreads(client codex.Client, epoch uint64)
 // is replaced as one atomic generation. Logical sessions remain marked dead
 // and resume independently on first use, so one stale peer cannot prevent an
 // unrelated session from loading or starting on the replacement generation.
-func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
+func (a *Agent) sharedRuntime(ctx context.Context, imageWorkspaces ...string) (codex.Client, error) {
 	for {
 		a.mu.Lock()
 		if a.closed {
@@ -664,6 +664,12 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 		a.runtimeScratchRoot = ""
 		a.runtimeScratchRelease = nil
 		a.runtimeDead = true
+
+		for _, active := range a.sessions {
+			active.mu.Lock()
+			imageWorkspaces = append(imageWorkspaces, active.cwd)
+			active.mu.Unlock()
+		}
 		a.mu.Unlock()
 
 		cleanupErr := a.closeRuntimeGeneration(
@@ -694,7 +700,7 @@ func (a *Agent) sharedRuntime(ctx context.Context) (codex.Client, error) {
 			return nil, toPublicAuthorityError(cleanupErr)
 		}
 
-		resources, err := a.startRuntimeGeneration(startCtx, epoch)
+		resources, err := a.startRuntimeGeneration(startCtx, epoch, imageWorkspaces...)
 
 		cancelStart()
 
@@ -746,7 +752,7 @@ type runtimeGenerationResources struct {
 	scratchRelease func()
 }
 
-func (a *Agent) startRuntimeGeneration(ctx context.Context, epoch uint64) (runtimeGenerationResources, error) {
+func (a *Agent) startRuntimeGeneration(ctx context.Context, epoch uint64, imageWorkspaces ...string) (runtimeGenerationResources, error) {
 	resources := runtimeGenerationResources{scratchRelease: func() {}}
 
 	scratchRoot, err := createPrivateTempDir(a.scratchDir, "acp-go-codex-runtime-")
@@ -758,7 +764,7 @@ func (a *Agent) startRuntimeGeneration(ctx context.Context, epoch uint64) (runti
 
 	resources.scratchRoot = scratchRoot
 
-	resources.nativeRelease, err = a.prepareRuntimeHome(ctx)
+	resources.nativeRelease, err = a.prepareRuntimeHome(ctx, imageWorkspaces...)
 	if err != nil {
 		removeErr := runtimeRemoveAll(resources.scratchRoot)
 		if removeErr == nil {
@@ -797,7 +803,7 @@ func (a *Agent) startRuntimeGeneration(ctx context.Context, epoch uint64) (runti
 	return resources, err
 }
 
-func (a *Agent) prepareRuntimeHome(ctx context.Context) (func() error, error) {
+func (a *Agent) prepareRuntimeHome(ctx context.Context, imageWorkspaces ...string) (func() error, error) {
 	home := a.resolvedCodexHomeForEnv(a.staticRuntimeEnv())
 	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home {
 		return nil, errors.New("codex home must resolve to a canonical absolute path")
@@ -822,6 +828,10 @@ func (a *Agent) prepareRuntimeHome(ctx context.Context) (func() error, error) {
 
 	if a.options.HostAuthority == nil {
 		return func() error { return nil }, nil
+	}
+
+	if err := a.prepareManagedImageRoots(home, scratchParent(a.scratchDir), imageWorkspaces); err != nil {
+		return nil, err
 	}
 
 	if err := a.options.HostAuthority.PrepareNativeTree(ctx, home); err != nil {
@@ -1136,7 +1146,7 @@ func (a *Agent) runtimeReadyCanaryWithConfig(
 	deadlineCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), runtimeReadyDeadline)
 	defer cancel()
 
-	for attempt := 0; attempt < runtimeReadyAttempts; attempt++ {
+	for range runtimeReadyAttempts {
 		// Diagnostic only. It must never decide readiness.
 		_, _ = client.MCPServerStatusList(deadlineCtx, threadID)
 

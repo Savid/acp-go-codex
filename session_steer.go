@@ -48,9 +48,7 @@ func (s *session) turnRouteActive(turnNonce string) bool {
 }
 
 func (s *session) prepareSteerInput(ctx context.Context, blocks []acp.ContentBlock) ([]codex.UserInput, func(), error) {
-	images, imageErr, abortErr := validatePromptImages(
-		ctx, blocks, s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot,
-	)
+	images, imageErr, abortErr := s.agent.validatePromptImages(ctx, blocks)
 	if abortErr != nil {
 		return nil, nil, abortErr
 	}

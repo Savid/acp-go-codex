@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -316,9 +317,7 @@ func cloneNativeMCPArguments(arguments map[string]any) map[string]any {
 	}
 
 	cloned := make(map[string]any, len(arguments))
-	for key, value := range arguments {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, arguments)
 
 	return cloned
 }
