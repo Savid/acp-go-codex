@@ -627,7 +627,7 @@ func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 		method := acp.AuthMethodTerminalInline{
 			Id:          authMethodCodexLogin,
 			Name:        "Codex Login",
-			Description: acp.Ptr("Authenticate with the local Codex CLI"),
+			Description: new("Authenticate with the local Codex CLI"),
 			Type:        authMethodTypeTerminal,
 			Args:        args,
 		}
@@ -638,7 +638,7 @@ func (a *Agent) authMethods(params acp.InitializeRequest) []acp.AuthMethod {
 		Agent: &acp.AuthMethodAgent{
 			Id:          authMethodChatGPTAuthTokens,
 			Name:        "Codex ChatGPT tokens",
-			Description: acp.Ptr("Provide external ChatGPT auth tokens for Codex"),
+			Description: new("Provide external ChatGPT auth tokens for Codex"),
 			Meta: map[string]any{
 				authMetaCodexAuth: map[string]any{jsonFieldType: authChatGPTAuthTokensMetaPath},
 			},

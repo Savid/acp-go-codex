@@ -7,6 +7,56 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRawLifecycleObjectsRejectAmbiguityAndMalformedValues(t *testing.T) {
+	for _, tc := range []struct{ raw, field string }{
+		{`null`, ""},
+		{`[]`, ""},
+		{`{"version":1,:2}`, ""},
+		{`{"version":}`, ".version"},
+		{`{"version":1`, ""},
+		{`{"version":1} 2`, ""},
+		{`{"version":1,"version":1}`, ".version"},
+		{`{"version":"1"}`, ".version"},
+		{`{"version":1e0}`, ".version"},
+	} {
+		_, present, refusal := DecodeOffer(map[string]any{MetaKey: json.RawMessage(tc.raw)})
+		require.False(t, present)
+		require.Equal(t, &ParamError{Field: MetaPath + tc.field, Verdict: VerdictUnsupported}, refusal)
+	}
+	_, refusal := DecodePromptCorrelation(map[string]any{MetaKey: json.RawMessage(
+		`{"version":1,"submission":{"submissionId":42,"clientNonce":"nonce"}}`,
+	)}, Negotiated{Version: 1})
+	require.Equal(t, paramError(fieldSubmission, fieldSubmissionID), refusal)
+}
+
+func TestRetainRequestMetadataPreservesOnlyOwnedWireSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		params  string
+		present bool
+		refused bool
+	}{
+		{params: `null`},
+		{params: `{"extra":1,"_meta":{"foreign":{"version":2,"version":1}}}`},
+		{params: `{"_meta":{"foreign":1},"_meta":{"foreign":2}}`},
+		{params: `{"_meta":{"foreign":true,"acp-go.dev/lifecycle":{"version":1}}}`, present: true},
+		{params: `{"_meta":{"acp-go.dev/lifecycle":{"version":2},"acp-go.dev/lifecycle":{"version":1}}}`, refused: true},
+		{params: `{"_meta":{"acp-go.dev/lifecycle":{"version":1}},"_meta":null}`, refused: true},
+	} {
+		var request struct {
+			Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP wire name.
+		}
+		require.NoError(t, json.Unmarshal([]byte(tc.params), &request))
+		meta := RetainRequestMetadata(request.Meta, json.RawMessage(tc.params))
+		_, present, refusal := DecodeOffer(meta)
+		require.Equal(t, tc.present, present)
+		if tc.refused {
+			require.Equal(t, paramError(), refusal)
+		} else {
+			require.Nil(t, refusal)
+		}
+	}
+}
+
 func TestDecodeOfferReadsWhatTheHostAsked(t *testing.T) {
 	t.Parallel()
 
@@ -20,6 +70,8 @@ func TestDecodeOfferReadsWhatTheHostAsked(t *testing.T) {
 		{name: "wire float version", meta: map[string]any{MetaKey: map[string]any{"version": float64(1)}}, present: true},
 		{name: "embedded int version", meta: map[string]any{MetaKey: map[string]any{"version": 1}}, present: true},
 		{name: "json number version", meta: map[string]any{MetaKey: map[string]any{"version": json.Number("1")}}, present: true},
+		{name: "json number cannot wrap to version one", meta: map[string]any{MetaKey: map[string]any{"version": json.Number("4294967297")}}, field: MetaPath + ".version"},
+		{name: "invalid json number", meta: map[string]any{MetaKey: map[string]any{"version": json.Number("1.0")}}, field: MetaPath + ".version"},
 		{
 			name:  "a non-object offer",
 			meta:  map[string]any{MetaKey: []any{1}},

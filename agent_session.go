@@ -57,7 +57,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	threadConfig := codex.MCPServerThreadConfig(mcpServers, meta.MCPToolApprovalMode)
 
-	client, err := a.sharedRuntime(ctx)
+	client, err := a.sharedRuntime(ctx, params.Cwd)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -778,7 +778,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 		return acp.ResumeSessionResponse{}, capacityErr
 	}
 
-	client, err := a.sharedRuntime(ctx)
+	client, err := a.sharedRuntime(ctx, params.Cwd)
 	if err != nil {
 		residenceRelease()
 
@@ -1426,7 +1426,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 		return acp.LoadSessionResponse{}, capacityErr
 	}
 
-	client, err := a.sharedRuntime(ctx)
+	client, err := a.sharedRuntime(ctx, params.Cwd)
 	if err != nil {
 		residenceRelease()
 
@@ -1673,7 +1673,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	client, err := a.sharedRuntime(ctx)
+	client, err := a.sharedRuntime(ctx, params.Cwd)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}

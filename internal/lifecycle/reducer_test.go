@@ -14,8 +14,6 @@ func deliver(sequence uint64, event Event) Delivery {
 	return Delivery{StreamID: "strm-1", Sequence: sequence, Carrier: CarrierSessionInfo, Event: event}
 }
 
-func blocking(value bool) *bool { return &value }
-
 func openStream(t *testing.T, negotiated Negotiated) *Reducer {
 	t.Helper()
 
@@ -123,7 +121,7 @@ func TestSnapshotIsJudgedWholeBeforeItIsProjected(t *testing.T) {
 				Foreground: Foreground{State: ForegroundRunning, CycleID: "c", TurnID: "t", Origin: CauseSubmission},
 				Actions: []ActionUpdate{{
 					ActionID: "act", Kind: ActionPermission, State: ActionAccepted,
-					Owner: Owner{Type: OwnerTurn, ID: "t"}, BlocksForeground: blocking(false),
+					Owner: Owner{Type: OwnerTurn, ID: "t"}, BlocksForeground: new(false),
 				}},
 			},
 			kind: ViolationMalformedEnvelope,
@@ -134,7 +132,7 @@ func TestSnapshotIsJudgedWholeBeforeItIsProjected(t *testing.T) {
 				Foreground: Foreground{State: ForegroundRunning, CycleID: "c", TurnID: "t", Origin: CauseSubmission},
 				Actions: []ActionUpdate{{
 					ActionID: "act", Kind: ActionPermission, State: ActionPending,
-					Owner: Owner{Type: OwnerActivity, ID: "ghost"}, BlocksForeground: blocking(false),
+					Owner: Owner{Type: OwnerActivity, ID: "ghost"}, BlocksForeground: new(false),
 				}},
 			},
 			kind: ViolationUnknownEntity,
@@ -450,7 +448,7 @@ func TestActionIdentityIsFixedOnFirstSight(t *testing.T) {
 		{name: "ownership root", patch: ActionUpdate{ActionID: "act-1", State: ActionAccepted, RunID: "run-2"}},
 		{
 			name:  "what it blocks",
-			patch: ActionUpdate{ActionID: "act-1", State: ActionAccepted, BlocksForeground: blocking(true)},
+			patch: ActionUpdate{ActionID: "act-1", State: ActionAccepted, BlocksForeground: new(true)},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -461,7 +459,7 @@ func TestActionIdentityIsFixedOnFirstSight(t *testing.T) {
 			require.NoError(t, reducer.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
 			require.NoError(t, reducer.Reduce(deliver(4, ActionEvent(ActionUpdate{
 				ActionID: "act-1", Kind: ActionPermission, State: ActionPending,
-				Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: blocking(false),
+				Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: new(false),
 			}))))
 
 			patch := tc.patch
@@ -479,7 +477,7 @@ func TestAnActionThatArrivesResolvedBlocksNothing(t *testing.T) {
 	require.NoError(t, reducer.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
 	require.NoError(t, reducer.Reduce(deliver(4, ActionEvent(ActionUpdate{
 		ActionID: "act-1", Kind: ActionPermission, State: ActionCancelled,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: blocking(true),
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(true),
 	}))))
 	require.NoError(t, reducer.Reduce(deliver(5, IdleEvent("cycle-1", "turn-1", StopReasonCancelled, OutcomeCancelled))))
 
@@ -579,7 +577,7 @@ func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
 		require.NoError(t, reducer.Reduce(deliver(3, TransitionEvent(ForegroundRunning, "cycle-1", "turn-1"))))
 		require.NoError(t, reducer.Reduce(deliver(4, ActionEvent(ActionUpdate{
 			ActionID: "act-1", Kind: ActionPermission, State: ActionPending,
-			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: blocking(false),
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 		}))))
 		require.NoError(t, reducer.Reduce(deliver(5, ActionEvent(ResolvedAction("act-1", ActionAccepted)))))
 
@@ -592,7 +590,7 @@ func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
 		reducer := settled(t)
 		require.NoError(t, reducer.Reduce(deliver(6, ActionEvent(ActionUpdate{
 			ActionID: "act-1", Kind: ActionPermission, State: ActionAccepted,
-			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: blocking(false),
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 		}))))
 
 		state := reducer.State()

@@ -120,6 +120,7 @@ func TestSessionEnvRefusesTwoSpellingsOfOneWindowsVariable(t *testing.T) {
 	_, err = sessionMetaFromLifecycle(CodexOptions{Env: env}.Meta())
 	requireAmbiguousField(t, err, envOptionPath+".https_proxy")
 	requireAmbiguousField(t, ValidateCodexSessionMeta(CodexOptions{Env: env}.Meta()), envOptionPath+".https_proxy")
+	require.ErrorContains(t, validateAgentEnv(env), "name the same variable")
 }
 
 func TestValidateCodexSessionMetaMirrorsTheSessionParser(t *testing.T) {

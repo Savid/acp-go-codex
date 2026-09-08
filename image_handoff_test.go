@@ -507,9 +507,7 @@ func TestHandoffEnvelopeAcceptsDecoderNumbers(t *testing.T) {
 	raw := `{"` + handoffMetaKey + `":{"version":1,"digest":"` + hex.EncodeToString(sum[:]) +
 		`","sizeBytes":` + strconv.Itoa(len(png)) + `}}`
 
-	// A decoder configured to keep number text hands the envelope json.Number
-	// rather than float64. Nothing in the pinned SDK does that today, and the
-	// whole transport would stop working at the version gate if it started.
+	// Owned handoff metadata retains number text through SDK request decoding.
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.UseNumber()
 

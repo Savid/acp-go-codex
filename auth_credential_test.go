@@ -3,6 +3,7 @@ package codexacp
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -276,9 +277,7 @@ func TestAuthCredentialAddressingFailures(t *testing.T) {
 
 	for _, field := range []string{"sessionId", "providerId", "flowId"} {
 		params := map[string]any{}
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 
 		delete(params, field)
 
@@ -289,9 +288,7 @@ func TestAuthCredentialAddressingFailures(t *testing.T) {
 
 	for _, extra := range []string{"connectionId", "revision", "bindingGeneration"} {
 		params := map[string]any{"extra": extra}
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 
 		params[extra] = "supplied"
 		delete(params, "extra")

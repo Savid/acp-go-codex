@@ -120,10 +120,7 @@ func (w *boundedImageDecoder) Write(p []byte) (int, error) {
 
 	remaining := w.limit - int64(len(w.data))
 	if remaining > 0 {
-		retain := int64(len(p))
-		if retain > remaining {
-			retain = remaining
-		}
+		retain := min(int64(len(p)), remaining)
 
 		w.data = append(w.data, p[:retain]...)
 	}
@@ -376,6 +373,15 @@ func (s *session) materializeImageEvent(image codex.ImageEvent) ([]byte, string,
 }
 
 func (s *session) readAllowedImageFile(path string) ([]byte, string, error) {
+	if authority, ok := s.agent.options.HostAuthority.(*guardedHostAuthority); ok {
+		roots := s.allowedImageRoots()
+
+		authority.trees.mu.RLock()
+		defer authority.trees.mu.RUnlock()
+
+		return s.readManagedImageFile(&authority.trees, path, roots)
+	}
+
 	resolved, err := evalImageSymlinks(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -428,6 +434,30 @@ func (s *session) readAllowedImageFile(path string) ([]byte, string, error) {
 	}
 	defer file.Close()
 
+	return readImageContents(file, limit)
+}
+
+func (s *session) readManagedImageFile(access *nativeTreeAccess, path string, roots []string) ([]byte, string, error) {
+	file, err := access.open(path, roots)
+	if err != nil {
+		reason := imageOutputPathDenied
+		if os.IsNotExist(err) {
+			reason = imageOutputMissingFile
+		}
+
+		return nil, "", &imageOutputError{reason: reason, message: "image output has no readable managed path"}
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, "", &imageOutputError{reason: imageOutputPathDenied, message: "image output path is not a regular file"}
+	}
+
+	return readImageContents(file, effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage))
+}
+
+func readImageContents(file io.Reader, limit int64) ([]byte, string, error) {
 	reader := io.LimitReader(file, limit+1)
 
 	data, err := readImageFile(reader)
@@ -453,7 +483,10 @@ func (s *session) readAllowedImageFile(path string) ([]byte, string, error) {
 }
 
 func (s *session) allowedImageRoots() []string {
+	s.mu.Lock()
 	roots := []string{s.cwd}
+	s.mu.Unlock()
+
 	if scratch := s.agent.scratchDir; scratch != "" {
 		roots = append(roots, scratch)
 	}

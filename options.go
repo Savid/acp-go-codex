@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -289,9 +290,7 @@ func WithLogger(logger *slog.Logger) Option {
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = make(map[string]string, len(env))
-		for key, value := range env {
-			options.Env[key] = value
-		}
+		maps.Copy(options.Env, env)
 	}
 }
 
@@ -336,9 +335,7 @@ func WithTurnTimeout(timeout time.Duration) Option {
 func WithSeedFiles(files map[string]string) Option {
 	return func(options *Options) {
 		options.SeedFiles = make(map[string]string, len(files))
-		for path, contents := range files {
-			options.SeedFiles[path] = contents
-		}
+		maps.Copy(options.SeedFiles, files)
 	}
 }
 
@@ -353,9 +350,7 @@ func WithSeedFiles(files map[string]string) Option {
 func WithCodexConfigOverrides(overrides map[string]any) Option {
 	return func(options *Options) {
 		options.Config = make(map[string]any, len(overrides))
-		for key, value := range overrides {
-			options.Config[key] = value
-		}
+		maps.Copy(options.Config, overrides)
 	}
 }
 

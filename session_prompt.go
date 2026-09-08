@@ -58,12 +58,7 @@ func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBl
 	func(),
 	error,
 ) {
-	images, imageErr, abortErr := validatePromptImages(
-		ctx,
-		blocks,
-		s.agent.options.ImageLimits,
-		s.agent.options.InputHandoffRoot,
-	)
+	images, imageErr, abortErr := s.agent.validatePromptImages(ctx, blocks)
 	if abortErr != nil {
 		return nil, nil, abortErr
 	}
@@ -1187,15 +1182,15 @@ func usageFromCodex(usage codex.Usage) *acp.Usage {
 	}
 
 	if usage.CachedReadTokens > 0 {
-		result.CachedReadTokens = acp.Ptr(int(usage.CachedReadTokens))
+		result.CachedReadTokens = new(int(usage.CachedReadTokens))
 	}
 
 	if usage.CachedWriteTokens > 0 {
-		result.CachedWriteTokens = acp.Ptr(int(usage.CachedWriteTokens))
+		result.CachedWriteTokens = new(int(usage.CachedWriteTokens))
 	}
 
 	if usage.ReasoningOutputTokens > 0 {
-		result.ThoughtTokens = acp.Ptr(int(usage.ReasoningOutputTokens))
+		result.ThoughtTokens = new(int(usage.ReasoningOutputTokens))
 	}
 
 	return result

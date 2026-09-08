@@ -206,7 +206,7 @@ func readPromptHandoff(
 		return nil, nil, err
 	}
 
-	file, verdict := openHandoffImage(root, path)
+	file, verdict := openPromptHandoff(ctx, root, path)
 	if verdict != nil {
 		return nil, verdict, nil
 	}
@@ -311,12 +311,7 @@ func handoffNumber(value any) (int64, bool) {
 	case int64:
 		return typed, true
 	case json.Number:
-		decoded, err := typed.Float64()
-		if err != nil {
-			return 0, false
-		}
-
-		return handoffFloatNumber(decoded)
+		return exactMetadataInteger(typed)
 	case float64:
 		return handoffFloatNumber(typed)
 	default:

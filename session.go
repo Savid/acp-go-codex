@@ -12,7 +12,7 @@ import (
 	"github.com/savid/acp-go-codex/internal/lifecycle"
 )
 
-// session is one Codex app-server process owned by an ACP session.
+// session is one logical Codex thread on the Agent-owned app-server.
 type session struct {
 	agent                 *Agent
 	id                    acp.SessionId
@@ -237,7 +237,7 @@ func (s *session) ensureLiveClient(ctx context.Context) error {
 
 	s.mu.Unlock()
 
-	client, err := s.agent.sharedRuntime(ctx)
+	client, err := s.agent.sharedRuntime(ctx, s.cwd)
 	if err != nil {
 		return err
 	}

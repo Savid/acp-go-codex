@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -211,10 +212,7 @@ func NewAgent(opts ...Option) *Agent {
 	optionsErr = errors.Join(optionsErr, validateProviderAuthOptions(options))
 	options.ConcurrencyLimits = limits
 
-	clientCallLimit := limits.MaxConcurrentClientCalls
-	if clientCallLimit < 0 {
-		clientCallLimit = 0
-	}
+	clientCallLimit := max(limits.MaxConcurrentClientCalls, 0)
 
 	log := options.Logger
 	if log == nil {
@@ -341,6 +339,8 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 
 // Close cancels and closes all resources owned by the agent.
 func (a *Agent) Close() error {
+	defer a.closeManagedImageRoots()
+
 	a.mu.Lock()
 	if closeDone := a.closeDone; closeDone != nil {
 		a.mu.Unlock()
@@ -670,9 +670,7 @@ func (a *Agent) codexConfig() map[string]any {
 	}
 
 	config := make(map[string]any, len(a.options.Config))
-	for key, value := range a.options.Config {
-		config[key] = value
-	}
+	maps.Copy(config, a.options.Config)
 
 	return config
 }

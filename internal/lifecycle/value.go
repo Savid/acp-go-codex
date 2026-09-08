@@ -109,8 +109,8 @@ func normalizedNumber(lexeme string) string {
 	}
 
 	integral, fraction := mantissa, ""
-	if index := strings.IndexByte(mantissa, '.'); index >= 0 {
-		integral, fraction = mantissa[:index], mantissa[index+1:]
+	if before, after, ok := strings.Cut(mantissa, "."); ok {
+		integral, fraction = before, after
 	}
 
 	coefficient := strings.TrimLeft(integral+fraction, "0")

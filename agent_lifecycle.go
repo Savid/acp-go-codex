@@ -99,9 +99,10 @@ func rejectLifecycleKeyInParams(params json.RawMessage) error {
 		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP wire name.
 	}
 
-	if err := json.Unmarshal(params, &envelope); err != nil {
+	sanitized, _ := preserveWireMetadata(params, false, false)
+	if err := json.Unmarshal(sanitized, &envelope); err != nil {
 		return nil //nolint:nilerr // The route-specific decoder reports malformed params.
 	}
 
-	return rejectLifecycleKey(envelope.Meta)
+	return rejectLifecycleKey(lifecycle.RetainRequestMetadata(envelope.Meta, params))
 }

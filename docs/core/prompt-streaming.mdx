@@ -25,7 +25,7 @@ APNG input, verifies the declared MIME against the bytes, and applies
 
 An embedded blob resource is gated whatever it declares. A blob whose media type
 is not an image reaches no native image transport — Codex receives a
-`[resource: <uri>]` reference line, as it always has — but its base64 must still
+`[resource: <uri>]` reference line — but its base64 must still
 decode and its decoded bytes are still charged against `MaxInputBytesPerImage`
 and the per-prompt total. The channel cannot carry undecodable or unbounded
 payloads.
@@ -33,9 +33,10 @@ payloads.
 The advertised bounds a host can pre-check against are published at initialize
 under [`acp-go.dev/mediaEnvelope`](/docs/reference/meta#media-envelope).
 
-Image invalid-params data always contains `field:"prompt.image"`, an `index`
-counted across every gated media block in request order, and one of these
-`error` values:
+Media invalid-params data contains `field:"prompt.image"` for an image block or
+`field:"prompt.resource"` for an embedded resource. Its `index` counts image and
+blob blocks in request order. Text resources consume the aggregate byte budget
+without advancing that index. The `error` is one of:
 
 - `missing_data`
 - `invalid_base64`
@@ -53,8 +54,6 @@ counted across every gated media block in request order, and one of these
 `too_large` also includes decoded `sizeBytes` and `maxBytes`. The four handoff
 values carry a fixed `message` naming the stage that refused; a refusal never
 reports a path, a filename, an observed digest, or an observed byte count.
-`field` names the inbound block type — `prompt.image` for an image block and
-`prompt.resource` for an embedded resource, whatever media type routed it.
 Validation stops at the first failing block in request order. At prompt time the selected model's native
 `inputModalities` field is authoritative when present: a text-only declaration
 rejects the image, an `image` declaration accepts it, and absent model metadata

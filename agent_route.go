@@ -2,8 +2,10 @@ package codexacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -125,6 +127,10 @@ func routeInteger(value any) (int, bool) {
 	switch typed := value.(type) {
 	case int:
 		return typed, true
+	case json.Number:
+		integer, ok := exactMetadataInteger(typed)
+
+		return int(integer), ok && integer <= math.MaxInt
 	case float64:
 		integer := int(typed)
 

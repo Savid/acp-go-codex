@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -372,9 +373,7 @@ func TestAuthorizeAddressingFailures(t *testing.T) {
 
 	for _, field := range []string{"sessionId", "providerId", "connectionId", "methodsGeneration", "method", "authorizeRequestId"} {
 		params := map[string]any{}
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 
 		delete(params, field)
 
@@ -867,9 +866,7 @@ func TestAuthCallbackRejectionPaths(t *testing.T) {
 
 	for _, field := range []string{"sessionId", "providerId", "method", "flowId", "input"} {
 		params := map[string]any{}
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 
 		delete(params, field)
 
@@ -1502,9 +1499,7 @@ func TestAuthDisconnectFencing(t *testing.T) {
 	requireAuthCause(t, err, authCauseBindingConflict)
 
 	wrongConnection := map[string]any{}
-	for key, value := range base {
-		wrongConnection[key] = value
-	}
+	maps.Copy(wrongConnection, base)
 
 	wrongConnection["connectionId"] = "connection-other"
 	wrongConnection["bindingGeneration"] = seeded.BindingGeneration
@@ -1527,9 +1522,7 @@ func TestAuthDisconnectFencing(t *testing.T) {
 
 	for _, field := range []string{"sessionId", "providerId", "connectionId", "bindingGeneration"} {
 		params := map[string]any{}
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 
 		delete(params, field)
 

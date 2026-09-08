@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"maps"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -74,9 +75,7 @@ func mergeNativeIdentityMeta(meta map[string]any, identity nativeTurnIdentity) m
 		codexMeta = make(map[string]any, len(identityValues))
 	}
 
-	for key, value := range identityValues {
-		codexMeta[key] = value
-	}
+	maps.Copy(codexMeta, identityValues)
 
 	meta[codexMetaKey] = codexMeta
 
