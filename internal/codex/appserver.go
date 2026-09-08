@@ -892,7 +892,7 @@ func (c *AppServerClient) ReadRateLimits(ctx context.Context) (RateLimitSnapshot
 		return RateLimitSnapshot{}, err
 	}
 
-	return rateLimitSnapshotFromMap(mapValue(resp, "rateLimits")), nil
+	return rateLimitSnapshotFromMap(resp)
 }
 
 func (c *AppServerClient) LoginWithChatGPTTokens(ctx context.Context, tokens ChatGPTAuthTokens) error {
@@ -1650,8 +1650,11 @@ func eventFromRPC(raw rpcEvent) Event {
 		event.Login = loginCompletionFromParams(params)
 	case notifyRateLimitsUpdated:
 		event.Kind = EventRateLimitsUpdated
-		snapshot := rateLimitSnapshotFromMap(mapValue(params, "rateLimits"))
-		event.RateLimits = &snapshot
+
+		snapshot, err := rateLimitSnapshotFromMap(params)
+		if err == nil {
+			event.RateLimits = &snapshot
+		}
 	case "warning", notifyGuardianWarning, "deprecationNotice", "configWarning":
 		event.Kind = EventWarning
 		event.Text = firstNonEmpty(stringValue(params, fieldMessage), stringValue(params, "text"))

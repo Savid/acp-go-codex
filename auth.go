@@ -738,6 +738,8 @@ func (a *Agent) Logout(ctx context.Context, params acp.LogoutRequest) (acp.Logou
 		return acp.LogoutResponse{}, errors.Join(err, clientErr)
 	}
 
+	a.invalidateRateLimitsAuth()
+
 	err = errors.Join(err, client.Logout(ctx))
 
 	a.clearExternalAuthTokens()

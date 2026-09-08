@@ -146,6 +146,7 @@ type Agent struct {
 	authTokens            *ChatGPTAuthTokens
 	runtimeClient         codex.Client
 	runtimeEpoch          uint64
+	rateLimitsAuthEpoch   uint64
 	runtimeDead           bool
 	runtimeStarting       chan struct{}
 	runtimeStartCancel    context.CancelFunc
@@ -461,6 +462,7 @@ func (a *Agent) setExternalAuthTokens(tokens ChatGPTAuthTokens) {
 
 	copied := tokens
 	a.authTokens = &copied
+	a.rateLimitsAuthEpoch++
 }
 
 func (a *Agent) clearExternalAuthTokens() {
@@ -468,6 +470,7 @@ func (a *Agent) clearExternalAuthTokens() {
 	defer a.mu.Unlock()
 
 	a.authTokens = nil
+	a.rateLimitsAuthEpoch++
 }
 
 func (a *Agent) externalAuthTokens() (ChatGPTAuthTokens, bool) {
@@ -740,8 +743,11 @@ func (s *codexClientEventSink) SetClient(client codex.Client) error {
 func (a *Agent) applyCodexClientEvent(ctx context.Context, client codex.Client, event codex.Event) {
 	switch event.Kind {
 	case codex.EventAccountUpdated:
+		a.invalidateRateLimitsAuth()
 		a.updateAccountForClient(client, event.ThreadID, event.Account)
 	case codex.EventLoginCompleted:
+		a.invalidateRateLimitsAuth()
+
 		if a.providerAuth != nil {
 			a.providerAuth.loginCompleted(ctx, event.Login)
 		}

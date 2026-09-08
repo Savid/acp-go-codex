@@ -109,13 +109,13 @@ with the elicitation capability advertised — which is why
 
 ## Rate limits look stale or empty
 
-`_codex/rateLimits` issues a fresh `account/rateLimits/read` request through a
-live session every time. The supported Codex CLI floor includes that method;
-the adapter has no older-version capability gate and does not retain a cached
-snapshot. An empty native snapshot is returned as an empty `windows` array, and
-an agent with no live session also returns that empty shape. A native read
-failure fails the extension request instead of returning earlier data.
+`_codex/rateLimits` makes a fresh, bounded native quota read. Inspect
+`availability` and `reason`: `not_authenticated` means the native account is
+logged out, `not_observed` means no current measured windows were returned,
+and `read_failed` means the read failed or its account/configuration changed.
+`unsupported` means the effective provider or authentication has no applicable
+reader. Every response includes `pools`, including `[]` when unavailable.
 
-`agent_ratelimits_test.go` pins the fresh, empty, error, and no-live-session
-cases. `internal/codex/ratelimits_test.go` pins the current nested app-server
-response and notification shapes.
+Supply `sessionId` to resolve that live session's provider configuration, or
+`providerId` for a provider-wide read. No prompt is needed. See the
+[method reference](/reference/acp-methods#_codexratelimits) for field semantics.

@@ -118,8 +118,12 @@ err := codexacp.Serve(ctx, stdin, stdout,
 | `ForkSessionRequest` | Build `_codex/session/fork` params. |
 | `CallForkSession` | Call `_codex/session/fork`. |
 | `RateLimitsMethod` | Method name for `_codex/rateLimits`. |
-| `RateLimitsResponse` | Decode the `_codex/rateLimits` reply (`Windows`, `PlanType`). |
-| `RateLimitWindow` | One rate-limit window (`ID`, `UsedPercent`, `ResetsAt`). |
+| `RateLimitsRequest` | Select a provider and optional live session. |
+| `RateLimitsResponse` | Provider availability, optional reason, and allowance pools. |
+| `RateLimitPool` | One native allowance with measured windows and optional monetary balances. |
+| `RateLimitWindow` | Utilization, optional duration/status, and UTC observation/reset times. |
+| `RateLimitBalance` | Optional monetary used/limit/remaining facts and reset details. |
+| `RateLimitMoney` | Major-unit amount with its uppercase currency code. |
 | `StdioMCPServer` | Construct a stdio MCP server; adapter-reserved environment names are rejected case-insensitively. |
 | `HTTPMCPServer` | Construct a streamable-HTTP MCP server. |
 | `WithSessionMCPServers` | Attach MCP servers to a session. |

@@ -73,35 +73,60 @@ and `session/set_mode` are intentionally not routed.
 
 ### `_codex/rateLimits`
 
-`_codex/rateLimits` reports the harness's subscription rate-limit usage. It is an
-agent-level request: the params are an empty object (`{}`) and carry no
-`sessionId`. A malformed params value that does not decode as an object is
-rejected with invalid-params.
-
-The response reports only harness-supplied values — nothing is derived from token
-counts or fabricated:
+`_codex/rateLimits` reads fresh quota observations for an effective provider.
+Params may include opaque, nonblank `providerId` and `sessionId` strings. An
+addressed session supplies its effective provider configuration; without one,
+the native app-server configuration resolves the provider. A missing selector
+that cannot resolve a provider fails with `missing` / `providerId`. Malformed,
+unknown, duplicate, or wrongly typed fields fail with invalid params.
 
 ```json
 {
-  "windows": [
-    { "id": "primary", "usedPercent": 42, "resetsAt": "2026-07-09T18:00:00Z" },
-    { "id": "secondary", "usedPercent": 12 }
-  ],
-  "planType": "pro"
+  "providerId": "openai",
+  "availability": "available",
+  "pools": [
+    {
+      "id": "codex",
+      "planType": "pro",
+      "windows": [
+        {
+          "id": "primary",
+          "usedPercent": 18,
+          "durationSeconds": 604800,
+          "observedAt": "2026-09-08T04:43:55Z",
+          "resetsAt": "2026-09-15T00:00:00Z"
+        }
+      ]
+    }
+  ]
 }
 ```
 
-`windows` is always present, and is an empty array when the harness has reported
-no usage. Each window `id` is codex-native (`primary` or `secondary`),
-`usedPercent` is passed through in the range 0-100, and `resetsAt` is an RFC3339
-instant included only when the harness supplies one. `planType` is included only
-when reported.
+The native ChatGPT account reader supports the built-in `openai` provider.
+The native account's authentication mode determines eligibility; an ambient
+API-key variable does not override a ChatGPT account reported by Codex. Codex's
+resolved default ChatGPT endpoint is supported.
+Unknown providers, API-key authentication, and custom endpoints or provider
+authentication are `unsupported`. A logged-out account is `unavailable` with
+reason `not_authenticated`; failed reads use `read_failed`, and absent or
+expired observations use `not_observed`. These responses always contain
+`pools: []`. Session lookup and lifecycle errors remain protocol errors.
 
-The adapter queries `account/rateLimits/read` through a live session on every
-request. The supported Codex CLI floor includes this app-server method, so
-there is no version capability gate or cached snapshot path. With no live
-session, including placeholder-only use, the response contains an empty window
-set. A native read failure fails the extension request.
+Every request uses the Agent's shared app-server and makes a bounded native
+read without a prompt or model turn. A provider-wide request can start that
+runtime without creating a session. The adapter checks native configuration
+and account identity around the read and discards observations if the account,
+authentication, runtime, or addressed session changes. Caller cancellation
+cancels the read. The complete read has a 30-second bound and no result cache.
+
+Each native allowance remains a separate pool; pool labels and plan types are
+included when reported. Window IDs retain the native `primary` / `secondary`
+identity, while `durationSeconds` reports the actual measured duration.
+`usedPercent` preserves measured zero and values above 100. `observedAt` is the
+UTC native-response receipt time; reset-expired windows are omitted. Unknown
+facts remain absent, and window status is not inferred from percentages.
+Codex credit counters and spend-control fields do not identify a currency, so
+they do not become monetary balances.
 
 ## Slash commands
 

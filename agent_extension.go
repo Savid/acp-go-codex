@@ -34,6 +34,13 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	}
 
 	switch method {
+	case RateLimitsMethod:
+		request, err := decodeRateLimitsRequest(params)
+		if err != nil {
+			return nil, err
+		}
+
+		return a.rateLimits(ctx, request)
 	case ForkSessionMethod:
 		var req acp.UnstableForkSessionRequest
 		if err := json.Unmarshal(params, &req); err != nil {
@@ -45,12 +52,6 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 		}
 
 		return a.forkSession(ctx, req)
-	case RateLimitsMethod:
-		if err := decodeRateLimitsParams(params); err != nil {
-			return nil, err
-		}
-
-		return a.rateLimits(ctx)
 	default:
 		if result, handled, err := a.handleAuthExtensionMethod(ctx, method, params); handled {
 			return result, err

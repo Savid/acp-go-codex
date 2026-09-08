@@ -618,6 +618,9 @@ func (p *providerAuth) applySecret(ctx context.Context, session *session, flow *
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
 
+	p.agent.invalidateRateLimitsAuth()
+	defer p.agent.invalidateRateLimitsAuth()
+
 	if err := client.StartAPIKeyLogin(callCtx, input); err != nil {
 		return nil, p.fail(flow, authNativeCause(callCtx, err), true)
 	}
@@ -1050,6 +1053,9 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
+
+	p.agent.invalidateRateLimitsAuth()
+	defer p.agent.invalidateRateLimitsAuth()
 
 	if err := client.Logout(callCtx); err != nil {
 		return nil, authFailed(authNativeCause(callCtx, err), providerID, "", "")

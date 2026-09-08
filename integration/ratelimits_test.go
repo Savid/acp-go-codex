@@ -27,8 +27,7 @@ func TestCodexCLIRateLimits(t *testing.T) {
 	client := &recordingClient{}
 	conn, _ := initializeLiveAgentForTest(t, ctx, client, acp.InitializeRequest{})
 
-	// A live session gives the fresh account/rateLimits/read path an app-server
-	// to query; without one the agent falls back to any cached snapshot.
+	// A session selects the effective native provider configuration.
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
@@ -37,7 +36,7 @@ func TestCodexCLIRateLimits(t *testing.T) {
 		t.Fatal("session id is empty")
 	}
 
-	raw, err := conn.CallExtension(ctx, codexacp.RateLimitsMethod, map[string]any{})
+	raw, err := conn.CallExtension(ctx, codexacp.RateLimitsMethod, map[string]any{"sessionId": session.SessionId})
 	if err != nil {
 		t.Fatalf("call %s: %v", codexacp.RateLimitsMethod, err)
 	}
@@ -47,24 +46,25 @@ func TestCodexCLIRateLimits(t *testing.T) {
 		t.Fatalf("decode rate limits response %s: %v", raw, err)
 	}
 
-	// windows is always present in the wire payload, even when empty.
-	if resp.Windows == nil {
-		t.Fatalf("windows missing from response %s", raw)
+	if resp.Pools == nil {
+		t.Fatalf("pools missing from response")
 	}
-
-	for _, window := range resp.Windows {
-		if window.ID == "" {
-			t.Fatalf("window missing id: %#v (raw %s)", window, raw)
+	if resp.ProviderID == "" || resp.Availability == "" {
+		t.Fatal("quota response missing provider or availability")
+	}
+	for _, pool := range resp.Pools {
+		if pool.ID == "" || pool.Windows == nil {
+			t.Fatal("quota pool missing id or windows")
 		}
-		if window.ID != "primary" && window.ID != "secondary" {
-			t.Fatalf("unexpected window id %q; codex reports primary/secondary", window.ID)
-		}
-		if window.UsedPercent < 0 || window.UsedPercent > 100 {
-			t.Fatalf("window %q usedPercent %v outside [0,100]; codex protocol changed", window.ID, window.UsedPercent)
-		}
-		if window.ResetsAt != "" {
-			if _, err := time.Parse(time.RFC3339, window.ResetsAt); err != nil {
-				t.Fatalf("window %q resetsAt %q is not RFC3339: %v", window.ID, window.ResetsAt, err)
+		for _, window := range pool.Windows {
+			if window.ID != "primary" && window.ID != "secondary" {
+				t.Fatalf("unexpected window id %q", window.ID)
+			}
+			if window.UsedPercent == nil || *window.UsedPercent < 0 {
+				t.Fatal("window has no measured utilization")
+			}
+			if _, err := time.Parse(time.RFC3339Nano, window.ObservedAt); err != nil {
+				t.Fatal("window observation is not RFC3339")
 			}
 		}
 	}
