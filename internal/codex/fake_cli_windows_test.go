@@ -13,13 +13,13 @@ import (
 // resolves an executable by PATHEXT and honours no interpreter line, so each of
 // these is a batch twin of the posix script beside it, behaving the same way.
 const (
-	fakeCLIVersionOnly = "@echo off\r\necho codex-cli 0.144.1\r\n"
+	fakeCLIVersionOnly = "@echo off\r\necho codex-cli 0.153.4\r\n"
 
 	fakeCLIExitZero = "@echo off\r\nexit /b 0\r\n"
 
 	fakeCLIAccountLog = "@echo off\r\n" +
 		"if \"%~1\"==\"--version\" (\r\n" +
-		"  echo codex-cli 0.144.1\r\n" +
+		"  echo codex-cli 0.153.4\r\n" +
 		"  exit /b 0\r\n" +
 		")\r\n" +
 		"echo %* > \"%ACCOUNT_LOG%\"\r\n"
@@ -31,7 +31,7 @@ const (
 
 	fakeCLIAppServer = "@echo off\r\n" +
 		"if \"%~1\"==\"--version\" (\r\n" +
-		"  echo codex-cli 0.144.1\r\n" +
+		"  echo codex-cli 0.153.4\r\n" +
 		"  exit /b 0\r\n" +
 		")\r\n" +
 		"set /p line=\r\n" +

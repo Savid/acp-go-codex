@@ -2,14 +2,14 @@
 set -eu
 
 case "$(uname -m)" in
-  x86_64) native_sha=2e863156ed35ecc5253b1e2f907a9143077b9f7cb51942070c61996471ff6e04 ;;
-  aarch64) native_sha=cb5e8cb8a333a408ce6adbe0d4fad1845c69772c2216af7c1f88c98a11460dc6 ;;
+  x86_64) native_sha=56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da ;;
+  aarch64) native_sha=4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6 ;;
   *) echo "unsupported browser-canary architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
 test -x /usr/local/bin/codex
 printf '%s  %s\n' "$native_sha" /usr/local/bin/codex | sha256sum --check --strict
-test "$(/usr/local/bin/codex --version)" = "codex-cli 0.146.0"
+test "$(/usr/local/bin/codex --version)" = "codex-cli 0.153.4"
 
 if [ "${1:-}" = "--verify-native" ]; then
   exit 0

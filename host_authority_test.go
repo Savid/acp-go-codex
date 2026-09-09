@@ -352,7 +352,7 @@ func (a *traceAuthority) StartNative(_ context.Context, request NativeRequest) (
 
 	return &traceNativeProcess{
 		authority: a,
-		stdout:    io.NopCloser(strings.NewReader("codex-cli 0.146.0\n")),
+		stdout:    io.NopCloser(strings.NewReader("codex-cli 0.153.4\n")),
 		stderr:    io.NopCloser(strings.NewReader("")),
 	}, nil
 }

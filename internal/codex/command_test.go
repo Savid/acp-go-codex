@@ -51,13 +51,13 @@ func TestCommandEnvironmentAndManagedSelector(t *testing.T) {
 }
 
 func TestValidateCodexVersion(t *testing.T) {
-	version, err := validateCodexVersionOutput("codex-cli 0.144.1")
+	version, err := validateCodexVersionOutput("codex-cli 0.153.4")
 	require.NoError(t, err)
-	require.Equal(t, "0.144.1", version)
+	require.Equal(t, "0.153.4", version)
 	version, err = validateCodexVersionOutput("codex 1.2.3-beta+build")
 	require.NoError(t, err)
 	require.Equal(t, "1.2.3", version)
-	for _, output := range []string{"", "unknown", "codex 0.144.0"} {
+	for _, output := range []string{"", "unknown", "codex 0.153.3"} {
 		_, err := validateCodexVersionOutput(output)
 		require.Error(t, err)
 	}

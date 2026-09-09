@@ -328,7 +328,7 @@ func TestVersionProbeCoverageEdges(t *testing.T) {
 	_, err := ProbeVersion(t.Context(), VersionProbeOptions{HostAuthority: &coverageHost{environment: map[string]string{"BAD=KEY": "x"}}})
 	require.Error(t, err)
 
-	process := newAuthorityTestProcess("codex 0.144.1")
+	process := newAuthorityTestProcess("codex 0.153.4")
 	_, err = ProbeVersion(t.Context(), VersionProbeOptions{HostAuthority: &coverageHost{environment: map[string]string{}, process: process}})
 	require.NoError(t, err)
 	startErr := errors.New("start")
@@ -356,7 +356,7 @@ func TestVersionProbeCoverageEdges(t *testing.T) {
 	require.ErrorIs(t, err, copyErr)
 
 	exitFailure := newCoverageNativeProcess()
-	exitFailure.stdout = io.NopCloser(bytes.NewBufferString("codex 0.144.1"))
+	exitFailure.stdout = io.NopCloser(bytes.NewBufferString("codex 0.153.4"))
 	exitFailure.result = NativeResult{ExitCode: 9}
 	_, err = ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "managed", HostAuthority: &coverageHost{environment: map[string]string{}, process: exitFailure}})
 	require.ErrorContains(t, err, "status 9")

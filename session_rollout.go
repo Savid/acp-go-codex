@@ -2,9 +2,13 @@ package codexacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 var (
@@ -21,6 +25,74 @@ const maxSessionImportLineBytes = 10 * 1024 * 1024
 type rolloutMirrorRow struct {
 	index int
 	entry SessionStoreEntry
+}
+
+type nativeTurnUsage struct {
+	turnID string
+	usage  codex.Usage
+}
+
+// rolloutTurnUsage reads the native turn aggregate, which survives repeated
+// usage notifications, context compaction, and a resumed thread's prior turns.
+func rolloutTurnUsage(entries []SessionStoreEntry, turnID string) (nativeTurnUsage, error) {
+	if turnID == "" {
+		return nativeTurnUsage{}, nil
+	}
+
+	for index := len(entries) - 1; index >= 0; index-- {
+		var row struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(entries[index], &row); err != nil {
+			return nativeTurnUsage{}, fmt.Errorf("decode native turn usage row: %w", err)
+		}
+
+		if row.Type != "token_usage_record" {
+			continue
+		}
+
+		//nolint:tagliatelle // Native Codex rollout field names.
+		var payload struct {
+			TurnID string `json:"turn_id"`
+			Usage  *struct {
+				Input       int64 `json:"input_tokens"`
+				CachedRead  int64 `json:"cached_input_tokens"`
+				CachedWrite int64 `json:"cache_write_input_tokens"`
+				Output      int64 `json:"output_tokens"`
+				Reasoning   int64 `json:"reasoning_output_tokens"`
+				Total       int64 `json:"total_tokens"`
+			} `json:"turn_token_usage"`
+		}
+		if err := json.Unmarshal(row.Payload, &payload); err != nil {
+			return nativeTurnUsage{}, fmt.Errorf("decode native turn usage: %w", err)
+		}
+
+		if payload.TurnID != turnID || payload.Usage == nil {
+			continue
+		}
+
+		usage := payload.Usage
+
+		return nativeTurnUsage{turnID: turnID, usage: codex.Usage{
+			InputTokens: usage.Input, CachedReadTokens: usage.CachedRead,
+			CachedWriteTokens: usage.CachedWrite, OutputTokens: usage.Output,
+			ReasoningOutputTokens: usage.Reasoning, TotalTokens: usage.Total,
+		}}, nil
+	}
+
+	return nativeTurnUsage{}, nil
+}
+
+func (s *session) committedUsage(turnID string) *acp.Usage {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	if turnID == "" || s.committedTurnUsage.turnID != turnID {
+		return nil
+	}
+
+	return usageFromCodex(s.committedTurnUsage.usage)
 }
 
 type managedNativeAppendLogError struct{ err error }
@@ -140,6 +212,11 @@ func (s *session) mirrorRolloutLocked(ctx context.Context, expected nativeTurnId
 		return s.latchCaptureFailure(store, expected, err)
 	}
 
+	usage, err := rolloutTurnUsage(clean, expected.turnID)
+	if err != nil {
+		return s.latchCaptureFailure(store, expected, err)
+	}
+
 	// Everything the store is owed is in hand from here on: a commit that fails
 	// retains it, so the capture no longer needs the latch.
 	s.captureStands(store)
@@ -152,6 +229,10 @@ func (s *session) mirrorRolloutLocked(ctx context.Context, expected nativeTurnId
 	durableEntries, nextMirroredRow := s.durableRolloutEntries(rows)
 	if err := s.commitRolloutEntries(ctx, store, durableEntries, nextMirroredRow); err != nil {
 		return err
+	}
+
+	if !s.persistenceFenced && usage.turnID != "" {
+		s.committedTurnUsage = usage
 	}
 
 	return nil

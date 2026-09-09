@@ -34,7 +34,7 @@ type ConcurrencyLimits struct {
 	MaxConcurrentClientCalls int
 }
 
-const minSupportedCodexVersion = "0.144.1"
+const minSupportedCodexVersion = "0.153.4"
 
 // Options configures the ACP agent process and Codex sessions it starts.
 type Options struct {

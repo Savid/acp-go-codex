@@ -1630,12 +1630,10 @@ func eventFromRPC(raw rpcEvent) Event {
 	case "thread/tokenUsage/updated":
 		event.Kind = EventUsageUpdated
 		event.TokenUsage = tokenUsageFromParams(params)
-		event.Usage = event.TokenUsage.Last
 	case notifyTurnCompleted:
 		event.Kind = EventCompleted
 		turn := mapValue(params, "turn")
 		event.StopReason = stopReasonFromTurn(turn)
-		event.Usage = usageFromParams(params)
 
 		if event.StopReason == StopReasonError {
 			event.Err = turnFailureFromCompleted(turn, params)
@@ -1986,15 +1984,6 @@ func turnFailureFromCompleted(turn map[string]any, params map[string]any) *TurnF
 			stringValue(errInfo, "code"),
 		),
 	}
-}
-
-func usageFromParams(params map[string]any) Usage {
-	usage := mapValue(params, "usage")
-	if usage == nil {
-		usage = mapValue(mapValue(params, "turn"), "usage")
-	}
-
-	return usageFromMap(usage)
 }
 
 func tokenUsageFromParams(params map[string]any) TokenUsage {

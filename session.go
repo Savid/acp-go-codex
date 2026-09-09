@@ -73,6 +73,7 @@ type session struct {
 	interactions        map[string]*sessionInteraction
 	mirrorMu            sync.Mutex
 	mirroredRows        int
+	committedTurnUsage  nativeTurnUsage
 	captureExpected     nativeTurnIdentity
 	imageStoreMu        sync.Mutex
 	rawEventMu          sync.Mutex

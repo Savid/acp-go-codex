@@ -37,7 +37,7 @@ func TestCodexNativeTwoThreadMCPRebindIsolation(t *testing.T) {
 		require.NoError(t, os.MkdirAll(scratch, 0o700))
 
 		client, err := codex.NewAppServerClient(ctx, codex.Options{
-			NativeVersion: "0.144.1",
+			NativeVersion: "0.153.4",
 			CLIPath:       codexPath,
 			CodexHome:     home,
 			Scratch:       scratch,

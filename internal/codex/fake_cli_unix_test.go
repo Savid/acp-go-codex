@@ -14,13 +14,13 @@ import (
 // body has a Windows twin that behaves the same way, so a test states what the
 // native side does rather than which shell says it.
 const (
-	fakeCLIVersionOnly = "#!/bin/sh\necho codex-cli 0.144.1\n"
+	fakeCLIVersionOnly = "#!/bin/sh\necho codex-cli 0.153.4\n"
 
 	fakeCLIExitZero = "#!/bin/sh\nexit 0\n"
 
 	fakeCLIAccountLog = `#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.144.1
+  echo codex-cli 0.153.4
   exit 0
 fi
 printf '%s' "$*" > "$ACCOUNT_LOG"
@@ -34,7 +34,7 @@ exit 0
 
 	fakeCLIAppServer = `#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.144.1
+  echo codex-cli 0.153.4
   exit 0
 fi
 read line || exit 0

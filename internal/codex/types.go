@@ -315,7 +315,6 @@ type Event struct {
 	Tool       ToolEvent
 	Image      ImageEvent
 	StopReason StopReason
-	Usage      Usage
 	TokenUsage TokenUsage
 	Account    Account
 	Login      LoginCompletion

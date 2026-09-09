@@ -12,7 +12,7 @@ are absorbed by design.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Session start fails with "codex CLI ... is too old; need >= 0.144.1" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
+| Session start fails with "codex CLI ... is too old; need >= 0.153.4" | The installed Codex CLI predates the minimum. Upgrade `codex` or point `-path` at a newer binary. |
 | Terminal login/logout reports a writable-home claim failure | Another cooperating runtime or terminal account command still owns that home. Quiesce it before retrying. |
 | Session start reports `host authority unavailable` | A supplied authority, environment, process handle, or managed launch failed validation. Correct the authority; the adapter will not retry through ordinary execution. |
 | Shutdown reports `native tree has live lease processes` | Reclaim reached a nonterminal native lease. Keep the tree intact and retry shutdown after terminal settlement. |

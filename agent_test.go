@@ -790,7 +790,7 @@ func (c *spyCodexClient) RunTurn(ctx context.Context, req codex.TurnStartRequest
 	c.mu.Unlock()
 	if err := c.publishTurn(req.ThreadID, "turn-1", []codex.Event{
 		{Kind: codex.EventAgentMessageDelta, Text: `{"ok":true}`},
-		{Kind: codex.EventCompleted, StopReason: codex.StopReasonEndTurn, Usage: codex.Usage{InputTokens: 1, OutputTokens: 2}},
+		{Kind: codex.EventCompleted, StopReason: codex.StopReasonEndTurn},
 	}); err != nil {
 		return codex.Turn{}, err
 	}
@@ -1411,7 +1411,7 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "--version":
-			fmt.Println("codex-cli 0.144.1")
+			fmt.Println("codex-cli 0.153.4")
 			os.Exit(0)
 		case "app-server":
 			runFakeCodexAppServer()

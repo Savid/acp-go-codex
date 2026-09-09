@@ -231,12 +231,12 @@ func TestAppServerRunTurnMapsEvents(t *testing.T) {
 	if got[0].Kind != EventPlanUpdated || got[1].Kind != EventReasoningDelta || got[2].Kind != EventAgentMessageDelta || got[3].Kind != EventDiffUpdated || got[4].Kind != EventUsageUpdated || got[5].Kind != EventCompleted {
 		t.Fatalf("unexpected event order: %#v", got)
 	}
-	if got[4].Usage.TotalTokens != 3 ||
+	if got[4].TokenUsage.Last.TotalTokens != 3 ||
 		got[4].TokenUsage.Last.CachedReadTokens != 1 ||
 		got[4].TokenUsage.Last.ReasoningOutputTokens != 1 ||
 		got[4].TokenUsage.Total.TotalTokens != 9 ||
 		got[4].TokenUsage.ModelContextWindow != 100 {
-		t.Fatalf("usage = %#v tokenUsage=%#v", got[4].Usage, got[4].TokenUsage)
+		t.Fatalf("token usage = %#v", got[4].TokenUsage)
 	}
 }
 
@@ -285,13 +285,13 @@ func TestAppServerMappingHelpers(t *testing.T) {
 	}
 
 	assertTurnFailureParse(t)
-	usage := usageFromParams(map[string]any{"usage": map[string]any{
+	usage := usageFromMap(map[string]any{
 		"inputTokens":              float64(1),
 		"completionTokens":         float64(2),
 		"cachedReadTokens":         float64(3),
 		"cacheCreationInputTokens": float64(4),
 		"reasoning_output_tokens":  float64(5),
-	}})
+	})
 	if usage.TotalTokens != 3 || usage.CachedReadTokens != 3 || usage.CachedWriteTokens != 4 || usage.ReasoningOutputTokens != 5 {
 		t.Fatalf("usage = %#v", usage)
 	}
@@ -1039,7 +1039,7 @@ func TestAppServerLifecycleMappingEdges(t *testing.T) {
 	initErrorScript := filepath.Join(t.TempDir(), "codex-init-error")
 	if err := os.WriteFile(initErrorScript, []byte(`#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo codex-cli 0.144.1
+  echo codex-cli 0.153.4
   exit 0
 fi
 read line || exit 0

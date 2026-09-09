@@ -22,6 +22,15 @@ Codex `app-server` events are mapped to ACP session updates:
 | usage update | usage events |
 | session metadata update | account changes |
 
+Usage updates describe the current context: `used` is the latest native usage
+snapshot and `size` is the model context window. `_meta.codex.usage` contains
+that snapshot's token breakdown, while `_meta.codex.threadUsage` contains
+cumulative thread accounting. The final prompt response's `usage` comes from
+the committed native `turn_token_usage` record for that turn, including every
+model response across tool calls and context compaction. Earlier turns on a
+resumed thread are excluded. When native turn accounting is unavailable, the
+prompt response omits `usage`.
+
 Image tools emit complete content snapshots. Successful content uses the
 standard ACP image block with sniffed MIME and base64 data. Native failed image
 tools emit failed status with no invented content. Adapter-side image

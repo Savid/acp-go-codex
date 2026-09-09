@@ -21,7 +21,7 @@ const (
 	envCodexHome     = "CODEX_HOME"
 	envHome          = "HOME"
 	envXDGConfigHome = "XDG_CONFIG_HOME"
-	minCodexVersion  = "0.144.1"
+	minCodexVersion  = "0.153.4"
 	appServerCommand = "app-server"
 	processExitGrace = 2 * time.Second
 )

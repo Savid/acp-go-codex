@@ -463,7 +463,7 @@ func (s *session) settlePrompt(
 
 	return acp.PromptResponse{
 		StopReason:    stopReason,
-		Usage:         result.state.usage,
+		Usage:         s.committedUsage(result.state.nativeIdentity.turnID),
 		UserMessageId: messageID,
 		Meta: mergePromptResponseMeta(
 			structuredOutputMeta(result.state.agentText.String(), result.snapshot.outputSchema),
@@ -547,7 +547,6 @@ type promptEventState struct {
 	streamedThreadUsage        codex.Usage
 	streamedUsageContextWindow int64
 
-	usage      *acp.Usage
 	stopReason acp.StopReason
 	completed  bool
 	// nativeFailure records a native completion this adapter cannot state as a
@@ -587,7 +586,7 @@ func (s *session) handlePromptEvent(turnCtx context.Context, event codex.Event, 
 		return err
 	}
 
-	s.applyPromptUsage(event, state)
+	s.applyPromptCompletion(event, state)
 
 	if visibleEvent.Kind == codex.EventAgentMessageDelta && visibleEvent.Text != "" {
 		state.agentText.WriteString(visibleEvent.Text)
@@ -672,13 +671,7 @@ func (s *session) emitPromptUpdates(turnCtx context.Context, event codex.Event, 
 	return err
 }
 
-func (s *session) applyPromptUsage(event codex.Event, state *promptEventState) {
-	if event.Kind == codex.EventUsageUpdated {
-		if tokenUsage := usageFromCodex(event.TokenUsage.Last); tokenUsage != nil {
-			state.usage = tokenUsage
-		}
-	}
-
+func (s *session) applyPromptCompletion(event codex.Event, state *promptEventState) {
 	if event.Kind == codex.EventCompleted {
 		state.completed = true
 
@@ -686,10 +679,6 @@ func (s *session) applyPromptUsage(event codex.Event, state *promptEventState) {
 			state.stopReason = stop
 		} else {
 			state.nativeFailure = true
-		}
-
-		if completedUsage := usageFromCodex(event.Usage); completedUsage != nil {
-			state.usage = completedUsage
 		}
 	}
 }
@@ -918,19 +907,6 @@ func usageUpdatesForEvent(
 			*streamedUsage = event.TokenUsage.Last
 			*streamedThreadUsage = event.TokenUsage.Total
 			*streamedUsageContextWindow = event.TokenUsage.ModelContextWindow
-		}
-
-		return updates
-	case codex.EventCompleted:
-		if event.Usage == *streamedUsage {
-			return nil
-		}
-
-		updates := usageUpdateFromCodex(event.Usage)
-		if len(updates) > 0 {
-			*streamedUsage = event.Usage
-			*streamedThreadUsage = codex.Usage{}
-			*streamedUsageContextWindow = 0
 		}
 
 		return updates
@@ -1196,34 +1172,27 @@ func usageFromCodex(usage codex.Usage) *acp.Usage {
 	return result
 }
 
-func usageUpdateFromCodex(usage codex.Usage) []acp.SessionUpdate {
-	return usageUpdateFromCodexContext(usage, codex.Usage{}, 0)
-}
-
 func tokenUsageUpdateFromCodex(usage codex.TokenUsage) []acp.SessionUpdate {
-	return usageUpdateFromCodexContext(usage.Last, usage.Total, usage.ModelContextWindow)
-}
-
-func usageUpdateFromCodexContext(usage codex.Usage, threadUsage codex.Usage, contextWindow int64) []acp.SessionUpdate {
-	acpUsage := usageFromCodex(usage)
+	acpUsage := usageFromCodex(usage.Last)
 	if acpUsage == nil {
 		return nil
 	}
 
-	used := acpUsage.TotalTokens
 	meta := map[string]any{
 		codexUsageMetaKey: usageMetaFromCodex(acpUsage),
 	}
 
-	if threadACPUsage := usageFromCodex(threadUsage); threadACPUsage != nil {
-		used = threadACPUsage.TotalTokens
+	if threadACPUsage := usageFromCodex(usage.Total); threadACPUsage != nil {
 		meta[codexThreadUsageMetaKey] = usageMetaFromCodex(threadACPUsage)
 	}
 
 	return []acp.SessionUpdate{{
 		UsageUpdate: &acp.SessionUsageUpdate{
-			Used: used,
-			Size: int(contextWindow),
+			// Context occupancy is the latest model request's usage. The
+			// cumulative thread usage includes repeated context across requests
+			// and belongs only in its own metadata above.
+			Used: acpUsage.TotalTokens,
+			Size: int(usage.ModelContextWindow),
 			Meta: map[string]any{
 				codexMetaKey: meta,
 			},

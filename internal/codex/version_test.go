@@ -133,7 +133,7 @@ func TestProbeVersionOrdinaryBackend(t *testing.T) {
 		CLIPath: script, ScratchParent: t.TempDir(), ImplicitEnvironment: map[string]string{"PATH": "/bin"},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "0.144.1", version)
+	require.Equal(t, "0.153.4", version)
 }
 
 func TestProbeVersionFailureBranches(t *testing.T) {
@@ -188,7 +188,7 @@ func TestProbeVersionSnapshotsAndJoinsPipesOnCancellation(t *testing.T) {
 	for _, settle := range []bool{true, false} {
 		t.Run(map[bool]string{true: "terminal retry", false: "incomplete retry"}[settle], func(t *testing.T) {
 			process := &snapshotVersionProcess{
-				stdin: &authorityTestWriteCloser{}, stdout: newPrefixBlockingReadCloser("codex-cli 0.144.1\n"),
+				stdin: &authorityTestWriteCloser{}, stdout: newPrefixBlockingReadCloser("codex-cli 0.153.4\n"),
 				stderr: newBlockingAuthorityReadCloser(), settleOnRevoke: settle,
 			}
 			host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
@@ -244,7 +244,7 @@ func (p *errorThenTerminalVersionProcess) Wait(context.Context) (NativeResult, e
 func TestProbeVersionPreservesInitialWaitErrorAfterTerminalRetry(t *testing.T) {
 	waitErr := errors.New("independent wait failure")
 	process := &errorThenTerminalVersionProcess{
-		authorityTestProcess: newAuthorityTestProcess("codex-cli 0.144.1\n"), err: waitErr,
+		authorityTestProcess: newAuthorityTestProcess("codex-cli 0.153.4\n"), err: waitErr,
 	}
 	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
 
@@ -257,7 +257,7 @@ func TestProbeVersionPreservesInitialWaitErrorAfterTerminalRetry(t *testing.T) {
 func TestProbeVersionPreservesStdinCloseFailure(t *testing.T) {
 	closeErr := errors.New("close version stdin")
 	hostProcess := &snapshotVersionProcess{
-		stdin: &errorVersionWriteCloser{err: closeErr}, stdout: newPrefixBlockingReadCloser("codex-cli 0.144.1\n"),
+		stdin: &errorVersionWriteCloser{err: closeErr}, stdout: newPrefixBlockingReadCloser("codex-cli 0.153.4\n"),
 		stderr: newBlockingAuthorityReadCloser(),
 	}
 	hostProcess.terminal.Store(true)

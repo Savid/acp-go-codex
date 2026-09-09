@@ -128,12 +128,12 @@ func (h *authorityTestHost) StartNative(_ context.Context, request NativeRequest
 }
 
 func TestManagedVersionProbeUsesOnlyHostAuthority(t *testing.T) {
-	process := newAuthorityTestProcess("codex-cli 0.144.1\n")
+	process := newAuthorityTestProcess("codex-cli 0.153.4\n")
 	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin", "HOME": "/host/home"}, process: process}
 
 	version, err := ProbeVersion(t.Context(), VersionProbeOptions{CLIPath: "host-pinned-codex", HostAuthority: host})
 	require.NoError(t, err)
-	require.Equal(t, "0.144.1", version)
+	require.Equal(t, "0.153.4", version)
 	require.Equal(t, []NativeRequest{{
 		Executable: "host-pinned-codex",
 		Arguments:  []string{"--version"},
@@ -166,7 +166,7 @@ func TestIncompleteManagedStdioIsRevokedAndWaited(t *testing.T) {
 	host := &authorityTestHost{environment: map[string]string{"PATH": "/host/bin"}, process: process}
 
 	transport, version, nativePath, err := launchAppServer(t.Context(), Options{
-		CLIPath: "host-pinned-codex", NativeVersion: "0.144.1", HostAuthority: host,
+		CLIPath: "host-pinned-codex", NativeVersion: "0.153.4", HostAuthority: host,
 	})
 	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
 	require.Nil(t, transport)

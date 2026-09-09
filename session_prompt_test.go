@@ -929,17 +929,21 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 	usageAgent := NewAgent()
 	usageConn := newRecordingAgentClient()
 	usageAgent.setAgentClient(usageConn)
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	rolloutContent := `{"type":"token_usage_record","payload":{"turn_id":"turn","turn_token_usage":{"input_tokens":857,"output_tokens":78,"reasoning_output_tokens":43,"total_tokens":935}}}` + "\n" +
+		`{"type":"token_usage_record","payload":{"turn_id":"turn","turn_token_usage":{"input_tokens":23000,"cached_input_tokens":6528,"output_tokens":400,"reasoning_output_tokens":200,"total_tokens":23400}}}` + "\n"
+	require.NoError(t, os.WriteFile(rollout, []byte(rolloutContent), 0o600))
 	usageSession := &session{
 		agent:         usageAgent,
 		id:            "usage",
 		cwd:           absTestPath("tmp", "project"),
 		codexThreadID: "thread",
+		rolloutPath:   rollout,
 		client: &runEventsClient{events: []codex.Event{
 			{
 				Kind:     codex.EventUsageUpdated,
 				ThreadID: "thread",
 				TurnID:   "turn",
-				Usage:    codex.Usage{InputTokens: 22143, CachedReadTokens: 6528, OutputTokens: 322, ReasoningOutputTokens: 157, TotalTokens: 22465},
 				TokenUsage: codex.TokenUsage{
 					Last:               codex.Usage{InputTokens: 22143, CachedReadTokens: 6528, OutputTokens: 322, ReasoningOutputTokens: 157, TotalTokens: 22465},
 					Total:              codex.Usage{InputTokens: 23000, CachedReadTokens: 6528, OutputTokens: 400, ReasoningOutputTokens: 200, TotalTokens: 23400},
@@ -950,18 +954,18 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 		}},
 	}
 	t.Cleanup(usageSession.fenceSession)
-	usageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "test-turn", "hi"))
+	usageResp, err := usageSession.Prompt(t.Context(), TextPromptRequest("usage", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("usage prompt returned error: %v", err)
 	}
 	if usageResp.Usage == nil ||
-		usageResp.Usage.InputTokens != 22143 ||
-		usageResp.Usage.OutputTokens != 322 ||
-		usageResp.Usage.TotalTokens != 22465 ||
+		usageResp.Usage.InputTokens != 23000 ||
+		usageResp.Usage.OutputTokens != 400 ||
+		usageResp.Usage.TotalTokens != 23400 ||
 		usageResp.Usage.CachedReadTokens == nil ||
 		*usageResp.Usage.CachedReadTokens != 6528 ||
 		usageResp.Usage.ThoughtTokens == nil ||
-		*usageResp.Usage.ThoughtTokens != 157 {
+		*usageResp.Usage.ThoughtTokens != 200 {
 		t.Fatalf("prompt usage = %#v", usageResp.Usage)
 	}
 	if len(usageConn.updates) != 1 || usageConn.updates[0].Update.UsageUpdate == nil {
@@ -970,7 +974,7 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 	usageUpdate := usageConn.updates[0].Update.UsageUpdate
 	codexMeta, _ := usageUpdate.Meta[codexMetaKey].(map[string]any)
 	usageMeta, _ := codexMeta[codexUsageMetaKey].(map[string]any)
-	if usageUpdate.Used != 23400 ||
+	if usageUpdate.Used != 22465 ||
 		usageUpdate.Size != 258400 ||
 		usageMeta[usageInputTokensKey] != 22143 ||
 		usageMeta[usageCachedReadTokensKey] != 6528 ||
@@ -980,12 +984,14 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 		t.Fatalf("usage update=%#v meta=%#v", usageUpdate, usageMeta)
 	}
 	threadUsageMeta, _ := codexMeta[codexThreadUsageMetaKey].(map[string]any)
-	if usageUpdate.Used != 23400 || threadUsageMeta[usageTotalTokensKey] != 23400 {
+	if usageUpdate.Used != 22465 || threadUsageMeta[usageTotalTokensKey] != 23400 {
 		t.Fatalf("thread usage update=%#v meta=%#v", usageUpdate, threadUsageMeta)
 	}
 
 	completedUsageConn := newRecordingAgentClient()
 	usageAgent.setAgentClient(completedUsageConn)
+	rolloutContent += `{"type":"token_usage_record","payload":{"turn_id":"turn-2","turn_token_usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}` + "\n"
+	require.NoError(t, os.WriteFile(rollout, []byte(rolloutContent), 0o600))
 	// Codex never reuses a turn id, and the settled "turn" above is tombstoned
 	// across the rebind, so the second prompt's native turn carries its own id:
 	// a frame for a tombstoned turn that no live cycle owns is dropped, and the
@@ -994,19 +1000,17 @@ func TestSessionPromptUsageUpdates(t *testing.T) {
 		Kind:     codex.EventCompleted,
 		ThreadID: "thread",
 		TurnID:   "turn-2",
-		Usage:    codex.Usage{InputTokens: 1, OutputTokens: 2},
 	}}}
 	require.NoError(t, usageSession.rebindNativeEvents(usageSession.client))
-	completedUsageResp, err := usageSession.Prompt(context.Background(), TextPromptRequest("usage", "test-turn", "hi"))
+	completedUsageResp, err := usageSession.Prompt(t.Context(), TextPromptRequest("usage", "test-turn", "hi"))
 	if err != nil {
 		t.Fatalf("completed usage prompt returned error: %v", err)
 	}
 	if completedUsageResp.Usage == nil || completedUsageResp.Usage.TotalTokens != 3 {
 		t.Fatalf("completed usage response = %#v", completedUsageResp.Usage)
 	}
-	if len(completedUsageConn.updates) != 1 || completedUsageConn.updates[0].Update.UsageUpdate == nil {
-		t.Fatalf("completed usage updates = %#v", completedUsageConn.updates)
-	}
+	require.Len(t, completedUsageConn.updates, 1)
+	require.Nil(t, completedUsageConn.updates[0].Update.UsageUpdate, "turn completion carries no context update")
 }
 
 func TestSandboxPolicyHelpers(t *testing.T) {
@@ -1154,10 +1158,10 @@ func TestEventUpdateEmptyAndFallbackBranches(t *testing.T) {
 		*usage.ThoughtTokens != 5 {
 		t.Fatal("usage mapping failed")
 	}
-	if updates := usageUpdateFromCodex(codex.Usage{}); updates != nil {
+	if updates := tokenUsageUpdateFromCodex(codex.TokenUsage{}); updates != nil {
 		t.Fatalf("zero usage update = %#v", updates)
 	}
-	updates := usageUpdateFromCodex(codex.Usage{InputTokens: 1, CachedWriteTokens: 2, OutputTokens: 3})
+	updates := tokenUsageUpdateFromCodex(codex.TokenUsage{Last: codex.Usage{InputTokens: 1, CachedWriteTokens: 2, OutputTokens: 3}})
 	if len(updates) != 1 {
 		t.Fatalf("usage update = %#v", updates)
 	}
@@ -1175,7 +1179,7 @@ func TestTokenUsageAndObserverBranches(t *testing.T) {
 		Total:              codex.Usage{InputTokens: 3, OutputTokens: 4},
 		ModelContextWindow: 100,
 	})
-	if len(tokenUpdates) != 1 || tokenUpdates[0].UsageUpdate.Used != 7 || tokenUpdates[0].UsageUpdate.Size != 100 {
+	if len(tokenUpdates) != 1 || tokenUpdates[0].UsageUpdate.Used != 3 || tokenUpdates[0].UsageUpdate.Size != 100 {
 		t.Fatalf("token usage update = %#v", tokenUpdates)
 	}
 	var streamedUsage codex.Usage

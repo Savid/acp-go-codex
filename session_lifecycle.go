@@ -2001,7 +2001,7 @@ func (s *session) handleAutonomousEvent(ctx context.Context, event codex.Event, 
 		return err
 	}
 
-	s.applyPromptUsage(event, state)
+	s.applyPromptCompletion(event, state)
 
 	if visible.Kind == codex.EventAgentMessageDelta && visible.Text != "" {
 		state.agentText.WriteString(visible.Text)

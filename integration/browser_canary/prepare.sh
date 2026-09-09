@@ -1,19 +1,19 @@
 #!/bin/sh
 set -eu
 
-version=0.146.0
+version=0.153.4
 case "$(uname -m)" in
   x86_64)
     archive=codex-x86_64-unknown-linux-musl.tar.gz
     member=codex-x86_64-unknown-linux-musl
-    archive_sha=5ba3b9405543953081f661d0854d266f76e2abbe51d41349355a36de7673776a
-    binary_sha=2e863156ed35ecc5253b1e2f907a9143077b9f7cb51942070c61996471ff6e04
+    archive_sha=f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30
+    binary_sha=56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da
     ;;
   aarch64|arm64)
     archive=codex-aarch64-unknown-linux-musl.tar.gz
     member=codex-aarch64-unknown-linux-musl
-    archive_sha=975bac91562abeedeb8f79636d51a86649b31f34a9de6a3bcb059565b6cf1f87
-    binary_sha=cb5e8cb8a333a408ce6adbe0d4fad1845c69772c2216af7c1f88c98a11460dc6
+    archive_sha=5cda6182bd94c3a30f2eb63a495489ebf7f691fddb14d70f48c6c1a5071b6cde
+    binary_sha=4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6
     ;;
   *)
     echo "unsupported browser-canary architecture: $(uname -m)" >&2
