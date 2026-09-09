@@ -2,8 +2,13 @@ package codexacp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+
+	"github.com/coder/acp-go-sdk"
 )
+
+const logRequestCancelled = "request_cancelled"
 
 func secretSafeLogger(logger *slog.Logger) *slog.Logger {
 	if logger == nil {
@@ -68,6 +73,18 @@ func secretSafeLogMessage(message string) string {
 func secretSafeLogAttr(attr slog.Attr) slog.Attr {
 	attr.Value = attr.Value.Resolve()
 	switch attr.Key {
+	case authFieldMethod:
+		if attr.Value.Kind() == slog.KindString {
+			switch attr.Value.String() {
+			case acp.AgentMethodSessionCancel, acp.AgentMethodSessionPrompt,
+				acp.AgentMethodSessionClose, acp.ClientMethodSessionUpdate, "$/cancel_request":
+				return attr
+			}
+		}
+	case "err", jsonFieldError:
+		if err, ok := attr.Value.Any().(error); ok {
+			return slog.String(attr.Key, secretSafeLogError(err))
+		}
 	case "capacity", "queued", "queue_len":
 		switch attr.Value.Kind() {
 		case slog.KindInt64, slog.KindUint64:
@@ -76,4 +93,34 @@ func secretSafeLogAttr(attr slog.Attr) slog.Attr {
 	}
 
 	return slog.String(attr.Key, valueInternalFailure)
+}
+
+func secretSafeLogError(err error) string {
+	var requestErr *acp.RequestError
+	if errors.As(err, &requestErr) && requestErr != nil {
+		switch requestErr.Code {
+		case -32700:
+			return "parse_error"
+		case -32600:
+			return "invalid_request"
+		case -32601:
+			return "method_not_found"
+		case -32602:
+			return "invalid_params"
+		case -32800:
+			return logRequestCancelled
+		case -32000:
+			return "authentication_required"
+		}
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return logRequestCancelled
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+
+	return valueInternalFailure
 }

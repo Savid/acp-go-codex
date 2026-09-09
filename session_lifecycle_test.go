@@ -1173,6 +1173,63 @@ func TestNativeCanaryBindingFailsClosedOnRebindAndQueueOverflow(t *testing.T) {
 	require.ErrorIs(t, s.bindNativeCanary(canary, "turn"), codex.ErrTurnEventOverflow)
 }
 
+func TestNativeEventRoutingToleratesTerminalTails(t *testing.T) {
+	for _, owner := range []string{"prompt", "canary"} {
+		for _, terminalKind := range []codex.EventKind{codex.EventCompleted, codex.EventError} {
+			for _, preBind := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/preBind=%t", owner, terminalKind, preBind), func(t *testing.T) {
+					s := &session{codexThreadID: "thread", nativeEventSource: true, nativeEventOpened: true}
+					var events <-chan codex.Event
+					var bind func() error
+
+					if owner == "canary" {
+						canary, err := s.beginNativeCanary()
+						require.NoError(t, err)
+						events = canary.events
+						bind = func() error { return s.bindNativeCanary(canary, "turn") }
+					} else {
+						in := &promptIncarnation{session: s, events: make(chan codex.Event, sessionNativeEventBuffer+1)}
+						s.incarnation = in
+						events = in.events
+						bind = func() error { return in.acceptNative(t.Context(), lifecycle.Submission{}, "turn") }
+					}
+
+					if !preBind {
+						require.NoError(t, bind())
+					}
+
+					terminal := codex.Event{
+						Kind: terminalKind, Scope: codex.EventScopeThread,
+						ThreadID: "thread", TurnID: "turn", StopReason: codex.StopReasonEndTurn,
+					}
+					if terminalKind == codex.EventError {
+						terminal.Err = errors.New("native turn failed")
+					}
+					require.NoError(t, s.routeNativeEvent(terminal))
+					for _, kind := range []codex.EventKind{codex.EventToolCompleted, codex.EventUsageUpdated} {
+						require.NoError(t, s.routeNativeEvent(codex.Event{
+							Kind: kind, Scope: codex.EventScopeThread, ThreadID: "thread", TurnID: "turn",
+						}))
+					}
+
+					if preBind {
+						require.NoError(t, bind())
+					}
+
+					require.Len(t, events, 1)
+					require.Equal(t, terminal, <-events)
+					select {
+					case _, open := <-events:
+						require.False(t, open)
+					default:
+						t.Fatal("native terminal did not close the consumer queue")
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestNativeEventPumpDrainsBarriersAndClassifiesUnexpectedStops(t *testing.T) {
 	t.Run("barrier drains and a contained stop stays clean", func(t *testing.T) {
 		s := &session{agent: NewAgent(), codexThreadID: "thread", nativeEventStopping: true}

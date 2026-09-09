@@ -22,28 +22,30 @@ const (
 // stream. The stream it references is the native app-server/thread incarnation
 // and is never rotated or fenced merely because this cycle ends.
 type promptIncarnation struct {
-	session      *session
-	stream       *lifecycle.Stream
-	cycleID      string
-	turnID       string
-	nativeTurnID string
-	turnNonce    string
-	autonomous   bool
-	accepted     bool
-	settled      bool
-	events       chan codex.Event
-	eventsClosed bool
-	preBind      []codex.Event
-	state        *promptEventState
-	cancelled    bool
-	terminating  *turnContainment
+	session        *session
+	stream         *lifecycle.Stream
+	cycleID        string
+	turnID         string
+	nativeTurnID   string
+	turnNonce      string
+	autonomous     bool
+	accepted       bool
+	settled        bool
+	events         chan codex.Event
+	eventsClosed   bool
+	nativeTerminal bool
+	preBind        []codex.Event
+	state          *promptEventState
+	cancelled      bool
+	terminating    *turnContainment
 }
 
 type nativeCanary struct {
-	turnID  string
-	events  chan codex.Event
-	closed  bool
-	preBind []codex.Event
+	turnID         string
+	events         chan codex.Event
+	closed         bool
+	nativeTerminal bool
+	preBind        []codex.Event
 }
 
 func (in *promptIncarnation) lifecycleActive() bool { return in != nil && in.stream != nil }
@@ -234,7 +236,7 @@ func (s *session) endNativeCanary(canary *nativeCanary) {
 
 func (s *session) enqueueCanaryEventLocked(canary *nativeCanary, event codex.Event) bool {
 	if canary.closed {
-		return false
+		return canary.nativeTerminal
 	}
 
 	if len(canary.events) == sessionNativeEventBuffer {
@@ -251,6 +253,7 @@ func (s *session) enqueueCanaryEventLocked(canary *nativeCanary, event codex.Eve
 	canary.events <- event
 
 	if event.Kind == codex.EventCompleted || event.Kind == codex.EventError {
+		canary.nativeTerminal = true
 		s.closeCanaryEventsLocked(canary)
 	}
 
@@ -1483,7 +1486,10 @@ func (s *session) deliverTurnlessWarningLocked(ctx context.Context, event codex.
 
 func (s *session) enqueuePromptEventLocked(in *promptIncarnation, event codex.Event) bool {
 	if in.eventsClosed {
-		return false
+		// Native turns may flush item completions and usage after their terminal,
+		// while this incarnation still owns durable settlement. Those exact-turn
+		// frames are already past the consumer's boundary, not a queue overflow.
+		return in.nativeTerminal
 	}
 
 	if len(in.events) == sessionNativeEventBuffer {
@@ -1500,6 +1506,7 @@ func (s *session) enqueuePromptEventLocked(in *promptIncarnation, event codex.Ev
 	in.events <- event
 
 	if event.Kind == codex.EventCompleted || event.Kind == codex.EventError {
+		in.nativeTerminal = true
 		s.closeCycleEventsLocked(in)
 	}
 
