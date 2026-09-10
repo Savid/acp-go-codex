@@ -20,6 +20,7 @@ type session struct {
 	additionalDirectories []string
 	codexThreadID         string
 	rolloutPath           string
+	initialRollout        bool
 	materializedPath      string
 	materializedRelease   func()
 	materializedBytes     int64

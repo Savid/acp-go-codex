@@ -7,6 +7,7 @@ import (
 	"maps"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const placeholderTurnID = "placeholder-turn"
@@ -61,6 +62,10 @@ func (c *PlaceholderClient) StartThread(ctx context.Context, req ThreadStartRequ
 		Model:     firstNonEmpty(req.Model, c.options.DefaultModel),
 		Provider:  valuePlaceholder,
 		Title:     "Codex placeholder session",
+		Raw: map[string]any{
+			"createdAt": time.Now().Unix(), "cliVersion": minCodexVersion,
+			fieldSource: "appServer", "historyMode": "paginated",
+		},
 	}
 	c.threads[id] = thread
 	c.streams[id] = newThreadStream(id)

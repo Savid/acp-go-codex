@@ -88,6 +88,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	session.fingerprint = codexSessionStartFingerprint(start)
 	session.setAccount(clientAccountMeta(ctx, client))
 
+	if err := session.initializeDurableThread(ctx, thread); err != nil {
+		return acp.NewSessionResponse{}, errors.Join(err, session.Close(context.WithoutCancel(ctx)))
+	}
+
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 

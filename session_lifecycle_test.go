@@ -3029,10 +3029,15 @@ func closeBoundaryFixture(t *testing.T, opts ...Option) (*Agent, *session, *reco
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 
-	created, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	cwd := t.TempDir()
+	thread, err := client.StartThread(t.Context(), codex.ThreadStartRequest{Cwd: cwd})
 	require.NoError(t, err)
+	id, err := newSessionID()
+	require.NoError(t, err)
+	session := newSession(agent, acp.SessionId(id), cwd, nil, thread, client, sessionMeta{}, nil)
+	require.NoError(t, agent.storeStartedSession(session))
 
-	return agent, agent.activeSession(created.SessionId), conn
+	return agent, session, conn
 }
 
 func cleanupSessionNativePumps(t *testing.T, agent *Agent) {

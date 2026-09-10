@@ -158,9 +158,8 @@ func TestPlaceholderSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSessions after close returned error: %v", err)
 	}
-	if len(listResp.Sessions) != 0 {
-		t.Fatalf("listed session absent from default store after logical release = %#v, want none", listResp.Sessions)
-	}
+	require.Len(t, listResp.Sessions, 1)
+	require.Equal(t, newResp.SessionId, listResp.Sessions[0].SessionId)
 }
 
 func TestACPConnectionStreamsPlaceholderUpdates(t *testing.T) {
@@ -722,6 +721,10 @@ func newSpyCodexClient() *spyCodexClient {
 			Provider:  "openai",
 			Title:     "Thread",
 			UpdatedAt: time.Unix(1, 0).UTC().Format(time.RFC3339),
+			Raw: map[string]any{
+				"createdAt": int64(1), "cliVersion": minSupportedCodexVersion,
+				"source": "appServer", "historyMode": "paginated",
+			},
 		},
 	}
 }
