@@ -125,7 +125,7 @@ func ownedConfigSection(parent map[string]any, key string, field string) (map[st
 
 // searchPathFromEnvironment reads the exact PATH out of the environment list
 // that was actually built for the app-server process, in either supervised or
-// direct launch mode. Ambient os.Getenv is never consulted.
+// direct launch mode. The process environment is never consulted.
 func searchPathFromEnvironment(entries []string) string {
 	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")

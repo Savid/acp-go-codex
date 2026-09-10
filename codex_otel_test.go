@@ -5,40 +5,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 func TestCodexOTELEffectiveEnvPrecedence(t *testing.T) {
-	original := osEnviron
-	t.Cleanup(func() { osEnviron = original })
-	osEnviron = func() []string {
-		return []string{
-			"OTEL_TRACES_EXPORTER=none",
-			"BASE=os",
-			"MALFORMED",
-			"=empty",
-		}
-	}
-
 	env := codexOTELEffectiveEnv(
+		map[string]string{"OTEL_TRACES_EXPORTER": "none", "BASE": "ambient", "AMBIENT": "ambient"},
 		map[string]string{"OTEL_TRACES_EXPORTER": "otlp", "BASE": "agent"},
 		map[string]string{"BASE": "session", "REQUEST": "session"},
 	)
-	if env["OTEL_TRACES_EXPORTER"] != "otlp" || env["BASE"] != "session" || env["REQUEST"] != "session" {
+	if env["OTEL_TRACES_EXPORTER"] != "otlp" || env["BASE"] != "session" || env["REQUEST"] != "session" || env["AMBIENT"] != "ambient" {
 		t.Fatalf("effective env = %#v", env)
-	}
-	if _, ok := env[""]; ok {
-		t.Fatalf("effective env kept empty key: %#v", env)
 	}
 }
 
 func TestAgentRuntimeClientMergesCodexOTELWithAgentEnv(t *testing.T) {
-	original := osEnviron
-	t.Cleanup(func() { osEnviron = original })
-	osEnviron = func() []string { return nil }
-
 	var gotOptions codex.Options
 	agent := NewAgent(
+		WithAmbientEnvironment(map[string]string{}),
 		WithEnv(map[string]string{
 			"OTEL_TRACES_EXPORTER":        "none",
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
@@ -102,4 +88,24 @@ func requireNotContainsAny(t *testing.T, value string, unwanted ...string) {
 			t.Fatalf("%q unexpectedly contained %q", value, item)
 		}
 	}
+}
+
+func TestCodexOTELConfigManagedModeReadsTheAuthorityEnvironment(t *testing.T) {
+	authority := authorityCoverageHost{
+		environment: func() map[string]string {
+			return map[string]string{"OTEL_TRACES_EXPORTER": "none", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://native:4318"}
+		},
+		prepare: func() error { return nil },
+		reclaim: func() error { return nil },
+		start:   func() (NativeProcess, error) { return nil, ErrHostAuthorityUnavailable },
+	}
+	agent := NewAgent(
+		WithHostAuthority(authority),
+		WithAmbientEnvironment(map[string]string{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "invalid"}),
+	)
+	require.NoError(t, agent.optionsErr)
+
+	config, err := agent.codexOTELConfig(nil)
+	require.NoError(t, err, "the ambient block must not reach managed telemetry")
+	requireContainsAll(t, strings.Join(config.ExtraArgs, " "), `endpoint = "http://native:4318/v1/metrics"`)
 }

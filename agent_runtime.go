@@ -30,7 +30,6 @@ var runtimeNativeTreeTimeout = 5 * time.Second
 
 var runtimeReadyDeadline = 2 * time.Minute
 var runtimeRandRead = rand.Read
-var runtimeUserHomeDir = os.UserHomeDir
 var runtimeRemoveAll = os.RemoveAll
 var runtimeStat = os.Stat
 var runtimeProbeCodexVersion = codex.ProbeVersion

@@ -733,7 +733,7 @@ func TestResolvedCodexHomePrecedence(t *testing.T) {
 	require.Equal(t, filepath.Clean("/env-home"), agent.resolvedCodexHomeForEnv(map[string]string{"CODEX_HOME": "/env-home/"}))
 	require.Equal(t, filepath.Clean("/process-home"), agent.resolvedCodexHomeForEnv(map[string]string{"CODEX_HOME": ""}))
 
-	home, err := runtimeUserHomeDir()
+	home, err := adapterHomeDir()
 	require.NoError(t, err)
 	t.Setenv("CODEX_HOME", "")
 	require.Equal(t, filepath.Clean("/process-home"), agent.resolvedCodexHomeForEnv(nil), "the agent must retain its captured environment")

@@ -54,6 +54,7 @@ unavailable authority; omitting the option selects ordinary execution.
 | `WithHostAuthority(authority)` | Select host-managed native execution and prepared-tree ownership. |
 | `WithDefaultModel(model)` | Default model preference for new sessions. |
 | `WithEnv(env)` | Process environment overrides. `CODEX_HOME`, `HOME`, and the XDG roots are refused under the platform identity. Names follow the session `env` rule with `PATH` allowed: a key is non-empty and free of `=` and NUL, the value is free of NUL, the injection names `NODE_OPTIONS`, `BASH_ENV`, `ENV`, and any `LD_` or `DYLD_` prefix are refused under the platform identity, the private adapter namespace is refused under every spelling, and two spellings of one Windows variable are refused; a refusal fails Agent construction. |
+| `WithAmbientEnvironment(env)` | Replaces the adapter's own process environment as the block ordinary execution inherits from. The same private-marker filtering applies to it, `WithEnv` overlays it, and a supplied map is folded in sorted key order. Nil inherits from the adapter's process, whose missing `HOME` falls back to the adapter account's home for the default `CODEX_HOME`; an empty map inherits nothing. An entry that could not be an environment entry fails Agent construction. Every mode validates it; managed execution reads nothing from it. |
 | `WithLogger(logger)` | Structured adapter diagnostics. |
 | `WithSessionStore(store)` | Replace the default in-memory rollout store. |
 | `WithSessionStoreLoadTimeout(d)` | Bound store-backed load and list operations. |

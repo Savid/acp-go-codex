@@ -75,7 +75,7 @@ func TestRunAccountCommandOrdinaryBackend(t *testing.T) {
 	close(closedSignals)
 	requireAccountLoginOutcome(t, RunAccountCommand(t.Context(), AccountCommandOptions{
 		CLIPath: script, CodexHome: t.TempDir(), Mode: accountCommandLogin, DeviceAuth: true,
-		Signals: closedSignals,
+		Signals: closedSignals, ImplicitEnvironment: environmentMap(os.Environ()),
 	}), logPath)
 }
 

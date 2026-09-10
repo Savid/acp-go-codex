@@ -79,11 +79,11 @@ func TestOptionsSetters(t *testing.T) {
 
 func TestCaptureAmbientEnvironmentFallsBackToUserHome(t *testing.T) {
 	t.Setenv(managedHomeEnv, "")
-	original := runtimeUserHomeDir
-	runtimeUserHomeDir = func() (string, error) { return "/fallback/home", nil }
-	t.Cleanup(func() { runtimeUserHomeDir = original })
+	original := adapterHomeDir
+	adapterHomeDir = func() (string, error) { return "/fallback/home", nil }
+	t.Cleanup(func() { adapterHomeDir = original })
 
-	environment := captureAmbientEnvironment()
+	environment := ambientEnvironmentSnapshot(Options{})
 	if environment[managedHomeEnv] != "/fallback/home" {
 		t.Fatalf("HOME = %q", environment[managedHomeEnv])
 	}

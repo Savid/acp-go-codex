@@ -2,40 +2,24 @@ package codexacp
 
 import (
 	"maps"
-	"os"
-	"strings"
 
 	"github.com/savid/acp-go-codex/internal/codex"
 )
 
-var osEnviron = os.Environ
-
 func (a *Agent) codexOTELConfig(envOverlay map[string]string) (codex.OTELConfig, error) {
-	return codex.OTELConfigFromEnv(codexOTELEffectiveEnv(a.options.Env, envOverlay))
-}
-
-func codexOTELEffectiveEnv(agentEnv map[string]string, sessionEnv map[string]string) map[string]string {
-	env := envMapFromEnviron(osEnviron())
-	overlayStringMap(env, agentEnv)
-	overlayStringMap(env, sessionEnv)
-
-	return env
-}
-
-func envMapFromEnviron(environ []string) map[string]string {
-	env := make(map[string]string, len(environ))
-	for _, entry := range environ {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || key == "" {
-			continue
-		}
-
-		env[key] = value
+	base := a.options.implicitEnvironment
+	if a.options.HostAuthority != nil {
+		base = a.options.HostAuthority.NativeEnvironment()
 	}
 
-	return env
+	return codex.OTELConfigFromEnv(codexOTELEffectiveEnv(base, a.options.Env, envOverlay))
 }
 
-func overlayStringMap(base map[string]string, overlay map[string]string) {
-	maps.Copy(base, overlay)
+func codexOTELEffectiveEnv(ambient, agentEnv, sessionEnv map[string]string) map[string]string {
+	env := make(map[string]string, len(ambient)+len(agentEnv)+len(sessionEnv))
+	maps.Copy(env, ambient)
+	maps.Copy(env, agentEnv)
+	maps.Copy(env, sessionEnv)
+
+	return env
 }

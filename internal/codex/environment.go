@@ -23,7 +23,6 @@ const (
 )
 
 var processGOOS = runtime.GOOS
-var processEnviron = os.Environ
 var ordinaryExecutableAbs = filepath.Abs
 
 func validateEnvironmentMap(environment map[string]string) error {
@@ -69,10 +68,6 @@ func environmentList(values map[string]string) []string {
 }
 
 func buildProcessEnvironmentFrom(base map[string]string, overlays ...map[string]string) ([]string, error) {
-	if base == nil {
-		base = captureProcessEnvironment()
-	}
-
 	values := make(map[string]string, len(base))
 
 	for _, overlay := range append([]map[string]string{base}, overlays...) {
@@ -101,8 +96,6 @@ func buildProcessEnvironmentFrom(base map[string]string, overlays ...map[string]
 func privateProcessEnvironmentKey(key string) bool {
 	return strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix)
 }
-
-func captureProcessEnvironment() map[string]string { return environmentMap(processEnviron()) }
 
 func withoutManagedRootOverrides(environment map[string]string) map[string]string {
 	filtered := make(map[string]string, len(environment))

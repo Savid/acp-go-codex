@@ -11,11 +11,8 @@ import (
 func TestEnvironmentCoverageEdges(t *testing.T) {
 	require.Error(t, validateEnvironmentMap(nil))
 
-	originalEnviron := processEnviron
-	processEnviron = func() []string { return []string{"B=2", "A=1", privateAdapterEnvPrefix + "SECRET=x"} }
-	t.Cleanup(func() { processEnviron = originalEnviron })
-
-	environment, err := buildProcessEnvironmentFrom(nil, nil, map[string]string{"A": "overlaid"})
+	environment, err := buildProcessEnvironmentFrom(
+		map[string]string{"B": "2", "A": "1", privateAdapterEnvPrefix + "SECRET": "x"}, nil, map[string]string{"A": "overlaid"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"A=overlaid", "B=2"}, environment)
 

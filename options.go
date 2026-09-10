@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"maps"
-	"os"
 	"strings"
 	"time"
 
@@ -59,6 +58,11 @@ type Options struct {
 	// Env is merged into launched Codex process environments. Managed config
 	// and identity root variables are rejected.
 	Env map[string]string
+	// AmbientEnvironment replaces the adapter's own process environment as the
+	// block ordinary execution inherits from. Its names are judged exactly as
+	// inherited names are; WithEnv and session environments overlay it. Nil
+	// inherits from the adapter's process. Managed execution never reads it.
+	AmbientEnvironment map[string]string
 	// HostAuthority delegates managed native execution and tree ownership to the
 	// embedding host. Nil runs Codex as the adapter's current identity.
 	HostAuthority HostAuthority
@@ -129,7 +133,6 @@ func applyOptions(opts []Option) Options {
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
 		ImageLimits:             defaultImageLimits(),
-		implicitEnvironment:     captureAmbientEnvironment(),
 		clientFactory: func(ctx context.Context, options codex.Options) (codex.Client, error) {
 			return codex.NewAppServerClient(ctx, options)
 		},
@@ -139,21 +142,27 @@ func applyOptions(opts []Option) Options {
 		opt(&options)
 	}
 
+	options.implicitEnvironment = ambientEnvironmentSnapshot(options)
+
 	return options
 }
 
-func captureAmbientEnvironment() map[string]string {
+// ambientEnvironmentSnapshot folds the ambient block once, at construction.
+// Codex derives its default CODEX_HOME from HOME, so the adapter's own process
+// environment falls back to the account's home directory when it names none. A
+// supplied block is taken as given.
+func ambientEnvironmentSnapshot(options Options) map[string]string {
 	environment := make(map[string]string)
 
-	for _, entry := range os.Environ() {
+	for _, entry := range ambientEnvironmentEntries(options) {
 		key, value, ok := strings.Cut(entry, "=")
 		if ok && key != "" {
 			environment[key] = value
 		}
 	}
 
-	if environment[managedHomeEnv] == "" {
-		if home, err := runtimeUserHomeDir(); err == nil && home != "" {
+	if options.AmbientEnvironment == nil && environment[managedHomeEnv] == "" {
+		if home, err := adapterHomeDir(); err == nil && home != "" {
 			environment[managedHomeEnv] = home
 		}
 	}
@@ -291,6 +300,16 @@ func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = make(map[string]string, len(env))
 		maps.Copy(options.Env, env)
+	}
+}
+
+// WithAmbientEnvironment supplies the block ordinary execution inherits from in
+// place of the adapter's own process environment. Entries are filtered like
+// inherited entries; an entry that could not be an environment entry fails
+// Agent construction. Managed execution reads nothing from it.
+func WithAmbientEnvironment(env map[string]string) Option {
+	return func(options *Options) {
+		options.AmbientEnvironment = cloneStringMap(env)
 	}
 }
 

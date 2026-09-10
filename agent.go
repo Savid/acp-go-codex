@@ -208,6 +208,7 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	optionsErr = errors.Join(optionsErr, validateAgentEnv(options.Env))
+	optionsErr = errors.Join(optionsErr, validateAmbientEnvironment(options.AmbientEnvironment))
 	optionsErr = errors.Join(optionsErr, validateImageLimits(options.ImageLimits))
 	optionsErr = errors.Join(optionsErr, validateInputHandoffRoot(options.InputHandoffRoot))
 	optionsErr = errors.Join(optionsErr, validateProviderAuthOptions(options))
