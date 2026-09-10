@@ -170,7 +170,10 @@ func (c *runtimeRecordingClient) StartThread(_ context.Context, req codex.Thread
 	c.starts = append(c.starts, req)
 	id := "thread-" + string(rune('1'+len(c.starts)-1))
 
-	return codex.Thread{ID: id, Cwd: req.Cwd, Model: req.Model}, nil
+	thread := c.thread
+	thread.ID, thread.SessionID, thread.Cwd, thread.Model = id, id, req.Cwd, req.Model
+
+	return thread, nil
 }
 
 func (c *runtimeRecordingClient) ResumeThread(_ context.Context, req codex.ThreadResumeRequest) (codex.Thread, error) {

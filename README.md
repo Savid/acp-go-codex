@@ -115,6 +115,8 @@ ChatGPT token refresh, guarded logout, and OpenTelemetry providers.
   listed, loaded, or resumed without those rows. A session the current
   app-server does not own is restored by making its stored rows resident in
   `CODEX_HOME` the way Codex writes them itself, then resuming by thread id.
+  New sessions persist their native initialization before returning, so an empty
+  session can be resumed after restart without sending a prompt.
 - One shared `codex app-server` per Agent, whose loss fences a runtime
   generation rather than the Agent: the next explicit operation starts exactly
   one replacement and rebinds through it.

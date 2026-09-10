@@ -370,7 +370,14 @@ func (s *session) commitRolloutEntries(
 		return err
 	}
 
-	if err := appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, entries); err != nil {
+	var err error
+	if s.initialRollout {
+		err = s.replaceInitialRollout(ctx, store, entries)
+	} else {
+		err = appendRolloutEntries(ctx, store, SessionKey{SessionID: string(s.id)}, entries)
+	}
+
+	if err != nil {
 		s.unsyncedEntries = entries
 		s.unsyncedRow = nextRow
 
@@ -379,6 +386,7 @@ func (s *session) commitRolloutEntries(
 
 	s.unsyncedEntries = nil
 	s.unsyncedRow = 0
+	s.initialRollout = false
 
 	if nextRow > s.mirroredRows {
 		s.mirroredRows = nextRow
