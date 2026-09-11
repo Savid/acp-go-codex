@@ -7,12 +7,9 @@ import (
 )
 
 func (a *Agent) codexOTELConfig(envOverlay map[string]string) (codex.OTELConfig, error) {
-	base := a.options.implicitEnvironment
-	if a.options.HostAuthority != nil {
-		base = a.options.HostAuthority.NativeEnvironment()
-	}
-
-	return codex.OTELConfigFromEnv(codexOTELEffectiveEnv(base, a.options.Env, envOverlay))
+	return codex.OTELConfigFromEnv(
+		codexOTELEffectiveEnv(a.nativeAmbientEnvironment(), a.options.Env, envOverlay),
+	)
 }
 
 func codexOTELEffectiveEnv(ambient, agentEnv, sessionEnv map[string]string) map[string]string {

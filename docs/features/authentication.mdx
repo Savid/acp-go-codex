@@ -22,6 +22,13 @@ and applies the same reserved-name checks. The embedding host decides which
 credential variables enter that environment; the adapter never restores a
 value withheld by host policy.
 
+`CODEX_API_KEY` in that environment signs Codex's requests on its own, and
+`account/read` reports no account for it. It is therefore the one credential
+the adapter recognises from the environment, and the
+[model menu](models-config#model-menu) treats it as authentication. A value
+named in the configured environment wins over an inherited one, empty included,
+so blanking the name withdraws an inherited key.
+
 ## Terminal login
 
 The `login` and `logout` subcommands delegate to `codex`:

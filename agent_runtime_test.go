@@ -886,9 +886,9 @@ func TestRuntimeFocusedErrorAndOwnershipBranches(t *testing.T) {
 	require.Equal(t, filepath.Join("/native/home", ".codex"), NewAgent(WithHostAuthority(authority)).resolvedCodexHomeForEnv(nil))
 	emptyAuthority := authority
 	emptyAuthority.environment = func() map[string]string { return map[string]string{} }
-	emptyHome := NewAgent(WithHostAuthority(emptyAuthority))
-	emptyHome.options.implicitEnvironment = map[string]string{}
-	require.Empty(t, emptyHome.resolvedCodexHomeForEnv(nil))
+	emptyHome := NewAgent(WithHostAuthority(emptyAuthority), WithAmbientEnvironment(map[string]string{"HOME": "/ambient/home"}))
+	require.Empty(t, emptyHome.resolvedCodexHomeForEnv(nil),
+		"managed execution resolves no home from the ambient block")
 
 	peerAgent := NewAgent()
 	peerClient := newSpyCodexClient()

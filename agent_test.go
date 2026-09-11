@@ -692,6 +692,11 @@ type spyCodexClient struct {
 	deletedThreads []string
 	feeds          map[string]chan codex.Event
 
+	account  codex.Account
+	route    codex.ProviderRoute
+	routeErr error
+	routeCwd string
+
 	rateLimits      codex.RateLimitSnapshot
 	rateLimitsErr   error
 	rateLimitsReads int
@@ -714,6 +719,14 @@ func (c *spyCodexClient) TerminateBackgroundTerminal(
 func newSpyCodexClient() *spyCodexClient {
 	return &spyCodexClient{
 		feeds: make(map[string]chan codex.Event),
+		account: codex.Account{
+			ID:       "acct",
+			Email:    "user@example.com",
+			PlanType: "plus",
+			AuthMode: codex.AuthModeChatGPT,
+			Raw:      map[string]any{"accessToken": "secret"},
+		},
+		route: codex.ProviderRoute{ProviderID: "openai"},
 		thread: codex.Thread{
 			ID:        "thread-1",
 			SessionID: "thread-1",
@@ -918,7 +931,40 @@ func (c *spyCodexClient) ModelList(context.Context) ([]codex.Model, error) {
 }
 
 func (c *spyCodexClient) AccountRead(context.Context) (codex.Account, error) {
-	return codex.Account{ID: "acct", Email: "user@example.com", PlanType: "plus", Raw: map[string]any{"accessToken": "secret"}}, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.account, nil
+}
+
+func (c *spyCodexClient) ReadProviderRoute(_ context.Context, cwd string) (codex.ProviderRoute, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.routeCwd = cwd
+
+	return c.route, c.routeErr
+}
+
+func (c *spyCodexClient) routeCwdSnapshot() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.routeCwd
+}
+
+func (c *spyCodexClient) setRoute(route codex.ProviderRoute, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.route, c.routeErr = route, err
+}
+
+func (c *spyCodexClient) setAccount(account codex.Account) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.account = account
 }
 
 func (c *spyCodexClient) ReadRateLimits(context.Context) (codex.RateLimitSnapshot, error) {
@@ -939,8 +985,14 @@ func (c *spyCodexClient) LoginWithChatGPTTokens(_ context.Context, tokens codex.
 	return nil
 }
 
+// Logout leaves the client reporting no account, as a signed-out app-server
+// does. A caller that verifies the removal reads that answer back.
 func (c *spyCodexClient) Logout(context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.loggedOut = true
+	c.account = codex.Account{}
 
 	return nil
 }
@@ -1300,12 +1352,15 @@ func (c *errorCodexClient) ModelList(ctx context.Context) ([]codex.Model, error)
 	return c.spyCodexClient.ModelList(ctx)
 }
 
+// AccountRead answers with the account beside the failure, so a caller that
+// ignores the error cannot be mistaken for one that honours it.
 func (c *errorCodexClient) AccountRead(ctx context.Context) (codex.Account, error) {
+	account, err := c.spyCodexClient.AccountRead(ctx)
 	if c.accountErr != nil {
-		return codex.Account{}, c.accountErr
+		return account, c.accountErr
 	}
 
-	return c.spyCodexClient.AccountRead(ctx)
+	return account, err
 }
 
 func (c *errorCodexClient) LoginWithChatGPTTokens(ctx context.Context, tokens codex.ChatGPTAuthTokens) error {
@@ -1417,6 +1472,14 @@ func TestMain(m *testing.M) {
 			runFakeCodexAppServer()
 			os.Exit(0)
 		}
+	}
+
+	// The model menu treats a Codex credential in the adapter's own environment
+	// as authentication, so the operator's shell would otherwise decide what a
+	// signed-out session advertises.
+	if err := os.Unsetenv(nativeAuthEnvAPIKey); err != nil {
+		fmt.Fprintln(os.Stderr, "clear inherited Codex credential:", err)
+		os.Exit(1)
 	}
 
 	// A restored session is made resident in the app-server's own CODEX_HOME, so
@@ -1715,4 +1778,11 @@ func TestInitializeRejectsGlobalShellEnvironmentPolicyOverrides(t *testing.T) {
 	if _, err := agent.Initialize(ctx, acp.InitializeRequest{}); err != nil {
 		t.Fatalf("Initialize rejected an unreserved config root: %v", err)
 	}
+}
+
+// routelessCodexClient is a client that cannot say where its requests go.
+// Embedding the interface rather than the double promotes only what a client
+// must implement, and the route reader is not part of that.
+type routelessCodexClient struct {
+	codex.Client
 }

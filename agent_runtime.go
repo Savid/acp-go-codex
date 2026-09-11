@@ -943,6 +943,10 @@ func (a *Agent) resolvedCodexHomeForEnv(env map[string]string) string {
 		if home := native["HOME"]; home != "" {
 			return filepath.Join(home, ".codex")
 		}
+
+		// Managed execution takes its home from the authority alone; the ambient
+		// block is not consulted for it.
+		return ""
 	}
 
 	if value := a.options.implicitEnvironment["CODEX_HOME"]; value != "" {

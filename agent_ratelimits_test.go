@@ -18,7 +18,7 @@ type quotaCodexClient struct {
 	*spyCodexClient
 	quotaMu   sync.Mutex
 	account   codex.Account
-	config    codex.RateLimitsContext
+	config    codex.ProviderRoute
 	configErr error
 	started   chan struct{}
 	release   chan struct{}
@@ -32,7 +32,7 @@ func (c *quotaCodexClient) AccountRead(context.Context) (codex.Account, error) {
 	return c.account, nil
 }
 
-func (c *quotaCodexClient) ReadRateLimitsContext(_ context.Context, cwd string) (codex.RateLimitsContext, error) {
+func (c *quotaCodexClient) ReadProviderRoute(_ context.Context, cwd string) (codex.ProviderRoute, error) {
 	c.quotaMu.Lock()
 	defer c.quotaMu.Unlock()
 	c.cwd = cwd
@@ -57,7 +57,7 @@ func newQuotaCodexAgent(t *testing.T) (*Agent, *quotaCodexClient) {
 	t.Helper()
 	client := &quotaCodexClient{spyCodexClient: newSpyCodexClient(),
 		account: codex.Account{ID: "account-1", AuthMode: codex.AuthModeChatGPT},
-		config:  codex.RateLimitsContext{ProviderID: "openai"}}
+		config:  codex.ProviderRoute{ProviderID: "openai"}}
 	client.rateLimits = codex.RateLimitSnapshot{AccountID: "account-1", ObservedAt: time.Now().UTC(), Pools: []codex.RateLimitPool{
 		{ID: "codex", PlanType: "pro", Windows: []codex.RateLimitWindow{{ID: "primary", UsedPercent: 0, DurationSeconds: new(int64(604800))}}},
 		{ID: "spark", Label: "Spark", Windows: []codex.RateLimitWindow{{ID: "primary", UsedPercent: 125}}},
@@ -350,12 +350,12 @@ func (c *failingQuotaReadClient) AccountRead(ctx context.Context) (codex.Account
 	return c.quotaCodexClient.AccountRead(ctx)
 }
 
-func (c *failingQuotaReadClient) ReadRateLimitsContext(ctx context.Context, cwd string) (codex.RateLimitsContext, error) {
+func (c *failingQuotaReadClient) ReadProviderRoute(ctx context.Context, cwd string) (codex.ProviderRoute, error) {
 	if err := c.waitForQuotaFailure(ctx); err != nil {
-		return codex.RateLimitsContext{}, err
+		return codex.ProviderRoute{}, err
 	}
 
-	return c.quotaCodexClient.ReadRateLimitsContext(ctx, cwd)
+	return c.quotaCodexClient.ReadProviderRoute(ctx, cwd)
 }
 
 func (c *failingQuotaReadClient) ReadRateLimits(ctx context.Context) (codex.RateLimitSnapshot, error) {

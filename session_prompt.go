@@ -71,7 +71,11 @@ func (s *session) preparePromptInput(ctx context.Context, blocks []acp.ContentBl
 		return nil, nil, s.mapTurnFailure(fmt.Errorf("%w: %w", codex.ErrConnectionClosed, err))
 	}
 
+	// The gate reads the same catalog the menu publishes, so it has to withhold
+	// on the same terms: a catalog that does not describe this session cannot
+	// refuse a prompt for it either.
 	if len(images) > 0 &&
+		s.agent.nativeModelCatalog(ctx, s.client, s.currentProvider(), s.cwd) &&
 		selectedModelImageSupport(modelList(ctx, s.client), s.currentModel()) == imageInputUnsupported {
 		imageErr = &promptImageError{
 			code:  imageErrorUnsupportedByModel,

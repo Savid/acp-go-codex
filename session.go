@@ -624,6 +624,13 @@ func (s *session) currentModel() string {
 	return s.model
 }
 
+func (s *session) currentProvider() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.modelProvider
+}
+
 func (s *session) snapshot() sessionSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"testing"
 
@@ -323,7 +324,7 @@ func TestMeasuredNativeEffortIsAcceptedAtTheDoor(t *testing.T) {
 		// After a completed turn the advertised effort is still the sent one.
 		session := agent.activeSession(resp.SessionId)
 		require.NotNil(t, session)
-		requireConfigCurrentValue(t, sessionConfigOptions(session, nil), configEffort, unknown)
+		requireConfigCurrentValue(t, agent.sessionConfigOptions(ctx, session, nil), configEffort, unknown)
 	})
 
 	// The same door, driven with the option native does serde-check. Without
@@ -499,7 +500,7 @@ func TestCodexConfigOptionsExposeModelCatalogAndEffort(t *testing.T) {
 		Raw: map[string]any{"displayName": "GPT-5.5"},
 	}}
 
-	options := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models)
+	options := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, true)
 	if len(options) != 3 {
 		t.Fatalf("config options = %#v", options)
 	}
@@ -538,7 +539,7 @@ func TestCodexConfigOptionsEdgeBranches(t *testing.T) {
 		{ID: "gpt-a", Name: "duplicate"},
 	}
 
-	options := codexConfigOptions("custom-model", "", "", "priority", "friendly", models)
+	options := codexConfigOptions("custom-model", "", "", "priority", "friendly", models, true)
 	if len(options) != 4 {
 		t.Fatalf("config options = %#v", options)
 	}
@@ -681,4 +682,322 @@ func TestUnstableConfigOptionMapping(t *testing.T) {
 	if unstableConfigOption(acp.SessionConfigOption{}).Select != nil {
 		t.Fatal("empty unstableConfigOption produced select")
 	}
+}
+
+// TestNativeModelMenuFollowsRoutingAndLogin pins the catalog rule: `model/list`
+// reports the presets the Codex build ships, so the adapter publishes them only
+// for a session whose requests actually reach OpenAI's own endpoint under a
+// credential. Otherwise the menu carries the session's current model alone —
+// the one id such a session can use.
+func TestNativeModelMenuFollowsRoutingAndLogin(t *testing.T) {
+	const gatewayModel = "opencode-go/qwen3.8-flash"
+
+	presets := []acp.SessionConfigValueId{"gpt-initial", "gpt-other", gatewayModel}
+	configuredOnly := []acp.SessionConfigValueId{gatewayModel}
+
+	for _, tc := range []struct {
+		name     string
+		provider string
+		route    codex.ProviderRoute
+		routeErr error
+		account  codex.Account
+		ambient  map[string]string
+		options  []Option
+		want     []acp.SessionConfigValueId
+	}{
+		{
+			name:    "routed to openai under a subscription account",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			account: codex.Account{AuthMode: codex.AuthModeChatGPT},
+			want:    presets,
+		},
+		{
+			name:    "routed to openai under a stored API key",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			account: codex.Account{AuthMode: codex.AuthModeAPIKey},
+			want:    presets,
+		},
+		{
+			// Codex signs requests with this variable and reports no account
+			// for it, so the environment is the only place it is visible.
+			name:    "routed to openai under an environment key",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			ambient: map[string]string{nativeAuthEnvAPIKey: "sk-test"},
+			want:    presets,
+		},
+		{
+			name:    "routed to openai under a launch-block key",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			options: []Option{WithEnv(map[string]string{nativeAuthEnvAPIKey: "sk-test"})},
+			want:    presets,
+		},
+		{
+			// The launch block is applied over the ambient one, so an entry it
+			// names withdraws the inherited value it blanks.
+			name:    "environment key withdrawn by the launch block",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			ambient: map[string]string{nativeAuthEnvAPIKey: "sk-inherited"},
+			options: []Option{WithEnv(map[string]string{nativeAuthEnvAPIKey: ""})},
+			want:    configuredOnly,
+		},
+		{
+			// Codex sends no authorization header for this variable, so it
+			// signs nothing.
+			name:    "routed to openai with only an agent identity token",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			ambient: map[string]string{"CODEX_ACCESS_TOKEN": "tok"},
+			want:    configuredOnly,
+		},
+		{
+			name:  "routed to openai and signed out",
+			route: codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			want:  configuredOnly,
+		},
+		{
+			// OPENAI_API_KEY does not authenticate native Codex requests.
+			name:    "routed to openai with only OPENAI_API_KEY",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			ambient: map[string]string{"OPENAI_API_KEY": "sk-unrelated"},
+			want:    configuredOnly,
+		},
+		{
+			name:    "routed to a gateway provider",
+			route:   codex.ProviderRoute{ProviderID: "omp"},
+			account: codex.Account{AuthMode: codex.AuthModeChatGPT},
+			want:    configuredOnly,
+		},
+		{
+			// An endpoint override keeps the provider id and changes where its
+			// requests land, which is what Custom reports.
+			name:    "routed to openai at another endpoint",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI, Custom: true},
+			account: codex.Account{AuthMode: codex.AuthModeChatGPT},
+			want:    configuredOnly,
+		},
+		{
+			name:    "account that does not sign OpenAI requests",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			account: codex.Account{AuthMode: "amazonBedrock"},
+			want:    configuredOnly,
+		},
+		{
+			name:     "route the app-server will not report",
+			route:    codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			routeErr: errors.New("config"),
+			account:  codex.Account{AuthMode: codex.AuthModeChatGPT},
+			want:     configuredOnly,
+		},
+		{
+			// An OPENAI_BASE_URL in the app-server's environment moves no
+			// request, so it must not withdraw the presets.
+			name:    "environment base URL that routes nothing",
+			route:   codex.ProviderRoute{ProviderID: authProviderOpenAI, EnvironmentBaseURL: true},
+			account: codex.Account{AuthMode: codex.AuthModeChatGPT},
+			want:    presets,
+		},
+		{
+			// The thread carries the provider it started on; the workspace
+			// carries the one a turn started now would use. Either withdraws.
+			name:     "thread started on a gateway provider",
+			provider: "omp",
+			route:    codex.ProviderRoute{ProviderID: authProviderOpenAI},
+			account:  codex.Account{AuthMode: codex.AuthModeChatGPT},
+			want:     configuredOnly,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			client := newSpyCodexClient()
+			client.thread.Provider = firstNonEmpty(tc.provider, authProviderOpenAI)
+			client.setRoute(tc.route, tc.routeErr)
+			client.setAccount(tc.account)
+
+			// The adapter's own process environment can carry a Codex
+			// credential, so the case declares the whole ambient block rather
+			// than adding to the operator's.
+			ambient := map[string]string{"HOME": t.TempDir()}
+			maps.Copy(ambient, tc.ambient)
+			agent := NewAgent(append(
+				[]Option{
+					withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
+						return client, nil
+					}),
+					WithAmbientEnvironment(ambient),
+				},
+				tc.options...,
+			)...)
+
+			cwd := absTestPath("tmp", "project")
+			resp, err := agent.NewSession(ctx, NewSessionRequest(
+				cwd,
+				WithSessionCodexOptions(CodexOptions{Model: gatewayModel}),
+			))
+			require.NoError(t, err)
+
+			require.Equal(t, tc.want, configOptionValueIDs(t, resp.ConfigOptions, configModel))
+			requireConfigCurrentValue(t, resp.ConfigOptions, configModel, gatewayModel)
+			if tc.provider == "" {
+				require.Equal(t, cwd, client.routeCwdSnapshot(),
+					"the route is workspace-scoped and must be read for the session's own")
+			}
+		})
+	}
+}
+
+// TestSuppressedNativeCatalogAlsoWithdrawsItsEffortMenu pins that the presets
+// are trusted as a whole: a gateway model id that collides with a preset must
+// not inherit the preset's reasoning-effort levels or its metadata.
+func TestSuppressedNativeCatalogAlsoWithdrawsItsEffortMenu(t *testing.T) {
+	models := []codex.Model{{
+		ID:                     "gpt-5.5",
+		Name:                   "GPT-5.5",
+		DefaultReasoningEffort: "medium",
+		ReasoningEfforts:       []codex.ModelReasoningEffort{{ID: "low"}, {ID: "medium"}},
+	}}
+
+	native := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, true)
+	requireConfigCurrentValue(t, native, configEffort, "medium")
+	require.Len(t, *native[0].Select.Options.Ungrouped, 1)
+	require.NotEmpty(t, (*native[0].Select.Options.Ungrouped)[0].Meta)
+
+	withoutSelection := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, false)
+	require.Equal(t,
+		[]acp.SessionConfigId{configModel, configMode},
+		configOptionIDs(withoutSelection),
+		"with no effort selected and no catalog describing the model, there is no effort menu to publish",
+	)
+
+	// A value chosen while the presets applied stays selectable after they are
+	// withdrawn: a select never reports a current value outside its options.
+	outsideVocabulary := codexConfigOptions("gpt-5.5", modeDefault, "ultra", "", "", models, false)
+	requireConfigCurrentValue(t, outsideVocabulary, configEffort, "ultra")
+	require.Contains(t,
+		[]acp.SessionConfigSelectOption(*outsideVocabulary[2].Select.Options.Ungrouped),
+		acp.SessionConfigSelectOption{Name: "ultra", Value: "ultra"},
+	)
+
+	suppressed := codexConfigOptions("gpt-5.5", modeDefault, "high", "", "", models, false)
+	values := *suppressed[0].Select.Options.Ungrouped
+	require.Len(t, values, 1)
+	require.Equal(t, acp.SessionConfigValueId("gpt-5.5"), values[0].Value)
+	require.Empty(t, values[0].Meta, "a suppressed preset publishes none of its facts")
+	requireConfigCurrentValue(t, suppressed, configEffort, "high")
+	require.Equal(t,
+		stringConfigValues(codexEffortValues),
+		[]acp.SessionConfigSelectOption(*suppressed[2].Select.Options.Ungrouped),
+		"the effort menu falls back to the harness vocabulary, not the preset's",
+	)
+}
+
+// TestNativeModelMenuFollowsALoginWithinTheSession pins that the rule reads the
+// account rather than remembering it: a session that started signed out
+// publishes the presets as soon as the app-server holds a credential, and drops
+// them again when it stops.
+func TestNativeModelMenuFollowsALoginWithinTheSession(t *testing.T) {
+	ctx := context.Background()
+	client := newSpyCodexClient()
+	client.setRoute(codex.ProviderRoute{ProviderID: authProviderOpenAI}, nil)
+	client.setAccount(codex.Account{})
+	agent := NewAgent(
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+		WithAmbientEnvironment(map[string]string{"HOME": t.TempDir()}),
+	)
+
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
+	require.NoError(t, err)
+	require.Equal(t,
+		[]acp.SessionConfigValueId{"gpt-initial"},
+		configOptionValueIDs(t, resp.ConfigOptions, configModel),
+	)
+
+	session := agent.activeSession(resp.SessionId)
+	require.NotNil(t, session)
+
+	client.setAccount(codex.Account{AuthMode: codex.AuthModeAPIKey})
+	require.Equal(t,
+		[]acp.SessionConfigValueId{"gpt-initial", "gpt-other"},
+		configOptionValueIDs(t, agent.sessionConfigOptions(ctx, session, modelList(ctx, client)), configModel),
+	)
+
+	client.setAccount(codex.Account{})
+	require.Equal(t,
+		[]acp.SessionConfigValueId{"gpt-initial"},
+		configOptionValueIDs(t, agent.sessionConfigOptions(ctx, session, modelList(ctx, client)), configModel),
+	)
+}
+
+// TestNativeModelMenuNeedsAnAnsweredAccountRead pins that an account read that
+// fails is not an account: the double answers with a signed-in account beside
+// its error, and the presets still stay out of the menu.
+func TestNativeModelMenuNeedsAnAnsweredAccountRead(t *testing.T) {
+	ctx := context.Background()
+	client := &errorCodexClient{spyCodexClient: newSpyCodexClient(), accountErr: errors.New("account")}
+	client.setRoute(codex.ProviderRoute{ProviderID: authProviderOpenAI}, nil)
+	agent := NewAgent(
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+		WithAmbientEnvironment(map[string]string{"HOME": t.TempDir()}),
+	)
+
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
+	require.NoError(t, err)
+	require.Equal(t,
+		[]acp.SessionConfigValueId{"gpt-initial"},
+		configOptionValueIDs(t, resp.ConfigOptions, configModel),
+	)
+}
+
+// TestNativeModelMenuNeedsARouteReader pins the client that cannot answer where
+// its requests go: without that answer the presets are not published.
+func TestNativeModelMenuNeedsARouteReader(t *testing.T) {
+	ctx := context.Background()
+	client := &routelessCodexClient{Client: newSpyCodexClient()}
+	agent := NewAgent(
+		withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }),
+		WithAmbientEnvironment(map[string]string{"HOME": t.TempDir()}),
+	)
+
+	resp, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
+	require.NoError(t, err)
+	require.Equal(t,
+		[]acp.SessionConfigValueId{"gpt-initial"},
+		configOptionValueIDs(t, resp.ConfigOptions, configModel),
+	)
+}
+
+func configOptionIDs(options []acp.SessionConfigOption) []acp.SessionConfigId {
+	ids := make([]acp.SessionConfigId, 0, len(options))
+	for _, option := range options {
+		if option.Select != nil {
+			ids = append(ids, option.Select.Id)
+		}
+	}
+
+	return ids
+}
+
+func configOptionValueIDs(
+	t *testing.T,
+	options []acp.SessionConfigOption,
+	id acp.SessionConfigId,
+) []acp.SessionConfigValueId {
+	t.Helper()
+
+	for _, option := range options {
+		if option.Select == nil || option.Select.Id != id {
+			continue
+		}
+
+		require.NotNil(t, option.Select.Options.Ungrouped)
+
+		values := make([]acp.SessionConfigValueId, 0, len(*option.Select.Options.Ungrouped))
+		for _, value := range *option.Select.Options.Ungrouped {
+			values = append(values, value.Value)
+		}
+
+		return values
+	}
+
+	require.Failf(t, "missing config option", "config option %q is absent from %#v", id, options)
+
+	return nil
 }

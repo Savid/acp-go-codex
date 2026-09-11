@@ -396,3 +396,52 @@ func TestSteerDispatchRevalidatesBindingAndExactTarget(t *testing.T) {
 	s.turnAccepted = false
 	require.ErrorIs(t, s.steerTurn(t.Context(), "turn", []acp.ContentBlock{acp.TextBlock("more")}), errTurnRouteMismatch)
 }
+
+// TestSteerImageGateStepsAsideWhenTheCatalogIsWithheld pins the gate against
+// the menu: the presets refuse an image only while they describe this session.
+// An endpoint override leaves the thread reporting `openai`, so the route read
+// is the only thing that catches it — and a preset id colliding with the model
+// in use says nothing about what that endpoint serves.
+func TestSteerImageGateStepsAsideWhenTheCatalogIsWithheld(t *testing.T) {
+	png := testdataFixture(t, "valid.png")
+	image := acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimeImagePNG)
+
+	for name, route := range map[string]codex.ProviderRoute{
+		"endpoint override": {ProviderID: "openai", Custom: true},
+		"another provider":  {ProviderID: "omp"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spy := newSpyCodexClient()
+			spy.route = route
+			s := &session{
+				agent:  NewAgent(),
+				client: &noImageSteerClient{spyCodexClient: spy},
+				model:  "text-only",
+			}
+
+			_, release, err := s.prepareSteerInput(t.Context(), []acp.ContentBlock{image})
+			if release != nil {
+				release()
+			}
+			require.NoError(t, err,
+				"a catalog the adapter withholds from the menu cannot refuse a prompt either")
+		})
+	}
+}
+
+// TestSteerImageGateRefusesOnACatalogThatDescribesTheSession is the other half:
+// on Codex's own route with a credential, the presets do describe the session,
+// so a text-only model still refuses an image before the turn starts.
+func TestSteerImageGateRefusesOnACatalogThatDescribesTheSession(t *testing.T) {
+	png := testdataFixture(t, "valid.png")
+	image := acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimeImagePNG)
+	s := &session{
+		agent:  NewAgent(),
+		client: &noImageSteerClient{spyCodexClient: newSpyCodexClient()},
+		model:  "text-only",
+	}
+
+	_, release, err := s.prepareSteerInput(t.Context(), []acp.ContentBlock{image})
+	require.Nil(t, release)
+	require.ErrorContains(t, err, imageErrorUnsupportedByModel)
+}

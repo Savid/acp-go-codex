@@ -60,6 +60,7 @@ func (s *session) prepareSteerInput(ctx context.Context, blocks []acp.ContentBlo
 	s.mu.Lock()
 	client := s.client
 	model := s.model
+	provider := s.modelProvider
 	clientDead := s.clientDead
 	s.mu.Unlock()
 
@@ -67,7 +68,10 @@ func (s *session) prepareSteerInput(ctx context.Context, blocks []acp.ContentBlo
 		return nil, nil, codex.ErrConnectionClosed
 	}
 
-	if len(images) > 0 && selectedModelImageSupport(modelList(ctx, client), model) == imageInputUnsupported {
+	// Withheld presets cannot refuse a prompt; see the prompt path.
+	if len(images) > 0 &&
+		s.agent.nativeModelCatalog(ctx, client, provider, s.cwd) &&
+		selectedModelImageSupport(modelList(ctx, client), model) == imageInputUnsupported {
 		imageErr = &promptImageError{code: imageErrorUnsupportedByModel, field: images[0].field, index: images[0].index}
 
 		return nil, nil, imageErr.invalidParams()

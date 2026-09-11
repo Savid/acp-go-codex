@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"context"
 	"errors"
 	"math"
 	"slices"
@@ -10,12 +9,9 @@ import (
 )
 
 const (
-	rateLimitsProviderOpenAI   = "openai"
-	rateLimitsDefaultPool      = "codex"
-	rateLimitsWindowPrimary    = "primary"
-	rateLimitsWindowSecondary  = "secondary"
-	rateLimitsChatGPTBaseURL   = "https://chatgpt.com/backend-api"
-	rateLimitsEnvOpenAIBaseURL = "OPENAI_BASE_URL"
+	rateLimitsDefaultPool     = "codex"
+	rateLimitsWindowPrimary   = "primary"
+	rateLimitsWindowSecondary = "secondary"
 )
 
 // RateLimitWindow contains only measured native utilization and timing facts.
@@ -39,72 +35,6 @@ type RateLimitSnapshot struct {
 	AccountID  string
 	ObservedAt time.Time
 	Pools      []RateLimitPool
-}
-
-// RateLimitsContextClient resolves native provider configuration without
-// starting a thread or model turn. Only the relevant configuration is returned.
-type RateLimitsContextClient interface {
-	ReadRateLimitsContext(context.Context, string) (RateLimitsContext, error)
-}
-
-// RateLimitsContext identifies the native account reader's effective target.
-type RateLimitsContext struct {
-	ProviderID string
-	Custom     bool
-}
-
-// ReadRateLimitsContext reads layered native config in the selected workspace.
-func (c *AppServerClient) ReadRateLimitsContext(ctx context.Context, cwd string) (RateLimitsContext, error) {
-	params := map[string]any{"includeLayers": false}
-	if cwd != "" {
-		params["cwd"] = cwd
-	}
-
-	var response struct {
-		Config map[string]any `json:"config"`
-	}
-	if err := c.rpc.Call(ctx, "config/read", params, &response); err != nil {
-		return RateLimitsContext{}, err
-	}
-
-	if response.Config == nil {
-		return RateLimitsContext{}, errors.New("missing native quota configuration")
-	}
-
-	configuration := rateLimitsContextFromConfig(response.Config)
-
-	environment, err := buildMergedEnv(c.options)
-	if err != nil {
-		return RateLimitsContext{}, err
-	}
-
-	for _, entry := range environment {
-		key, value, _ := strings.Cut(entry, "=")
-		if strings.EqualFold(key, rateLimitsEnvOpenAIBaseURL) {
-			configuration.Custom = configuration.Custom || value != ""
-		}
-	}
-
-	return configuration, nil
-}
-
-func rateLimitsContextFromConfig(config map[string]any) RateLimitsContext {
-	provider := stringValue(config, "model_provider")
-	if provider == "" {
-		provider = rateLimitsProviderOpenAI // Codex's built-in default when no provider is selected.
-	}
-
-	// config/read includes Codex's resolved ChatGPT URL even without an override.
-	chatGPTBaseURL := strings.TrimSpace(stringValue(config, "chatgpt_base_url"))
-	custom := provider != rateLimitsProviderOpenAI || strings.TrimSpace(stringValue(config, "openai_base_url")) != "" ||
-		chatGPTBaseURL != "" && chatGPTBaseURL != rateLimitsChatGPTBaseURL && chatGPTBaseURL != rateLimitsChatGPTBaseURL+"/"
-
-	providerConfig := mapValue(mapValue(config, "model_providers"), provider)
-	for _, key := range []string{"base_url", "env_key", "experimental_bearer_token", "auth", "http_headers", "env_http_headers"} {
-		custom = custom || providerConfig[key] != nil
-	}
-
-	return RateLimitsContext{ProviderID: provider, Custom: custom}
 }
 
 func rateLimitSnapshotFromMap(response map[string]any) (RateLimitSnapshot, error) {

@@ -59,6 +59,39 @@ explicitly empty values remain invalid input, as does an unknown `configId`.
 Approval and sandbox options are separate safety authorities and are not value
 menus.
 
+## Model menu
+
+The `model` option's menu is Codex's own `model/list` plus the session's current
+model. `model/list` reports the presets the Codex CLI build ships rather than
+what the endpoint in use serves, so the adapter publishes those presets — and
+their reasoning-effort levels and metadata — only when the session's requests
+actually reach OpenAI:
+
+- the thread's provider and the workspace's effective `model_provider` are both
+  `openai` or unset, and
+- that provider is not pointed elsewhere by `openai_base_url`, a
+  `chatgpt_base_url` override, or a credential or header binding on the provider
+  block, and
+- a credential exists: the app-server reports a ChatGPT or API-key account, or
+  `CODEX_API_KEY` is in its environment.
+
+Otherwise the menu carries the session's current model alone, an effort value
+already selected stays selectable, and a session with no effort selected
+advertises no effort menu — the same as any model no catalog describes. Image
+admission steps aside on the same terms: whatever withholds the menu also
+withholds the modality gate, because a preset cannot refuse an image for a model
+the endpoint in use may never serve.
+
+Routing is read from the app-server each time the menu is built, because
+configuration is layered across seed files, the operator's own config, process
+overrides, and the launch environment, and only the app-server resolves it. A
+route it will not report publishes no presets. The menu is rebuilt per request
+rather than pushed, so a login, a logout, or a config edit reaches a host on its
+next session or config-option request.
+
+As with every other option, the menu is host-facing and not an allowlist: a
+model value outside it is still sent to Codex, which resolves it.
+
 Prompt-image admission uses the currently selected model on every turn. When
 Codex model discovery supplies `inputModalities`, a list containing `image`
 accepts validated image input and a list without it rejects the prompt before

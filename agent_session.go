@@ -100,7 +100,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	return acp.NewSessionResponse{
 		SessionId:     id,
 		Meta:          sessionResponseMeta(snapshot),
-		ConfigOptions: sessionConfigOptions(session, models),
+		ConfigOptions: a.sessionConfigOptions(ctx, session, models),
 	}, nil
 }
 
@@ -700,7 +700,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 		return acp.ResumeSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
-			ConfigOptions: sessionConfigOptions(session, models),
+			ConfigOptions: a.sessionConfigOptions(ctx, session, models),
 		}, nil
 	}
 
@@ -863,7 +863,7 @@ func (a *Agent) resumeMaterializedSession(ctx context.Context, params acp.Resume
 
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
-		ConfigOptions: sessionConfigOptions(session, models),
+		ConfigOptions: a.sessionConfigOptions(ctx, session, models),
 	}, nil
 }
 
@@ -976,7 +976,7 @@ func (a *Agent) resumeRetainedRuntimeSession(
 
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
-		ConfigOptions: sessionConfigOptions(session, models),
+		ConfigOptions: a.sessionConfigOptions(ctx, session, models),
 	}, session, nil
 }
 
@@ -1116,7 +1116,7 @@ func (a *Agent) rebindActiveStoredSession(
 
 	return acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
-		ConfigOptions: sessionConfigOptions(active, models),
+		ConfigOptions: a.sessionConfigOptions(ctx, active, models),
 	}, nil
 }
 
@@ -1255,7 +1255,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 		return acp.LoadSessionResponse{
 			Meta:          sessionResponseMeta(snapshot),
-			ConfigOptions: sessionConfigOptions(existing, models),
+			ConfigOptions: a.sessionConfigOptions(ctx, existing, models),
 		}, nil
 	}
 
@@ -1517,7 +1517,7 @@ func (a *Agent) loadMaterializedSession(ctx context.Context, params acp.LoadSess
 
 	return acp.LoadSessionResponse{
 		Meta:          sessionResponseMeta(snapshot),
-		ConfigOptions: sessionConfigOptions(session, models),
+		ConfigOptions: a.sessionConfigOptions(ctx, session, models),
 	}, nil
 }
 
@@ -1768,7 +1768,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	return acp.UnstableForkSessionResponse{
 		SessionId:     id,
 		Meta:          sessionResponseMeta(snapshot),
-		ConfigOptions: sessionUnstableConfigOptions(session, models),
+		ConfigOptions: a.sessionUnstableConfigOptions(ctx, session, models),
 	}, nil
 }
 

@@ -50,3 +50,14 @@ func validateAmbientEnvironment(env map[string]string) error {
 
 	return nil
 }
+
+// nativeAmbientEnvironment is the block the shared app-server inherits from:
+// the host authority's environment where one owns native launches, and the
+// adapter's own ambient block otherwise.
+func (a *Agent) nativeAmbientEnvironment() map[string]string {
+	if a.options.HostAuthority != nil {
+		return a.options.HostAuthority.NativeEnvironment()
+	}
+
+	return a.options.implicitEnvironment
+}

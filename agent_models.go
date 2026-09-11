@@ -2,7 +2,9 @@ package codexacp
 
 import (
 	"context"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -39,20 +41,25 @@ const (
 	personalityPragmatic = "pragmatic"
 )
 
-func sessionConfigOptions(session *session, models []codex.Model) []acp.SessionConfigOption {
+func (a *Agent) sessionConfigOptions(ctx context.Context, session *session, models []codex.Model) []acp.SessionConfigOption {
 	session.mu.Lock()
 	model := session.model
 	mode := session.mode
 	effort := session.reasoningEffort
 	tier := session.serviceTier
 	personality := session.personality
+	cwd := session.cwd
+	provider := session.modelProvider
+	client := session.client
 	session.mu.Unlock()
 
-	return codexConfigOptions(model, mode, effort, tier, personality, models)
+	native := a.nativeModelCatalog(ctx, client, provider, cwd)
+
+	return codexConfigOptions(model, mode, effort, tier, personality, models, native)
 }
 
-func sessionUnstableConfigOptions(session *session, models []codex.Model) []acp.UnstableSessionConfigOption {
-	options := sessionConfigOptions(session, models)
+func (a *Agent) sessionUnstableConfigOptions(ctx context.Context, session *session, models []codex.Model) []acp.UnstableSessionConfigOption {
+	options := a.sessionConfigOptions(ctx, session, models)
 
 	out := make([]acp.UnstableSessionConfigOption, 0, len(options))
 	for _, option := range options {
@@ -62,8 +69,15 @@ func sessionUnstableConfigOptions(session *session, models []codex.Model) []acp.
 	return out
 }
 
-func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tier string, personality string, models []codex.Model) []acp.SessionConfigOption {
+func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tier string, personality string, models []codex.Model, nativeCatalog bool) []acp.SessionConfigOption {
 	var options []acp.SessionConfigOption
+
+	// Every menu built from model/list describes the same presets, so the model
+	// menu, the effort menu, and the published model metadata are trustworthy
+	// together or not at all.
+	if !nativeCatalog {
+		models = nil
+	}
 
 	if model == "" {
 		model = valueDefault
@@ -96,6 +110,9 @@ func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tie
 	return options
 }
 
+// modelConfigValues builds the model menu from the models this session can
+// reach plus its own current model. Selection stays with Codex: a value absent
+// from the menu still travels to the native harness.
 func modelConfigValues(current string, models []codex.Model) []acp.SessionConfigSelectOption {
 	seen := map[string]struct{}{}
 
@@ -130,6 +147,92 @@ func modelConfigValues(current string, models []codex.Model) []acp.SessionConfig
 	return values
 }
 
+// nativeAuthEnvAPIKey is the one variable Codex signs its own requests with
+// when no account is stored: it becomes the request's bearer, while the other
+// credential-shaped names in its environment authorize nothing. An account read
+// reports none of them, so a process authenticated this way is only visible
+// here.
+const nativeAuthEnvAPIKey = "CODEX_API_KEY" // #nosec G101 -- variable name, not a credential.
+
+// nativeModelCatalogTimeout bounds the native reads the menu depends on. They
+// are local app-server calls, and they run inside the session's turn slot on a
+// config-option change, where a prompt arriving behind them is refused rather
+// than queued.
+const nativeModelCatalogTimeout = 2 * time.Second
+
+// nativeModelCatalog reports whether Codex's built-in model presets describe
+// models this session can actually reach. `model/list` answers from the CLI
+// build rather than from the endpoint in use, so the presets are published only
+// when requests reach Codex's own OpenAI provider at its own endpoint, signed
+// by a credential that exists. Routed through another provider, pointed
+// elsewhere, or signed out, the presets name model ids the endpoint never
+// serves, and the menu carries the session's current model alone.
+//
+// Routing is asked twice because the two answers age differently: the thread
+// carries the provider it started on, and the workspace configuration carries
+// the provider a turn started now would use. Either naming a provider other
+// than OpenAI withdraws the presets, so an edited route is honoured in both
+// directions. Configuration is layered — seed files, the operator's own config,
+// process overrides, the launch environment — and only the app-server resolves
+// it, so a route it will not report withdraws them too.
+func (a *Agent) nativeModelCatalog(ctx context.Context, client codex.Client, provider, cwd string) bool {
+	if provider != "" && provider != authProviderOpenAI {
+		return false
+	}
+
+	reader, ok := client.(codex.ProviderRouteClient)
+	if !ok {
+		return false
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, nativeModelCatalogTimeout)
+	defer cancel()
+
+	route, err := reader.ReadProviderRoute(readCtx, cwd)
+	if err != nil {
+		a.log.DebugContext(ctx, "native model catalog withheld: provider route unavailable")
+
+		return false
+	}
+
+	if route.ProviderID != authProviderOpenAI || route.Custom {
+		return false
+	}
+
+	// An account the app-server cannot report is not evidence of a credential,
+	// but neither is it evidence against one: environment auth is invisible to
+	// this read, so the environment still answers for itself.
+	account, err := client.AccountRead(readCtx)
+	if err != nil {
+		a.log.DebugContext(ctx, "native model catalog falling back to environment auth: account unavailable")
+	} else if nativeOpenAIAccount(account) {
+		return true
+	}
+
+	return a.nativeEnvironmentAuth()
+}
+
+// nativeOpenAIAccount reports whether a read account signs OpenAI requests.
+// The account mode names the credential's own provider, and Codex brokers
+// accounts it does not route to OpenAI.
+func nativeOpenAIAccount(account codex.Account) bool {
+	return account.AuthMode == codex.AuthModeChatGPT || account.AuthMode == codex.AuthModeAPIKey
+}
+
+// nativeEnvironmentAuth reports whether the shared app-server's environment
+// carries a credential of its own. The static launch block is consulted the way
+// the launcher applies it: an entry it names wins over the ambient block even
+// when its value is empty, because that is how an operator withdraws an
+// inherited key.
+func (a *Agent) nativeEnvironmentAuth() bool {
+	key := codex.EnvironmentKey(nativeAuthEnvAPIKey)
+	if value, ok := a.options.Env[key]; ok {
+		return value != ""
+	}
+
+	return a.nativeAmbientEnvironment()[key] != ""
+}
+
 func modelMeta(model codex.Model, id string) map[string]any {
 	codexMeta := map[string]any{"modelId": id}
 	if model.Context > 0 {
@@ -150,6 +253,11 @@ func modelMeta(model codex.Model, id string) map[string]any {
 	return map[string]any{codexMetaKey: codexMeta}
 }
 
+// selectedModelImageSupport answers from Codex's own model list, which
+// describes the presets the CLI build ships. The caller establishes first that
+// those presets describe this session; where they do not, a model id colliding
+// with one proves nothing about the model in use and the decision is left to
+// Codex.
 func selectedModelImageSupport(models []codex.Model, selected string) imageInputSupport {
 	model := modelByID(selected, models)
 	if model == nil || len(model.InputModalities) == 0 {
@@ -202,7 +310,17 @@ func effortConfigValues(currentModel string, currentEffort string, models []code
 		return "", nil
 	}
 
-	return acp.SessionConfigValueId(currentEffort), stringConfigValues(codexEffortValues)
+	values := stringConfigValues(codexEffortValues)
+	if !slices.ContainsFunc(values, func(option acp.SessionConfigSelectOption) bool {
+		return string(option.Value) == currentEffort
+	}) {
+		values = append(values, acp.SessionConfigSelectOption{
+			Name:  currentEffort,
+			Value: acp.SessionConfigValueId(currentEffort),
+		})
+	}
+
+	return acp.SessionConfigValueId(currentEffort), values
 }
 
 func modelByID(id string, models []codex.Model) *codex.Model {
@@ -326,7 +444,7 @@ func (a *Agent) setSessionConfigValue(ctx context.Context, params *acp.SetSessio
 
 	models := modelList(ctx, session.client)
 
-	options := sessionConfigOptions(session, models)
+	options := a.sessionConfigOptions(ctx, session, models)
 	if err := session.emitUpdates(ctx, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}

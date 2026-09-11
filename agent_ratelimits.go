@@ -80,12 +80,12 @@ func (a *Agent) rateLimitsForTarget(ctx context.Context, target rateLimitsTarget
 	fence := rateLimitsFence{client: client, runtime: a.runtimeEpoch, auth: a.rateLimitsAuthEpoch}
 	a.mu.Unlock()
 
-	reader, ok := client.(codex.RateLimitsContextClient)
+	reader, ok := client.(codex.ProviderRouteClient)
 	if !ok {
 		return unresolvedRateLimits(target.provider)
 	}
 
-	configuration, err := reader.ReadRateLimitsContext(readCtx, target.cwd)
+	configuration, err := reader.ReadProviderRoute(readCtx, target.cwd)
 	if err != nil {
 		if ctx.Err() != nil {
 			return RateLimitsResponse{}, ctx.Err()
@@ -102,7 +102,8 @@ func (a *Agent) rateLimitsForTarget(ctx context.Context, target rateLimitsTarget
 		return unresolvedRateLimits("")
 	}
 
-	if target.provider != authProviderOpenAI || configuration.ProviderID != target.provider || configuration.Custom || target.custom {
+	if target.provider != authProviderOpenAI || configuration.ProviderID != target.provider ||
+		configuration.Custom || configuration.EnvironmentBaseURL || target.custom {
 		return rateLimitsUnsupported(target.provider), nil
 	}
 
@@ -160,8 +161,8 @@ func (a *Agent) readRateLimits(
 	ctx, caller context.Context,
 	target rateLimitsTarget,
 	fence rateLimitsFence,
-	reader codex.RateLimitsContextClient,
-	configuration codex.RateLimitsContext,
+	reader codex.ProviderRouteClient,
+	configuration codex.ProviderRoute,
 ) (RateLimitsResponse, error) {
 	account, err := fence.client.AccountRead(ctx)
 	if err != nil {
@@ -187,7 +188,7 @@ func (a *Agent) readRateLimits(
 		return a.rateLimitsReadFailure(caller, target, fence, err)
 	}
 
-	currentConfig, err := reader.ReadRateLimitsContext(ctx, target.cwd)
+	currentConfig, err := reader.ReadProviderRoute(ctx, target.cwd)
 	if err != nil {
 		return a.rateLimitsReadFailure(caller, target, fence, err)
 	}
