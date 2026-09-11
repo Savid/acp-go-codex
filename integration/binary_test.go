@@ -3,83 +3,87 @@
 package integration
 
 import (
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
+
+	codexacp "github.com/savid/acp-go-codex"
 )
 
-func TestCodexACPAgentBinaryConversation(t *testing.T) {
-	requireLiveTurn(t)
-	t.Parallel()
+func TestSmokeSessionLifecycle(t *testing.T) {
+	requireIntegration(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	h := newHarness(t, false)
+	ctx := h.ctx(t)
 
-	client := &recordingClient{}
-	conn := connectLiveAgentBinary(t, ctx, client, acp.InitializeRequest{})
+	init, err := h.conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.NoError(t, err)
+	require.Empty(t, init.AuthMethods)
+	require.True(t, init.AgentCapabilities.LoadSession)
 
-	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
+	cwd := t.TempDir()
 
-	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
-		return conn.Prompt(ctx, acp.PromptRequest{
-			Meta:      newTurnRouteMeta(),
-			SessionId: session.SessionId,
-			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_BINARY_OK and no punctuation.")},
-		})
-	})
-	if resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("stop reason = %s", resp.StopReason)
-	}
-	if !strings.Contains(client.text(), "ACP_BINARY_OK") {
-		t.Fatalf("agent text %q does not contain sentinel", client.text())
-	}
+	session, err := h.conn.NewSession(ctx, codexacp.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	require.NotEmpty(t, session.SessionId)
 
-	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); err != nil {
-		t.Fatalf("close session: %v", err)
-	}
+	list, err := h.conn.ListSessions(ctx, codexacp.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, list.Sessions, 1)
+
+	_, err = h.conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	_, err = h.conn.UnstableDeleteSession(ctx, codexacp.DeleteSessionRequest(session.SessionId))
+	require.NoError(t, err)
+
+	_, err = h.conn.LoadSession(ctx, codexacp.LoadSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 }
 
-// TestBinarySmokeInitializeClose exercises the compiled adapter's ACP startup
-// and graceful EOF without launching a native harness or reading credentials.
-// It proves wrapper wiring and counter production, not native compatibility.
-func TestBinarySmokeInitializeClose(t *testing.T) {
-	if os.Getenv(envRunIntegration) != "1" {
-		t.Skipf("set %s=1 to run compiled adapter smoke", envRunIntegration)
-	}
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	home := t.TempDir()
-	cmd := exec.CommandContext(ctx, integrationBinaryPath(t), "-path", filepath.Join(home, "no-native-harness"), "-home", home)
-	cmd.Dir = home
-	cmd.Env = []string{"HOME=" + home, "USERPROFILE=" + home, "XDG_CONFIG_HOME=" + home, "TMPDIR=" + home, "TEMP=" + home, "TMP=" + home}
-	for _, key := range []string{"PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "GOCOVERDIR"} {
-		if value, ok := os.LookupEnv(key); ok {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
-	process := startIntegrationProcess(t, cmd)
-	conn := acp.NewClientSideConnection(&recordingClient{}, process.stdin, process.stdout)
-	response, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
-	if err != nil {
-		t.Fatalf("compiled initialize: %v; stderr: %s", err, process.stderr.String())
-	}
-	if response.ProtocolVersion != acp.ProtocolVersionNumber || response.AgentInfo == nil {
-		t.Fatalf("unexpected initialize response: %#v", response)
-	}
-	if err := process.stdin.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := process.wait(ctx); err != nil {
-		t.Fatalf("compiled adapter EOF: %v; stderr: %s", err, process.stderr.String())
-	}
+func TestLivePromptResumeAndPath(t *testing.T) {
+	requireLive(t)
+
+	h := newHarness(t, true)
+	ctx := h.ctx(t)
+
+	_, err := h.conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.NoError(t, err)
+
+	cwd := t.TempDir()
+	binDir := filepath.Join(t.TempDir(), "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "acp-marker"), []byte("#!/bin/sh\necho MARKER_OK\n"), 0o700))
+
+	session, err := h.conn.NewSession(ctx, codexacp.NewSessionRequest(cwd, liveModel(),
+		codexacp.WithSessionCodexOptions(codexacp.NewCodexOptions(codexacp.WithCodexExtraPathDirs(binDir), codexacp.WithCodexApprovalPolicy("never")))))
+	require.NoError(t, err)
+
+	resp, err := h.conn.Prompt(ctx, codexacp.TextPromptRequest(session.SessionId, "Reply with exactly LIVE_OK and nothing else. Do not use tools."))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Contains(t, h.rec.text(), "LIVE_OK")
+
+	resp, err = h.conn.Prompt(ctx, codexacp.TextPromptRequest(session.SessionId, "Run the shell command `acp-marker` and reply with its exact output and nothing else."))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Contains(t, h.rec.text(), "MARKER_OK")
+
+	_, err = h.conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	matches, err := filepath.Glob(filepath.Join(h.home, "sessions", "*", "*", "*", "rollout-*-"+string(session.SessionId)+".jsonl"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1, "codex keeps the rollout in its own home after close")
+
+	_, err = h.conn.ResumeSession(ctx, codexacp.ResumeSessionRequest(session.SessionId, cwd, liveModel()))
+	require.NoError(t, err)
+
+	resp, err = h.conn.Prompt(ctx, codexacp.TextPromptRequest(session.SessionId, "Reply with exactly RESUME_OK and nothing else."))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Contains(t, h.rec.text(), "RESUME_OK")
 }

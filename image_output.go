@@ -5,856 +5,355 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
+
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-core/image"
+	"github.com/savid/acp-go-core/wire"
 )
 
-const (
-	imageOutputStage          = "image_output"
-	imageOutputInvalidBase64  = "invalid_base64"
-	imageOutputNotRaster      = "not_a_raster"
-	imageOutputMIMEConflict   = "media_type_mismatch"
-	imageOutputMissingFile    = "missing_file"
-	imageOutputPathDenied     = "path_not_allowed"
-	imageOutputTooLarge       = "too_large"
-	imageOutputStorageFailure = "storage_failed"
-	imageArtifactStorePrefix  = "images/"
-	imageArtifactStoreVersion = 1
-	imageArtifactRefKey       = "artifactSubpath"
-	imageArtifactTTL          = 24 * time.Hour
-
-	imageOutputTooLargeMessage = "image output exceeds the configured per-image limit"
-
-	// Guidance carried back to the client when an image output is refused.
-	// Each string is a fixed constant keyed only by the verdict token: it says
-	// what to do next and never describes the path, filename, size, or
-	// operating-system error that produced the verdict.
-	imageGuidancePathDenied     = "write the image inside the workspace and try again"
-	imageGuidanceMissingFile    = "the image file could not be read; write the image inside the workspace and try again"
-	imageGuidanceTooLarge       = "the image is too large to send; write a smaller image and try again"
-	imageGuidanceNotRaster      = "the file is not a supported raster image; write a PNG, JPEG, GIF, WebP, BMP, ICO, or TIFF and try again"
-	imageGuidanceInvalidBase64  = "the image payload could not be decoded; write the image to a file inside the workspace and try again"
-	imageGuidanceMIMEMismatched = "the declared media type does not match the image; write the image again with a matching media type"
-
-	// maxACPImageDecodedBytes is the largest decoded image the pinned ACP Go
-	// SDK can carry in one JSON-RPC frame. A single update frame above the
-	// SDK's 10 MiB scanner bound disconnects a Go-SDK consumer's whole
-	// connection, so emitted output is always clamped to this hard cap even
-	// when the configured policy limit is larger or disabled.
-	maxACPImageDecodedBytes int64 = 7_864_155
-)
-
-type imageOutputError struct {
-	reason    string
-	message   string
-	sizeBytes int64
-	maxBytes  int64
+// outputImage is one validated emitted image: the base64 payload, the
+// sniffed MIME, its decoded size, and its fingerprint.
+type outputImage struct {
+	data        string
+	mime        string
+	fingerprint string
+	sizeBytes   int64
 }
 
-func (e *imageOutputError) Error() string {
-	return e.message
-}
-
-// imageOutputGuidance classifies an image output failure. A recoverable
-// verdict is an ordinary mistake the model can retry — the bytes were written
-// somewhere the adapter may not read, are gone, are too big, or are not an
-// image — and comes back with fixed guidance. A storage failure is the
-// adapter's own durability breaking and is not something the model can act on.
-func imageOutputGuidance(err error) (string, bool) {
-	var failure *imageOutputError
-	if !errors.As(err, &failure) {
-		return "", false
+// decodeOutputImage validates one inline native image for emission through
+// the core output gate. Output is not format-allowlisted: any sniffable
+// raster is emitted with its sniffed MIME.
+func decodeOutputImage(encoded string, declaredMIME string, limit int64) (outputImage, *image.OutputError) {
+	data, mime, size, failure := image.DecodeInline(encoded, limit)
+	if failure != nil {
+		return outputImage{}, failure
 	}
 
-	switch failure.reason {
-	case imageOutputPathDenied:
-		return imageGuidancePathDenied, true
-	case imageOutputMissingFile:
-		return imageGuidanceMissingFile, true
-	case imageOutputTooLarge:
-		return imageGuidanceTooLarge, true
-	case imageOutputNotRaster:
-		return imageGuidanceNotRaster, true
-	case imageOutputInvalidBase64:
-		return imageGuidanceInvalidBase64, true
-	case imageOutputMIMEConflict:
-		return imageGuidanceMIMEMismatched, true
-	default:
-		return "", false
+	if declaredMIME != "" && declaredMIME != mime && image.IsImageMIME(declaredMIME) {
+		return outputImage{}, &image.OutputError{Reason: image.ReasonMediaTypeMismatch, Message: "declared media type does not match the image"}
+	}
+
+	return fingerprinted(data, mime, size), nil
+}
+
+func fingerprinted(data []byte, mime string, size int64) outputImage {
+	digest := sha256.Sum256(data)
+
+	return outputImage{
+		data:        base64.StdEncoding.EncodeToString(data),
+		mime:        mime,
+		fingerprint: hex.EncodeToString(digest[:]),
+		sizeBytes:   size,
 	}
 }
 
-// effectiveImageOutputLimit clamps a configured output byte limit to the hard
-// ACP frame bound. A configured zero disables only the adapter policy limit,
-// and a configured value above the frame bound is reduced to it, so emitted
-// output can never exceed what a Go-SDK consumer can receive in one frame.
-func effectiveImageOutputLimit(configured int64) int64 {
-	if configured <= 0 || configured > maxACPImageDecodedBytes {
-		return maxACPImageDecodedBytes
+// readOutputImage reads a harness-returned file through the core output gate
+// within the allowed roots.
+func (s *session) readOutputImage(path string, limit int64) (outputImage, *image.OutputError) {
+	data, mime, failure := image.ReadFile(path, s.outputRoots(), limit)
+	if failure != nil {
+		return outputImage{}, failure
 	}
 
-	return configured
+	return fingerprinted(data, mime, int64(len(data))), nil
 }
 
-// boundedImageDecoder retains at most limit bytes while counting the full
-// decoded size, so an oversize image is rejected without ever allocating its
-// entire decoded body.
-type boundedImageDecoder struct {
-	data  []byte
-	limit int64
-	size  int64
-}
-
-func (w *boundedImageDecoder) Write(p []byte) (int, error) {
-	w.size += int64(len(p))
-
-	remaining := w.limit - int64(len(w.data))
-	if remaining > 0 {
-		retain := min(int64(len(p)), remaining)
-
-		w.data = append(w.data, p[:retain]...)
-	}
-
-	return len(p), nil
-}
-
-func decodeBoundedImage(data string, retainLimit int64) ([]byte, int64, error) {
-	decoded := &boundedImageDecoder{limit: retainLimit}
-
-	if _, err := io.Copy(decoded, base64.NewDecoder(base64.StdEncoding, strings.NewReader(data))); err != nil {
-		return nil, 0, err
-	}
-
-	return decoded.data, decoded.size, nil
-}
-
-type storedImageArtifact struct {
-	Version            int    `json:"version"`
-	NativeID           string `json:"nativeId"`
-	Fingerprint        string `json:"fingerprint"`
-	MimeType           string `json:"mimeType"`
-	Data               string `json:"data"`
-	CreatedAtUnixMilli int64  `json:"createdAtUnixMilli"`
-}
-
-var (
-	evalImageSymlinks = filepath.EvalSymlinks
-	statImageFile     = os.Stat
-	openImageFile     = func(path string) (io.ReadCloser, error) { return os.Open(path) }
-	readImageFile     = io.ReadAll
-	relativeImagePath = filepath.Rel
-	marshalImageJSON  = json.Marshal
-)
-
-type imageToolState struct {
-	started      map[string]struct{}
-	emitted      map[string]struct{}
-	content      map[acp.ToolCallId][]acp.ToolCallContent
-	decodedBytes map[acp.ToolCallId]int64
-}
-
-func newImageToolState() imageToolState {
-	return imageToolState{
-		started:      make(map[string]struct{}),
-		emitted:      make(map[string]struct{}),
-		content:      make(map[acp.ToolCallId][]acp.ToolCallContent),
-		decodedBytes: make(map[acp.ToolCallId]int64),
-	}
-}
-
-func (s *session) imageEventUpdates(ctx context.Context, event codex.Event, state *imageToolState) ([]acp.SessionUpdate, error) {
-	image := event.Image
-	id := acp.ToolCallId(firstNonEmpty(image.ID, "codex-image"))
-	title := imageToolTitle(image.Kind)
-
-	updates := make([]acp.SessionUpdate, 0, 2)
-
-	if _, started := state.started[string(id)]; !started {
-		startOptions := []acp.ToolCallStartOpt{
-			acp.WithStartKind(acp.ToolKindOther),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-		}
-		if image.RevisedPrompt != "" {
-			startOptions = append(startOptions, acp.WithStartRawInput(map[string]any{jsonFieldPrompt: image.RevisedPrompt}))
-		}
-
-		updates = append(updates, acp.StartToolCall(id, title, startOptions...))
-		state.started[string(id)] = struct{}{}
-	}
-
-	if event.Kind == codex.EventImageStarted {
-		return updates, nil
-	}
-
-	if imageNativeFailed(image.Status) {
-		failed := acp.ToolCallStatusFailed
-		updates = append(updates, acp.UpdateToolCall(id,
-			acp.WithUpdateStatus(failed),
-			acp.WithUpdateKind(acp.ToolKindOther),
-			acp.WithUpdateRawOutput(image.Raw),
-		))
-
-		return updates, nil
-	}
-
-	var (
-		data     []byte
-		mimeType string
-		size     int64
-		err      error
-	)
-
-	if image.ArtifactRef != "" {
-		artifact, loadErr := s.loadImageArtifact(ctx, image.ArtifactRef)
-		if loadErr != nil {
-			err = &imageOutputError{
-				reason:  imageOutputStorageFailure,
-				message: fmt.Sprintf("load image output: %v", loadErr),
-			}
-		} else {
-			data, err = base64.StdEncoding.DecodeString(artifact.Data)
-			mimeType = artifact.MimeType
-			size = int64(len(data))
-		}
-	} else {
-		data, mimeType, size, err = s.materializeImageEvent(image)
-	}
-
-	if err != nil {
-		return refuseImageOutput(updates, id, image.Raw, err)
-	}
-
-	fingerprint := sha256.Sum256(data)
-
-	artifactIdentity := string(id) + ":" + hex.EncodeToString(fingerprint[:])
-	if _, emitted := state.emitted[artifactIdentity]; emitted {
-		return updates, nil
-	}
-
-	limit := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
-	if size > limit {
-		return refuseImageOutput(updates, id, image.Raw, &imageOutputError{
-			reason:    imageOutputTooLarge,
-			message:   imageOutputTooLargeMessage,
-			sizeBytes: size,
-			maxBytes:  limit,
-		})
-	}
-
-	aggregate := state.decodedBytes[id] + size
-
-	aggregateLimit := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerToolCall)
-	if aggregate > aggregateLimit {
-		return refuseImageOutput(updates, id, image.Raw, &imageOutputError{
-			reason:    imageOutputTooLarge,
-			message:   "image output exceeds the configured per-tool-call limit",
-			sizeBytes: aggregate,
-			maxBytes:  aggregateLimit,
-		})
-	}
-
-	if _, err := s.storeImageArtifact(ctx, image.ID, data, mimeType); err != nil {
-		return refuseImageOutput(updates, id, image.Raw, &imageOutputError{
-			reason:  imageOutputStorageFailure,
-			message: fmt.Sprintf("store image output: %v", err),
-		})
-	}
-
-	content := acp.ToolContent(acp.ImageBlock(base64.StdEncoding.EncodeToString(data), mimeType))
-	state.content[id] = append(state.content[id], content)
-	state.decodedBytes[id] = aggregate
-	state.emitted[artifactIdentity] = struct{}{}
-
-	updates = append(updates, acp.UpdateToolCall(id,
-		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
-		acp.WithUpdateKind(acp.ToolKindOther),
-		acp.WithUpdateContent(append([]acp.ToolCallContent(nil), state.content[id]...)),
-		acp.WithUpdateRawOutput(image.Raw),
-	))
-
-	return updates, nil
-}
-
-func imageToolTitle(kind string) string {
-	if kind == "imageView" {
-		return "View image"
-	}
-
-	return "Image generation"
-}
-
-func imageNativeFailed(status string) bool {
-	switch strings.ToLower(status) {
-	case statusFailed, jsonFieldError, statusErrored, authStateCancelled, "canceled":
-		return true
-	default:
-		return false
-	}
-}
-
-func failedImageToolUpdate(id acp.ToolCallId, raw map[string]any) acp.SessionUpdate {
-	return acp.UpdateToolCall(id,
-		acp.WithUpdateStatus(acp.ToolCallStatusFailed),
-		acp.WithUpdateKind(acp.ToolKindOther),
-		acp.WithUpdateRawOutput(raw),
-	)
-}
-
-// refuseImageOutput reports an image output the adapter will not ship. A
-// recoverable verdict fails only the tool call and carries its guidance as
-// that call's own content, so the thread keeps its context and can write the
-// image somewhere readable; the error is not returned and the turn runs on. A
-// storage failure fails the tool call and stays turn-fatal.
-func refuseImageOutput(
-	updates []acp.SessionUpdate,
-	id acp.ToolCallId,
-	raw map[string]any,
-	err error,
-) ([]acp.SessionUpdate, error) {
-	guidance, recoverable := imageOutputGuidance(err)
-	if !recoverable {
-		return append(updates, failedImageToolUpdate(id, raw)), err
-	}
-
-	return append(updates, acp.UpdateToolCall(id,
-		acp.WithUpdateStatus(acp.ToolCallStatusFailed),
-		acp.WithUpdateKind(acp.ToolKindOther),
-		acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(guidance))}),
-		acp.WithUpdateRawOutput(raw),
-	)), nil
-}
-
-func (s *session) materializeImageEvent(image codex.ImageEvent) ([]byte, string, int64, error) {
-	if image.Result != "" {
-		limit := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
-
-		data, size, err := decodeBoundedImage(image.Result, limit+1)
-		if err != nil {
-			return nil, "", 0, &imageOutputError{
-				reason:  imageOutputInvalidBase64,
-				message: "image output contains invalid base64",
-			}
-		}
-
-		mimeType, ok := sniffRasterMIME(data)
-		if !ok {
-			return nil, "", 0, &imageOutputError{
-				reason:  imageOutputNotRaster,
-				message: "image output bytes are not a raster",
-			}
-		}
-
-		return data, mimeType, size, nil
-	}
-
-	if image.SavedPath == "" {
-		return nil, "", 0, &imageOutputError{
-			reason:  imageOutputMissingFile,
-			message: "image output did not contain bytes or a saved file",
-		}
-	}
-
-	data, mimeType, err := s.readAllowedImageFile(image.SavedPath)
-	if err != nil {
-		return nil, "", 0, err
-	}
-
-	return data, mimeType, int64(len(data)), nil
-}
-
-func (s *session) readAllowedImageFile(path string) ([]byte, string, error) {
-	if authority, ok := s.agent.options.HostAuthority.(*guardedHostAuthority); ok {
-		roots := s.allowedImageRoots()
-
-		authority.trees.mu.RLock()
-		defer authority.trees.mu.RUnlock()
-
-		return s.readManagedImageFile(&authority.trees, path, roots)
-	}
-
-	resolved, err := evalImageSymlinks(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, "", &imageOutputError{reason: imageOutputMissingFile, message: "image output file is missing"}
-		}
-
-		return nil, "", &imageOutputError{reason: imageOutputPathDenied, message: "image output path cannot be resolved safely"}
-	}
-
-	allowed := false
-
-	for _, root := range s.allowedImageRoots() {
-		if pathWithinRoot(resolved, root) {
-			allowed = true
-
-			break
-		}
-	}
-
-	if !allowed {
-		return nil, "", &imageOutputError{reason: imageOutputPathDenied, message: "image output path is outside the allowed roots"}
-	}
-
-	info, err := statImageFile(resolved)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, "", &imageOutputError{reason: imageOutputMissingFile, message: "image output file is missing"}
-		}
-
-		return nil, "", &imageOutputError{reason: imageOutputPathDenied, message: "image output path cannot be inspected safely"}
-	}
-
-	if !info.Mode().IsRegular() {
-		return nil, "", &imageOutputError{reason: imageOutputPathDenied, message: "image output path is not a regular file"}
-	}
-
-	limit := effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
-	if info.Size() > limit {
-		return nil, "", &imageOutputError{
-			reason:    imageOutputTooLarge,
-			message:   imageOutputTooLargeMessage,
-			sizeBytes: info.Size(),
-			maxBytes:  limit,
-		}
-	}
-
-	file, err := openImageFile(resolved)
-	if err != nil {
-		return nil, "", &imageOutputError{reason: imageOutputMissingFile, message: "image output file cannot be opened"}
-	}
-	defer file.Close()
-
-	return readImageContents(file, limit)
-}
-
-func (s *session) readManagedImageFile(access *nativeTreeAccess, path string, roots []string) ([]byte, string, error) {
-	file, err := access.open(path, roots)
-	if err != nil {
-		reason := imageOutputPathDenied
-		if os.IsNotExist(err) {
-			reason = imageOutputMissingFile
-		}
-
-		return nil, "", &imageOutputError{reason: reason, message: "image output has no readable managed path"}
-	}
-	defer file.Close()
-
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, "", &imageOutputError{reason: imageOutputPathDenied, message: "image output path is not a regular file"}
-	}
-
-	return readImageContents(file, effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage))
-}
-
-func readImageContents(file io.Reader, limit int64) ([]byte, string, error) {
-	reader := io.LimitReader(file, limit+1)
-
-	data, err := readImageFile(reader)
-	if err != nil {
-		return nil, "", &imageOutputError{reason: imageOutputMissingFile, message: "image output file cannot be read"}
-	}
-
-	if int64(len(data)) > limit {
-		return nil, "", &imageOutputError{
-			reason:    imageOutputTooLarge,
-			message:   imageOutputTooLargeMessage,
-			sizeBytes: int64(len(data)),
-			maxBytes:  limit,
-		}
-	}
-
-	mimeType, ok := sniffRasterMIME(data)
-	if !ok {
-		return nil, "", &imageOutputError{reason: imageOutputNotRaster, message: "image output file is not a raster"}
-	}
-
-	return data, mimeType, nil
-}
-
-func (s *session) allowedImageRoots() []string {
-	s.mu.Lock()
+// outputRoots are the directories a native image path may be read from: the
+// workspace, the adapter's scratch parent, the system temp directory, and
+// Codex's own generated-images directory.
+func (s *session) outputRoots() []string {
 	roots := []string{s.cwd}
-	s.mu.Unlock()
 
-	if scratch := s.agent.scratchDir; scratch != "" {
+	if scratch := s.agent.options.ScratchDir; scratch != "" {
 		roots = append(roots, scratch)
 	}
 
-	s.agent.mu.Lock()
-	runtimeScratch := s.agent.runtimeScratchRoot
-	s.agent.mu.Unlock()
-
-	if runtimeScratch != "" {
-		roots = append(roots, runtimeScratch)
-	}
-
-	if s.agent.options.HostAuthority == nil {
-		if home := s.agent.resolvedCodexHome(); home != "" {
-			roots = append(roots, filepath.Join(home, "generated_images"))
-		}
-	}
-
-	// The harness sandbox already permits writing to the OS temp directory, so
-	// a root set without it refuses reads of files the model was allowed to
-	// create. Temp files stay subject to every other check here: the temp
-	// directory is shared with every process on the host and nothing in it is
-	// trusted for being there.
 	if temp := os.TempDir(); temp != "" {
 		roots = append(roots, temp)
+	}
+
+	s.mu.Lock()
+	rt := s.rt
+	s.mu.Unlock()
+
+	if rt != nil && rt.home != "" {
+		roots = append(roots, filepath.Join(rt.home, "generated_images"))
 	}
 
 	return roots
 }
 
-// pathWithinRoot reports whether an already-resolved path sits under root,
-// resolving root so a root reached through a symlink still matches. path must be
-// resolved by the caller; passing a raw path asks whether it happens to be
-// spelled the resolved way.
-//
-// The comparison is lexical, which is why the caller has to resolve: this
-// answers a question about spelling and only describes the filesystem when both
-// sides are resolved to the same degree.
-func pathWithinRoot(path string, root string) bool {
-	if path == "" || root == "" {
-		return false
-	}
-
-	resolvedRoot, err := evalImageSymlinks(root)
-	if err != nil {
-		return false
-	}
-
-	relative, err := relativeImagePath(resolvedRoot, path)
-	if err != nil {
-		return false
-	}
-
-	return relative != ".." && relative != "."+string(filepath.Separator)+".." &&
-		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+// toolState is the exact-id lifecycle published for one native tool call.
+type toolState struct {
+	published bool
+	terminal  bool
+	// content is the last emitted complete content array; each later
+	// content-bearing update extends it so no delivered item disappears
+	// under ACP's whole-array replacement.
+	content []acp.ToolCallContent
+	// imageBytes is the decoded size of every image the array carries.
+	imageBytes int64
 }
 
-func sniffRasterMIME(data []byte) (string, bool) {
-	if info, err := inspectPromptRaster(data); err == nil {
-		return info.mimeType, true
+func (state *cycleState) tool(id string) *toolState {
+	if state.tools == nil {
+		state.tools = make(map[string]*toolState)
 	}
 
-	switch detected := http.DetectContentType(data); detected {
-	case "image/bmp", "image/x-icon", "image/vnd.microsoft.icon", "image/tiff":
-		return detected, true
+	tool := state.tools[id]
+	if tool == nil {
+		tool = &toolState{}
+		state.tools[id] = tool
 	}
 
-	switch {
-	case len(data) >= 4 && (string(data[:4]) == "II*\x00" || string(data[:4]) == "MM\x00*"):
-		return "image/tiff", true
-	default:
-		return "", false
-	}
+	return tool
 }
 
-func (s *session) storeImageArtifact(ctx context.Context, nativeID string, data []byte, mimeType string) (string, error) {
-	fingerprint := sha256.Sum256(data)
-	idHash := sha256.Sum256([]byte(nativeID))
-	subpath := imageArtifactStorePrefix + hex.EncodeToString(idHash[:8]) + "/" + hex.EncodeToString(fingerprint[:]) + ".json"
-
-	record := storedImageArtifact{
-		Version:            imageArtifactStoreVersion,
-		NativeID:           nativeID,
-		Fingerprint:        hex.EncodeToString(fingerprint[:]),
-		MimeType:           mimeType,
-		Data:               base64.StdEncoding.EncodeToString(data),
-		CreatedAtUnixMilli: timeNow().UnixMilli(),
+// publishPendingTool announces a tool call that is awaiting approval before
+// the app-server reports the item started.
+func (s *session) publishPendingTool(ctx context.Context, state *cycleState, request permissionRequest) error {
+	tool := state.tool(request.toolCallID)
+	if tool.published {
+		return nil
 	}
 
-	entry, err := marshalImageJSON(record)
-	if err != nil {
-		return "", err
+	opts := []acp.ToolCallStartOpt{
+		acp.WithStartKind(request.kind),
+		acp.WithStartStatus(acp.ToolCallStatusPending),
+		acp.WithStartRawInput(request.rawInput),
+	}
+	if len(request.content) > 0 {
+		opts = append(opts, acp.WithStartContent(request.content))
 	}
 
-	storeCtx, cancel := s.agent.sessionStoreContext(ctx)
-	defer cancel()
-
-	key := SessionKey{SessionID: string(s.id), Subpath: subpath}
-
-	// Serialize the sweep, load, and append against a concurrent store of the
-	// same artifact. Concurrent native event handlers can store the same native
-	// id at once; without this an interleaved load-then-append
-	// would write the key twice and a later single-entry load would fail as a
-	// spurious storage_failed.
-	s.imageStoreMu.Lock()
-	defer s.imageStoreMu.Unlock()
-
-	sweepErr := s.agent.sweepSessionImageArtifacts(storeCtx, string(s.id))
-	if sweepErr != nil {
-		return "", sweepErr
-	}
-
-	existing, err := s.agent.sessionStore().Load(storeCtx, key)
-	if err != nil {
-		return "", err
-	}
-
-	if len(existing) > 0 {
-		var stored storedImageArtifact
-		if len(existing) != 1 || json.Unmarshal(existing[0], &stored) != nil ||
-			stored.Fingerprint != record.Fingerprint || stored.MimeType != record.MimeType ||
-			stored.Data != record.Data {
-			return "", errors.New("stored image artifact conflicts with native identity")
-		}
-
-		return subpath, nil
-	}
-
-	if err := s.agent.sessionStore().Append(storeCtx, key, []SessionStoreEntry{entry}); err != nil {
-		return "", err
-	}
-
-	return subpath, nil
-}
-
-func (s *session) loadImageArtifact(ctx context.Context, subpath string) (storedImageArtifact, error) {
-	if !strings.HasPrefix(subpath, imageArtifactStorePrefix) {
-		return storedImageArtifact{}, errors.New("image artifact reference is invalid")
-	}
-
-	storeCtx, cancel := s.agent.sessionStoreContext(ctx)
-	defer cancel()
-
-	entries, err := s.agent.sessionStore().Load(storeCtx, SessionKey{SessionID: string(s.id), Subpath: subpath})
-	if err != nil {
-		return storedImageArtifact{}, err
-	}
-
-	if len(entries) != 1 {
-		return storedImageArtifact{}, errors.New("image artifact bytes are unavailable")
-	}
-
-	var artifact storedImageArtifact
-
-	unmarshalErr := json.Unmarshal(entries[0], &artifact)
-	if unmarshalErr != nil {
-		return storedImageArtifact{}, unmarshalErr
-	}
-
-	if artifact.Version != imageArtifactStoreVersion || artifact.Data == "" || artifact.MimeType == "" ||
-		artifact.CreatedAtUnixMilli <= 0 {
-		return storedImageArtifact{}, errors.New("image artifact record is incomplete")
-	}
-
-	if imageArtifactExpired(artifact.CreatedAtUnixMilli, timeNow()) {
-		deleteErr := s.agent.sessionStore().Delete(storeCtx, SessionKey{
-			SessionID: string(s.id),
-			Subpath:   subpath,
-		})
-		if deleteErr != nil {
-			return storedImageArtifact{}, fmt.Errorf("delete expired image artifact: %w", deleteErr)
-		}
-
-		return storedImageArtifact{}, errors.New("image artifact bytes expired")
-	}
-
-	data, err := base64.StdEncoding.DecodeString(artifact.Data)
-	if err != nil {
-		return storedImageArtifact{}, err
-	}
-
-	fingerprint := sha256.Sum256(data)
-	if hex.EncodeToString(fingerprint[:]) != artifact.Fingerprint {
-		return storedImageArtifact{}, errors.New("image artifact checksum does not match")
-	}
-
-	return artifact, nil
-}
-
-func imageArtifactExpired(createdAtUnixMilli int64, now time.Time) bool {
-	return createdAtUnixMilli <= 0 ||
-		!now.Before(time.UnixMilli(createdAtUnixMilli).Add(imageArtifactTTL))
-}
-
-func (a *Agent) sweepSessionImageArtifacts(ctx context.Context, sessionID string) error {
-	store := a.sessionStore()
-
-	subpaths, err := store.ListSubkeys(ctx, SessionKey{SessionID: sessionID})
-	if err != nil {
+	if err := s.emit(ctx, acp.StartToolCall(acp.ToolCallId(request.toolCallID), request.title, opts...)); err != nil {
 		return err
 	}
 
-	now := timeNow()
-
-	for _, subpath := range subpaths {
-		if !strings.HasPrefix(subpath, imageArtifactStorePrefix) {
-			continue
-		}
-
-		key := SessionKey{SessionID: sessionID, Subpath: subpath}
-
-		entries, loadErr := store.Load(ctx, key)
-		if loadErr != nil {
-			return loadErr
-		}
-
-		expired := len(entries) != 1
-		if !expired {
-			var artifact storedImageArtifact
-
-			expired = json.Unmarshal(entries[0], &artifact) != nil ||
-				imageArtifactExpired(artifact.CreatedAtUnixMilli, now)
-		}
-
-		if !expired {
-			continue
-		}
-
-		if deleteErr := store.Delete(ctx, key); deleteErr != nil {
-			return deleteErr
-		}
-	}
+	tool.published = true
 
 	return nil
 }
 
-// durableImageArtifact stores one rollout image and returns its artifact
-// subpath. An empty subpath with a nil error means the image has no durable
-// form: every verdict materialization can raise here — unreadable path,
-// missing file, oversize, non-raster, bad base64 — is recoverable and already
-// reached the client on the live wire, so the rollout keeps the call and drops
-// the bytes. Only the adapter's own store breaking is returned as an error.
-func (s *session) durableImageArtifact(ctx context.Context, image codex.ImageEvent) (string, error) {
-	data, mimeType, size, refusal := s.materializeImageEvent(image)
+func (s *session) publishToolStart(ctx context.Context, state *cycleState, event codex.ToolEvent) error {
+	id := firstNonEmpty(event.ID, "codex-tool")
 
-	durable := refusal == nil && size <= effectiveImageOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
-	if !durable {
-		return "", nil
+	tool := state.tool(id)
+	if tool.terminal {
+		return nil
 	}
 
-	subpath, err := s.storeImageArtifact(ctx, image.ID, data, mimeType)
-	if err != nil {
-		return "", &imageOutputError{reason: imageOutputStorageFailure, message: fmt.Sprintf("store image output: %v", err)}
+	kind := toolKind(event.Kind)
+
+	if tool.published {
+		return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id),
+			acp.WithUpdateTitle(event.Title), acp.WithUpdateKind(kind),
+			acp.WithUpdateStatus(acp.ToolCallStatusInProgress), acp.WithUpdateRawInput(event.Raw)))
 	}
 
-	return subpath, nil
+	if err := s.emit(ctx, acp.StartToolCall(acp.ToolCallId(id), event.Title,
+		acp.WithStartKind(kind), acp.WithStartStatus(acp.ToolCallStatusInProgress), acp.WithStartRawInput(event.Raw))); err != nil {
+		return err
+	}
+
+	tool.published = true
+
+	return nil
 }
 
-func dropDurableImagePath(payload map[string]any) {
-	delete(payload, "saved_path")
-	delete(payload, "savedPath")
+// publishToolDelta appends one output delta and emits the complete content
+// array.
+func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id string, text string) error {
+	if text == "" {
+		return nil
+	}
+
+	tool := state.tool(firstNonEmpty(id, "codex-tool"))
+	if tool.terminal {
+		return nil
+	}
+
+	tool.content = append(tool.content, acp.ToolContent(acp.TextBlock(text)))
+
+	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(firstNonEmpty(id, "codex-tool")), acp.WithUpdateContent(append([]acp.ToolCallContent(nil), tool.content...))))
 }
 
-func (s *session) prepareDurableImageRolloutEntries(ctx context.Context, entries []SessionStoreEntry) ([]SessionStoreEntry, error) {
-	out := make([]SessionStoreEntry, len(entries))
-	for index, entry := range entries {
-		var row map[string]any
-		if err := json.Unmarshal(entry, &row); err != nil {
-			return nil, err
+// publishToolTerminal emits the terminal status and the complete final
+// content array: the aggregated output, and for file changes their diffs.
+func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, event codex.ToolEvent) error {
+	id := firstNonEmpty(event.ID, "codex-tool")
+
+	tool := state.tool(id)
+	if tool.terminal {
+		return nil
+	}
+
+	status := acp.ToolCallStatusCompleted
+	if event.Status == itemStatusFailed || event.Status == itemStatusDeclined {
+		status = acp.ToolCallStatusFailed
+	}
+
+	opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status), acp.WithUpdateKind(toolKind(event.Kind)), acp.WithUpdateRawOutput(event.Raw)}
+	if event.Title != "" {
+		opts = append(opts, acp.WithUpdateTitle(event.Title))
+	}
+
+	if len(tool.content) == 0 && event.Content != "" {
+		tool.content = append(tool.content, acp.ToolContent(acp.TextBlock(event.Content)))
+	}
+
+	tool.content = append(tool.content, diffContent(event.Raw)...)
+
+	if len(tool.content) > 0 {
+		opts = append(opts, acp.WithUpdateContent(append([]acp.ToolCallContent(nil), tool.content...)))
+	}
+
+	if !tool.published {
+		if err := s.emit(ctx, acp.StartToolCall(acp.ToolCallId(id), event.Title, acp.WithStartKind(toolKind(event.Kind)), acp.WithStartRawInput(event.Raw))); err != nil {
+			return err
 		}
 
-		payload, _ := row["payload"].(map[string]any)
-		if stringFromAny(row[jsonFieldType]) != valueResponseItem ||
-			stringFromAny(payload[jsonFieldType]) != valueImageGenerationCall {
-			out[index] = cloneStoreEntry(entry)
+		tool.published = true
+	}
 
+	tool.terminal = true
+
+	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+}
+
+// diffContent renders a file-change item's changes as diff content.
+func diffContent(item map[string]any) []acp.ToolCallContent {
+	changes, _ := item["changes"].([]any)
+	content := make([]acp.ToolCallContent, 0, len(changes))
+
+	for _, raw := range changes {
+		change, _ := raw.(map[string]any)
+
+		path, _ := change["path"].(string)
+		diff, _ := change["diff"].(string)
+
+		if diff == "" {
 			continue
 		}
 
-		result := stringFromAny(payload[jsonFieldResult])
-		savedPath := firstNonEmpty(stringFromAny(payload["saved_path"]), stringFromAny(payload["savedPath"]))
-		status := stringFromAny(payload["status"])
-
-		if result == "" && savedPath == "" {
-			out[index] = cloneStoreEntry(entry)
-
-			continue
-		}
-
-		subpath := ""
-
-		if !imageNativeFailed(status) {
-			ref, err := s.durableImageArtifact(ctx, codex.ImageEvent{
-				ID:        firstNonEmpty(stringFromAny(payload["id"]), stringFromAny(payload["call_id"])),
-				Kind:      valueImageGeneration,
-				Status:    status,
-				Result:    result,
-				SavedPath: savedPath,
-			})
-			if err != nil {
-				return nil, err
-			}
-
-			subpath = ref
-		}
-
-		dropDurableImagePath(payload)
-
-		if subpath == "" {
-			delete(payload, jsonFieldResult)
-		} else {
-			payload[jsonFieldResult] = map[string]any{imageArtifactRefKey: subpath}
-		}
-
-		sanitized, err := marshalImageJSON(row)
-		if err != nil {
-			return nil, err
-		}
-
-		out[index] = sanitized
+		content = append(content, acp.ToolCallContent{Diff: &acp.ToolCallContentDiff{Path: path, NewText: diff}})
 	}
 
-	return out, nil
+	return content
 }
 
-func (a *Agent) hydrateStoredImageArtifacts(
-	ctx context.Context,
-	sessionID acp.SessionId,
-	entries []SessionStoreEntry,
-) ([]SessionStoreEntry, error) {
-	session := &session{agent: a, id: sessionID}
-	out := make([]SessionStoreEntry, len(entries))
+// publishImageStart announces an image generation item as a tool call.
+func (s *session) publishImageStart(ctx context.Context, state *cycleState, event codex.ImageEvent) error {
+	id := firstNonEmpty(event.ID, "codex-image")
 
-	for index, entry := range entries {
-		var row map[string]any
-		if err := json.Unmarshal(entry, &row); err != nil {
-			return nil, err
-		}
-
-		payload, _ := row["payload"].(map[string]any)
-		result, _ := payload[jsonFieldResult].(map[string]any)
-
-		subpath := stringFromAny(result[imageArtifactRefKey])
-		if stringFromAny(row[jsonFieldType]) != valueResponseItem ||
-			stringFromAny(payload[jsonFieldType]) != valueImageGenerationCall ||
-			subpath == "" {
-			out[index] = cloneStoreEntry(entry)
-
-			continue
-		}
-
-		artifact, err := session.loadImageArtifact(ctx, subpath)
-		if err != nil {
-			return nil, &imageOutputError{
-				reason:  imageOutputStorageFailure,
-				message: fmt.Sprintf("load image output for replay: %v", err),
-			}
-		}
-
-		payload[jsonFieldResult] = artifact.Data
-
-		hydrated, err := marshalImageJSON(row)
-		if err != nil {
-			return nil, err
-		}
-
-		out[index] = hydrated
+	tool := state.tool(id)
+	if tool.published || tool.terminal {
+		return nil
 	}
 
-	return out, nil
+	if err := s.emit(ctx, acp.StartToolCall(acp.ToolCallId(id), imageToolTitle(event.Kind),
+		acp.WithStartKind(acp.ToolKindOther), acp.WithStartStatus(acp.ToolCallStatusInProgress), acp.WithStartRawInput(event.Raw))); err != nil {
+		return err
+	}
+
+	tool.published = true
+
+	return nil
+}
+
+// publishImageTerminal decodes an image item's bytes, inline or from an
+// allowed path, and emits them as the tool call's content. A refusal is
+// reported in place as the failed call's own content and the turn continues.
+func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, event codex.ImageEvent) error {
+	id := firstNonEmpty(event.ID, "codex-image")
+
+	tool := state.tool(id)
+	if tool.terminal {
+		return nil
+	}
+
+	if !tool.published {
+		if err := s.emit(ctx, acp.StartToolCall(acp.ToolCallId(id), imageToolTitle(event.Kind),
+			acp.WithStartKind(acp.ToolKindOther), acp.WithStartStatus(acp.ToolCallStatusInProgress), acp.WithStartRawInput(event.Raw))); err != nil {
+			return err
+		}
+
+		tool.published = true
+	}
+
+	tool.terminal = true
+
+	if event.Status == itemStatusFailed {
+		return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(acp.ToolCallStatusFailed), acp.WithUpdateRawOutput(event.Raw)))
+	}
+
+	limits := s.agent.options.ImageLimits.core()
+
+	var (
+		output  outputImage
+		failure *image.OutputError
+	)
+
+	switch {
+	case event.Result != "":
+		output, failure = decodeOutputImage(event.Result, "", limits.EffectiveOutputPerImage())
+	case event.SavedPath != "":
+		output, failure = s.readOutputImage(event.SavedPath, limits.EffectiveOutputPerImage())
+	default:
+		failure = &image.OutputError{Reason: image.ReasonMissingFile, Message: "image output carried neither bytes nor a path"}
+	}
+
+	if failure == nil && output.sizeBytes > limits.EffectiveOutputPerToolCall() {
+		failure = &image.OutputError{
+			Reason: image.ReasonTooLarge, Message: "tool call image content exceeds the per-tool-call limit",
+			SizeBytes: output.sizeBytes, MaxBytes: limits.EffectiveOutputPerToolCall(),
+		}
+	}
+
+	if failure != nil {
+		guidance, recoverable := failure.Guidance()
+		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(acp.ToolCallStatusFailed)}
+
+		if recoverable {
+			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(guidance))}))
+		}
+
+		err := s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+		if recoverable {
+			return err
+		}
+
+		return wire.TurnFailed(vendor, failure.TurnFailure())
+	}
+
+	tool.content = []acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(output.data, output.mime))}
+	tool.imageBytes = output.sizeBytes
+	state.imagesEmitted = true
+
+	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(acp.ToolCallStatusCompleted), acp.WithUpdateContent(tool.content)))
+}
+
+func imageToolTitle(kind string) string {
+	if kind == itemTypeImageView {
+		return "View image"
+	}
+
+	return "Generate image"
+}
+
+func toolKind(itemType string) acp.ToolKind {
+	switch itemType {
+	case itemTypeCommandExecution:
+		return acp.ToolKindExecute
+	case itemTypeFileChange:
+		return acp.ToolKindEdit
+	case itemTypeWebSearch:
+		return acp.ToolKindSearch
+	default:
+		return acp.ToolKindOther
+	}
 }

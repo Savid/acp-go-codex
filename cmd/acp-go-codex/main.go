@@ -2,171 +2,99 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
+	"slices"
 	"strings"
 
 	codexacp "github.com/savid/acp-go-codex"
-	"github.com/savid/acp-go-codex/internal/codex"
 )
 
-const (
-	loginCommand  = "login"
-	logoutCommand = "logout"
-)
-
-// seedFileFlag collects repeatable -seed-file <relpath>=<hostpath> flags,
-// reading each host file's contents keyed by its relative destination path.
+// seedFileFlag collects repeatable -seed-file <relpath>=<hostpath> values,
+// reading each host file's contents into a map keyed by the relative path.
 type seedFileFlag struct {
 	files map[string]string
 }
 
-func (f *seedFileFlag) String() string {
-	return ""
+func (s *seedFileFlag) String() string {
+	if s == nil || len(s.files) == 0 {
+		return ""
+	}
+
+	return strings.Join(slices.Sorted(func(yield func(string) bool) {
+		for name := range s.files {
+			if !yield(name) {
+				return
+			}
+		}
+	}), ",")
 }
 
-func (f *seedFileFlag) Set(value string) error {
-	rel, host, ok := strings.Cut(value, "=")
-	if !ok {
-		return fmt.Errorf("expected <relpath>=<hostpath>, got %q", value)
+func (s *seedFileFlag) Set(value string) error {
+	relPath, hostPath, ok := strings.Cut(value, "=")
+
+	relPath = strings.TrimSpace(relPath)
+	hostPath = strings.TrimSpace(hostPath)
+
+	if !ok || relPath == "" || hostPath == "" {
+		return fmt.Errorf("invalid -seed-file %q: expected <relpath>=<hostpath>", value)
 	}
 
-	if rel == "" {
-		return fmt.Errorf("seed-file relative path must not be empty")
-	}
-
-	if host == "" {
-		return fmt.Errorf("seed-file host path must not be empty")
-	}
-
-	contents, err := os.ReadFile(host) // #nosec G304 -- host path is an explicit operator-provided seed source.
+	contents, err := os.ReadFile(hostPath)
 	if err != nil {
-		return fmt.Errorf("read seed file %q: %w", host, err)
+		return fmt.Errorf("read seed file %q: %w", hostPath, err)
 	}
 
-	if f.files == nil {
-		f.files = make(map[string]string, 1)
+	if s.files == nil {
+		s.files = make(map[string]string)
 	}
 
-	f.files[rel] = string(contents)
+	s.files[relPath] = string(contents)
 
 	return nil
 }
-
-// configOverrideFlag collects repeatable -codex-config <key>=<value> flags into a map
-// of string-valued TOML config overrides passed to codex app-server as
-// `-c key=value`.
-type configOverrideFlag struct {
-	overrides map[string]any
-}
-
-func (f *configOverrideFlag) String() string {
-	return ""
-}
-
-func (f *configOverrideFlag) Set(value string) error {
-	key, val, ok := strings.Cut(value, "=")
-	if !ok {
-		return fmt.Errorf("expected <key>=<value>, got %q", value)
-	}
-
-	if key == "" {
-		return fmt.Errorf("config key must not be empty")
-	}
-
-	if f.overrides == nil {
-		f.overrides = make(map[string]any, 1)
-	}
-
-	f.overrides[key] = val
-
-	return nil
-}
-
-var serve = codexacp.Serve
-var agentVersion = version
-var exit = os.Exit
-var runCodexCLICommand = runCodexCLI
-var shutdownOpenTelemetry = shutdownTelemetry
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
-		exit(code)
+		os.Exit(code)
 	}
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	if len(args) > 0 && (args[0] == loginCommand || args[0] == logoutCommand) {
-		return runCodexCLISubcommand(ctx, args, stdin, stdout, stderr)
-	}
-
 	flags := flag.NewFlagSet("acp-go-codex", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	codexPath := flags.String("path", "", "path to codex CLI")
-	codexHome := flags.String("home", "", "Codex home directory")
-	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
-	providerAuthRoot := flags.String("provider-auth-root", "", "durable host-owned root housing the provider-auth ledger; empty leaves the provider-auth surface unadvertised")
-	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "exact CODEX_HOME the operator consents to the credential and disconnect legs touching; empty leaves those two legs unadvertised")
-	model := flags.String("model", "", "default Codex model")
+	codexPath := flags.String("path", "", "codex executable; a bare name is searched on PATH")
+	home := flags.String("home", "", "Codex home passed as CODEX_HOME; empty inherits Codex's own resolution")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral adapter state; empty means the system temp directory")
+	model := flags.String("model", "", "default model for new sessions")
+	seedFiles := &seedFileFlag{}
+	flags.Var(seedFiles, "seed-file", "file seeded into Codex's home as <relpath>=<hostpath>; repeatable")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
-	allowAccountLogout := flags.Bool("codex-allow-account-logout", false, "permit ACP logout to mutate adapter-owned Codex auth")
-
-	seedFiles := &seedFileFlag{}
-	flags.Var(seedFiles, "seed-file", "seed file as <relpath>=<hostpath>, repeatable; contents are written under CODEX_HOME before codex launches")
-
-	configOverrides := &configOverrideFlag{}
-	flags.Var(configOverrides, "codex-config", "Codex config override as <key>=<value>, repeatable; passed to codex app-server as -c key=value (dotted keys set nested config, nothing is written to disk, and the mcp_servers and shell_environment_policy keyspaces are reserved)")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 
 	if *printVersion {
-		_, _ = fmt.Fprintln(stdout, agentVersion())
+		_, _ = fmt.Fprintln(stdout, version())
 
 		return 0
 	}
 
-	logger := slog.New(slog.DiscardHandler)
+	level := slog.LevelWarn
 	if *debug {
-		logger = slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		level = slog.LevelDebug
 	}
 
-	signals := forwardedSignals()
-	receivedSignals := make(chan os.Signal, 1)
-	handledSignals := make(chan os.Signal, 1)
+	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
 
-	// One consumer owns both cancellation and the recorded signal. Registering
-	// an independent NotifyContext would let its cancellation race ahead of the
-	// channel that preserves the conventional signal exit code.
-	signal.Notify(receivedSignals, signals...)
-	defer signal.Stop(receivedSignals)
-
-	ctx, cancelSignal := context.WithCancel(ctx)
-	defer cancelSignal()
-
-	go func() {
-		select {
-		case sig := <-receivedSignals:
-			handledSignals <- sig
-
-			cancelSignal()
-		case <-ctx.Done():
-		}
-	}()
-
-	version := agentVersion()
-
-	telemetry, err := configureTelemetry(ctx, logger, version)
+	telemetry, err := configureTelemetry(ctx, logger, version())
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-codex: configure OpenTelemetry: %v\n", err)
 
@@ -175,158 +103,37 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger = telemetry.logger
 
-	serveOptions := make([]codexacp.Option, 0, 8+len(telemetry.options))
+	ctx, stop := signal.NotifyContext(ctx, forwardedSignals()...)
+	defer stop()
 
-	serveOptions = append(serveOptions,
-		codexacp.WithAgentVersion(version),
+	options := []codexacp.Option{
+		codexacp.WithAgentVersion(version()),
 		codexacp.WithExecutablePath(*codexPath),
-		codexacp.WithHome(*codexHome),
+		codexacp.WithHome(*home),
 		codexacp.WithScratchDir(*scratchDir),
-		codexacp.WithProviderAuthRoot(*providerAuthRoot),
-		codexacp.WithProviderAuthDirectHome(*providerAuthDirectHome),
 		codexacp.WithDefaultModel(*model),
-		codexacp.WithCodexAllowAccountLogout(*allowAccountLogout),
 		codexacp.WithLogger(logger),
-	)
-
+	}
 	if len(seedFiles.files) > 0 {
-		serveOptions = append(serveOptions, codexacp.WithSeedFiles(seedFiles.files))
+		options = append(options, codexacp.WithSeedFiles(seedFiles.files))
 	}
 
-	if len(configOverrides.overrides) > 0 {
-		serveOptions = append(serveOptions, codexacp.WithCodexConfigOverrides(configOverrides.overrides))
+	options = append(options, telemetry.options...)
+
+	serveErr := codexacp.Serve(ctx, stdin, stdout, options...)
+	shutdownErr := shutdownTelemetry(context.Background(), telemetry.shutdown)
+
+	if serveErr != nil && ctx.Err() == nil {
+		_, _ = fmt.Fprintf(stderr, "acp-go-codex: %v\n", serveErr)
+
+		return 1
 	}
 
-	serveOptions = append(serveOptions, telemetry.options...)
-
-	err = serve(ctx, stdin, stdout, serveOptions...)
-
-	shutdownErr := shutdownOpenTelemetry(context.Background(), telemetry.shutdown)
 	if shutdownErr != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-codex: shutdown OpenTelemetry: %v\n", shutdownErr)
 
 		return 1
 	}
 
-	if err != nil && ctx.Err() == nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex: %v\n", err)
-
-		return 1
-	}
-
-	if sig := pendingSignal(handledSignals); sig != nil {
-		return signalCode(sig)
-	}
-
 	return 0
-}
-
-func runCodexCLISubcommand(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	mode := args[0]
-	flags := flag.NewFlagSet("acp-go-codex "+mode, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	codexPath := flags.String("path", "", "path to codex CLI")
-	codexHome := flags.String("home", "", "Codex home directory")
-	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral account-command scratch; empty means the system temp directory")
-
-	deviceAuth := flags.Bool("codex-device-auth", false, "use Codex device auth for login")
-	if err := flags.Parse(args[1:]); err != nil {
-		return 2
-	}
-
-	var err error
-
-	*codexHome, err = resolvedCodexCLIHome(*codexHome)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: native home: %v\n", mode, err)
-
-		return 1
-	}
-
-	if err := runCodexCLICommand(ctx, *codexPath, *codexHome, *scratchDir, mode, *deviceAuth, stdin, stdout, stderr); err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-codex %s: %v\n", mode, err)
-
-		return commandExitCode(err)
-	}
-
-	return 0
-}
-
-func runCodexCLI(ctx context.Context, codexPath string, codexHome string, scratchDir string, mode string, deviceAuth bool, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	home, err := resolvedCodexCLIHome(codexHome)
-	if err != nil {
-		return err
-	}
-
-	signals := make(chan os.Signal, 1)
-
-	signal.Notify(signals, forwardedSignals()...)
-	defer signal.Stop(signals)
-
-	return runCodexCLIWithSignals(ctx, codexPath, home, scratchDir, mode, deviceAuth, stdin, stdout, stderr, signals)
-}
-
-func runCodexCLIWithSignals(
-	ctx context.Context,
-	codexPath string,
-	home string,
-	scratchDir string,
-	mode string,
-	deviceAuth bool,
-	stdin io.Reader,
-	stdout io.Writer,
-	stderr io.Writer,
-	signals <-chan os.Signal,
-) error {
-	options := codex.AccountCommandOptions{
-		CLIPath:    codexPath,
-		CodexHome:  home,
-		Scratch:    scratchDir,
-		Mode:       mode,
-		DeviceAuth: deviceAuth,
-		Stdin:      stdin,
-		Stdout:     stdout,
-		Stderr:     stderr,
-		Signals:    signals,
-	}
-
-	return codex.RunAccountCommand(ctx, options)
-}
-
-func resolvedCodexCLIHome(configured string) (string, error) {
-	if configured == "" {
-		return "", errors.New("-home is required for native account mode; root CODEX_HOME and root home are never consulted")
-	}
-
-	cleaned := filepath.Clean(configured)
-	if !filepath.IsAbs(configured) || cleaned != configured {
-		return "", errors.New("-home must be a canonical absolute path")
-	}
-
-	return cleaned, nil
-}
-
-func pendingSignal(signals <-chan os.Signal) os.Signal {
-	select {
-	case sig := <-signals:
-		return sig
-	default:
-		return nil
-	}
-}
-
-func commandExitCode(err error) int {
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		code := exitErr.ExitCode()
-		if code >= 0 {
-			return code
-		}
-
-		if code := signalExitCode(exitErr); code > 0 {
-			return code
-		}
-	}
-
-	return 1
 }

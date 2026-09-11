@@ -9,512 +9,350 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
-const jsonRPCVersion = "2.0"
+// ErrTransportClosed reports that the app-server stdout stream ended before a
+// call received its response.
+var ErrTransportClosed = errors.New("codex app-server transport closed")
 
-// maxNativeLineBytes bounds one app-server stdout line so a single oversize
-// frame cannot force an unbounded buffer allocation before the JSON is parsed.
-const maxNativeLineBytes = 10 * 1024 * 1024
+const (
+	jsonRPCVersion = "2.0"
+	// maxLineBytes bounds one app-server stdout line so one oversize frame
+	// cannot force an unbounded allocation before it is parsed.
+	maxLineBytes = 10 * 1024 * 1024
+	// initialLineBytes is the scanner's starting buffer.
+	initialLineBytes = 64 * 1024
+)
 
-type rpcTransport interface {
-	Send(context.Context, rpcMessage) error
-	Recv() (rpcMessage, string, error)
-	Close() error
-}
-
-type rpcMessage struct {
+// message is one JSON-RPC frame in either direction.
+type message struct {
 	JSONRPC string          `json:"jsonrpc,omitempty"`
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
+	Error   *RPCError       `json:"error,omitempty"`
 }
 
-type rpcError struct {
+// RPCError is the error member of a failed app-server response.
+type RPCError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
-func (e *rpcError) Error() string {
-	if e == nil {
-		return ""
-	}
-
-	return fmt.Sprintf("codex app-server request failed (code %d)", e.Code)
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("codex app-server request failed (code %d): %s", e.Code, e.Message)
 }
 
-type lineTransport struct {
-	s    *bufio.Scanner
-	w    io.Writer
-	proc *process
-	mu   sync.Mutex
-
-	// grace bounds how long readError waits for the process to be reaped
-	// before classifying a read failure as a live-transport fault. Captured at
-	// construction so concurrent readers never touch shared mutable state.
-	grace time.Duration
-}
-
-func newLineTransport(r io.Reader, w io.Writer, proc *process) *lineTransport {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxNativeLineBytes)
-
-	return &lineTransport{
-		s:     scanner,
-		w:     w,
-		proc:  proc,
-		grace: processExitGrace,
-	}
-}
-
-func (t *lineTransport) Send(ctx context.Context, msg rpcMessage) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	msg.JSONRPC = jsonRPCVersion
-
-	payload, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-
-	payload = append(payload, '\n')
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	_, err = t.w.Write(payload)
-
-	return err
-}
-
-func (t *lineTransport) Recv() (rpcMessage, string, error) {
-	if !t.s.Scan() {
-		err := t.s.Err()
-		if err == nil {
-			err = io.EOF
-		}
-
-		return rpcMessage{}, "", t.readError(err)
-	}
-
-	raw := string(t.s.Bytes())
-	if raw == "" {
-		return rpcMessage{}, raw, errors.New("empty JSON-RPC line")
-	}
-
-	var msg rpcMessage
-	if err := json.Unmarshal(t.s.Bytes(), &msg); err != nil {
-		return rpcMessage{}, raw, fmt.Errorf("decode JSON-RPC line: %w", err)
-	}
-
-	return msg, raw, nil
-}
-
-// readError distinguishes process exit from a live transport fault.
-func (t *lineTransport) readError(err error) error {
-	if t.proc == nil {
-		return err
-	}
-
-	if errors.Is(err, io.EOF) {
-		return &ProcessExitError{Err: errors.Join(err, t.proc.waitTerminal())}
-	}
-
-	exited, terminalErr := t.proc.waitTerminalWithin(t.grace)
-	if !exited {
-		return err
-	}
-
-	return &ProcessExitError{Err: errors.Join(err, terminalErr)}
-}
-
-func (t *lineTransport) Close() error {
-	if t.proc == nil {
-		return nil
-	}
-
-	return t.proc.Close()
-}
-
-type pendingCall struct {
-	result chan rpcMessage
-}
-
-type pendingRequest struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-}
-
-type rpcConn struct {
-	transport rpcTransport
-	handler   RequestHandler
-	events    chan rpcEvent
-	done      chan struct{}
-	doneOnce  sync.Once
-	shutdown  sync.Once
-
-	nextID atomic.Int64
-
-	mu            sync.Mutex
-	pending       map[string]pendingCall
-	requests      map[string]*pendingRequest
-	closed        bool
-	closeErr      error
-	closeWait     chan struct{}
-	closeComplete bool
-	shutdownCause error
-	transportErr  error
-	shutdownErr   error
-}
-
-type rpcEvent struct {
+// Notification is one app-server notification, undecoded.
+type Notification struct {
 	Method string
 	Params json.RawMessage
-	Raw    string
 }
 
-func newRPCConn(transport rpcTransport, handler RequestHandler) *rpcConn {
-	conn := &rpcConn{
-		transport: transport,
-		handler:   handler,
-		events:    make(chan rpcEvent, 128),
-		done:      make(chan struct{}),
-		pending:   make(map[string]pendingCall),
-		requests:  make(map[string]*pendingRequest),
-		closeWait: make(chan struct{}),
+// ServerRequest is one request the app-server sent to the adapter, answered
+// through Client.Respond.
+type ServerRequest struct {
+	ID     json.RawMessage
+	Method string
+	Params json.RawMessage
+}
+
+// Client speaks the app-server's JSON-RPC protocol over its stdin and stdout.
+// Calls are correlated by id; notifications and server requests are delivered
+// on channels in stream order. Delivery is synchronous, so the consumer keeps
+// draining both channels while calls are in flight.
+type Client struct {
+	stdin   io.Writer
+	scanner *bufio.Scanner
+
+	writeMu sync.Mutex
+
+	pendingMu sync.Mutex
+	pending   map[string]chan message
+	failed    bool
+	failure   error
+
+	nextID  atomic.Int64
+	started atomic.Bool
+
+	notifications chan Notification
+	requests      chan ServerRequest
+	done          chan struct{}
+	wg            sync.WaitGroup
+}
+
+// NewClient constructs a client over the app-server's stdin writer and stdout
+// reader.
+func NewClient(stdin io.Writer, stdout io.Reader) *Client {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, initialLineBytes), maxLineBytes)
+
+	return &Client{
+		stdin:         stdin,
+		scanner:       scanner,
+		pending:       make(map[string]chan message, 4),
+		notifications: make(chan Notification),
+		requests:      make(chan ServerRequest),
+		done:          make(chan struct{}),
+	}
+}
+
+// Start launches the stdout read loop. It must be called exactly once before
+// any call is issued; the loop stops when the stream ends or ctx is cancelled.
+func (c *Client) Start(ctx context.Context) error {
+	if !c.started.CompareAndSwap(false, true) {
+		return errors.New("codex client already started")
 	}
 
-	go func() {
-		defer recoverCodexGoroutine(context.Background(), "Codex JSON-RPC read loop")
+	c.wg.Go(func() { c.readLoop(ctx) })
 
-		conn.readLoop()
-	}()
-
-	return conn
+	return nil
 }
 
-func (c *rpcConn) Events() <-chan rpcEvent { return c.events }
+// Stop waits for the read loop to exit and returns the transport failure, if
+// any. The caller first ends the stream by terminating the process.
+func (c *Client) Stop() error {
+	if c.started.Load() {
+		c.wg.Wait()
+	}
 
-func (c *rpcConn) Call(ctx context.Context, method string, params any, result any) error {
+	return c.Err()
+}
+
+// Notifications returns the notification stream. It is closed when the read
+// loop exits.
+func (c *Client) Notifications() <-chan Notification { return c.notifications }
+
+// Requests returns the server request stream. It is closed when the read loop
+// exits. Every request must be answered through Respond.
+func (c *Client) Requests() <-chan ServerRequest { return c.requests }
+
+// Done is closed when the read loop has exited.
+func (c *Client) Done() <-chan struct{} { return c.done }
+
+// Err returns the transport failure, or nil after a clean end-of-stream.
+func (c *Client) Err() error {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+
+	return c.failure
+}
+
+// Call sends one request and decodes its result into result when non-nil. A
+// failed response is returned as an *RPCError.
+func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	id := c.nextID.Add(1)
-	idRaw := json.RawMessage(fmt.Sprintf("%d", id))
-	key := string(idRaw)
-	call := pendingCall{result: make(chan rpcMessage, 1)}
+	id := json.RawMessage(fmt.Sprintf("%d", c.nextID.Add(1)))
 
-	c.mu.Lock()
-	if c.closed {
-		err := c.closeErr
-		if err == nil {
-			err = ErrConnectionClosed
-		}
-		c.mu.Unlock()
-
-		return err
-	}
-
-	c.pending[key] = call
-	c.mu.Unlock()
-
-	cleanup := func() {
-		c.mu.Lock()
-		delete(c.pending, key)
-		c.mu.Unlock()
-	}
-
-	paramsRaw, err := marshalRaw(params)
+	encodedParams, err := marshalRaw(params)
 	if err != nil {
-		cleanup()
+		return fmt.Errorf("encode %s params: %w", method, err)
+	}
 
+	waiter := make(chan message, 1)
+
+	if err := c.registerPending(string(id), waiter); err != nil {
 		return err
 	}
 
-	if err := c.transport.Send(ctx, rpcMessage{ID: idRaw, Method: method, Params: paramsRaw}); err != nil {
-		cleanup()
+	if err := c.write(message{ID: id, Method: method, Params: encodedParams}); err != nil {
+		c.unregisterPending(string(id))
 
-		return err
+		return fmt.Errorf("write %s request: %w", method, err)
 	}
 
 	select {
-	case <-ctx.Done():
-		cleanup()
-
-		return ctx.Err()
-	case <-c.done:
-		cleanup()
-
-		return c.err()
-	case msg, ok := <-call.result:
+	case response, ok := <-waiter:
 		if !ok {
-			return c.err()
+			return c.closedError()
 		}
 
-		if msg.Error != nil {
-			return msg.Error
+		if response.Error != nil {
+			return response.Error
 		}
 
-		if result == nil || len(msg.Result) == 0 {
+		if result == nil || len(response.Result) == 0 {
 			return nil
 		}
 
-		return json.Unmarshal(msg.Result, result)
-	}
-}
+		if err := json.Unmarshal(response.Result, result); err != nil {
+			return fmt.Errorf("decode %s result: %w", method, err)
+		}
 
-func (c *rpcConn) Notify(ctx context.Context, method string, params any) error {
-	paramsRaw, err := marshalRaw(params)
-	if err != nil {
-		return err
-	}
-
-	return c.transport.Send(ctx, rpcMessage{Method: method, Params: paramsRaw})
-}
-
-func (c *rpcConn) Respond(ctx context.Context, id json.RawMessage, result any, reqErr *rpcError) error {
-	resultRaw, err := marshalRaw(result)
-	if err != nil {
-		return err
-	}
-
-	return c.transport.Send(ctx, rpcMessage{ID: id, Result: resultRaw, Error: reqErr})
-}
-
-func (c *rpcConn) Close() error {
-	return c.closeContext(context.Background())
-}
-
-func (c *rpcConn) CloseContext(ctx context.Context) error {
-	return c.closeContext(ctx)
-}
-
-func (c *rpcConn) closeContext(ctx context.Context) error {
-	c.startShutdown(nil)
-
-	c.mu.Lock()
-	if c.closeComplete && errors.Is(c.transportErr, ErrContainmentIncomplete) {
-		c.closeWait = make(chan struct{})
-		c.closeComplete = false
-
-		go c.retryTransportClose()
-	}
-
-	wait := c.closeWait
-	c.mu.Unlock()
-
-	select {
+		return nil
 	case <-ctx.Done():
+		c.unregisterPending(string(id))
+
 		return ctx.Err()
-	case <-wait:
+	}
+}
+
+// Notify sends one notification.
+func (c *Client) Notify(method string, params any) error {
+	encodedParams, err := marshalRaw(params)
+	if err != nil {
+		return fmt.Errorf("encode %s params: %w", method, err)
 	}
 
-	c.mu.Lock()
-	err := c.shutdownErr
-	c.mu.Unlock()
+	return c.write(message{Method: method, Params: encodedParams})
+}
+
+// Respond answers one server request. A nil rpcErr sends result; otherwise the
+// error is sent and result is ignored.
+func (c *Client) Respond(request ServerRequest, result any, rpcErr *RPCError) error {
+	encodedResult, err := marshalRaw(result)
+	if err != nil {
+		return fmt.Errorf("encode %s response: %w", request.Method, err)
+	}
+
+	if rpcErr != nil {
+		encodedResult = nil
+	}
+
+	return c.write(message{ID: request.ID, Result: encodedResult, Error: rpcErr})
+}
+
+func (c *Client) write(frame message) error {
+	frame.JSONRPC = jsonRPCVersion
+
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	record := make([]byte, len(encoded)+1)
+	copy(record, encoded)
+	record[len(encoded)] = '\n'
+
+	n, err := c.stdin.Write(record)
+	if err == nil && n != len(record) {
+		err = io.ErrShortWrite
+	}
 
 	return err
 }
 
-func (c *rpcConn) startShutdown(cause error) {
-	c.shutdown.Do(func() {
-		c.mu.Lock()
+func (c *Client) registerPending(id string, waiter chan message) error {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
 
-		c.closed = true
-		if cause != nil && c.closeErr == nil {
-			c.closeErr = fmt.Errorf("%w: %w", ErrConnectionClosed, cause)
+	if c.failed {
+		return c.closedErrorLocked()
+	}
+
+	c.pending[id] = waiter
+
+	return nil
+}
+
+func (c *Client) unregisterPending(id string) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+
+	delete(c.pending, id)
+}
+
+func (c *Client) closedError() error {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+
+	return c.closedErrorLocked()
+}
+
+func (c *Client) closedErrorLocked() error {
+	if c.failure != nil {
+		return fmt.Errorf("%w: %w", ErrTransportClosed, c.failure)
+	}
+
+	return ErrTransportClosed
+}
+
+func (c *Client) readLoop(ctx context.Context) {
+	var failure error
+
+	for c.scanner.Scan() {
+		line := c.scanner.Bytes()
+		if len(line) == 0 {
+			continue
 		}
 
-		c.shutdownCause = c.closeErr
-
-		for key, call := range c.pending {
-			delete(c.pending, key)
-			close(call.result)
+		var frame message
+		if err := json.Unmarshal(line, &frame); err != nil {
+			// A line that is not JSON-RPC is app-server chatter on the wrong
+			// stream; it is skipped rather than ending the transport.
+			continue
 		}
 
-		requests := make([]*pendingRequest, 0, len(c.requests))
-		for _, request := range c.requests {
-			requests = append(requests, request)
-		}
-		c.mu.Unlock()
+		if err := c.dispatch(ctx, frame); err != nil {
+			failure = err
 
-		for _, request := range requests {
-			request.cancel()
-		}
-
-		go c.finishShutdown(requests)
-	})
-}
-
-func (c *rpcConn) finishShutdown(requests []*pendingRequest) {
-	transportErr := c.transport.Close()
-
-	for _, request := range requests {
-		<-request.done
-	}
-
-	<-c.done
-	c.publishTransportClose(transportErr)
-}
-
-func (c *rpcConn) retryTransportClose() {
-	c.publishTransportClose(c.transport.Close())
-}
-
-func (c *rpcConn) publishTransportClose(transportErr error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.transportErr = transportErr
-	c.shutdownErr = errors.Join(c.shutdownCause, transportErr)
-	c.closeComplete = true
-	close(c.closeWait)
-}
-
-func (c *rpcConn) readLoop() {
-	defer c.closeDone()
-
-	for {
-		msg, raw, err := c.transport.Recv()
-		if err != nil {
-			c.startShutdown(err)
-
-			return
-		}
-
-		switch {
-		case len(msg.ID) > 0 && msg.Method == "":
-			c.deliverResponse(msg)
-		case len(msg.ID) > 0 && msg.Method != "":
-			go func() {
-				defer recoverCodexGoroutine(context.Background(), "Codex server request")
-
-				c.handleRequest(msg)
-			}()
-		case msg.Method != "":
-			c.deliverNotification(msg, raw)
+			break
 		}
 	}
-}
 
-func (c *rpcConn) err() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.closeErr != nil {
-		return c.closeErr
-	}
-
-	return ErrConnectionClosed
-}
-
-func (c *rpcConn) closeError() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.closeErr
-}
-
-func (c *rpcConn) closeDone() {
-	c.doneOnce.Do(func() {
-		close(c.done)
-		close(c.events)
-	})
-}
-
-func (c *rpcConn) deliverResponse(msg rpcMessage) {
-	c.mu.Lock()
-
-	call, ok := c.pending[string(msg.ID)]
-	if ok {
-		delete(c.pending, string(msg.ID))
-	}
-	c.mu.Unlock()
-
-	if ok {
-		call.result <- msg
-	}
-}
-
-func (c *rpcConn) deliverNotification(msg rpcMessage, raw string) {
-	event := rpcEvent{Method: msg.Method, Params: msg.Params, Raw: raw}
-	select {
-	case c.events <- event:
-	case <-c.done:
-	}
-}
-
-func (c *rpcConn) handleRequest(msg rpcMessage) {
-	if c.handler == nil {
-		_ = c.Respond(context.Background(), msg.ID, nil, &rpcError{Code: jsonRPCMethodNotFound, Message: methodNotFoundMessage})
-
-		return
-	}
-
-	ctx, finish, ok := c.beginRequest(string(msg.ID))
-	if !ok {
-		return
-	}
-	defer finish()
-
-	result, err := c.handler(ctx, ServerRequest{
-		ID:     append(json.RawMessage(nil), msg.ID...),
-		Method: msg.Method,
-		Params: append(json.RawMessage(nil), msg.Params...),
-	})
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-		return
-	}
-
-	if err != nil {
-		_ = c.Respond(ctx, msg.ID, nil, &rpcError{Code: -32000, Message: "codex adapter request failed"})
-
-		return
-	}
-
-	_ = c.Respond(ctx, msg.ID, result, nil)
-}
-
-func (c *rpcConn) beginRequest(key string) (context.Context, func(), bool) {
-	ctx, cancel := context.WithCancel(context.Background())
-	request := &pendingRequest{cancel: cancel, done: make(chan struct{})}
-
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		cancel()
-
-		return nil, nil, false
-	}
-
-	if _, exists := c.requests[key]; exists {
-		c.mu.Unlock()
-		cancel()
-
-		return nil, nil, false
-	}
-
-	c.requests[key] = request
-	c.mu.Unlock()
-
-	finish := func() {
-		c.mu.Lock()
-		if c.requests[key] == request {
-			delete(c.requests, key)
+	if failure == nil {
+		if err := c.scanner.Err(); err != nil {
+			failure = err
 		}
-		c.mu.Unlock()
-		cancel()
-		close(request.done)
 	}
 
-	return ctx, finish, true
+	c.finish(failure)
+}
+
+func (c *Client) dispatch(ctx context.Context, frame message) error {
+	switch {
+	case len(frame.ID) > 0 && frame.Method == "":
+		c.pendingMu.Lock()
+		waiter, ok := c.pending[string(frame.ID)]
+		delete(c.pending, string(frame.ID))
+		c.pendingMu.Unlock()
+
+		if ok {
+			waiter <- frame
+		}
+
+		return nil
+	case len(frame.ID) > 0:
+		select {
+		case c.requests <- ServerRequest{ID: frame.ID, Method: frame.Method, Params: frame.Params}:
+			return nil
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	case frame.Method != "":
+		select {
+		case c.notifications <- Notification{Method: frame.Method, Params: frame.Params}:
+			return nil
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	default:
+		return nil
+	}
+}
+
+func (c *Client) finish(failure error) {
+	c.pendingMu.Lock()
+	c.failed = true
+	c.failure = failure
+
+	for id, waiter := range c.pending {
+		close(waiter)
+		delete(c.pending, id)
+	}
+	c.pendingMu.Unlock()
+
+	close(c.notifications)
+	close(c.requests)
+	close(c.done)
 }
 
 func marshalRaw(value any) (json.RawMessage, error) {
@@ -526,10 +364,13 @@ func marshalRaw(value any) (json.RawMessage, error) {
 		return raw, nil
 	}
 
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
+	return json.Marshal(value)
+}
 
-	return payload, nil
+// IsMethodNotFound reports whether the app-server answered that it does not
+// implement the method.
+func IsMethodNotFound(err error) bool {
+	var rpcErr *RPCError
+
+	return errors.As(err, &rpcErr) && rpcErr.Code == -32601
 }

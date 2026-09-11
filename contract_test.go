@@ -3,381 +3,343 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
-func TestCommandContractInitializeHasNoCommandCapability(t *testing.T) {
-	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
-	if err != nil {
-		t.Fatalf("Initialize returned error: %v", err)
-	}
+func TestInitializeShape(t *testing.T) {
+	t.Parallel()
 
-	raw, err := json.Marshal(resp.AgentCapabilities)
-	if err != nil {
-		t.Fatalf("marshal capabilities: %v", err)
-	}
-	for _, forbidden := range []string{`"command"`, `"commands"`, `"slashCommands"`, `"availableCommands"`} {
-		if strings.Contains(string(raw), forbidden) {
-			t.Fatalf("initialize advertised command capability %s in %s", forbidden, raw)
-		}
-	}
-	if path, ok := commandAdvertisingMetaPath(resp.AgentCapabilities.Meta); ok {
-		t.Fatalf("initialize advertised command metadata at %s: %#v", path, resp.AgentCapabilities.Meta)
-	}
+	h := newHarness(t, WithInputHandoffRoot(t.TempDir()))
+	resp := h.initialize(func(request *acp.InitializeRequest) {
+		request.ClientCapabilities.PositionEncodings = []acp.PositionEncodingKind{acp.PositionEncodingKindUtf8}
+	})
+
+	require.Empty(t, resp.AuthMethods)
+	require.Nil(t, resp.Meta)
+	require.True(t, resp.AgentCapabilities.LoadSession)
+	require.True(t, resp.AgentCapabilities.PromptCapabilities.Image)
+	require.True(t, resp.AgentCapabilities.PromptCapabilities.EmbeddedContext)
+	require.False(t, resp.AgentCapabilities.McpCapabilities.Http)
+	require.Nil(t, resp.AgentCapabilities.SessionCapabilities.Fork)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Close)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Delete)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.List)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Resume)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.AdditionalDirectories)
+	require.Equal(t, acp.PositionEncodingKindUtf8, *resp.AgentCapabilities.PositionEncoding)
+
+	meta := resp.AgentCapabilities.Meta
+	require.Contains(t, meta, "codex")
+	require.Contains(t, meta, wire.MediaEnvelopeKey)
+	require.Contains(t, meta, wire.HandoffKey)
+
+	envelope, _ := meta[wire.MediaEnvelopeKey].(map[string]any)
+	require.EqualValues(t, 6291456, envelope["maxBytes"])
+	require.EqualValues(t, 6291456, envelope["maxPromptBytes"])
+	require.EqualValues(t, 0, envelope["maxDimension"])
+	require.Equal(t, []any{"image/png", "image/jpeg", "image/gif", "image/webp"}, envelope["imageFormats"])
+	require.Equal(t, []any{}, envelope["documentFormats"])
+
+	codexMeta, _ := meta["codex"].(map[string]any)
+	store, _ := codexMeta["sessionStore"].(map[string]any)
+	require.Equal(t, SessionStoreFormat, store["format"])
+
+	structured, _ := codexMeta["structuredOutput"].(map[string]any)
+	require.Equal(t, "_meta.codex.options.outputSchema", structured["config"])
+	require.Equal(t, "_meta.codex.structuredOutput", structured["result"])
 }
 
-func TestCommandContractLifecycleDoesNotEmitCommands(t *testing.T) {
-	ctx := context.Background()
-	cases := []struct {
-		name string
-		run  func(context.Context, *acp.ClientSideConnection, SessionStore) error
-	}{
-		{
-			name: "new",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
-				_, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
+func TestInitializeWithoutHandoffOmitsAdvertisement(t *testing.T) {
+	t.Parallel()
 
-				return err
-			},
-		},
-		{
-			name: "resume",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
-				session, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
-				if err != nil {
-					return err
-				}
-				_, err = conn.ResumeSession(ctx, ResumeSessionRequest(session.SessionId, absTestPath("tmp", "project")))
+	h := newHarness(t)
+	resp := h.initialize()
+	require.NotContains(t, resp.AgentCapabilities.Meta, wire.HandoffKey)
+	require.Equal(t, acp.PositionEncodingKindUtf16, *resp.AgentCapabilities.PositionEncoding)
+}
 
-				return err
-			},
-		},
-		{
-			name: "load",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection, store SessionStore) error {
-				session, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
-				if err != nil {
-					return err
-				}
-				err = store.Replace(ctx, SessionKey{SessionID: string(session.SessionId)}, []SessionStoreReplacement{{
-					Key: SessionKey{SessionID: string(session.SessionId)},
-					Entries: []SessionStoreEntry{SessionStoreEntry(
-						`{"type":"session_meta","payload":{"id":"thread-1","cwd":` + absTestPathJSON("tmp", "project") + `}}`,
-					)},
-				}, testDurableSessionConfigReplacement(t, session.SessionId, nil, nil)})
-				if err != nil {
-					return err
-				}
-				_, err = conn.LoadSession(ctx, LoadSessionRequest(session.SessionId, absTestPath("tmp", "project")))
+func TestInitializeLifecycleAnswer(t *testing.T) {
+	t.Parallel()
 
-				return err
-			},
-		},
-		{
-			name: "fork",
-			run: func(ctx context.Context, conn *acp.ClientSideConnection, _ SessionStore) error {
-				session, err := conn.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
-				if err != nil {
-					return err
-				}
-				_, err = CallForkSession(ctx, conn, ForkSessionRequest(session.SessionId, absTestPath("tmp", "project")))
+	h := newHarness(t)
+	resp := h.initialize(withLifecycle())
 
-				return err
-			},
-		},
+	answer, ok := resp.Meta[wire.LifecycleKey].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1, answer["version"])
+	require.Equal(t, true, answer["updatesOutsidePrompt"])
+	require.Equal(t, []any{}, answer["activityKinds"])
+	require.NotContains(t, resp.AgentCapabilities.Meta, wire.LifecycleKey)
+}
+
+func TestInitializeLifecycleStrictness(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]any{
+		"string version": map[string]any{"version": "1"},
+		"fraction":       map[string]any{"version": json.Number("1.0")},
+		"other version":  map[string]any{"version": 2},
+		"unknown member": map[string]any{"version": 1, "extra": true},
+		"non-object":     true,
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			conn, client, store := newCommandContractConnection(t)
-			if _, err := conn.Initialize(ctx, acp.InitializeRequest{}); err != nil {
-				t.Fatalf("Initialize returned error: %v", err)
-			}
-			if err := tc.run(ctx, conn, store); err != nil {
-				t.Fatalf("%s lifecycle returned error: %v", tc.name, err)
-			}
-			assertNoAvailableCommandUpdates(t, client.Updates())
+	for name, value := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+			meta := map[string]any{wire.LifecycleKey: value}
+
+			_, err := h.conn.Initialize(h.ctx(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: meta})
+			require.Equal(t, -32602, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "unsupported", data["error"])
+			require.Contains(t, data["field"], wire.LifecycleKey)
 		})
 	}
 }
 
-func TestCommandContractSlashTextPassesThroughRunTurn(t *testing.T) {
-	ctx := context.Background()
+func TestBannedRoutes(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+
+	for _, method := range []string{"_codex/fork", "_codex/anything"} {
+		_, err := h.conn.CallExtension(h.ctx(), method, map[string]any{})
+		require.Equal(t, -32601, requestErrorCode(t, err), method)
+	}
+
+	var err error
+
+	_, err = h.conn.SetSessionMode(h.ctx(), acp.SetSessionModeRequest{SessionId: "x", ModeId: "plan"})
+	require.Equal(t, -32601, requestErrorCode(t, err))
+
+	_, err = h.conn.Authenticate(h.ctx(), acp.AuthenticateRequest{MethodId: "oauth"})
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "oauth", requestErrorData(t, err)["methodId"])
+
+	_, err = h.conn.Logout(h.ctx(), acp.LogoutRequest{})
+	require.Equal(t, -32601, requestErrorCode(t, err))
+}
+
+func TestSessionMetaStrictness(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
-		name string
-		text string
+		name  string
+		meta  map[string]any
+		field string
 	}{
-		{name: "unknown", text: "/unknown args"},
-		{name: "compact", text: "/compact"},
-		{name: "review", text: "/review"},
+		{"unknown own key", map[string]any{"codex": map[string]any{"bogus": 1}}, "_meta.codex.bogus"},
+		{"unknown option", map[string]any{"codex": map[string]any{"options": map[string]any{"bogus": 1}}}, "_meta.codex.options.bogus"},
+		{"empty output schema", map[string]any{"codex": map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}}, "_meta.codex.options.outputSchema"},
+		{"empty model", map[string]any{"codex": map[string]any{"options": map[string]any{"model": ""}}}, "_meta.codex.options.model"},
+		{"bad policy", map[string]any{"codex": map[string]any{"options": map[string]any{"sandboxPolicy": 1}}}, "_meta.codex.options.sandboxPolicy"},
+		{"relative path dir", map[string]any{"codex": map[string]any{"options": map[string]any{"extraPathDirs": []any{"rel"}}}}, "_meta.codex.options.extraPathDirs[0]"},
+		{"bad env name", map[string]any{"codex": map[string]any{"options": map[string]any{"env": map[string]any{"A=B": "x"}}}}, "_meta.codex.options.env.A=B"},
+		{"lifecycle literal", map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}, `_meta["` + wire.LifecycleKey + `"]`},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := newSpyCodexClient()
-			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-				return client, nil
-			}))
-			session, err := agent.NewSession(ctx, NewSessionRequest(absTestPath("tmp", "project")))
-			if err != nil {
-				t.Fatalf("NewSession returned error: %v", err)
-			}
-			if _, err := agent.Prompt(ctx, TextPromptRequest(session.SessionId, "test-turn", tc.text)); err != nil {
-				t.Fatalf("Prompt returned error: %v", err)
-			}
+			t.Parallel()
 
-			turn, compact, review := client.commandContractSnapshot()
-			if got := runTurnText(turn); got != tc.text {
-				t.Fatalf("RunTurn text = %q, want %q; prompt=%#v", got, tc.text, turn.Prompt)
-			}
-			if compact.ThreadID != "" {
-				t.Fatalf("slash text routed to CompactThread: %#v", compact)
-			}
-			if review.ThreadID != "" || review.Target != nil || review.Delivery != "" {
-				t.Fatalf("slash text routed to StartReview: %#v", review)
-			}
+			h := newHarness(t)
+			h.initialize()
+
+			request := NewSessionRequest(t.TempDir())
+			request.Meta = tc.meta
+
+			_, err := h.conn.NewSession(h.ctx(), request)
+			require.Equal(t, -32602, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "unsupported", data["error"])
+			require.Equal(t, tc.field, data["field"])
 		})
 	}
 }
 
-func TestCommandContractSkillsAreNotCommands(t *testing.T) {
-	clientType := reflect.TypeFor[codex.Client]()
-	for method := range clientType.Methods() {
-		name := strings.ToLower(method.Name)
-		if strings.Contains(name, "skill") || strings.Contains(name, "command") {
-			t.Fatalf("Codex provider boundary exposes %s; skills and commands must not be projected as AvailableCommand entries", method.Name)
-		}
-	}
+func TestForeignMetaIgnored(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+
+	session := h.newSession(WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
+	require.NotEmpty(t, session.SessionId)
 }
 
-func newCommandContractConnection(t *testing.T) (*acp.ClientSideConnection, *recordingClient, SessionStore) {
-	t.Helper()
+func TestUniformRejections(t *testing.T) {
+	t.Parallel()
 
-	c2aR, c2aW := io.Pipe()
-	a2cR, a2cW := io.Pipe()
-	t.Cleanup(func() {
-		_ = c2aR.Close()
-		_ = c2aW.Close()
-		_ = a2cR.Close()
-		_ = a2cW.Close()
+	h := newHarness(t)
+	h.initialize()
+
+	_, err := h.conn.NewSession(h.ctx(), acp.NewSessionRequest{Cwd: "relative", McpServers: []acp.McpServer{}})
+	require.Equal(t, "cwd", requestErrorData(t, err)["field"])
+
+	var server acp.McpServer
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"stdio","name":"x","command":"x","args":[],"env":[]}`), &server))
+
+	_, err = h.conn.NewSession(h.ctx(), acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{server}})
+	require.Equal(t, "mcpServers", requestErrorData(t, err)["field"])
+
+	session := h.newSession()
+
+	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId))
+	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
+
+	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
+	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
+
+	_, err = h.conn.Prompt(h.ctx(), TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+
+	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest("00000000-0000-4000-8000-000000000000")))
+}
+
+func TestPromptCorrelationGate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("required when negotiated", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize(withLifecycle())
+		session := h.newSession()
+
+		_, err := h.prompt(session.SessionId, "HELLO", nil)
+		data := requestErrorData(t, err)
+		require.Equal(t, "missing", data["error"])
+		require.Equal(t, `_meta["`+wire.LifecycleKey+`"]`, data["field"])
 	})
 
-	client := &recordingClient{}
-	clientConn := acp.NewClientSideConnection(client, c2aW, a2cR)
-	store := NewInMemorySessionStore()
-	agent := NewAgent(WithSessionStore(store), withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-		return newSpyCodexClient(), nil
-	}))
-	agentConn := newLocalAgentConnection(agent, a2cW, c2aR)
-	agent.setAgentClient(agentConn)
+	t.Run("refused when omitted", func(t *testing.T) {
+		t.Parallel()
 
-	return clientConn, client, store
-}
+		h := newHarness(t)
+		h.initialize()
+		session := h.newSession()
 
-func assertNoAvailableCommandUpdates(t *testing.T, updates []acp.SessionNotification) {
-	t.Helper()
-
-	for i, notification := range updates {
-		if notification.Update.AvailableCommandsUpdate != nil {
-			t.Fatalf("update %d emitted available_commands_update: %#v", i, notification.Update.AvailableCommandsUpdate)
-		}
-	}
-}
-
-func commandAdvertisingMetaPath(value any) (string, bool) {
-	return commandAdvertisingMetaPathAt(value, "_meta")
-}
-
-func commandAdvertisingMetaPathAt(value any, path string) (string, bool) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			childPath := path + "." + key
-			switch strings.ToLower(key) {
-			case "command", "commands", "slashcommands", "availablecommands", "available_commands_update":
-				return childPath, true
-			}
-			if found, ok := commandAdvertisingMetaPathAt(child, childPath); ok {
-				return found, true
-			}
-		}
-	case []any:
-		for _, child := range typed {
-			if found, ok := commandAdvertisingMetaPathAt(child, path+"[]"); ok {
-				return found, true
-			}
-		}
-	}
-
-	return "", false
-}
-
-func (c *spyCodexClient) commandContractSnapshot() (codex.TurnStartRequest, codex.ThreadCompactRequest, codex.ReviewStartRequest) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	turn := c.lastTurn
-	turn.Prompt = append([]codex.UserInput(nil), c.lastTurn.Prompt...)
-
-	return turn, c.compact, c.review
-}
-
-func runTurnText(turn codex.TurnStartRequest) string {
-	if len(turn.Prompt) != 1 {
-		return ""
-	}
-	text, _ := turn.Prompt[0]["text"].(string)
-
-	return text
-}
-
-// TestProviderAuthContractCapabilityShape pins the wire shape of the
-// provider-auth advertisement: the exact enabled leg names, and no injection
-// key, because a brokered ChatGPT credential returns through the existing
-// codex-chatgpt-auth-tokens auth method instead.
-func TestProviderAuthContractCapabilityShape(t *testing.T) {
-	fixture := newProviderAuthFixture(t)
-
-	resp, err := fixture.agent.Initialize(context.Background(), acp.InitializeRequest{})
-	if err != nil {
-		t.Fatalf("Initialize returned error: %v", err)
-	}
-
-	raw, err := json.Marshal(resp.AgentCapabilities.Meta)
-	if err != nil {
-		t.Fatalf("marshal capabilities: %v", err)
-	}
-
-	var meta struct {
-		Codex struct {
-			ProviderAuth struct {
-				Methods      []string `json:"methods"`
-				InjectionKey *string  `json:"injectionKey"`
-			} `json:"providerAuth"`
-		} `json:"codex"`
-	}
-
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		t.Fatalf("decode capabilities: %v", err)
-	}
-
-	want := []string{
-		"_codex/auth/methods",
-		"_codex/auth/authorize",
-		"_codex/auth/callback",
-		"_codex/auth/status",
-		"_codex/auth/cancel",
-		"_codex/auth/inventory",
-		"_codex/auth/credential",
-		"_codex/auth/disconnect",
-	}
-
-	if !reflect.DeepEqual(meta.Codex.ProviderAuth.Methods, want) {
-		t.Fatalf("advertised legs = %v, want %v", meta.Codex.ProviderAuth.Methods, want)
-	}
-
-	if meta.Codex.ProviderAuth.InjectionKey != nil {
-		t.Fatalf("codex advertised an injection key: %q", *meta.Codex.ProviderAuth.InjectionKey)
-	}
-}
-
-// TestProviderAuthContractMethodConstants pins the exported constant set against
-// the closed suffix set. A sibling declares a constant only for a leg it
-// advertises.
-func TestProviderAuthContractMethodConstants(t *testing.T) {
-	constants := map[string]string{
-		AuthMethodsMethod:    "_codex/auth/methods",
-		AuthAuthorizeMethod:  "_codex/auth/authorize",
-		AuthCallbackMethod:   "_codex/auth/callback",
-		AuthStatusMethod:     "_codex/auth/status",
-		AuthCancelMethod:     "_codex/auth/cancel",
-		AuthInventoryMethod:  "_codex/auth/inventory",
-		AuthCredentialMethod: "_codex/auth/credential",
-		AuthDisconnectMethod: "_codex/auth/disconnect",
-	}
-
-	for got, want := range constants {
-		if got != want {
-			t.Fatalf("constant = %q, want %q", got, want)
-		}
-	}
-}
-
-// TestProviderAuthContractLegShapes pins every field a leg returns, so a field
-// this surface does not fix cannot appear and a fixed one cannot disappear.
-func TestProviderAuthContractLegShapes(t *testing.T) {
-	fixture := newProviderAuthFixture(t)
-	seedStoredLogin(t, fixture.home, testStoredLogin)
-
-	methods, err := fixture.call(t, AuthMethodsMethod, map[string]any{"sessionId": fixture.sessionID})
-	if err != nil {
-		t.Fatalf("methods: %v", err)
-	}
-
-	assertContractKeys(t, methods, []string{"providers", "generation"})
-
-	catalog, _ := methods.(authMethodsResult)
-	entry := catalog.Providers[authProviderOpenAI][0]
-	assertContractKeys(t, entry, []string{"id", "type", "label"})
-
-	authorization := fixture.authorize(t, authMethodDeviceCode, "contract-request")
-	assertContractKeys(t, authorization, []string{"interaction", "url", "message", "userCode", "flowId", "flowExpiresAt"})
-
-	status := fixture.status(t, authorization.FlowID)
-	assertContractKeys(t, status, []string{"flowId", "state"})
-
-	inventory, err := fixture.call(t, AuthInventoryMethod, map[string]any{"sessionId": fixture.sessionID})
-	if err != nil {
-		t.Fatalf("inventory: %v", err)
-	}
-
-	resident, _ := inventory.(authInventoryResult)
-	entries := resident.Entries
-	assertContractKeys(t, entries[0], []string{"providerId", "connectionId", "revision", "bindingGeneration", "proofSource"})
-
-	fixture.client.account = codex.Account{AuthMode: codex.AuthModeChatGPT}
-	fixture.broker.loginCompleted(t.Context(), codex.LoginCompletion{LoginID: "login-1", Success: true})
-
-	credential, err := fixture.call(t, AuthCredentialMethod, map[string]any{
-		"sessionId":  fixture.sessionID,
-		"providerId": authProviderOpenAI,
-		"flowId":     authorization.FlowID,
+		_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
+		data := requestErrorData(t, err)
+		require.Equal(t, "unsupported", data["error"])
+		require.Equal(t, `_meta["`+wire.LifecycleKey+`"]`, data["field"])
 	})
-	if err != nil {
-		t.Fatalf("credential: %v", err)
-	}
-
-	assertContractKeys(t, credential, []string{"connectionId", "revision", "bindingGeneration", "credential"})
-	harvested, _ := credential.(authCredentialResult)
-	assertContractKeys(t, harvested.Credential, []string{"type", "refresh", "access", "accessExpiresAt", "accountId"})
 }
 
-func assertContractKeys(t *testing.T, value any, want []string) {
-	t.Helper()
+func TestInvalidOptionsVerdict(t *testing.T) {
+	t.Parallel()
 
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	cases := map[string]Option{
+		"home":                 WithHome("relative/home"),
+		"configuredModels":     WithConfiguredModels([]string{"a", "a"}),
+		"env":                  WithEnv(map[string]string{"": "x"}),
+		"codexConfigOverrides": WithCodexConfigOverrides(map[string]any{"shell_environment_policy.set.X": "1"}),
+		"imageLimits":          WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}),
+		"concurrencyLimits":    WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
+		"inputHandoffRoot":     WithInputHandoffRoot("relative"),
 	}
 
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	for field, option := range cases {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
 
-	if len(fields) != len(want) {
-		t.Fatalf("keys = %v, want %v", fields, want)
-	}
+			agent := NewAgent(testOptions(t, option)...)
+			t.Cleanup(func() { _ = agent.Close() })
 
-	for _, key := range want {
-		if _, ok := fields[key]; !ok {
-			t.Fatalf("keys = %v, want %v", fields, want)
-		}
+			_, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+			require.Equal(t, -32603, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "codex_invalid_options", data["error"])
+			require.Equal(t, field, data["field"])
+
+			_, err = agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+			require.Equal(t, "codex_invalid_options", requestErrorData(t, err)["error"])
+		})
+	}
+}
+
+func TestPromptBackpressure(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := h.prompt(session.SessionId, "SLOW", promptMeta(1))
+		done <- err
+	}()
+
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(lifecycleEvents(updates)) >= 3 })
+
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(2))
+	require.Equal(t, -32600, requestErrorCode(t, err))
+	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	require.Equal(t, "session_prompt", requestErrorData(t, err)["limit"])
+
+	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest(session.SessionId)))
+	require.NoError(t, <-done)
+}
+
+func TestActiveSessionLimit(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	h.initialize()
+	h.newSession()
+
+	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
+}
+
+func TestVersionFloor(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithEnv(map[string]string{fakeCodexEnv: "1", fakeCodexEnvVersion: "0.1.0"}))
+	h.initialize()
+
+	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	require.Equal(t, -32603, requestErrorCode(t, err))
+	require.Equal(t, "codex_runtime_unavailable", requestErrorData(t, err)["error"])
+}
+
+func TestClosedAgentRefusesRequests(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent(testOptions(t)...)
+	require.NoError(t, agent.Close())
+	require.NoError(t, agent.Close())
+
+	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	require.Equal(t, -32600, requestErrorCode(t, err))
+}
+
+func TestCommandSilence(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+
+	for _, update := range h.rec.snapshot() {
+		require.Nil(t, update.Update.AvailableCommandsUpdate)
 	}
 }

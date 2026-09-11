@@ -1,32 +1,24 @@
 package codexacp
 
 import (
+	"fmt"
 	"os"
-
-	"github.com/savid/acp-go-codex/internal/codex"
+	"path/filepath"
 )
 
-func init() {
-	codex.SetScratchParentResolver(ensureScratchParent)
-}
-
-func resolveScratchDir(options Options) string {
-	return options.ScratchDir
-}
-
-func scratchParent(dir string) string {
-	if dir == "" {
-		return os.TempDir()
+// scratchDir is the sole scratch accessor. It returns the adapter directory
+// for one purpose under the configured scratch parent, creating the parent
+// 0700 when missing. Names carry the acp-go-codex-<purpose>- prefix so a host
+// can sweep orphans.
+func (a *Agent) scratchDir(purpose string, name string) (string, error) {
+	parent := a.options.ScratchDir
+	if parent == "" {
+		parent = os.TempDir()
 	}
 
-	return dir
-}
-
-func ensureScratchParent(dir string) (string, error) {
-	parent := scratchParent(dir)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return "", err
+		return "", fmt.Errorf("create scratch parent: %w", err)
 	}
 
-	return parent, nil
+	return filepath.Join(parent, "acp-go-codex-"+purpose+"-"+name), nil
 }

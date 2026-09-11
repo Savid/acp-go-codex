@@ -1,7 +1,8 @@
+// Command resume-from-file embeds the agent in-process with a session store
+// persisted to a JSON file, so a session can be resumed by a later run.
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,315 +11,257 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
+	"os/signal"
 	"strings"
-	"sync"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/google/uuid"
+
 	codexacp "github.com/savid/acp-go-codex"
+	acpcore "github.com/savid/acp-go-core"
 )
 
-const (
-	defaultSessionFile          = "session.jsonl"
-	defaultPrompt               = "Reply with exactly RESUME_OK and do not use tools."
-	sessionConfigurationSubpath = "session-config/v1"
-)
-
-type sessionConfiguration struct {
-	Version       int               `json:"version"`
-	SessionID     string            `json:"sessionId"`
-	Revision      int               `json:"revision"`
-	Env           map[string]string `json:"env"`
-	ExtraPathDirs []string          `json:"extraPathDirs"`
+// fileStore is an in-memory store whose whole content is written to one JSON
+// file after every write. It is an example, not a durable store.
+type fileStore struct {
+	path    string
+	entries map[string][]acpcore.SessionStoreEntry
 }
 
-type client struct {
-	output io.Writer
-	mu     sync.Mutex
-	text   strings.Builder
-}
+func loadFileStore(path string) (*fileStore, error) {
+	store := &fileStore{path: path, entries: make(map[string][]acpcore.SessionStoreEntry)}
 
-var _ acp.Client = (*client)(nil)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return store, nil
+	}
 
-var (
-	runMain   = run
-	runLoaded = runLoadedSession
-	getwd     = os.Getwd
-	exit      = os.Exit
-	serve     = codexacp.Serve
-)
-
-func (*client) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	data, err := os.ReadFile(params.Path)
 	if err != nil {
-		return acp.ReadTextFileResponse{}, err
+		return nil, err
 	}
 
-	return acp.ReadTextFileResponse{Content: string(data)}, nil
+	return store, json.Unmarshal(data, &store.entries)
 }
 
-func (*client) WriteTextFile(_ context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	if err := os.MkdirAll(filepath.Dir(params.Path), 0o755); err != nil {
-		return acp.WriteTextFileResponse{}, err
+func storeKey(key acpcore.SessionKey) string { return key.SessionID + "\x00" + key.Subpath }
+
+func (s *fileStore) save() error {
+	data, err := json.Marshal(s.entries)
+	if err != nil {
+		return err
 	}
 
-	return acp.WriteTextFileResponse{}, os.WriteFile(params.Path, []byte(params.Content), 0o600)
+	return os.WriteFile(s.path, data, 0o600)
 }
 
-func (*client) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
-}
-
-func (c *client) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
-	if params.Update.AgentMessageChunk == nil || params.Update.AgentMessageChunk.Content.Text == nil {
+func (s *fileStore) Append(_ context.Context, key acpcore.SessionKey, entries []acpcore.SessionStoreEntry) error {
+	if len(entries) == 0 {
 		return nil
 	}
 
-	text := params.Update.AgentMessageChunk.Content.Text.Text
+	s.entries[storeKey(key)] = append(s.entries[storeKey(key)], entries...)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return s.save()
+}
 
-	writer := c.output
-	if writer == nil {
-		writer = os.Stdout
+func (s *fileStore) Load(_ context.Context, key acpcore.SessionKey) ([]acpcore.SessionStoreEntry, error) {
+	return s.entries[storeKey(key)], nil
+}
+
+func (s *fileStore) Replace(_ context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	for key := range s.entries {
+		if strings.HasPrefix(key, main.SessionID+"\x00") {
+			delete(s.entries, key)
+		}
 	}
 
-	fmt.Fprint(writer, text)
-	c.text.WriteString(text)
+	for _, replacement := range replacements {
+		s.entries[storeKey(replacement.Key)] = replacement.Entries
+	}
+
+	return s.save()
+}
+
+func (s *fileStore) Delete(_ context.Context, key acpcore.SessionKey) error {
+	for candidate := range s.entries {
+		if strings.HasPrefix(candidate, key.SessionID+"\x00") && (key.Subpath == "" || candidate == storeKey(key)) {
+			delete(s.entries, candidate)
+		}
+	}
+
+	return s.save()
+}
+
+func (s *fileStore) ListSessions(context.Context) ([]acpcore.SessionSummary, error) {
+	summaries := make([]acpcore.SessionSummary, 0)
+
+	for key := range s.entries {
+		if id, subpath, _ := strings.Cut(key, "\x00"); subpath == "" {
+			summaries = append(summaries, acpcore.SessionSummary{SessionID: id})
+		}
+	}
+
+	return summaries, nil
+}
+
+func (s *fileStore) ListSubkeys(_ context.Context, key acpcore.SessionKey) ([]string, error) {
+	subkeys := make([]string, 0)
+
+	for candidate := range s.entries {
+		if id, subpath, _ := strings.Cut(candidate, "\x00"); id == key.SessionID && subpath != "" {
+			subkeys = append(subkeys, subpath)
+		}
+	}
+
+	return subkeys, nil
+}
+
+type printer struct{ output io.Writer }
+
+func (p *printer) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
+	if chunk := params.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+		fmt.Fprint(p.output, chunk.Content.Text.Text)
+	}
 
 	return nil
 }
 
-func (*client) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{TerminalId: "terminal-1"}, nil
+func (*printer) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 
-func (*client) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+func (*printer) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.New("unsupported")
+}
+
+func (*printer) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, errors.New("unsupported")
+}
+
+func (*printer) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*printer) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
 	return acp.KillTerminalResponse{}, nil
 }
 
-func (*client) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{Output: "", Truncated: false}, nil
+func (*printer) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, nil
 }
 
-func (*client) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+func (*printer) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
 	return acp.ReleaseTerminalResponse{}, nil
 }
 
-func (*client) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+func (*printer) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
 	return acp.WaitForTerminalExitResponse{}, nil
 }
 
 func main() {
-	if err := runMain(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "resume-from-file: %v\n", err)
-		exit(1)
-	}
+	os.Exit(mainCode())
 }
 
-func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) error {
+func mainCode() int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	return run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+}
+
+func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("resume-from-file", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	sessionFile := flags.String("file", defaultSessionFile, "Codex rollout JSONL file")
-	sessionID := flags.String("session", "", "session id; defaults to the session_meta id found in the JSONL")
-	cwd := flags.String("cwd", "", "session cwd; defaults to the JSONL cwd or current directory")
-	prompt := flags.String("prompt", defaultPrompt, "prompt to send after loading history")
-	codexPath := flags.String("path", "", "path to codex CLI")
-	codexHome := flags.String("home", "", "parent root for isolated Codex session state")
+	storePath := flags.String("store", "sessions.json", "session store file")
+	sessionID := flags.String("session", "", "session id to resume; empty starts a new session")
 
 	if err := flags.Parse(args); err != nil {
-		return err
+		return 2
 	}
 
-	entries, inferredSessionID, inferredCwd, err := readTranscriptJSONL(*sessionFile)
+	prompt := strings.TrimSpace(strings.Join(flags.Args(), " "))
+	if prompt == "" {
+		prompt = "Reply with exactly RESUME_OK and do not use tools."
+	}
+
+	store, err := loadFileStore(*storePath)
 	if err != nil {
-		return err
+		fmt.Fprintf(stderr, "resume-from-file: %v\n", err)
+
+		return 1
 	}
 
-	if *sessionID == "" {
-		*sessionID = inferredSessionID
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "resume-from-file: %v\n", err)
+
+		return 1
 	}
 
-	if *sessionID == "" {
-		return errors.New("session id is required")
-	}
-
-	if *cwd == "" {
-		*cwd = inferredCwd
-	}
-
-	if *cwd == "" {
-		*cwd, err = getwd()
-		if err != nil {
-			return err
-		}
-	}
-
-	store := codexacp.NewInMemorySessionStore()
-
-	// This closed record contains only JSON-native scalar, string-map, and string-slice fields.
-	configuration, _ := json.Marshal(sessionConfiguration{
-		Version:       1,
-		SessionID:     *sessionID,
-		Revision:      1,
-		Env:           map[string]string{},
-		ExtraPathDirs: []string{},
-	})
-
-	if err := store.Replace(ctx, codexacp.SessionKey{SessionID: *sessionID}, []codexacp.SessionStoreReplacement{{
-		Key:     codexacp.SessionKey{SessionID: *sessionID},
-		Entries: entries,
-	}, {
-		Key: codexacp.SessionKey{
-			SessionID: *sessionID,
-			Subpath:   sessionConfigurationSubpath,
-		},
-		Entries: []codexacp.SessionStoreEntry{configuration},
-	}}); err != nil {
-		return err
-	}
-
-	return runLoaded(ctx, store, *sessionID, *cwd, *prompt, *codexPath, *codexHome, stdout)
-}
-
-func runLoadedSession(
-	ctx context.Context,
-	store codexacp.SessionStore,
-	sessionID string,
-	cwd string,
-	prompt string,
-	codexPath string,
-	codexHome string,
-	stdout io.Writer,
-) error {
-	clientInput, agentOutput := io.Pipe()
-	agentInput, clientOutput := io.Pipe()
-
-	defer clientInput.Close()
-	defer clientOutput.Close()
-
-	client := &client{output: stdout}
-	conn := acp.NewClientSideConnection(client, clientOutput, clientInput)
-	conn.SetLogger(slog.New(slog.DiscardHandler))
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	served := make(chan error, 1)
 
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errs := make(chan error, 1)
 	go func() {
-		errs <- serve(
-			serveCtx,
-			agentInput,
-			agentOutput,
-			codexacp.WithExecutablePath(codexPath),
-			codexacp.WithHome(codexHome),
-			codexacp.WithSessionStore(store),
-			codexacp.WithLogger(slog.New(slog.DiscardHandler)),
-		)
+		served <- codexacp.Serve(serveCtx, agentReader, agentWriter, codexacp.WithSessionStore(store), codexacp.WithLogger(slog.New(slog.DiscardHandler)))
 	}()
 
-	_, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	conn := acp.NewClientSideConnection(&printer{output: stdout}, clientWriter, clientReader)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+
+	id, err := converse(ctx, conn, cwd, acp.SessionId(*sessionID), prompt)
+
+	cancel()
+
+	_ = clientWriter.Close()
+
+	<-served
+
 	if err != nil {
-		return err
+		fmt.Fprintf(stderr, "resume-from-file: %v\n", err)
+
+		return 1
 	}
 
-	id := acp.SessionId(sessionID)
+	fmt.Fprintf(stdout, "\nsession %s stored in %s\n", id, *storePath)
 
-	_, err = conn.LoadSession(ctx, codexacp.LoadSessionRequest(id, cwd))
-	if err != nil {
-		return err
+	return 0
+}
+
+type agentConnection interface {
+	Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error)
+	NewSession(context.Context, acp.NewSessionRequest) (acp.NewSessionResponse, error)
+	ResumeSession(context.Context, acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error)
+	Prompt(context.Context, acp.PromptRequest) (acp.PromptResponse, error)
+	CloseSession(context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error)
+}
+
+func converse(ctx context.Context, conn agentConnection, cwd string, sessionID acp.SessionId, prompt string) (acp.SessionId, error) {
+	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
+		return "", err
+	}
+
+	if sessionID == "" {
+		session, err := conn.NewSession(ctx, codexacp.NewSessionRequest(cwd))
+		if err != nil {
+			return "", err
+		}
+
+		sessionID = session.SessionId
+	} else if _, err := conn.ResumeSession(ctx, codexacp.ResumeSessionRequest(sessionID, cwd)); err != nil {
+		return "", err
 	}
 
 	defer func() {
-		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: id})
-
-		cancel()
-
-		_ = agentInput.Close()
-		_ = agentOutput.Close()
-
-		<-errs
+		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: sessionID})
 	}()
 
-	fmt.Fprintln(stdout, "== resume smoke test ==")
-
-	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(id, uuid.NewString(), prompt))
-	if err != nil {
-		return err
+	if _, err := conn.Prompt(ctx, codexacp.TextPromptRequest(sessionID, prompt)); err != nil {
+		return "", err
 	}
 
-	fmt.Fprintf(stdout, "\n\nstop reason: %s\n", resp.StopReason)
-
-	return nil
-}
-
-func readTranscriptJSONL(path string) ([]codexacp.SessionStoreEntry, string, string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, "", "", err
-	}
-	defer file.Close()
-
-	var (
-		entries   []codexacp.SessionStoreEntry
-		sessionID string
-		cwd       string
-	)
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		entry := codexacp.SessionStoreEntry(append([]byte(nil), line...))
-		entries = append(entries, entry)
-
-		inferredID, inferredCwd := rolloutMeta(entry)
-		if sessionID == "" {
-			sessionID = inferredID
-		}
-
-		if cwd == "" {
-			cwd = inferredCwd
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, "", "", err
-	}
-
-	return entries, sessionID, cwd, nil
-}
-
-func rolloutMeta(entry codexacp.SessionStoreEntry) (string, string) {
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(entry, &obj) != nil {
-		return "", ""
-	}
-
-	var rowType string
-	if json.Unmarshal(obj["type"], &rowType) != nil || rowType != "session_meta" {
-		return "", ""
-	}
-
-	var payload map[string]json.RawMessage
-	if json.Unmarshal(obj["payload"], &payload) != nil {
-		return "", ""
-	}
-
-	var id string
-	if json.Unmarshal(payload["id"], &id) != nil || id == "" {
-		return "", ""
-	}
-
-	var cwd string
-
-	_ = json.Unmarshal(payload["cwd"], &cwd)
-
-	return id, cwd
+	return sessionID, nil
 }

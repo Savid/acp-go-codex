@@ -98,12 +98,12 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 	}
 
 	config.shutdown = func(ctx context.Context) error {
-		var errs []error
+		var shutdownErrs []error
 		for i := len(shutdowns) - 1; i >= 0; i-- {
-			errs = append(errs, shutdowns[i](ctx))
+			shutdownErrs = append(shutdownErrs, shutdowns[i](ctx))
 		}
 
-		return errors.Join(errs...)
+		return errors.Join(shutdownErrs...)
 	}
 
 	return config, nil

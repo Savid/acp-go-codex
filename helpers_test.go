@@ -1,181 +1,354 @@
 package codexacp
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
-// testNativeRolloutPath is the rollout path a fake app-server reports for a
-// resumed thread. `thread/resume` carries no path, so the native side is the
-// only thing that can name one.
-const testNativeRolloutPath = "/native/rollout.jsonl"
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeCodexEnv) == "1" {
+		os.Exit(runFakeCodex(os.Args[1:]))
+	}
 
-// runtimeGenerationSnapshot reads the shared app-server generation a test wants
-// to prove survived, or did not. The epoch is what distinguishes a generation
-// that kept serving from a replacement started after one was fenced.
-type runtimeGeneration struct {
-	epoch uint64
-	dead  bool
+	os.Exit(m.Run())
 }
 
-func (a *Agent) runtimeGenerationSnapshot() runtimeGeneration {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+const testTimeout = 20 * time.Second
 
-	return runtimeGeneration{epoch: a.runtimeEpoch, dead: a.runtimeDead}
-}
-
-// testSignalTimeout bounds every rendezvous a test waits on. It is generous
-// enough that a slow or loaded machine never trips it, and short enough that a
-// signal which is never going to arrive is reported as a failure long before the
-// package timeout would take the rest of the suite down with it.
-const testSignalTimeout = 30 * time.Second
-
-// awaitTestSignal takes one value from a rendezvous a test is waiting on. A
-// signal that never arrives fails the test at the point it waited, naming what
-// it waited for, instead of parking the package until its timeout and hiding
-// every test that had not run yet behind the one that hung.
-func awaitTestSignal[T any](t *testing.T, signal <-chan T, what string) T {
+// testOptions configures an agent that launches the test binary as codex,
+// with an isolated home and scratch directory.
+func testOptions(t *testing.T, extra ...Option) []Option {
 	t.Helper()
 
+	options := make([]Option, 0, 5+len(extra))
+	options = append(options,
+		WithExecutablePath(os.Args[0]),
+		WithEnv(map[string]string{fakeCodexEnv: "1"}),
+		WithHome(filepath.Join(t.TempDir(), "home")),
+		WithScratchDir(filepath.Join(t.TempDir(), "scratch")),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+
+	return append(options, extra...)
+}
+
+// recorder is the ACP client the tests observe the agent through.
+type recorder struct {
+	mu          sync.Mutex
+	updates     []acp.SessionNotification
+	raw         []json.RawMessage
+	permissions []acp.RequestPermissionRequest
+	answer      func(acp.RequestPermissionRequest) acp.RequestPermissionResponse
+	elicit      func(acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	changed     chan struct{}
+}
+
+var (
+	_ acp.Client                 = (*recorder)(nil)
+	_ acp.ExtensionMethodHandler = (*recorder)(nil)
+)
+
+func newRecorder() *recorder {
+	return &recorder{
+		changed: make(chan struct{}, 1),
+		answer: func(acp.RequestPermissionRequest) acp.RequestPermissionResponse {
+			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(optionAccept)}
+		},
+	}
+}
+
+func (r *recorder) signal() {
 	select {
-	case value := <-signal:
-		return value
-	case <-time.After(testSignalTimeout):
-		t.Fatalf("timed out waiting for %s", what)
-
-		var zero T
-
-		return zero
+	case r.changed <- struct{}{}:
+	default:
 	}
 }
 
-// hostWindows names the GOOS whose spelling of a path, a permission bit, or a
-// file URI differs from the POSIX one these helpers translate from.
-const hostWindows = "windows"
+func (r *recorder) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
+	r.mu.Lock()
+	r.updates = append(r.updates, params)
+	r.mu.Unlock()
+	r.signal()
 
-// absTestPath builds a host-absolute path from POSIX-looking segments, so a
-// test states "an absolute working directory" rather than a spelling only
-// one platform accepts.
-func absTestPath(segments ...string) string {
-	root := "/"
-	if runtime.GOOS == hostWindows {
-		root = `C:\`
+	return nil
+}
+
+func (r *recorder) RequestPermission(_ context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	r.mu.Lock()
+	r.permissions = append(r.permissions, params)
+	answer := r.answer
+	r.mu.Unlock()
+	r.signal()
+
+	return answer(params), nil
+}
+
+func (r *recorder) UnstableCreateElicitation(_ context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	r.mu.Lock()
+	elicit := r.elicit
+	r.mu.Unlock()
+
+	if elicit == nil {
+		return acp.UnstableCreateElicitationResponse{}, errors.New("no elicitation handler")
 	}
 
-	return filepath.Join(append([]string{root}, segments...)...)
+	return elicit(params)
 }
 
-// absTestPathJSON is absTestPath quoted for embedding in a JSON literal, so a
-// stored record and the request that has to match it carry one spelling.
-func absTestPathJSON(segments ...string) string {
-	return strconv.Quote(absTestPath(segments...))
-}
-
-// handoffTestURI spells a host path as the file URI a truthful host would send.
-// A Windows path carries its volume after the URI's own root, so the slashed
-// form gains the leading slash a POSIX path already has.
-func handoffTestURI(path string) string {
-	return "file://" + handoffTestURIPath(path)
-}
-
-// handoffTestURIPath is the path component a file URI carries for a host path.
-// A Windows path carries its volume after the URI's own root, so the slashed
-// form gains the leading slash a POSIX path already has.
-func handoffTestURIPath(path string) string {
-	slashed := filepath.ToSlash(path)
-	if filepath.IsAbs(path) && !strings.HasPrefix(slashed, "/") {
-		slashed = "/" + slashed
+func (r *recorder) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	if method == RawEventMethod {
+		r.mu.Lock()
+		r.raw = append(r.raw, append(json.RawMessage(nil), params...))
+		r.mu.Unlock()
+		r.signal()
 	}
 
-	return slashed
+	return map[string]any{}, nil
 }
 
-// hostFilePerm is the permission mode a host filesystem reports for a file this
-// adapter created with mode. Windows carries no POSIX mode bits: os.Stat
-// synthesises 0o666 for a writable file and 0o444 for one marked read-only, so
-// a POSIX literal is not the property a Windows host can be asked about.
-func hostFilePerm(mode os.FileMode) os.FileMode {
-	if runtime.GOOS != hostWindows {
-		return mode
-	}
+func (*recorder) NotifyExtension(context.Context, string, any) error { return nil }
 
-	if mode&0o200 == 0 {
-		return 0o444
-	}
-
-	return 0o666
+func (*recorder) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.New("unsupported")
 }
 
-// hostDirPerm is the permission mode a host filesystem reports for a directory
-// this adapter created with mode. Windows reports every directory as 0o777, for
-// the same reason hostFilePerm exists.
-func hostDirPerm(mode os.FileMode) os.FileMode {
-	if runtime.GOOS != hostWindows {
-		return mode
-	}
-
-	return 0o777
+func (*recorder) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, errors.New("unsupported")
 }
 
-// requireRestoreFailed asserts the closed off-prompt verdict a store entry the
-// adapter could not bring back is answered with: the token alone, with no Go or
-// native cause text anywhere in the data.
-func requireRestoreFailed(t *testing.T, err error) {
+func (*recorder) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, errors.New("unsupported")
+}
+
+// snapshot returns the notifications recorded so far.
+func (r *recorder) snapshot() []acp.SessionNotification {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]acp.SessionNotification(nil), r.updates...)
+}
+
+// waitFor blocks until condition holds over the recorded notifications.
+func (r *recorder) waitFor(t *testing.T, condition func([]acp.SessionNotification) bool) {
 	t.Helper()
 
-	requireClosedInternalError(t, err, valueRestoreFailed)
+	deadline := time.After(testTimeout)
+
+	for {
+		if condition(r.snapshot()) {
+			return
+		}
+
+		select {
+		case <-r.changed:
+		case <-deadline:
+			t.Fatalf("condition not met; %d notifications recorded", len(r.snapshot()))
+		}
+	}
 }
 
-// requireClosedInternalError asserts one -32603 answer carries exactly the
-// named token and nothing else a host could read a cause out of.
-func requireClosedInternalError(t *testing.T, err error, token string) {
+// harness serves an agent over pipes to a recording client.
+type harness struct {
+	t      *testing.T
+	conn   *acp.ClientSideConnection
+	rec    *recorder
+	cancel context.CancelFunc
+	served chan error
+	home   string
+}
+
+func newHarness(t *testing.T, extra ...Option) *harness {
 	t.Helper()
 
-	var requestErr *acp.RequestError
-	if !errors.As(err, &requestErr) {
-		t.Fatalf("error is not an ACP request error: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	rec := newRecorder()
+	served := make(chan error, 1)
+	options := testOptions(t, extra...)
+
+	go func() { served <- Serve(ctx, agentReader, agentWriter, options...) }()
+
+	conn := acp.NewClientSideConnection(rec, clientWriter, clientReader)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+
+	h := &harness{t: t, conn: conn, rec: rec, cancel: cancel, served: served, home: applyOptions(options).Home}
+
+	t.Cleanup(func() {
+		cancel()
+		_ = clientWriter.Close()
+
+		select {
+		case <-served:
+		case <-time.After(testTimeout):
+			t.Error("Serve did not return")
+		}
+	})
+
+	return h
+}
+
+func (h *harness) ctx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	h.t.Cleanup(cancel)
+
+	return ctx
+}
+
+func (h *harness) initialize(opts ...func(*acp.InitializeRequest)) acp.InitializeResponse {
+	h.t.Helper()
+
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	for _, opt := range opts {
+		opt(&request)
 	}
 
-	if requestErr.Code != -32603 {
-		t.Fatalf("error code = %d, want -32603 (%v)", requestErr.Code, err)
-	}
+	resp, err := h.conn.Initialize(h.ctx(), request)
+	require.NoError(h.t, err)
 
-	if requestErr.Message != "Internal error" {
-		t.Fatalf("error message = %q, want the JSON-RPC constant", requestErr.Message)
-	}
+	return resp
+}
 
-	data, ok := requestErr.Data.(map[string]any)
+func withLifecycle() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.Meta = map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}
+	}
+}
+
+func withFormElicitation() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.ClientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	}
+}
+
+func (h *harness) newSession(opts ...SessionRequestOption) acp.NewSessionResponse {
+	h.t.Helper()
+
+	resp, err := h.conn.NewSession(h.ctx(), NewSessionRequest(h.t.TempDir(), opts...))
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func (h *harness) prompt(sessionID acp.SessionId, text string, meta map[string]any) (acp.PromptResponse, error) {
+	h.t.Helper()
+
+	request := TextPromptRequest(sessionID, text)
+	request.Meta = meta
+
+	return h.conn.Prompt(h.ctx(), request)
+}
+
+// promptMeta stamps the lifecycle prompt correlation.
+func promptMeta(n int) map[string]any {
+	return map[string]any{wire.LifecycleKey: map[string]any{
+		"version": 1, "submission": map[string]any{"submissionId": fmt.Sprintf("sub-%d", n), "clientNonce": fmt.Sprintf("non-%d", n)},
+	}}
+}
+
+// requestErrorData decodes the data member of a JSON-RPC error.
+func requestErrorData(t *testing.T, err error) map[string]any {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	data, ok := reqErr.Data.(map[string]any)
 	if !ok {
-		t.Fatalf("error data is not an object: %#v", requestErr.Data)
+		encoded, marshalErr := json.Marshal(reqErr.Data)
+		require.NoError(t, marshalErr)
+		require.NoError(t, json.Unmarshal(encoded, &data))
 	}
 
-	if data[jsonFieldError] != token {
-		t.Fatalf("error data = %#v, want %q", data, token)
-	}
-
-	if _, present := data["message"]; present {
-		t.Fatalf("error data carries a message member: %#v", data)
-	}
+	return data
 }
 
-// requireInvalidParamsData asserts one -32602 answer carries exactly the
-// uniform `{error, field}` object and nothing a host could read a cause out of.
-func requireInvalidParamsData(t *testing.T, err error, want map[string]any) {
+func requestErrorCode(t *testing.T, err error) int {
 	t.Helper()
 
-	var requestErr *acp.RequestError
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
 
-	require.ErrorAs(t, err, &requestErr)
-	require.Equal(t, -32602, requestErr.Code)
-	require.Equal(t, want, requestErr.Data)
+	return reqErr.Code
+}
+
+// agentText concatenates streamed agent message text.
+func agentText(updates []acp.SessionNotification) string {
+	var text strings.Builder
+
+	for _, update := range updates {
+		if chunk := update.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			text.WriteString(chunk.Content.Text.Text)
+		}
+	}
+
+	return text.String()
+}
+
+// lifecycleEvents extracts the lifecycle envelopes in delivery order.
+func lifecycleEvents(updates []acp.SessionNotification) []map[string]any {
+	events := make([]map[string]any, 0)
+
+	for _, update := range updates {
+		envelope, ok := update.Meta[wire.LifecycleKey].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		event, _ := envelope["event"].(map[string]any)
+		events = append(events, event)
+	}
+
+	return events
+}
+
+func eventTypes(events []map[string]any) []string {
+	types := make([]string, 0, len(events))
+	for _, event := range events {
+		kind, _ := event["type"].(string)
+		state, _ := event["state"].(string)
+
+		if action, ok := event["action"].(map[string]any); ok {
+			state, _ = action["state"].(string)
+		}
+
+		if state != "" {
+			kind += ":" + state
+		}
+
+		types = append(types, kind)
+	}
+
+	return types
 }

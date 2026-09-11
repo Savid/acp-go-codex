@@ -1,9 +1,12 @@
+// Package observer centralizes the adapter's OpenTelemetry instrumentation:
+// ACP request spans and metrics, prompt-turn GenAI metrics, permission and
+// elicitation dialogs, session store operations, and codex process exits.
 package observer
 
 import (
 	"context"
 	"errors"
-	"maps"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -17,35 +20,32 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
+// InstrumentationName is the OpenTelemetry instrumentation scope name.
+const InstrumentationName = "github.com/savid/acp-go-codex"
+
 const (
-	InstrumentationName = "github.com/savid/acp-go-codex"
+	attrACPMethod                          = "acp.method"
+	attrErrorType                          = "error.type"
+	attrGenAIOperation                     = "gen_ai.operation.name"
+	attrGenAIProvider                      = "gen_ai.provider.name"
+	attrGenAIRequestModel                  = "gen_ai.request.model"
+	attrGenAIResponseModel                 = "gen_ai.response.model"
+	attrGenAIStopReason                    = "gen_ai.response.finish_reasons"
+	attrGenAITokenType                     = "gen_ai.token.type"                        // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageCacheCreationInputTokens = "gen_ai.usage.cache_creation.input_tokens" // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageCacheReadInputTokens     = "gen_ai.usage.cache_read.input_tokens"     // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageInputTokens              = "gen_ai.usage.input_tokens"                // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrGenAIUsageOutputTokens             = "gen_ai.usage.output_tokens"               // #nosec G101 -- OTel semantic-convention attribute, not a secret.
+	attrOperation                          = "operation"
+	attrOutcome                            = "outcome"
+	attrPiClient                           = "codex.client"
+	attrPiPermission                       = "codex.permission.mode"
+	attrSessionStoreOp                     = "session.store.operation"
+	attrStopReason                         = "stop_reason"
+	attrToolName                           = "codex.tool.name"
 
-	attrACPMethod                       = "acp.method"
-	attrCodexClient                     = "codex.client"
-	attrCodexProcessKind                = "codex.process.kind"
-	attrGenAIOperation                  = "gen_ai.operation.name"
-	attrGenAIProvider                   = "gen_ai.provider.name"
-	attrGenAIRequestModel               = "gen_ai.request.model"
-	attrGenAIResponseModel              = "gen_ai.response.model"
-	attrGenAIStopReason                 = "gen_ai.response.finish_reasons"
-	attrGenAITokenType                  = "gen_ai.token.type"                        // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageCacheCreationTokens   = "gen_ai.usage.cache_creation.input_tokens" // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageCacheReadTokens       = "gen_ai.usage.cache_read.input_tokens"     // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageInputTokens           = "gen_ai.usage.input_tokens"                // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageOutputTokens          = "gen_ai.usage.output_tokens"               // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageReasoningOutputTokens = "gen_ai.usage.reasoning.output_tokens"     // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrGenAIUsageTotalTokens           = "gen_ai.usage.total_tokens"                // #nosec G101 -- OTel semantic-convention attribute, not a secret.
-	attrOperation                       = "operation"
-	attrOutcome                         = "outcome"
-	attrStopReason                      = "stop_reason"
-
-	codexClientValue   = "codex-app-server"
+	piClientValue      = "codex-app-server"
 	genAIOperationChat = "chat"
-	genAIProviderValue = "openai"
-
-	envBaggage     = "BAGGAGE"
-	envTraceParent = "TRACEPARENT"
-	envTraceState  = "TRACESTATE"
 
 	metaBaggage     = "baggage"
 	metaTraceParent = "traceparent"
@@ -56,6 +56,7 @@ const (
 	outcomeOK       = "ok"
 )
 
+// Config wires optional OpenTelemetry providers into an Observer.
 type Config struct {
 	MeterProvider  metric.MeterProvider
 	Propagator     propagation.TextMapPropagator
@@ -63,45 +64,65 @@ type Config struct {
 	Version        string
 }
 
+// Observer records adapter spans and metrics; nil providers degrade to no-ops.
 type Observer struct {
 	propagator propagation.TextMapPropagator
 	tracer     trace.Tracer
-	runtime    *runtimeObserver
 
 	acpRequestCount    metric.Int64Counter
 	acpRequestDuration metric.Float64Histogram
-	genAIDuration      metric.Float64Histogram
-	genAITokenUsage    metric.Int64Histogram
-	firstPromptChunk   metric.Float64Histogram
-	promptCancelCount  metric.Int64Counter
-	promptCount        metric.Int64Counter
-	promptDuration     metric.Float64Histogram
-	processStartCount  metric.Int64Counter
-	sessionActive      metric.Int64UpDownCounter
+
+	genAIOperationDuration        metric.Float64Histogram
+	genAITimeToFirstChunk         metric.Float64Histogram
+	genAITokenUsage               metric.Int64Histogram
+	promptCount                   metric.Int64Counter
+	promptDuration                metric.Float64Histogram
+	promptCancelCount             metric.Int64Counter
+	sessionActive                 metric.Int64UpDownCounter
+	permissionCount               metric.Int64Counter
+	permissionDuration            metric.Float64Histogram
+	elicitationCount              metric.Int64Counter
+	elicitationDuration           metric.Float64Histogram
+	sessionStoreOperationDuration metric.Float64Histogram
+	sessionStoreErrorCount        metric.Int64Counter
+	rawMessageEmitErrorCount      metric.Int64Counter
+	codexProcessExitCount         metric.Int64Counter
 }
 
+// ACPResult finishes one ACP request observation.
+type ACPResult struct {
+	Err   error
+	Extra []attribute.KeyValue
+}
+
+// PromptResult finishes one prompt-turn observation.
 type PromptResult struct {
 	CachedReadTokens  int
 	CachedWriteTokens int
 	Err               error
-	InputTokens       int
 	Model             string
+	Provider          string
+	InputTokens       int
 	OutputTokens      int
 	StopReason        string
-	ThoughtTokens     int
 	TotalTokens       int
 }
 
-type promptStateKey struct{}
-
-type promptState struct {
-	start time.Time
-	model string
-
-	mu       sync.Mutex
-	observed bool
+// PermissionResult finishes one permission-request observation.
+type PermissionResult struct {
+	Behavior string
+	Err      error
+	Mode     string
+	ToolName string
 }
 
+// ElicitationResult finishes one elicitation-request observation.
+type ElicitationResult struct {
+	Accepted bool
+	Err      error
+}
+
+// New constructs an Observer; nil providers degrade to no-ops.
 func New(config Config) *Observer {
 	tracerProvider := config.TracerProvider
 	if tracerProvider == nil {
@@ -121,10 +142,8 @@ func New(config Config) *Observer {
 		)
 	}
 
-	var (
-		tracerOptions []trace.TracerOption
-		meterOptions  []metric.MeterOption
-	)
+	tracerOptions := []trace.TracerOption(nil)
+	meterOptions := []metric.MeterOption(nil)
 
 	if config.Version != "" {
 		tracerOptions = append(tracerOptions, trace.WithInstrumentationVersion(config.Version))
@@ -136,17 +155,23 @@ func New(config Config) *Observer {
 		propagator: propagator,
 		tracer:     tracerProvider.Tracer(InstrumentationName, tracerOptions...),
 	}
-	observer.runtime = newRuntimeObserver(meter, "acp_go_codex")
 	observer.acpRequestCount = mustInt64Counter(meter, "acp_go_codex.acp.request.count", "ACP requests.")
 	observer.acpRequestDuration = mustFloat64Histogram(meter, "acp_go_codex.acp.request.duration", "ACP request duration.")
-	observer.genAIDuration = mustFloat64Histogram(meter, "gen_ai.client.operation.duration", "Codex prompt operation duration.")
-	observer.genAITokenUsage = mustInt64Histogram(meter, "gen_ai.client.token.usage", "{token}", "Codex token usage.")
-	observer.firstPromptChunk = mustFloat64Histogram(meter, "gen_ai.client.operation.time_to_first_chunk", "Time to first ACP prompt update.")
-	observer.promptCancelCount = mustInt64Counter(meter, "acp_go_codex.session.cancel.count", "Cancelled prompt turns.")
+	observer.genAIOperationDuration = mustFloat64Histogram(meter, "gen_ai.client.operation.duration", "codex prompt operation duration.")
+	observer.genAITimeToFirstChunk = mustFloat64Histogram(meter, "gen_ai.client.operation.time_to_first_chunk", "Time to first ACP prompt update.")
+	observer.genAITokenUsage = mustInt64Histogram(meter, "gen_ai.client.token.usage", "{token}", "codex token usage.")
 	observer.promptCount = mustInt64Counter(meter, "acp_go_codex.session.prompt.count", "Prompt turns.")
 	observer.promptDuration = mustFloat64Histogram(meter, "acp_go_codex.session.prompt.duration", "Prompt turn duration.")
-	observer.processStartCount = mustInt64Counter(meter, "acp_go_codex.codex.process.start.count", "Codex app-server process starts.")
-	observer.sessionActive = mustInt64UpDownCounter(meter, "acp_go_codex.session.active", "Active Codex sessions.")
+	observer.promptCancelCount = mustInt64Counter(meter, "acp_go_codex.session.cancel.count", "Cancelled prompt turns.")
+	observer.sessionActive = mustInt64UpDownCounter(meter, "acp_go_codex.session.active", "Active codex sessions.")
+	observer.permissionCount = mustInt64Counter(meter, "acp_go_codex.permission.request.count", "Permission requests.")
+	observer.permissionDuration = mustFloat64Histogram(meter, "acp_go_codex.permission.request.duration", "Permission request duration.")
+	observer.elicitationCount = mustInt64Counter(meter, "acp_go_codex.elicitation.request.count", "Elicitation requests.")
+	observer.elicitationDuration = mustFloat64Histogram(meter, "acp_go_codex.elicitation.request.duration", "Elicitation request duration.")
+	observer.sessionStoreOperationDuration = mustFloat64Histogram(meter, "acp_go_codex.session_store.operation.duration", "Session store operation duration.")
+	observer.sessionStoreErrorCount = mustInt64Counter(meter, "acp_go_codex.session_store.error.count", "Session store errors.")
+	observer.rawMessageEmitErrorCount = mustInt64Counter(meter, "acp_go_codex.raw_message.emit.error.count", "Raw codex event emission errors.")
+	observer.codexProcessExitCount = mustInt64Counter(meter, "acp_go_codex.codex.process.exit.count", "codex process exits.")
 
 	return observer
 }
@@ -175,6 +200,7 @@ func mustInt64UpDownCounter(meter metric.Meter, name string, description string)
 	return instrument
 }
 
+// Extract pulls trace context from ACP _meta reserved keys into ctx.
 func (o *Observer) Extract(ctx context.Context, meta map[string]any) context.Context {
 	if o == nil || len(meta) == 0 {
 		return ctx
@@ -184,7 +210,7 @@ func (o *Observer) Extract(ctx context.Context, meta map[string]any) context.Con
 
 	for _, key := range []string{metaTraceParent, metaTraceState, metaBaggage} {
 		value, _ := meta[key].(string)
-		if value != "" {
+		if strings.TrimSpace(value) != "" {
 			carrier[key] = value
 		}
 	}
@@ -196,114 +222,101 @@ func (o *Observer) Extract(ctx context.Context, meta map[string]any) context.Con
 	return o.propagator.Extract(ctx, carrier)
 }
 
-func (o *Observer) InjectTraceEnv(ctx context.Context, env map[string]string) map[string]string {
-	if o == nil {
-		return cloneEnv(env)
-	}
+// StartACP begins one ACP request observation.
+func (o *Observer) StartACP(ctx context.Context, meta map[string]any, method string, attrs ...attribute.KeyValue) (context.Context, func(error)) {
+	ctx, finish := o.startACP(ctx, meta, method, attrs...)
 
-	carrier := propagation.MapCarrier{}
-	o.propagator.Inject(ctx, carrier)
-
-	if len(carrier) == 0 {
-		return cloneEnv(env)
-	}
-
-	out := cloneEnv(env)
-	if out == nil {
-		out = map[string]string{}
-	}
-
-	setUpper(out, envTraceParent, carrier.Get(metaTraceParent))
-	setUpper(out, envTraceState, carrier.Get(metaTraceState))
-	setUpper(out, envBaggage, carrier.Get(metaBaggage))
-
-	return out
+	return ctx, func(err error) { finish(ACPResult{Err: err}) }
 }
 
-func (o *Observer) StartACPRequest(ctx context.Context, method string) (context.Context, func(error)) {
+func (o *Observer) startACP(ctx context.Context, meta map[string]any, method string, attrs ...attribute.KeyValue) (context.Context, func(ACPResult)) {
 	if o == nil {
-		return ctx, func(error) {}
+		return ctx, func(ACPResult) {}
 	}
 
-	ctx, span := o.tracer.Start(ctx, "acp.request",
-		trace.WithAttributes(
-			attribute.String(attrOperation, "acp.request"),
-			attribute.String(attrACPMethod, method),
-		),
-	)
-	o.acpRequestCount.Add(ctx, 1, metric.WithAttributes(attribute.String(attrACPMethod, method)))
+	ctx = o.Extract(ctx, meta)
+	start := time.Now()
 
-	start := monotonicNow()
+	spanAttrs := make([]attribute.KeyValue, 0, 1+len(attrs))
+	spanAttrs = append(spanAttrs, attribute.String(attrACPMethod, method))
+	spanAttrs = append(spanAttrs, attrs...)
 
-	return ctx, func(err error) {
-		elapsed := monotonicSince(start)
+	ctx, span := o.tracer.Start(ctx, spanNameForACPMethod(method), trace.WithAttributes(spanAttrs...))
 
-		attrs := []attribute.KeyValue{attribute.String(attrACPMethod, method)}
-		if err != nil {
-			attrs = append(attrs, attribute.String(attrOutcome, outcomeError))
+	return ctx, func(result ACPResult) {
+		allAttrs := append(slicesClone(spanAttrs), result.Extra...)
+		outcome := outcomeFromError(result.Err)
+		allAttrs = append(allAttrs, attribute.String(attrOutcome, outcome))
 
-			span.RecordError(errors.New("codex adapter request failed"))
-			span.SetStatus(codes.Error, "codex adapter request failed")
+		if errType := ErrorType(result.Err); errType != "" {
+			allAttrs = append(allAttrs, attribute.String(attrErrorType, errType))
+
+			span.RecordError(result.Err)
+			span.SetStatus(codes.Error, errType)
 		} else {
-			attrs = append(attrs, attribute.String(attrOutcome, outcomeOK))
-
 			span.SetStatus(codes.Ok, "")
 		}
 
-		o.acpRequestDuration.Record(ctx, elapsed, metric.WithAttributes(attrs...))
+		span.SetAttributes(allAttrs...)
 		span.End()
+
+		o.acpRequestCount.Add(ctx, 1, metric.WithAttributes(allAttrs...))
+		o.acpRequestDuration.Record(ctx, durationSeconds(start), metric.WithAttributes(allAttrs...))
 	}
 }
 
+// StartPrompt begins one prompt-turn observation.
 func (o *Observer) StartPrompt(ctx context.Context, meta map[string]any, model string) (context.Context, func(PromptResult)) {
+	ctx, finishACP := o.startACP(ctx, meta, "session/prompt", modelAttrs(model)...)
 	if o == nil {
 		return ctx, func(PromptResult) {}
 	}
 
-	ctx = o.Extract(ctx, meta)
-	attrs := promptAttrs(model)
-	ctx, span := o.tracer.Start(ctx, "session.prompt", trace.WithAttributes(attrs...))
-	state := &promptState{start: monotonicNow(), model: model}
+	state := &promptState{start: time.Now(), model: model}
 	ctx = context.WithValue(ctx, promptStateKey{}, state)
 
 	return ctx, func(result PromptResult) {
-		finalAttrs := promptAttrs(firstNonEmpty(result.Model, model))
+		promptAttrs := []attribute.KeyValue{
+			attribute.String(attrPiClient, piClientValue),
+			attribute.String(attrGenAIOperation, genAIOperationChat),
+		}
+		if result.Provider != "" {
+			promptAttrs = append(promptAttrs, attribute.String(attrGenAIProvider, result.Provider))
+		}
 
-		finalAttrs = append(finalAttrs, promptUsageAttrs(result)...)
+		promptAttrs = append(promptAttrs, modelAttrs(firstNonEmpty(result.Model, model))...)
+		promptAttrs = append(promptAttrs, promptUsageAttrs(result)...)
+
 		if result.StopReason != "" {
-			finalAttrs = append(finalAttrs,
+			promptAttrs = append(promptAttrs,
 				attribute.String(attrStopReason, result.StopReason),
 				attribute.StringSlice(attrGenAIStopReason, []string{result.StopReason}),
 			)
 		}
 
 		outcome := outcomeFromPrompt(result)
-		metricAttrs := append(cloneAttrs(finalAttrs), attribute.String(attrOutcome, outcome))
+		metricAttrs := append(slicesClone(promptAttrs), attribute.String(attrOutcome, outcome))
 
-		if result.Err != nil {
-			span.RecordError(errors.New("codex prompt failed"))
-			span.SetStatus(codes.Error, "codex prompt failed")
-		} else {
-			span.SetStatus(codes.Ok, "")
+		if errType := ErrorType(result.Err); errType != "" {
+			metricAttrs = append(metricAttrs, attribute.String(attrErrorType, errType))
 		}
 
-		span.SetAttributes(metricAttrs...)
-		span.End()
-
-		elapsed := monotonicSince(state.start)
+		duration := durationSeconds(state.start)
 
 		o.promptCount.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
-		o.promptDuration.Record(ctx, elapsed, metric.WithAttributes(metricAttrs...))
-		o.genAIDuration.Record(ctx, elapsed, metric.WithAttributes(metricAttrs...))
+		o.promptDuration.Record(ctx, duration, metric.WithAttributes(metricAttrs...))
+		o.genAIOperationDuration.Record(ctx, duration, metric.WithAttributes(metricAttrs...))
 
 		if outcome == outcomeCanceled {
 			o.promptCancelCount.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
 		}
 
-		o.recordTokenUsage(ctx, result, finalAttrs)
+		o.recordTokenUsage(ctx, result, promptAttrs)
+		finishACP(ACPResult{Err: result.Err, Extra: promptAttrs})
 	}
 }
 
+// ObserveFirstPromptUpdate records time-to-first-chunk once per prompt turn.
 func (o *Observer) ObserveFirstPromptUpdate(ctx context.Context) {
 	if o == nil {
 		return
@@ -326,17 +339,59 @@ func (o *Observer) ObserveFirstPromptUpdate(ctx context.Context) {
 	model := state.model
 	state.mu.Unlock()
 
-	o.firstPromptChunk.Record(ctx, monotonicSince(start), metric.WithAttributes(promptAttrs(model)...))
+	attrs := make([]attribute.KeyValue, 0, 4)
+	attrs = append(attrs,
+		attribute.String(attrPiClient, piClientValue),
+		attribute.String(attrGenAIOperation, genAIOperationChat),
+	)
+	attrs = append(attrs, modelAttrs(model)...)
+	o.genAITimeToFirstChunk.Record(ctx, durationSeconds(start), metric.WithAttributes(attrs...))
 }
 
-func (o *Observer) RecordCodexProcessStart(ctx context.Context) {
+// StartSpan begins one adapter span.
+func (o *Observer) StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, func(error, ...attribute.KeyValue)) {
+	if o == nil {
+		return ctx, func(error, ...attribute.KeyValue) {}
+	}
+
+	ctx, span := o.tracer.Start(ctx, name, trace.WithAttributes(attrs...))
+
+	return ctx, func(err error, extra ...attribute.KeyValue) {
+		if errType := ErrorType(err); errType != "" {
+			extra = append(extra, attribute.String(attrErrorType, errType))
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, errType)
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+
+		if len(extra) > 0 {
+			span.SetAttributes(extra...)
+		}
+
+		span.End()
+	}
+}
+
+// RecordCodexProcessExit counts one codex process exit.
+func (o *Observer) RecordCodexProcessExit(ctx context.Context, outcome string, err error) {
 	if o == nil {
 		return
 	}
 
-	o.processStartCount.Add(ctx, 1, metric.WithAttributes(attribute.String(attrCodexProcessKind, "app-server")))
+	attrs := []attribute.KeyValue{
+		attribute.String(attrOutcome, firstNonEmpty(outcome, outcomeFromError(err))),
+		attribute.String(attrPiClient, piClientValue),
+	}
+	if errType := ErrorType(err); errType != "" {
+		attrs = append(attrs, attribute.String(attrErrorType, errType))
+	}
+
+	o.codexProcessExitCount.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
+// AddActiveSession adjusts the active-session gauge.
 func (o *Observer) AddActiveSession(ctx context.Context, delta int64) {
 	if o == nil || delta == 0 {
 		return
@@ -345,75 +400,211 @@ func (o *Observer) AddActiveSession(ctx context.Context, delta int64) {
 	o.sessionActive.Add(ctx, delta)
 }
 
-func (o *Observer) recordTokenUsage(ctx context.Context, result PromptResult, attrs []attribute.KeyValue) {
-	for _, item := range []struct {
-		name  string
-		value int
-	}{
-		{name: "input", value: result.InputTokens},
-		{name: "output", value: result.OutputTokens},
-		{name: "total", value: result.TotalTokens},
-	} {
-		if item.value <= 0 {
-			continue
+// StartPermission begins one permission-request observation.
+func (o *Observer) StartPermission(ctx context.Context, toolName string, mode string) (context.Context, func(PermissionResult)) {
+	if o == nil {
+		return ctx, func(PermissionResult) {}
+	}
+
+	start := time.Now()
+
+	attrs := []attribute.KeyValue{
+		attribute.String(attrPiClient, piClientValue),
+	}
+	if toolName != "" {
+		attrs = append(attrs, attribute.String(attrToolName, toolName))
+	}
+
+	if mode != "" {
+		attrs = append(attrs, attribute.String(attrPiPermission, mode))
+	}
+
+	ctx, span := o.tracer.Start(ctx, "acp.permission.request", trace.WithAttributes(attrs...))
+
+	return ctx, func(result PermissionResult) {
+		finalAttrs := slicesClone(attrs)
+		if result.Behavior != "" {
+			finalAttrs = append(finalAttrs, attribute.String(attrOutcome, result.Behavior))
+		} else {
+			finalAttrs = append(finalAttrs, attribute.String(attrOutcome, outcomeFromError(result.Err)))
 		}
 
-		tokenAttrs := append(cloneAttrs(attrs), attribute.String(attrGenAITokenType, item.name))
-		o.genAITokenUsage.Record(ctx, int64(item.value), metric.WithAttributes(tokenAttrs...))
+		if errType := ErrorType(result.Err); errType != "" {
+			finalAttrs = append(finalAttrs, attribute.String(attrErrorType, errType))
+
+			span.RecordError(result.Err)
+			span.SetStatus(codes.Error, errType)
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+
+		if result.Mode != "" && result.Mode != mode {
+			finalAttrs = append(finalAttrs, attribute.String(attrPiPermission, result.Mode))
+		}
+
+		if result.ToolName != "" && result.ToolName != toolName {
+			finalAttrs = append(finalAttrs, attribute.String(attrToolName, result.ToolName))
+		}
+
+		span.SetAttributes(finalAttrs...)
+		span.End()
+
+		metricAttrs := removeAttribute(finalAttrs, attrToolName)
+		o.permissionCount.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
+		o.permissionDuration.Record(ctx, durationSeconds(start), metric.WithAttributes(metricAttrs...))
 	}
 }
 
-func promptAttrs(model string) []attribute.KeyValue {
-	attrs := []attribute.KeyValue{
-		attribute.String(attrCodexClient, codexClientValue),
-		attribute.String(attrGenAIProvider, genAIProviderValue),
-		attribute.String(attrGenAIOperation, genAIOperationChat),
-	}
-	if strings.TrimSpace(model) != "" {
-		attrs = append(attrs,
-			attribute.String(attrGenAIRequestModel, model),
-			attribute.String(attrGenAIResponseModel, model),
-		)
+// StartElicitation begins one elicitation-request observation.
+func (o *Observer) StartElicitation(ctx context.Context) (context.Context, func(ElicitationResult)) {
+	if o == nil {
+		return ctx, func(ElicitationResult) {}
 	}
 
-	return attrs
+	start := time.Now()
+	attrs := []attribute.KeyValue{attribute.String(attrPiClient, piClientValue)}
+	ctx, span := o.tracer.Start(ctx, "acp.elicitation.request", trace.WithAttributes(attrs...))
+
+	return ctx, func(result ElicitationResult) {
+		outcome := outcomeOK
+		if !result.Accepted {
+			outcome = "declined"
+		}
+
+		if result.Err != nil {
+			outcome = outcomeError
+		}
+
+		finalAttrs := append(slicesClone(attrs), attribute.String(attrOutcome, outcome))
+		if errType := ErrorType(result.Err); errType != "" {
+			finalAttrs = append(finalAttrs, attribute.String(attrErrorType, errType))
+
+			span.RecordError(result.Err)
+			span.SetStatus(codes.Error, errType)
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+
+		span.SetAttributes(finalAttrs...)
+		span.End()
+		o.elicitationCount.Add(ctx, 1, metric.WithAttributes(finalAttrs...))
+		o.elicitationDuration.Record(ctx, durationSeconds(start), metric.WithAttributes(finalAttrs...))
+	}
+}
+
+// RecordSessionStore records one session store operation.
+func (o *Observer) RecordSessionStore(ctx context.Context, start time.Time, operation string, err error) {
+	if o == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String(attrSessionStoreOp, operation),
+		attribute.String(attrOutcome, outcomeFromError(err)),
+	}
+	if errType := ErrorType(err); errType != "" {
+		attrs = append(attrs, attribute.String(attrErrorType, errType))
+		o.sessionStoreErrorCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
+
+	o.sessionStoreOperationDuration.Record(ctx, durationSeconds(start), metric.WithAttributes(attrs...))
+}
+
+// StartSessionStore begins one session store operation observation.
+func (o *Observer) StartSessionStore(ctx context.Context, operation string) (context.Context, func(error)) {
+	start := time.Now()
+	ctx, finishSpan := o.StartSpan(ctx, "acp.session_store."+operation, attribute.String(attrSessionStoreOp, operation))
+
+	return ctx, func(err error) {
+		finishSpan(err)
+		o.RecordSessionStore(ctx, start, operation, err)
+	}
+}
+
+// RecordRawMessageEmitFailure counts one raw-event notification failure.
+func (o *Observer) RecordRawMessageEmitFailure(ctx context.Context, err error) {
+	if o == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue{attribute.String(attrOutcome, outcomeFromError(err))}
+	if errType := ErrorType(err); errType != "" {
+		attrs = append(attrs, attribute.String(attrErrorType, errType))
+	}
+
+	o.rawMessageEmitErrorCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (o *Observer) recordTokenUsage(ctx context.Context, result PromptResult, attrs []attribute.KeyValue) {
+	inputTokens := result.InputTokens + result.CachedReadTokens + result.CachedWriteTokens
+	if inputTokens > 0 {
+		o.genAITokenUsage.Record(ctx, int64(inputTokens), metric.WithAttributes(appendTokenType(attrs, "input")...))
+	}
+
+	if result.OutputTokens > 0 {
+		o.genAITokenUsage.Record(ctx, int64(result.OutputTokens), metric.WithAttributes(appendTokenType(attrs, "output")...))
+	}
 }
 
 func promptUsageAttrs(result PromptResult) []attribute.KeyValue {
-	attrs := make([]attribute.KeyValue, 0, 3)
-	if result.InputTokens > 0 {
-		attrs = append(attrs, attribute.Int(attrGenAIUsageInputTokens, result.InputTokens))
+	attrs := []attribute.KeyValue(nil)
+
+	inputTokens := result.InputTokens + result.CachedReadTokens + result.CachedWriteTokens
+	if inputTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrGenAIUsageInputTokens, inputTokens))
 	}
 
 	if result.OutputTokens > 0 {
 		attrs = append(attrs, attribute.Int(attrGenAIUsageOutputTokens, result.OutputTokens))
 	}
 
-	if result.CachedReadTokens > 0 {
-		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheReadTokens, result.CachedReadTokens))
-	}
-
 	if result.CachedWriteTokens > 0 {
-		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheCreationTokens, result.CachedWriteTokens))
+		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheCreationInputTokens, result.CachedWriteTokens))
 	}
 
-	if result.ThoughtTokens > 0 {
-		attrs = append(attrs, attribute.Int(attrGenAIUsageReasoningOutputTokens, result.ThoughtTokens))
-	}
-
-	if result.TotalTokens > 0 {
-		attrs = append(attrs, attribute.Int(attrGenAIUsageTotalTokens, result.TotalTokens))
+	if result.CachedReadTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrGenAIUsageCacheReadInputTokens, result.CachedReadTokens))
 	}
 
 	return attrs
 }
 
-func outcomeFromPrompt(result PromptResult) string {
-	if result.Err != nil {
-		if errors.Is(result.Err, context.Canceled) {
-			return outcomeCanceled
+func appendTokenType(attrs []attribute.KeyValue, tokenType string) []attribute.KeyValue {
+	cloned := slicesClone(attrs)
+
+	return append(cloned, attribute.String(attrGenAITokenType, tokenType))
+}
+
+func removeAttribute(attrs []attribute.KeyValue, key string) []attribute.KeyValue {
+	filtered := attrs[:0]
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			continue
 		}
 
+		filtered = append(filtered, attr)
+	}
+
+	return filtered
+}
+
+func modelAttrs(model string) []attribute.KeyValue {
+	if strings.TrimSpace(model) == "" {
+		return nil
+	}
+
+	return []attribute.KeyValue{
+		attribute.String(attrGenAIRequestModel, model),
+		attribute.String(attrGenAIResponseModel, model),
+	}
+}
+
+func spanNameForACPMethod(method string) string {
+	return "acp." + strings.ReplaceAll(method, "/", ".")
+}
+
+func outcomeFromPrompt(result PromptResult) string {
+	if result.Err != nil {
 		return outcomeError
 	}
 
@@ -422,6 +613,41 @@ func outcomeFromPrompt(result PromptResult) string {
 	}
 
 	return outcomeOK
+}
+
+func outcomeFromError(err error) string {
+	if err == nil {
+		return outcomeOK
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return outcomeCanceled
+	}
+
+	return outcomeError
+}
+
+// ErrorType names an error for metric attributes, normalizing context errors.
+func ErrorType(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return "context.Canceled"
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context.DeadlineExceeded"
+	}
+
+	typ := reflect.TypeOf(err)
+
+	return typ.String()
+}
+
+func durationSeconds(start time.Time) float64 {
+	return time.Since(start).Seconds()
 }
 
 func firstNonEmpty(values ...string) string {
@@ -434,23 +660,15 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func cloneAttrs(attrs []attribute.KeyValue) []attribute.KeyValue {
-	return append([]attribute.KeyValue(nil), attrs...)
+func slicesClone[T any](values []T) []T {
+	return append([]T(nil), values...)
 }
 
-func cloneEnv(env map[string]string) map[string]string {
-	if len(env) == 0 {
-		return nil
-	}
+type promptStateKey struct{}
 
-	out := make(map[string]string, len(env))
-	maps.Copy(out, env)
-
-	return out
-}
-
-func setUpper(env map[string]string, key string, value string) {
-	if value != "" {
-		env[key] = value
-	}
+type promptState struct {
+	mu       sync.Mutex
+	model    string
+	observed bool
+	start    time.Time
 }
