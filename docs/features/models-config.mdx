@@ -89,6 +89,14 @@ route it will not report publishes no presets. The menu is rebuilt per request
 rather than pushed, so a login, a logout, or a config edit reaches a host on its
 next session or config-option request.
 
+A host that knows what its endpoint serves lists those ids with
+`WithConfiguredModels`. Each id follows the native rows on every route as the
+id alone, with no metadata or effort levels, which is how a gateway session
+carries a menu Codex cannot discover for itself. An id the presets already
+carry keeps its native row, and where the presets are withheld a host-listed id
+naming one of them is withheld with it. An empty, whitespace, or duplicate id
+fails construction.
+
 As with every other option, the menu is host-facing and not an allowlist: a
 model value outside it is still sent to Codex, which resolves it.
 

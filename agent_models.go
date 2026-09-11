@@ -55,7 +55,7 @@ func (a *Agent) sessionConfigOptions(ctx context.Context, session *session, mode
 
 	native := a.nativeModelCatalog(ctx, client, provider, cwd)
 
-	return codexConfigOptions(model, mode, effort, tier, personality, models, native)
+	return codexConfigOptions(model, mode, effort, tier, personality, models, native, a.options.ConfiguredModels)
 }
 
 func (a *Agent) sessionUnstableConfigOptions(ctx context.Context, session *session, models []codex.Model) []acp.UnstableSessionConfigOption {
@@ -69,14 +69,25 @@ func (a *Agent) sessionUnstableConfigOptions(ctx context.Context, session *sessi
 	return out
 }
 
-func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tier string, personality string, models []codex.Model, nativeCatalog bool) []acp.SessionConfigOption {
+func codexConfigOptions(
+	model string,
+	mode acp.SessionModeId,
+	effort string,
+	tier string,
+	personality string,
+	models []codex.Model,
+	nativeCatalog bool,
+	hostListed []string,
+) []acp.SessionConfigOption {
 	var options []acp.SessionConfigOption
 
 	// Every menu built from model/list describes the same presets, so the model
 	// menu, the effort menu, and the published model metadata are trustworthy
-	// together or not at all.
+	// together or not at all. A withheld preset also withholds a host-listed id
+	// naming it: dispatch identity outranks the host's listing.
+	var withheld []codex.Model
 	if !nativeCatalog {
-		models = nil
+		withheld, models = models, nil
 	}
 
 	if model == "" {
@@ -87,7 +98,7 @@ func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tie
 		mode = modeDefault
 	}
 
-	if values := modelConfigValues(model, models); len(values) > 0 {
+	if values := modelConfigValues(model, models, hostListed, withheld); len(values) > 0 {
 		options = append(options, selectConfigOption(configModel, "Model", acp.SessionConfigOptionCategoryModel, acp.SessionConfigValueId(model), values))
 	}
 
@@ -111,12 +122,20 @@ func codexConfigOptions(model string, mode acp.SessionModeId, effort string, tie
 }
 
 // modelConfigValues builds the model menu from the models this session can
-// reach plus its own current model. Selection stays with Codex: a value absent
-// from the menu still travels to the native harness.
-func modelConfigValues(current string, models []codex.Model) []acp.SessionConfigSelectOption {
+// reach, the ids the host listed explicitly, and its own current model.
+// Selection stays with Codex: a value absent from the menu still travels to
+// the native harness. A host-listed id follows the native rows as the id
+// alone; a native row of the same id stands and the host entry adds nothing,
+// and an id naming a withheld preset is withheld with it.
+func modelConfigValues(
+	current string,
+	models []codex.Model,
+	hostListed []string,
+	withheld []codex.Model,
+) []acp.SessionConfigSelectOption {
 	seen := map[string]struct{}{}
 
-	values := make([]acp.SessionConfigSelectOption, 0, len(models)+1)
+	values := make([]acp.SessionConfigSelectOption, 0, len(models)+len(hostListed)+1)
 	for index := range models {
 		model := &models[index]
 
@@ -136,6 +155,15 @@ func modelConfigValues(current string, models []codex.Model) []acp.SessionConfig
 			Description: stringPtrIfNotEmpty(model.Description),
 			Meta:        modelMeta(*model, id),
 		})
+	}
+
+	for _, id := range hostListed {
+		if _, ok := seen[id]; ok || modelByID(id, withheld) != nil {
+			continue
+		}
+
+		seen[id] = struct{}{}
+		values = append(values, acp.SessionConfigSelectOption{Name: id, Value: acp.SessionConfigValueId(id)})
 	}
 
 	if current != "" {

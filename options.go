@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,6 +56,11 @@ type Options struct {
 	ScratchDir string
 	// DefaultModel is the model preference for newly created Codex threads.
 	DefaultModel string
+	// ConfiguredModels are the model ids the host lists explicitly. Each is a
+	// configured catalog entry: published after the native rows on every route,
+	// standing aside for a native row of the same identity, and carrying no
+	// invented facts.
+	ConfiguredModels []string
 	// Env is merged into launched Codex process environments. Managed config
 	// and identity root variables are rejected.
 	Env map[string]string
@@ -284,6 +290,13 @@ func WithProviderAuthDirectHome(path string) Option {
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
 		options.DefaultModel = model
+	}
+}
+
+// WithConfiguredModels names the models the host lists explicitly.
+func WithConfiguredModels(ids []string) Option {
+	return func(options *Options) {
+		options.ConfiguredModels = slices.Clone(ids)
 	}
 }
 

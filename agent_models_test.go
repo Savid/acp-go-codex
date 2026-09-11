@@ -500,7 +500,7 @@ func TestCodexConfigOptionsExposeModelCatalogAndEffort(t *testing.T) {
 		Raw: map[string]any{"displayName": "GPT-5.5"},
 	}}
 
-	options := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, true)
+	options := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, true, nil)
 	if len(options) != 3 {
 		t.Fatalf("config options = %#v", options)
 	}
@@ -539,7 +539,7 @@ func TestCodexConfigOptionsEdgeBranches(t *testing.T) {
 		{ID: "gpt-a", Name: "duplicate"},
 	}
 
-	options := codexConfigOptions("custom-model", "", "", "priority", "friendly", models, true)
+	options := codexConfigOptions("custom-model", "", "", "priority", "friendly", models, true, nil)
 	if len(options) != 4 {
 		t.Fatalf("config options = %#v", options)
 	}
@@ -855,12 +855,12 @@ func TestSuppressedNativeCatalogAlsoWithdrawsItsEffortMenu(t *testing.T) {
 		ReasoningEfforts:       []codex.ModelReasoningEffort{{ID: "low"}, {ID: "medium"}},
 	}}
 
-	native := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, true)
+	native := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, true, nil)
 	requireConfigCurrentValue(t, native, configEffort, "medium")
 	require.Len(t, *native[0].Select.Options.Ungrouped, 1)
 	require.NotEmpty(t, (*native[0].Select.Options.Ungrouped)[0].Meta)
 
-	withoutSelection := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, false)
+	withoutSelection := codexConfigOptions("gpt-5.5", modeDefault, "", "", "", models, false, nil)
 	require.Equal(t,
 		[]acp.SessionConfigId{configModel, configMode},
 		configOptionIDs(withoutSelection),
@@ -869,14 +869,14 @@ func TestSuppressedNativeCatalogAlsoWithdrawsItsEffortMenu(t *testing.T) {
 
 	// A value chosen while the presets applied stays selectable after they are
 	// withdrawn: a select never reports a current value outside its options.
-	outsideVocabulary := codexConfigOptions("gpt-5.5", modeDefault, "ultra", "", "", models, false)
+	outsideVocabulary := codexConfigOptions("gpt-5.5", modeDefault, "ultra", "", "", models, false, nil)
 	requireConfigCurrentValue(t, outsideVocabulary, configEffort, "ultra")
 	require.Contains(t,
 		[]acp.SessionConfigSelectOption(*outsideVocabulary[2].Select.Options.Ungrouped),
 		acp.SessionConfigSelectOption{Name: "ultra", Value: "ultra"},
 	)
 
-	suppressed := codexConfigOptions("gpt-5.5", modeDefault, "high", "", "", models, false)
+	suppressed := codexConfigOptions("gpt-5.5", modeDefault, "high", "", "", models, false, nil)
 	values := *suppressed[0].Select.Options.Ungrouped
 	require.Len(t, values, 1)
 	require.Equal(t, acp.SessionConfigValueId("gpt-5.5"), values[0].Value)
