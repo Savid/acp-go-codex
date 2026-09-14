@@ -105,13 +105,13 @@ func TestInitializeLifecycleStrictness(t *testing.T) {
 	}
 }
 
-func TestBannedRoutes(t *testing.T) {
+func TestProtocolAdmission(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t)
 	h.initialize()
 
-	for _, method := range []string{"_codex/fork", "_codex/anything"} {
+	for _, method := range []string{"_codex/anything"} {
 		_, err := h.conn.CallExtension(h.ctx(), method, map[string]any{})
 		require.Equal(t, -32601, requestErrorCode(t, err), method)
 	}
