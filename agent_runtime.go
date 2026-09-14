@@ -36,7 +36,7 @@ const (
 // runtime is one app-server generation: the process every session's thread
 // runs on until it exits.
 type runtime struct {
-	homeLock *codex.HomeLock
+	homeLock *process.FileLock
 	proc     *process.Process
 	client   *codex.Client
 	stderr   *stderrTail
