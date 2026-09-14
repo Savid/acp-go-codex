@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +36,7 @@ const (
 // runtime is one app-server generation: the process every session's thread
 // runs on until it exits.
 type runtime struct {
-	homeLock *os.File
+	homeLock *codex.HomeLock
 	proc     *process.Process
 	client   *codex.Client
 	stderr   *stderrTail
@@ -186,6 +186,11 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 
 	home := codex.CodexHome(a.options.Home, func(key string) (string, bool) { return process.Lookup(env, key) })
 
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return nil, err
+	}
+
 	homeLock, err := codex.LockHome(home)
 	if err != nil {
 		return nil, err
@@ -319,7 +324,7 @@ func (a *Agent) routeRequest(rt *runtime, request codex.ServerRequest) {
 		return
 	}
 
-	go s.handleRequest(rt, request, params)
+	s.handleRequest(rt, request, params)
 }
 
 func (a *Agent) respondUnowned(rt *runtime, request codex.ServerRequest) {

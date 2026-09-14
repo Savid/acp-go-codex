@@ -116,6 +116,9 @@ func (state *cycleState) tool(id string) *toolState {
 // publishPendingTool announces a tool call that is awaiting approval before
 // the app-server reports the item started.
 func (s *session) publishPendingTool(ctx context.Context, state *cycleState, request permissionRequest) error {
+	state.toolsMu.Lock()
+	defer state.toolsMu.Unlock()
+
 	tool := state.tool(request.toolCallID)
 	if tool.published {
 		return nil
@@ -140,6 +143,9 @@ func (s *session) publishPendingTool(ctx context.Context, state *cycleState, req
 }
 
 func (s *session) publishToolStart(ctx context.Context, state *cycleState, event codex.ToolEvent) error {
+	state.toolsMu.Lock()
+	defer state.toolsMu.Unlock()
+
 	id := firstNonEmpty(event.ID, "codex-tool")
 
 	tool := state.tool(id)
@@ -168,6 +174,9 @@ func (s *session) publishToolStart(ctx context.Context, state *cycleState, event
 // publishToolDelta appends one output delta and emits the complete content
 // array.
 func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id string, text string) error {
+	state.toolsMu.Lock()
+	defer state.toolsMu.Unlock()
+
 	if text == "" {
 		return nil
 	}
@@ -185,6 +194,9 @@ func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id st
 // publishToolTerminal emits the terminal status and the complete final
 // content array: the aggregated output, and for file changes their diffs.
 func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, event codex.ToolEvent) error {
+	state.toolsMu.Lock()
+	defer state.toolsMu.Unlock()
+
 	id := firstNonEmpty(event.ID, "codex-tool")
 
 	tool := state.tool(id)
@@ -248,6 +260,9 @@ func diffContent(item map[string]any) []acp.ToolCallContent {
 
 // publishImageStart announces an image generation item as a tool call.
 func (s *session) publishImageStart(ctx context.Context, state *cycleState, event codex.ImageEvent) error {
+	state.toolsMu.Lock()
+	defer state.toolsMu.Unlock()
+
 	id := firstNonEmpty(event.ID, "codex-image")
 
 	tool := state.tool(id)
@@ -269,6 +284,9 @@ func (s *session) publishImageStart(ctx context.Context, state *cycleState, even
 // allowed path, and emits them as the tool call's content. A refusal is
 // reported in place as the failed call's own content and the turn continues.
 func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, event codex.ImageEvent) error {
+	state.toolsMu.Lock()
+	defer state.toolsMu.Unlock()
+
 	id := firstNonEmpty(event.ID, "codex-image")
 
 	tool := state.tool(id)

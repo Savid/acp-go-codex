@@ -21,6 +21,7 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 	var c *cycle
 
 	s.mu.Lock()
+	t := s.turn
 
 	switch {
 	case s.turn != nil:
@@ -33,64 +34,72 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithCancelCause(context.Background())
-	defer cancel(nil)
-
 	unregister := s.registerDialog(string(request.ID), cancel)
-	defer unregister()
 
-	if c == nil || closing {
+	if c == nil || closing || ctx.Err() != nil {
+		cancel(nil)
+		unregister()
 		s.agent.respondUnowned(rt, request)
 
 		return
 	}
 
-	var response any
+	if t != nil {
+		s.acceptTurn(ctx, t)
+	}
 
-	switch request.Method {
-	case codex.RequestCommandApproval, codex.RequestFileChangeApproval:
-		selected := s.requestPermission(ctx, c, permissionRequest{
-			toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
-			title:      codex.ApprovalTitle(request.Method, params),
-			kind:       codex.ApprovalKind(request.Method),
-			content:    codex.ApprovalContent(request.Method, params),
-			rawInput:   params,
-			options:    codex.ApprovalOptions(params),
-		})
-		response = codex.ApprovalResponse(selected, params)
-	case codex.RequestPermissionsApproval:
-		selected := s.requestPermission(ctx, c, permissionRequest{
-			toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
-			title:      codex.ApprovalTitle(request.Method, params),
-			kind:       acp.ToolKindOther,
-			content:    codex.ApprovalContent(request.Method, params),
-			rawInput:   params,
-			options:    codex.PermissionsOptions(),
-		})
-		response = codex.PermissionsResponse(selected, params)
-	case codex.RequestToolUserInput:
-		response = s.toolUserInput(ctx, c, params)
-	case codex.RequestMCPElicitation:
-		if codex.IsMCPToolApproval(params) {
+	go func() {
+		defer cancel(nil)
+		defer unregister()
+
+		var response any
+
+		switch request.Method {
+		case codex.RequestCommandApproval, codex.RequestFileChangeApproval:
 			selected := s.requestPermission(ctx, c, permissionRequest{
 				toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
-				title:      codex.MCPToolApprovalTitle(params),
-				kind:       acp.ToolKindOther,
+				title:      codex.ApprovalTitle(request.Method, params),
+				kind:       codex.ApprovalKind(request.Method),
+				content:    codex.ApprovalContent(request.Method, params),
 				rawInput:   params,
-				options:    codex.MCPToolApprovalOptions(),
+				options:    codex.ApprovalOptions(params),
 			})
-			response = codex.MCPToolApprovalResponse(selected)
-		} else {
-			response = s.mcpElicitation(ctx, c, params)
+			response = codex.ApprovalResponse(selected, params)
+		case codex.RequestPermissionsApproval:
+			selected := s.requestPermission(ctx, c, permissionRequest{
+				toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
+				title:      codex.ApprovalTitle(request.Method, params),
+				kind:       acp.ToolKindOther,
+				content:    codex.ApprovalContent(request.Method, params),
+				rawInput:   params,
+				options:    codex.PermissionsOptions(),
+			})
+			response = codex.PermissionsResponse(selected, params)
+		case codex.RequestToolUserInput:
+			response = s.toolUserInput(ctx, c, params)
+		case codex.RequestMCPElicitation:
+			if codex.IsMCPToolApproval(params) {
+				selected := s.requestPermission(ctx, c, permissionRequest{
+					toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
+					title:      codex.MCPToolApprovalTitle(params),
+					kind:       acp.ToolKindOther,
+					rawInput:   params,
+					options:    codex.MCPToolApprovalOptions(),
+				})
+				response = codex.MCPToolApprovalResponse(selected)
+			} else {
+				response = s.mcpElicitation(ctx, c, params)
+			}
+		default:
+			s.agent.respondUnowned(rt, request)
+
+			return
 		}
-	default:
-		s.agent.respondUnowned(rt, request)
 
-		return
-	}
-
-	if err := rt.client.Respond(request, response, nil); err != nil {
-		s.agent.log.DebugContext(ctx, "respond to codex request failed", slog.String("session_id", string(s.id)))
-	}
+		if err := rt.client.Respond(request, response, nil); err != nil {
+			s.agent.log.DebugContext(ctx, "respond to codex request failed", slog.String("session_id", string(s.id)))
+		}
+	}()
 }
 
 // permissionRequest is what one native approval asks the host.

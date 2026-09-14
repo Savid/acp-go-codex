@@ -235,3 +235,124 @@ func TestMirrorFailureFencesTurnAndAllowsRetry(t *testing.T) {
 	types = eventTypes(lifecycleEvents(h.rec.snapshot()))
 	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update:running", "lifecycle_snapshot", "prompt_accepted", "state_update:running", "state_update:idle"}, types)
 }
+
+func TestNewSessionFailsWhenInitialMirrorFails(t *testing.T) {
+	t.Parallel()
+	store := &mirrorFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	store.fail.Store(true)
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	require.Equal(t, "codex_internal_failure", requestErrorData(t, err)["error"])
+	listed, err := h.conn.ListSessions(h.ctx(), ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, listed.Sessions)
+	store.fail.Store(false)
+	h.newSession()
+}
+
+type blockedLoadStore struct {
+	acpcore.SessionStore
+	block            atomic.Bool
+	entered, release chan struct{}
+}
+
+func (s *blockedLoadStore) Load(ctx context.Context, key acpcore.SessionKey) ([]acpcore.SessionStoreEntry, error) {
+	rows, err := s.SessionStore.Load(ctx, key)
+	if err == nil && key.Subpath == configSubpath && s.block.CompareAndSwap(true, false) {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return rows, err
+}
+
+func TestConcurrentColdRestoreIsRefusedBeforeBinding(t *testing.T) {
+	t.Parallel()
+	store := &blockedLoadStore{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	store.block.Store(true)
+	done := make(chan error, 1)
+	ctx := h.ctx()
+	go func() {
+		_, loadErr := h.conn.LoadSession(ctx, LoadSessionRequest(session.SessionId, cwd))
+		done <- loadErr
+	}()
+	select {
+	case <-store.entered:
+	case <-ctx.Done():
+		t.Fatal("load did not reach configuration")
+	}
+	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest(session.SessionId, cwd))
+	close(store.release)
+	require.Equal(t, "session_restore", requestErrorData(t, err)["limit"])
+	require.NoError(t, <-done)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+}
+
+func TestLiveResumeAppliesOptionsAndRetainsDirectories(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd, directory := t.TempDir(), t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd, WithSessionAdditionalDirectories(directory)))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest(session.SessionId, cwd,
+		WithSessionCodexOptions(NewCodexOptions(WithCodexModel("text-only")))))
+	require.NoError(t, err)
+	rows, err := store.Load(h.ctx(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	var record sessionRecord
+	require.NoError(t, json.Unmarshal(rows[0], &record))
+	require.Equal(t, "text-only", record.Model)
+	require.Equal(t, []string{directory}, record.AdditionalDirectories)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+}
+
+func TestRestoreIntoDifferentNativeHome(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	home := t.TempDir()
+	restored := newHarness(t, WithSessionStore(store), WithHome(home))
+	restored.initialize()
+	_, err = restored.conn.LoadSession(restored.ctx(), LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	_, err = restored.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	rows, err := store.Load(restored.ctx(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	require.NoError(t, err)
+	var record sessionRecord
+	require.Len(t, rows, 1)
+	require.NoError(t, json.Unmarshal(rows[0], &record))
+	relative, err := filepath.Rel(home, record.RolloutPath)
+	require.NoError(t, err)
+	require.True(t, filepath.IsLocal(relative))
+	require.FileExists(t, record.RolloutPath)
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -32,6 +33,7 @@ const (
 
 // cycleState accumulates what one cycle streamed.
 type cycleState struct {
+	toolsMu       sync.Mutex
 	usage         *acp.Usage
 	stop          codex.StopReason
 	failure       *codex.TurnFailure
@@ -78,12 +80,12 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 	nativeTurnID := c.nativeTurnID
 	s.mu.Unlock()
 
+	if nativeTurnID != "" && event.TurnID != "" && event.TurnID != nativeTurnID {
+		return false, nil
+	}
+
 	switch event.Kind {
 	case codex.EventTurnCompleted:
-		if nativeTurnID != "" && event.TurnID != "" && event.TurnID != nativeTurnID {
-			return false, nil
-		}
-
 		state.stop = event.Stop
 		state.failure = event.Failure
 
@@ -131,7 +133,7 @@ func (s *session) emitText(ctx context.Context, state *cycleState, event codex.E
 
 	if event.Completed {
 		text = unstreamedSuffix(state.streamed[key], text)
-		delete(state.streamed, key)
+		state.streamed[key] += text
 	} else {
 		state.streamed[key] += text
 	}

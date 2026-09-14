@@ -406,6 +406,8 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 	}
 
 	switch {
+	case strings.HasPrefix(message, "STALE"):
+		f.notify("item/agentMessage/delta", scoped(map[string]any{"turnId": "previous-turn", "itemId": "old-message", "delta": "stale text"}))
 	case strings.HasPrefix(message, "SUFFIX"):
 		delta("Hel")
 		text = "Hello"
@@ -456,6 +458,9 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 
 	if status == "completed" {
 		f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": itemID, "type": "agentMessage", "text": text}}))
+		if strings.HasPrefix(message, "DUPLICATE") {
+			f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": itemID, "type": "agentMessage", "text": text}}))
+		}
 		f.appendRow(thread, eventRow("agent_message", map[string]any{"message": text}))
 	}
 

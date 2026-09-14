@@ -12,7 +12,6 @@ import (
 	"github.com/coder/acp-go-sdk"
 
 	"github.com/savid/acp-go-codex/internal/codex"
-	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
@@ -142,11 +141,13 @@ func (r sessionRecord) validate(sessionID string) error {
 		return fmt.Errorf("invalid session record identity or location")
 	}
 
-	if err := process.ValidateNames(r.Env); err != nil {
-		return err
+	for _, directory := range r.AdditionalDirectories {
+		if !filepath.IsAbs(directory) {
+			return fmt.Errorf("invalid additional directory")
+		}
 	}
 
-	if err := process.ValidateExtraPathDirs(r.ExtraPathDirs); err != nil {
+	if _, err := parseSessionMeta(inheritCarrier(sessionMeta{}, r).Meta()); err != nil {
 		return err
 	}
 
@@ -166,7 +167,9 @@ func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored sto
 	}
 
 	path := stored.record.RolloutPath
-	if path == "" || !fileExists(path) {
+
+	relative, pathErr := filepath.Rel(home, path)
+	if pathErr != nil || !filepath.IsLocal(relative) || !fileExists(path) {
 		stamp := meta.Timestamp
 		if stamp.IsZero() {
 			return "", nil, a.restoreRefused(ctx, sessionID, fmt.Errorf("native session timestamp missing"))
