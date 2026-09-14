@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,7 @@ import (
 
 const (
 	codexHomeEnv      = codex.EnvCodexHome
-	internalEnvPrefix = "ACP_GO_CODEX_INTERNAL_"
+	internalEnvPrefix = codex.InternalEnvPrefix
 
 	// runtimeShutdownGrace is how long the app-server gets after SIGTERM
 	// before its group is killed.
@@ -35,11 +36,11 @@ const (
 // runtime is one app-server generation: the process every session's thread
 // runs on until it exits.
 type runtime struct {
-	epoch  uint64
-	proc   *process.Process
-	client *codex.Client
-	stderr *stderrTail
-	cancel context.CancelFunc
+	homeLock *os.File
+	proc     *process.Process
+	client   *codex.Client
+	stderr   *stderrTail
+	cancel   context.CancelFunc
 	// done is closed when the pump has stopped routing this generation.
 	done chan struct{}
 	// nativePath is the PATH the app-server runs with; thread PATHs are
@@ -157,6 +158,11 @@ func (a *Agent) ensureRuntime(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		a.log.ErrorContext(ctx, "codex app-server start failed", slog.String("reason", err.Error()))
 
+		var seedErr *process.SeedFileError
+		if errors.As(err, &seedErr) {
+			return nil, wire.Unsupported("seedFiles")
+		}
+
 		return nil, wire.RuntimeUnavailable(vendor)
 	}
 
@@ -180,7 +186,19 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 
 	home := codex.CodexHome(a.options.Home, func(key string) (string, bool) { return process.Lookup(env, key) })
 
-	if seedErr := codex.WriteSeedFiles(home, a.options.SeedFiles); seedErr != nil {
+	homeLock, err := codex.LockHome(home)
+	if err != nil {
+		return nil, err
+	}
+
+	started := false
+	defer func() {
+		if !started {
+			_ = homeLock.Close()
+		}
+	}()
+
+	if seedErr := process.WriteSeedFiles(home, a.options.SeedFiles); seedErr != nil {
 		return nil, seedErr
 	}
 
@@ -211,10 +229,8 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		return nil, startErr
 	}
 
-	a.epoch++
-
 	rt := &runtime{
-		epoch:      a.epoch,
+		homeLock:   homeLock,
 		proc:       proc,
 		client:     nativeClient,
 		stderr:     tail,
@@ -243,6 +259,7 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 	}
 
 	rt.models = models
+	started = true
 
 	return rt, nil
 }
@@ -346,15 +363,18 @@ func (a *Agent) sessionByThread(threadID string) *session {
 // generationEnded records that an app-server generation stopped producing
 // records: every session bound to it learns its incarnation is over.
 func (a *Agent) generationEnded(ctx context.Context, rt *runtime) {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeShutdownTimeout)
+	defer cancel()
+
+	if err := rt.proc.Shutdown(shutdownCtx, runtimeShutdownGrace); err != nil {
+		_ = rt.proc.Kill()
+	}
+
+	_ = rt.homeLock.Close()
+
 	rt.mu.Lock()
 	rt.dead = true
 	rt.mu.Unlock()
-
-	a.runtimeMu.Lock()
-	if a.runtime == rt {
-		a.runtime = nil
-	}
-	a.runtimeMu.Unlock()
 
 	a.mu.Lock()
 	sessions := collectSessions(a.sessions)
@@ -364,7 +384,7 @@ func (a *Agent) generationEnded(ctx context.Context, rt *runtime) {
 		s.runtimeEnded(ctx, rt)
 	}
 
-	a.observe.RecordCodexProcessExit(ctx, "exited", rt.client.Err())
+	a.observe.RecordProcessExit(ctx, "exited", rt.client.Err())
 }
 
 func collectSessions(sessions map[acp.SessionId]*session) []*session {

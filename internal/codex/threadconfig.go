@@ -1,62 +1,35 @@
 package codex
 
 import (
-	"fmt"
-	"os"
 	"strings"
+
+	"github.com/savid/acp-go-core/process"
 )
 
-const (
-	shellEnvironmentPolicyKey = "shell_environment_policy"
-	shellEnvironmentSetKey    = "set"
-	pathEnvKey                = "PATH"
-)
+// InternalEnvPrefix names the adapter's private child-process markers.
+const InternalEnvPrefix = "ACP_GO_CODEX_INTERNAL_"
 
-// threadSessionConfig renders the thread config that carries one thread's
-// shell environment at shell_environment_policy.set, which Codex applies after
-// inheritance and its own secret filtering. The derived PATH places the
-// ordered session directories ahead of the exact PATH the app-server process
-// itself runs with, so two threads on one app-server never see each other's
-// environment.
+const shellEnvironmentSetKey = "set"
+const shellEnvironmentPolicyKey = "shell_environment_policy"
+
+// threadSessionConfig applies the session overlay after Codex's native shell
+// policy. Session PATH replaces the process PATH before extra directories apply.
 func threadSessionConfig(environment map[string]string, extraPathDirs []string, nativePath string) (map[string]any, error) {
-	if len(environment) == 0 && len(extraPathDirs) == 0 {
-		return map[string]any{}, nil
+	env, err := (process.Environment{
+		Process:        []string{"PATH=" + nativePath},
+		Session:        environment,
+		ExtraPathDirs:  extraPathDirs,
+		InternalPrefix: InternalEnvPrefix,
+	}).Build()
+	if err != nil {
+		return nil, err
 	}
 
-	set := make(map[string]any, len(environment)+1)
-
-	for key, value := range environment {
-		if key == pathEnvKey {
-			return nil, fmt.Errorf("codex thread environment must not set %s", key)
-		}
-
+	set := make(map[string]any, len(env))
+	for _, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
 		set[key] = value
 	}
 
-	if path := composeSearchPath(extraPathDirs, nativePath); len(extraPathDirs) > 0 && path != "" {
-		set[pathEnvKey] = path
-	}
-
 	return map[string]any{shellEnvironmentPolicyKey: map[string]any{shellEnvironmentSetKey: set}}, nil
-}
-
-// composeSearchPath joins the ordered session directories ahead of the native
-// path, dropping empty components because an empty PATH element means the
-// current directory to some shells.
-func composeSearchPath(extraPathDirs []string, nativePath string) string {
-	separator := string(os.PathListSeparator)
-
-	components := make([]string, 0, len(extraPathDirs)+1)
-	components = append(components, extraPathDirs...)
-	components = append(components, strings.Split(nativePath, separator)...)
-
-	kept := make([]string, 0, len(components))
-
-	for _, component := range components {
-		if component != "" {
-			kept = append(kept, component)
-		}
-	}
-
-	return strings.Join(kept, separator)
 }

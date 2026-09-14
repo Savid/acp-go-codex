@@ -22,7 +22,7 @@ coverage-check:
 	@awk 'NR > 1 && $$(NF - 1) > 0 { found = 1 } END { if (!found) { print "coverage profile has no statement blocks"; exit 1 } }' coverage.out
 	@report=$$(go tool cover -func=coverage.out) || exit $$?; printf '%s\n' "$$report" | awk '/^total:/ { found = 1; if ($$3 !~ /^[0-9]+([.][0-9]+)?%$$/) { print "invalid total coverage line"; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
-## test-integration-smoke: run integration tests against the installed pi without spending tokens
+## test-integration-smoke: run integration tests against the installed codex without spending tokens
 test-integration-smoke:
 	ACP_GO_CODEX_RUN_LIVE_TOKENS=0 ACP_GO_CODEX_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=300s -v ./integration/...
 

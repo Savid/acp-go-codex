@@ -13,15 +13,13 @@ in its own home, so a session started over ACP can be continued natively with
 - `cmd/acp-go-codex`: stdio entrypoint, OpenTelemetry setup, signals, flags.
 - Root `agent*.go`, `options.go`, `request_builders.go`: the public ACP
   surface, option validation, the shared app-server generation and its event
-  pump, and the transport wrapper that orders session publication behind the
-  establishing response.
+  pump; the shared ACP transport orders publication.
 - Root `session*.go`, `image_output.go`: one session's thread binding, prompt
   turns, approvals and elicitation, lifecycle stream, store mirror, replay,
   config options, and image output.
 - `internal/codex`: the app-server JSON-RPC client, launch arguments, event
-  decoding, server request mapping, thread configuration, seed files, and the
+  decoding, server request mapping, thread configuration, home locking, and the
   rollout file layout.
-- `internal/observer`: OpenTelemetry spans and metrics.
 - `integration`: gated tests against the installed codex.
 - `examples`: runnable ACP clients.
 

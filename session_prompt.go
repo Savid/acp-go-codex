@@ -222,7 +222,11 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 
 	nativeTurnID, err := rt.client.StartTurn(ctx, s.turnStart(mapped.input))
 	if err != nil {
-		if !t.accepted {
+		s.lcMu.Lock()
+		accepted := t.accepted
+		s.lcMu.Unlock()
+
+		if !accepted {
 			if ctx.Err() != nil {
 				return cancelledResponse(params), nil
 			}
@@ -340,7 +344,11 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 		s.emitSessionInfo(settleCtx, params.Prompt)
 	}
 
-	if err := s.commitMirror(settleCtx); err != nil && verdict.failure == nil {
+	if err := s.commitMirror(settleCtx); err != nil {
+		s.mu.Lock()
+		s.rt = nil
+		s.mu.Unlock()
+		s.lcFence()
 		verdict.failure = s.mirrorFailure(&t.state, err)
 		verdict.outcome = lifecycle.OutcomeFailed
 	}

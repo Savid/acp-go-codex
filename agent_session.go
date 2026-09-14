@@ -2,7 +2,6 @@ package codexacp
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
@@ -14,16 +13,15 @@ import (
 	"github.com/coder/acp-go-sdk"
 
 	"github.com/savid/acp-go-codex/internal/codex"
-	"github.com/savid/acp-go-codex/internal/observer"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/wire"
 )
 
 const (
 	limitActiveSessions = "active_sessions"
 	limitSessionRestore = "session_restore"
-	listSessionsPage    = 50
 )
 
 // sessionStart carries the validated inputs of one session-establishing
@@ -130,7 +128,7 @@ func isDeleted(deleted map[acp.SessionId]struct{}, id acp.SessionId) bool {
 // Codex has no command surface, so nothing else is published.
 func (a *Agent) scheduleOpen(ctx context.Context, s *session) error {
 	if t := a.transportRef(); t != nil {
-		t.registerHook(s.id, func(hookCtx context.Context) {
+		t.RegisterHook(s.id, func(hookCtx context.Context) {
 			if err := s.openStream(hookCtx); err != nil {
 				a.log.ErrorContext(hookCtx, "publish session open failed",
 					slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
@@ -250,7 +248,7 @@ func (a *Agent) restore(
 		}
 
 		if closeErr := active.close(ctx); closeErr != nil {
-			return nil, nil, closeErr
+			return nil, nil, wire.RestoreFailed(vendor)
 		}
 
 		a.detach(ctx, active)
@@ -425,6 +423,10 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		return acp.ListSessionsResponse{}, invalidParam(refusal)
 	}
 
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.ListSessionsResponse{}, openErr
+	}
+
 	filter := ""
 	if params.Cwd != nil {
 		filter = strings.TrimSpace(*params.Cwd)
@@ -475,9 +477,6 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		}
 
 		cwd := stored.record.Cwd
-		if cwd == "" {
-			cwd = storedCwd(stored.rows)
-		}
 
 		if filter != "" && cwd != filter {
 			continue
@@ -496,7 +495,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		seen[id] = struct{}{}
 	}
 
-	page, next, err := paginate(sessions, params.Cursor)
+	page, next, err := wire.PaginateSessions(sessions, params.Cursor)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
@@ -504,41 +503,16 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	return acp.ListSessionsResponse{Sessions: page, NextCursor: next}, nil
 }
 
-func paginate(sessions []acp.SessionInfo, cursor *string) ([]acp.SessionInfo, *string, error) {
-	offset := 0
-
-	if cursor != nil && *cursor != "" {
-		data, err := base64.RawURLEncoding.DecodeString(*cursor)
-		if err != nil {
-			return nil, nil, wire.Unsupported("cursor")
-		}
-
-		offset, err = strconv.Atoi(string(data))
-		if err != nil || offset < 0 || offset > len(sessions) {
-			return nil, nil, wire.Unsupported("cursor")
-		}
-	}
-
-	end := offset + listSessionsPage
-	if end >= len(sessions) {
-		return sessions[offset:], nil, nil
-	}
-
-	next := base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-
-	return sessions[offset:end], &next, nil
-}
-
 // Prompt sends one turn to the thread and streams updates until it settles.
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
-	s, err := a.session(params.SessionId)
+	s, err := a.session(ctx, params.SessionId)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
 
 	var raw json.RawMessage
 	if t := a.transportRef(); t != nil {
-		raw = t.takeRawPrompt(params.SessionId, params.Meta)
+		raw = t.TakeRawPrompt(params.SessionId, params.Meta)
 	}
 
 	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, s.currentModel())
@@ -584,7 +558,7 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 		return invalidParam(refusal)
 	}
 
-	s, err := a.session(params.SessionId)
+	s, err := a.session(ctx, params.SessionId)
 	if err != nil {
 		return nil
 	}
@@ -603,7 +577,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, invalidParam(refusal)
 	}
 
-	s, err := a.session(params.SessionId)
+	s, err := a.session(ctx, params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
@@ -672,7 +646,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		return acp.SetSessionConfigOptionResponse{}, wire.Unsupported("type")
 	}
 
-	s, err := a.session(params.ValueId.SessionId)
+	s, err := a.session(ctx, params.ValueId.SessionId)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
@@ -687,17 +661,28 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 // session resolves an addressed id to its live session. A deleted id is
 // indistinguishable from one that never existed.
-func (a *Agent) session(sessionID acp.SessionId) (*session, error) {
+func (a *Agent) session(ctx context.Context, sessionID acp.SessionId) (*session, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	if a.closed {
+		a.mu.Unlock()
+
 		return nil, errAgentClosed()
 	}
 
 	s := a.sessions[sessionID]
 	if s == nil || isDeleted(a.deleted, sessionID) {
+		a.mu.Unlock()
+
 		return nil, wire.UnknownSession()
+	}
+
+	a.mu.Unlock()
+
+	if transport := a.transportRef(); transport != nil {
+		if err := transport.AwaitSession(ctx, sessionID); err != nil {
+			return nil, err
+		}
 	}
 
 	return s, nil

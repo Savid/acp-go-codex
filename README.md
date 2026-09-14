@@ -7,7 +7,8 @@ it, maps ACP requests onto the app-server protocol, and streams ACP session
 updates back to the client.
 
 Codex inherits the adapter's environment and keeps its rollouts in its own
-home. A session started over ACP can be continued natively:
+home. One adapter runtime holds the home lock until its app-server has
+exited and been waited on. A session started over ACP can be continued natively:
 
 ```sh
 acp-go-codex           # host runs a session
@@ -93,6 +94,8 @@ and the adapter's session record under `config`, format
 `codex-rollout-jsonl-v1`. `session/load` and `session/resume` prefer the
 rollout in Codex's home when it exists and materialize it from the store
 otherwise.
+Native rows and session configuration commit as one store generation. A
+configuration change is durable even when no native rows were added.
 
 ## Development
 

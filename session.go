@@ -67,8 +67,9 @@ type session struct {
 	cycle         *cycle
 	dialogs       map[string]*dialog
 
-	lcMu sync.Mutex
-	lc   lifecycleState
+	mirrorMu sync.Mutex
+	lcMu     sync.Mutex
+	lc       lifecycleState
 }
 
 // cycle is one foreground run: the work of one accepted prompt, or one
@@ -254,6 +255,11 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 
 		if settled {
 			t.settle(turnSettled)
+
+			select {
+			case <-t.finished:
+			case <-rt.proc.Done():
+			}
 		}
 	case c != nil:
 		settled, err := s.projectEvent(ctx, c, event)
@@ -314,6 +320,7 @@ func (s *session) settleAgentCycle(ctx context.Context, c *cycle) {
 	defer cancel()
 
 	if err := s.commitMirror(settleCtx); err != nil {
+		s.lcFence()
 		s.agent.log.ErrorContext(settleCtx, "mirror commit after agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 	}
@@ -512,7 +519,10 @@ func (s *session) close(ctx context.Context) error {
 
 	if t != nil {
 		if rt != nil && rt.alive() {
-			s.interrupt(ctx, rt, t.nativeTurnID)
+			s.mu.Lock()
+			nativeTurnID := t.nativeTurnID
+			s.mu.Unlock()
+			s.interrupt(ctx, rt, nativeTurnID)
 		}
 
 		select {

@@ -8,8 +8,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 
 	"github.com/savid/acp-go-codex/internal/codex"
-	"github.com/savid/acp-go-codex/internal/observer"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
 )
 
 // optionAccept is the native decision that allows one approval once.
@@ -311,7 +311,7 @@ func announcedRequest[T any](
 
 	var written <-chan struct{}
 	if t := s.agent.transportRef(); t != nil {
-		written = t.awaitRequestWrite(actionID)
+		written = t.AwaitRequestWrite(actionID)
 	}
 
 	go func() {

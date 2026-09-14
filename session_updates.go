@@ -70,13 +70,17 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event) (bool, error) {
 	state := &c.state
 
+	s.mu.Lock()
 	if event.TurnID != "" && c.nativeTurnID == "" {
 		c.nativeTurnID = event.TurnID
 	}
 
+	nativeTurnID := c.nativeTurnID
+	s.mu.Unlock()
+
 	switch event.Kind {
 	case codex.EventTurnCompleted:
-		if c.nativeTurnID != "" && event.TurnID != "" && event.TurnID != c.nativeTurnID {
+		if nativeTurnID != "" && event.TurnID != "" && event.TurnID != nativeTurnID {
 			return false, nil
 		}
 
