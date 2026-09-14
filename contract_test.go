@@ -343,3 +343,11 @@ func TestCommandSilence(t *testing.T) {
 		require.Nil(t, update.Update.AvailableCommandsUpdate)
 	}
 }
+
+func TestNegativeClientCallLimitReturnsOptionsError(t *testing.T) {
+	t.Parallel()
+	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: -1}))
+	defer agent.Close()
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.Equal(t, "codex_invalid_options", requestErrorData(t, err)["error"])
+}
