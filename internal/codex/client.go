@@ -43,7 +43,6 @@ const (
 type Thread struct {
 	ID   string
 	Path string
-	Cwd  string
 	// Model is the model the thread reports, when the response names one.
 	Model string
 }
@@ -265,11 +264,16 @@ func threadFromResponse(resp map[string]any) (Thread, error) {
 	thread := Thread{
 		ID:    stringValue(raw, fieldID),
 		Path:  stringValue(raw, fieldPath),
-		Cwd:   firstNonEmpty(stringValue(raw, fieldCwd), stringValue(resp, fieldCwd)),
 		Model: firstNonEmpty(stringValue(resp, fieldModel), stringValue(raw, fieldModel)),
 	}
 	if thread.ID == "" {
 		return Thread{}, errors.New("codex thread response names no thread id")
+	}
+
+	// The rollout path is the adapter's only mirror source; a thread it cannot
+	// read is never bound.
+	if thread.Path == "" {
+		return Thread{}, errors.New("codex thread response names no rollout path")
 	}
 
 	return thread, nil

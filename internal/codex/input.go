@@ -42,7 +42,7 @@ func PromptToUserInput(blocks []acp.ContentBlock, images []PromptImage) ([]UserI
 
 	for _, block := range blocks {
 		switch {
-		case block.Image != nil:
+		case block.Image != nil || (block.Resource != nil && block.Resource.Resource.BlobResourceContents != nil):
 			if nextImage >= len(images) {
 				return nil, ErrUnsupportedContentBlock
 			}
@@ -52,6 +52,10 @@ func PromptToUserInput(blocks []acp.ContentBlock, images []PromptImage) ([]UserI
 
 			input = append(input, UserInput{fieldType: inputImage, inputURL: "data:" + image.MIME + ";base64," + base64.StdEncoding.EncodeToString(image.Data)})
 		case block.Text != nil:
+			if strings.TrimSpace(block.Text.Text) == "" {
+				continue
+			}
+
 			input = append(input, UserInput{fieldType: inputText, inputText: block.Text.Text})
 		case block.ResourceLink != nil:
 			input = append(input, resourceLinkInput(*block.ResourceLink))

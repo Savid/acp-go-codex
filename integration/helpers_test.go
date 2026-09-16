@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	codexacp "github.com/savid/acp-go-codex"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const (
@@ -69,6 +71,39 @@ func harnessPath(t *testing.T, live bool) string {
 	}
 
 	return resolved
+}
+
+// requireSessionPath permits only the installed package's own native prefix
+// ahead of the session directories in an actual shell tool's output.
+func requireSessionPath(t *testing.T, output, directory string) {
+	t.Helper()
+	_, value, found := strings.Cut(output, "ACP_PATH=")
+	require.True(t, found, "marker did not report its PATH: %s", output)
+	value, _, _ = strings.Cut(value, "\n")
+	entries := filepath.SplitList(strings.TrimSpace(value))
+	require.NotEmpty(t, entries)
+	if entries[0] != directory {
+		executable, err := filepath.EvalSymlinks(harnessPath(t, true))
+		require.NoError(t, err)
+		packageDir := filepath.Dir(filepath.Dir(executable))
+		data, err := os.ReadFile(filepath.Join(packageDir, "codex-package.json"))
+		require.NoError(t, err, "unexpected native PATH prefix: %s", entries[0])
+		var manifest struct {
+			Entrypoint string `json:"entrypoint"`
+			PathDir    string `json:"pathDir"`
+		}
+		require.NoError(t, json.Unmarshal(data, &manifest))
+		require.Equal(t, "codex-path", manifest.PathDir)
+		entrypoint, err := filepath.EvalSymlinks(filepath.Join(packageDir, manifest.Entrypoint))
+		require.NoError(t, err)
+		require.Equal(t, executable, entrypoint)
+		prefix, err := filepath.EvalSymlinks(filepath.Join(packageDir, manifest.PathDir))
+		require.NoError(t, err)
+		require.Equal(t, prefix, entries[0])
+		entries = entries[1:]
+	}
+	require.NotEmpty(t, entries)
+	require.Equal(t, directory, entries[0])
 }
 
 // isolatedHome copies the operator's codex home named by ACP_GO_CODEX_HOME into a
@@ -175,6 +210,7 @@ type harness struct {
 
 func newHarness(t *testing.T, live bool, extra ...codexacp.Option) *harness {
 	t.Helper()
+
 	return newHarnessAt(t, live, isolatedHome(t), extra...)
 }
 
@@ -244,7 +280,7 @@ func (h *harness) ctx(t *testing.T) context.Context {
 	return ctx
 }
 
-func liveModel() codexacp.SessionRequestOption {
+func liveModel() wire.SessionRequestOption {
 	options := codexacp.NewCodexOptions()
 	if model := os.Getenv(envModel); model != "" {
 		options.Model = model
@@ -266,4 +302,21 @@ func requestErrorData(t *testing.T, err error) map[string]any {
 	require.NoError(t, json.Unmarshal(encoded, &data))
 
 	return data
+}
+
+func (r *recorder) toolText() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var text strings.Builder
+	for _, update := range r.updates {
+		if tool := update.Update.ToolCallUpdate; tool != nil {
+			for _, item := range tool.Content {
+				if item.Content != nil && item.Content.Content.Text != nil {
+					text.WriteString(item.Content.Content.Text.Text)
+				}
+			}
+		}
+	}
+
+	return text.String()
 }

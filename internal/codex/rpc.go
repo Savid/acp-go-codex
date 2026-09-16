@@ -79,8 +79,6 @@ type Client struct {
 
 	notifications chan Notification
 	requests      chan ServerRequest
-	done          chan struct{}
-	wg            sync.WaitGroup
 }
 
 // NewClient constructs a client over the app-server's stdin writer and stdout
@@ -95,7 +93,6 @@ func NewClient(stdin io.Writer, stdout io.Reader) *Client {
 		pending:       make(map[string]chan message, 4),
 		notifications: make(chan Notification),
 		requests:      make(chan ServerRequest),
-		done:          make(chan struct{}),
 	}
 }
 
@@ -106,19 +103,9 @@ func (c *Client) Start(ctx context.Context) error {
 		return errors.New("codex client already started")
 	}
 
-	c.wg.Go(func() { c.readLoop(ctx) })
+	go c.readLoop(ctx)
 
 	return nil
-}
-
-// Stop waits for the read loop to exit and returns the transport failure, if
-// any. The caller first ends the stream by terminating the process.
-func (c *Client) Stop() error {
-	if c.started.Load() {
-		c.wg.Wait()
-	}
-
-	return c.Err()
 }
 
 // Notifications returns the notification stream. It is closed when the read
@@ -128,9 +115,6 @@ func (c *Client) Notifications() <-chan Notification { return c.notifications }
 // Requests returns the server request stream. It is closed when the read loop
 // exits. Every request must be answered through Respond.
 func (c *Client) Requests() <-chan ServerRequest { return c.requests }
-
-// Done is closed when the read loop has exited.
-func (c *Client) Done() <-chan struct{} { return c.done }
 
 // Err returns the transport failure, or nil after a clean end-of-stream.
 func (c *Client) Err() error {
@@ -352,7 +336,6 @@ func (c *Client) finish(failure error) {
 
 	close(c.notifications)
 	close(c.requests)
-	close(c.done)
 }
 
 func marshalRaw(value any) (json.RawMessage, error) {

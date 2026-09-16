@@ -23,10 +23,18 @@ const (
 	fakeCodexEnv        = "ACP_GO_CODEX_TEST_FAKE"
 	fakeCodexEnvDump    = "ACP_GO_CODEX_TEST_ENV_DUMP"
 	fakeCodexEnvVersion = "ACP_GO_CODEX_TEST_VERSION"
-	fakeCodexVersion    = "0.154.0"
+	// fakeCodexEnvResumeHold names a file the fake creates when a thread/resume
+	// arrives that it will never answer, so a test can act while the adapter is
+	// still rebinding the thread.
+	fakeCodexEnvResumeHold = "ACP_GO_CODEX_TEST_RESUME_HOLD"
+	fakeCodexVersion       = "0.154.0"
 
 	// tinyPNG is a valid 1x1 PNG.
 	tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+	// noNativeRowsDir is the workspace base name that makes the fake open a
+	// thread whose rollout file exists with no rows at all.
+	noNativeRowsDir = "no-native-rows"
 )
 
 var fakeModels = []map[string]any{
@@ -114,6 +122,15 @@ func (f *fakeCodex) serve(input io.Reader) int {
 	}
 
 	return 0
+}
+
+// rawLine writes one line that is not a JSON-RPC frame onto the same stdout
+// the frames use.
+func (f *fakeCodex) rawLine(line string) {
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+
+	_, _ = fmt.Fprintln(f.out, line)
 }
 
 func (f *fakeCodex) write(value any) {
@@ -229,12 +246,16 @@ func (f *fakeCodex) startThread(id json.RawMessage, params map[string]any) {
 
 	_ = os.MkdirAll(filepath.Dir(thread.path), 0o700)
 
-	meta := map[string]any{"type": "session_meta", "payload": map[string]any{
-		"id": thread.id, "timestamp": time.Now().UTC().Format(time.RFC3339), "cwd": cwd,
-	}}
-	encoded, _ := json.Marshal(meta)
-	_ = os.WriteFile(thread.path, append(encoded, '\n'), 0o600)
-	thread.entries = 1
+	if filepath.Base(cwd) == noNativeRowsDir {
+		_ = os.WriteFile(thread.path, nil, 0o600)
+	} else {
+		meta := map[string]any{"type": "session_meta", "payload": map[string]any{
+			"id": thread.id, "timestamp": time.Now().UTC().Format(time.RFC3339), "cwd": cwd,
+		}}
+		encoded, _ := json.Marshal(meta)
+		_ = os.WriteFile(thread.path, append(encoded, '\n'), 0o600)
+		thread.entries = 1
+	}
 
 	f.mu.Lock()
 	f.threads[thread.id] = thread
@@ -276,6 +297,12 @@ func (f *fakeCodex) resumeThread(id json.RawMessage, params map[string]any) {
 	rows, err := codex.ReadRows(matches[0])
 	if err != nil || len(rows) == 0 {
 		f.fail(id, -32000, "rollout unreadable")
+
+		return
+	}
+
+	if hold := os.Getenv(fakeCodexEnvResumeHold); hold != "" {
+		_ = os.WriteFile(hold, []byte("held\n"), 0o600)
 
 		return
 	}
@@ -429,8 +456,18 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		if len(values) > 0 {
 			text = fmt.Sprintf("hi %v", values[0])
 		}
+	case strings.HasPrefix(message, "NOISE"):
+		fmt.Fprintln(os.Stderr, "chatter on stderr")
+		f.rawLine("not a json record at all")
+		text = "quiet"
+	case f.isServerRequestScript(message):
+		text = f.serverRequestTurn(message, thread, scoped)
 	case strings.HasPrefix(message, "ERROR"):
 		status = "failed"
+	case strings.HasPrefix(message, "NOTIFYERROR"):
+		f.notify("error", scoped(map[string]any{"message": "provider exploded", "willRetry": false}))
+	case strings.HasPrefix(message, "RETRYERROR"):
+		f.notify("error", scoped(map[string]any{"message": "transient", "willRetry": true}))
 	case strings.HasPrefix(message, "SLOW"):
 		select {
 		case <-thread.abort:
@@ -474,6 +511,95 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 	}
 
 	f.notify("turn/completed", scoped(map[string]any{"turn": turn}))
+
+	switch {
+	case strings.HasPrefix(message, "TAIL"):
+		// State the harness writes after its own completion signal, still
+		// naming the turn that just ended.
+		f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "tail-1", "delta": "tail"}))
+	case strings.HasPrefix(message, "AGENT"):
+		f.agentTurn(thread, message == "AGENTHANG")
+	}
+}
+
+// fakeModeKey is the native field naming an MCP elicitation's mode.
+const fakeModeKey = "mode"
+
+// isServerRequestScript reports whether the message selects one of the server
+// request scripts below.
+func (f *fakeCodex) isServerRequestScript(message string) bool {
+	for _, prefix := range []string{"FILECHANGE", "PERMISSIONS", "MCPTOOL", "MCPELICIT"} {
+		if strings.HasPrefix(message, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// serverRequestTurn raises one server request the keyword names and renders
+// the answer as the turn's text.
+func (f *fakeCodex) serverRequestTurn(message string, thread *fakeThread, scoped func(map[string]any) map[string]any) string {
+	switch {
+	case strings.HasPrefix(message, "FILECHANGE"):
+		answer := f.request(codex.RequestFileChangeApproval, scoped(map[string]any{"itemId": "fc-1", "grantRoot": thread.cwd, "reason": "Edit files"}))
+		if decision, _ := answer["decision"].(string); strings.HasPrefix(decision, "accept") {
+			return "edited"
+		}
+
+		return "declined"
+	case strings.HasPrefix(message, "PERMISSIONS"):
+		answer := f.request(codex.RequestPermissionsApproval, scoped(map[string]any{"itemId": "perm-1", "permissions": map[string]any{"network": true}}))
+		scope, _ := answer["scope"].(string)
+
+		if granted, _ := answer["permissions"].(map[string]any); len(granted) > 0 {
+			return "granted " + scope
+		}
+
+		return "declined"
+	case strings.HasPrefix(message, "MCPTOOL"):
+		answer := f.request(codex.RequestMCPElicitation, scoped(map[string]any{"message": "Call fetch?", "_meta": map[string]any{"codex_approval_kind": "mcp_tool_call", "tool_name": "fetch"}}))
+		action, _ := answer["action"].(string)
+
+		return action
+	case strings.HasPrefix(message, "MCPELICIT_URL"):
+		answer := f.request(codex.RequestMCPElicitation, scoped(map[string]any{"message": "Open the page", fakeModeKey: "url", "url": "https://example.test/authorize", "elicitationId": "url-1"}))
+		action, _ := answer["action"].(string)
+
+		return action
+	default:
+		answer := f.request(codex.RequestMCPElicitation, scoped(map[string]any{"message": "Pick a color", fakeModeKey: "form", "requestedSchema": map[string]any{"type": "object", "properties": map[string]any{"color": map[string]any{"type": "string"}}, "required": []string{"color"}}}))
+		action, _ := answer["action"].(string)
+
+		if content, ok := answer["content"].(map[string]any); ok {
+			if color, ok := content["color"].(string); ok {
+				action += " " + color
+			}
+		}
+
+		return action
+	}
+}
+
+// agentTurn runs one turn the thread begins on its own, with no prompt in
+// flight: the agent-origin path the lifecycle capability advertises.
+func (f *fakeCodex) agentTurn(thread *fakeThread, hold bool) {
+	turnID := fakeUUID()
+	scoped := func(fields map[string]any) map[string]any {
+		out := map[string]any{"threadId": thread.id, "turnId": turnID}
+		maps.Copy(out, fields)
+
+		return out
+	}
+
+	f.notify("turn/started", scoped(map[string]any{"turn": map[string]any{"id": turnID}}))
+	f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "agent-1", "delta": "background"}))
+	f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": "agent-1", "type": "agentMessage", "text": "background"}}))
+	f.appendRow(thread, eventRow("agent_message", map[string]any{"message": "background"}))
+	if hold {
+		return
+	}
+	f.notify("turn/completed", scoped(map[string]any{"turn": map[string]any{"id": turnID, "status": "completed"}}))
 }
 
 func (f *fakeCodex) tool(thread *fakeThread, scoped func(map[string]any) map[string]any, withImage bool) {

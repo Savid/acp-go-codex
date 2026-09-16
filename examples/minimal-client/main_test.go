@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -74,8 +73,7 @@ func TestClientRendersUpdates(t *testing.T) {
 	require.NotNil(t, resp.Outcome.Cancelled)
 
 	_, err = c.CreateTerminal(context.Background(), acp.CreateTerminalRequest{})
-	require.Error(t, err)
-	require.True(t, errors.Is(err, err))
+	require.ErrorContains(t, err, "terminals are not supported")
 }
 
 func TestRunRejectsBadFlags(t *testing.T) {

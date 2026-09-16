@@ -23,13 +23,15 @@ const (
 	modePlan     = "plan"
 	effortMedium = "medium"
 
-	// configCategoryModelConfig groups the model parameters the contract
-	// categorizes beside the model and effort selectors.
+	// configCategoryModelConfig is the category of the model parameters
+	// listed beside the model and effort selectors.
 	configCategoryModelConfig acp.SessionConfigOptionCategory = "model_config"
 )
 
 // Host-facing menus for values the app-server does not enumerate. A value
-// outside a menu still travels to Codex, which owns resolution.
+// outside one of these menus still travels to Codex, which owns resolution;
+// the collaboration mode is the adapter's own closed set and is not one of
+// them.
 var (
 	effortMenu      = []string{"none", "minimal", "low", effortMedium, "high", "xhigh"}
 	serviceTierMenu = []string{"auto", "default", "flex", "priority"}
@@ -172,8 +174,8 @@ func menuOptions(menu []string, current string) acp.SessionConfigSelectOptionsUn
 }
 
 // setConfigOption applies one select value while no turn is in flight. Values
-// forward to the next turn/start unchanged; only mode, effort, and
-// personality reject an empty value.
+// forward to the next turn/start unchanged, except mode, which is the
+// adapter's own two-value menu; effort and personality reject an empty value.
 func (s *session) setConfigOption(ctx context.Context, configID acp.SessionConfigId, value string) ([]acp.SessionConfigOption, error) {
 	if err := s.admissionError(); err != nil {
 		return nil, err
@@ -196,7 +198,7 @@ func (s *session) setConfigOption(ctx context.Context, configID acp.SessionConfi
 			s.contextWindow = catalogContextWindow(s.rt.models, value)
 		}
 	case configMode:
-		if value == "" {
+		if value != modeDefault && value != modePlan {
 			s.mu.Unlock()
 
 			return nil, wire.Unsupported("value")

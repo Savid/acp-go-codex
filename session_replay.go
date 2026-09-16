@@ -35,7 +35,7 @@ const (
 // replay delivers mirrored rollout rows as session updates in row order.
 // Replay runs the same image validation as live emission; a stored artifact
 // the adapter can no longer reproduce fails the whole load.
-func (s *session) replay(ctx context.Context, rows [][]byte) error {
+func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImage) error {
 	limits := s.agent.options.ImageLimits.core()
 
 	decoded := make([]codex.RolloutRow, 0, len(rows))
@@ -44,7 +44,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 	for _, row := range rows {
 		parsed, err := codex.DecodeRow(row)
 		if err != nil {
-			continue
+			return s.agent.restoreRefused(ctx, s.id, err)
 		}
 
 		decoded = append(decoded, parsed)
@@ -54,7 +54,34 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 		}
 	}
 
+	captured := make(map[string]storedImage, len(images))
+	for _, saved := range images {
+		if saved.ID == "" {
+			return s.agent.restoreRefused(ctx, s.id, fmt.Errorf("stored image has no identity"))
+		}
+
+		if _, exists := captured[saved.ID]; exists {
+			return s.agent.restoreRefused(ctx, s.id, fmt.Errorf("duplicate stored image identity"))
+		}
+
+		if _, failure := image.DecodeOutput(saved.Data, saved.MIME, limits.EffectiveOutputPerImage()); failure != nil {
+			return s.agent.restoreRefused(ctx, s.id, failure)
+		}
+
+		captured[saved.ID] = saved
+	}
+
+	emitted := make(map[string]bool)
+
 	for _, row := range decoded {
+		id := firstNonEmpty(payloadString(row.Payload, "id"), payloadString(row.Payload, "call_id"))
+		if row.Type == codex.RowTypeResponseItem && payloadString(row.Payload, fieldType) == itemImageGen {
+			if saved, ok := captured[id]; ok {
+				row.Payload[nativeResultKey] = saved.Data
+				emitted[id] = true
+			}
+		}
+
 		updates, failure := replayRow(row, hasEvents, limits)
 		if failure != nil {
 			return s.agent.restoreRefused(ctx, s.id, failure)
@@ -63,9 +90,33 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 		if err := s.emit(ctx, updates...); err != nil {
 			return err
 		}
+
+		if saved, ok := captured[id]; ok && !emitted[id] && (payloadString(row.Payload, fieldType) == itemFunctionOutput || payloadString(row.Payload, fieldType) == itemCustomOutput) {
+			if err := s.emitStoredImage(ctx, saved); err != nil {
+				return err
+			}
+
+			emitted[id] = true
+		}
+	}
+
+	for _, saved := range images {
+		if !emitted[saved.ID] {
+			if err := s.emitStoredImage(ctx, saved); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
+}
+
+// emitStoredImage restores an admitted artifact whose native row contains only a path.
+func (s *session) emitStoredImage(ctx context.Context, saved storedImage) error {
+	return s.emit(ctx,
+		acp.StartToolCall(acp.ToolCallId(saved.ID), imageToolTitle(saved.Kind), acp.WithStartKind(acp.ToolKindOther), acp.WithStartStatus(acp.ToolCallStatusCompleted)),
+		acp.UpdateToolCall(acp.ToolCallId(saved.ID), acp.WithUpdateStatus(acp.ToolCallStatusCompleted), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(saved.Data, saved.MIME))})),
+	)
 }
 
 // replayEventKinds records which event_msg kinds the rollout carries, so the
@@ -189,27 +240,29 @@ func replayToolOutput(payload map[string]any) []acp.SessionUpdate {
 	return []acp.SessionUpdate{acp.UpdateToolCall(acp.ToolCallId(id), opts...)}
 }
 
-// replayImage decodes an image generation row through the output gate. The
-// row carries the bytes, so replay reads nothing beyond the store.
+// replayImage decodes an image generation row through the output gate. A row
+// whose bytes the store never admitted replays the way the live turn reported
+// it: a failed call carrying the same guidance text. Bytes that are present
+// but invalid still fail the restore.
 func replayImage(payload map[string]any, limits image.Limits) ([]acp.SessionUpdate, *image.OutputError) {
 	id := acp.ToolCallId(firstNonEmpty(payloadString(payload, "id"), payloadString(payload, "call_id"), "image"))
 	start := acp.StartToolCall(id, imageToolTitle(itemTypeImageGeneration), acp.WithStartKind(acp.ToolKindOther), acp.WithStartStatus(acp.ToolCallStatusCompleted))
 
 	result := payloadString(payload, nativeResultKey)
 	if result == "" {
-		return []acp.SessionUpdate{start}, nil
+		return []acp.SessionUpdate{
+			start,
+			acp.UpdateToolCall(id, acp.WithUpdateStatus(acp.ToolCallStatusFailed),
+				acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(image.GuidanceMissingFile))})),
+		}, nil
 	}
 
-	output, failure := decodeOutputImage(result, "", limits.EffectiveOutputPerImage())
+	output, failure := image.DecodeOutput(result, "", limits.EffectiveOutputPerImage())
 	if failure != nil {
-		if _, recoverable := failure.Guidance(); recoverable {
-			return []acp.SessionUpdate{start}, nil
-		}
-
 		return nil, failure
 	}
 
-	return []acp.SessionUpdate{start, acp.UpdateToolCall(id, acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(output.data, output.mime))}))}, nil
+	return []acp.SessionUpdate{start, acp.UpdateToolCall(id, acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(output.Data, output.MIME))}))}, nil
 }
 
 func responseItemText(payload map[string]any) string {

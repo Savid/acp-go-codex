@@ -8,9 +8,10 @@
 // started over ACP can be continued natively with `codex resume` after the
 // adapter closes.
 //
-// Hosts that need durable remote resume provide [WithSessionStore]. The
-// store mirrors the rollout rows and backs session/list, session/load, and
-// session/resume when the native rollout is absent.
+// Hosts that need durable remote resume provide [WithSessionStore]. The store
+// is the durability boundary for session/list, session/load and
+// session/resume; Codex's own rollout is the native copy an operator can
+// continue outside ACP.
 //
 // Hosts that need adapter telemetry provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]; the package never configures

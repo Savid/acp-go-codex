@@ -1,8 +1,11 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
+	"slices"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -154,7 +157,7 @@ func TestSessionMetaStrictness(t *testing.T) {
 			h := newHarness(t)
 			h.initialize()
 
-			request := NewSessionRequest(t.TempDir())
+			request := wire.NewSessionRequest(t.TempDir())
 			request.Meta = tc.meta
 
 			_, err := h.conn.NewSession(h.ctx(), request)
@@ -173,7 +176,7 @@ func TestForeignMetaIgnored(t *testing.T) {
 	h := newHarness(t)
 	h.initialize()
 
-	session := h.newSession(WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
+	session := h.newSession(wire.WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
 	require.NotEmpty(t, session.SessionId)
 }
 
@@ -194,17 +197,17 @@ func TestUniformRejections(t *testing.T) {
 
 	session := h.newSession()
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId))
 	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
 	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	_, err = h.conn.Prompt(h.ctx(), TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
+	_, err = h.conn.Prompt(h.ctx(), wire.TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
 	require.Equal(t, -32602, requestErrorCode(t, err))
 	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 
-	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest("00000000-0000-4000-8000-000000000000")))
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest("00000000-0000-4000-8000-000000000000")))
 }
 
 func TestPromptCorrelationGate(t *testing.T) {
@@ -240,18 +243,27 @@ func TestPromptCorrelationGate(t *testing.T) {
 func TestInvalidOptionsVerdict(t *testing.T) {
 	t.Parallel()
 
-	cases := map[string]Option{
-		"home":                 WithHome("relative/home"),
-		"configuredModels":     WithConfiguredModels([]string{"a", "a"}),
-		"env":                  WithEnv(map[string]string{"": "x"}),
-		"codexConfigOverrides": WithCodexConfigOverrides(map[string]any{"shell_environment_policy.set.X": "1"}),
-		"imageLimits":          WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}),
-		"concurrencyLimits":    WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
-		"inputHandoffRoot":     WithInputHandoffRoot("relative"),
+	const fieldConfiguredModels = "configuredModels"
+
+	cases := []struct {
+		name, field string
+		option      Option
+	}{
+		{"", "home", WithHome("relative/home")},
+		{"duplicate model", fieldConfiguredModels, WithConfiguredModels([]string{"a", "a"})},
+		{"empty model", fieldConfiguredModels, WithConfiguredModels([]string{""})},
+		{"whitespace model", fieldConfiguredModels, WithConfiguredModels([]string{" a"})},
+		{"", "env", WithEnv(map[string]string{"": "x"})},
+		{"", "codexConfigOverrides", WithCodexConfigOverrides(map[string]any{"shell_environment_policy.set.X": "1"})},
+		{"", "imageLimits", WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1})},
+		{"", "concurrencyLimits", WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1})},
+		{"", "inputHandoffRoot", WithInputHandoffRoot("relative")},
 	}
 
-	for field, option := range cases {
-		t.Run(field, func(t *testing.T) {
+	for _, tc := range cases {
+		field, option := tc.field, tc.option
+
+		t.Run(cmp.Or(tc.name, tc.field), func(t *testing.T) {
 			t.Parallel()
 
 			agent := NewAgent(testOptions(t, option)...)
@@ -264,7 +276,7 @@ func TestInvalidOptionsVerdict(t *testing.T) {
 			require.Equal(t, "codex_invalid_options", data["error"])
 			require.Equal(t, field, data["field"])
 
-			_, err = agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+			_, err = agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
 			require.Equal(t, "codex_invalid_options", requestErrorData(t, err)["error"])
 		})
 	}
@@ -291,7 +303,7 @@ func TestPromptBackpressure(t *testing.T) {
 	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
 	require.Equal(t, "session_prompt", requestErrorData(t, err)["limit"])
 
-	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest(session.SessionId)))
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
 	require.NoError(t, <-done)
 }
 
@@ -302,7 +314,7 @@ func TestActiveSessionLimit(t *testing.T) {
 	h.initialize()
 	h.newSession()
 
-	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
 	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
 }
@@ -313,7 +325,7 @@ func TestVersionFloor(t *testing.T) {
 	h := newHarness(t, WithEnv(map[string]string{fakeCodexEnv: "1", fakeCodexEnvVersion: "0.1.0"}))
 	h.initialize()
 
-	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, -32603, requestErrorCode(t, err))
 	require.Equal(t, "codex_runtime_unavailable", requestErrorData(t, err)["error"])
 }
@@ -325,7 +337,7 @@ func TestClosedAgentRefusesRequests(t *testing.T) {
 	require.NoError(t, agent.Close())
 	require.NoError(t, agent.Close())
 
-	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	_, err := agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, -32600, requestErrorCode(t, err))
 }
 
@@ -350,4 +362,95 @@ func TestNegativeClientCallLimitReturnsOptionsError(t *testing.T) {
 	defer agent.Close()
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	require.Equal(t, "codex_invalid_options", requestErrorData(t, err)["error"])
+}
+
+// Lines the app-server writes to its stdout that are not JSON-RPC frames, and
+// anything on its stderr, never reach the ACP stream.
+func TestNativeNoiseCannotCorruptACPStdout(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "NOISE", nil)
+	require.NoError(t, err)
+	require.Equal(t, "quiet", agentText(h.rec.snapshot()))
+
+	for _, update := range h.rec.snapshot() {
+		encoded, marshalErr := json.Marshal(update)
+		require.NoError(t, marshalErr)
+		require.NotContains(t, string(encoded), "not a json record at all")
+		require.NotContains(t, string(encoded), "chatter on stderr")
+	}
+
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, list.Sessions, 1)
+}
+
+// A $/cancel_request ends only the addressed handler's context: the turn it
+// was driving stays the session's, completes successfully once, and the
+// session keeps serving prompts.
+func TestCancelRequestSettlesTheOriginalRequestOnce(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	permissionCtx, releasePermission := context.WithCancel(t.Context())
+	defer releasePermission()
+	entered := make(chan struct{}, 1)
+	answer := h.rec.answer
+	h.rec.answer = func(request acp.RequestPermissionRequest) acp.RequestPermissionResponse {
+		entered <- struct{}{}
+		<-permissionCtx.Done()
+
+		return answer(request)
+	}
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	request := wire.TextPromptRequest(session.SessionId, "TOOL")
+	request.Meta = promptMeta(1)
+	failed := make(chan error, 1)
+
+	go func() {
+		response, err := h.conn.Prompt(h.ctx(), request)
+		if err == nil && response.StopReason != acp.StopReasonEndTurn {
+			err = errors.New("request cancellation ended the native turn")
+		}
+		failed <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-h.ctx().Done():
+		t.Fatal("native permission request did not arrive")
+	}
+	require.NoError(t, h.input.cancelPrompt())
+
+	_, busyErr := h.prompt(session.SessionId, "HELLO", promptMeta(2))
+	require.Equal(t, "backpressure", requestErrorData(t, busyErr)["error"])
+	releasePermission()
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
+		return slices.Contains(eventTypes(lifecycleEvents(updates)), "state_update:idle")
+	})
+
+	idles := 0
+
+	for _, update := range h.rec.snapshot() {
+		envelope, _ := update.Meta[wire.LifecycleKey].(map[string]any)
+		event, _ := envelope["event"].(map[string]any)
+		if event["type"] == "state_update" && event["state"] == "idle" {
+			idles++
+			require.Equal(t, "success", event["outcome"])
+			require.Equal(t, string(acp.StopReasonEndTurn), event["stopReason"])
+		}
+	}
+
+	require.Equal(t, 1, idles, "the turn the cancelled request started settles exactly once")
+	require.NoError(t, <-failed)
+
+	resp, err := h.prompt(session.SessionId, "HELLO", promptMeta(3))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 }

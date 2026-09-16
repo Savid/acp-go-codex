@@ -1,14 +1,12 @@
 package codexacp
 
 import (
-	"errors"
-	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/coder/acp-go-sdk"
 
 	"github.com/savid/acp-go-core/lifecycle"
-	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -71,9 +69,9 @@ func WithCodexModel(model string) CodexOption {
 
 // WithCodexEnv configures the session environment overlay.
 func WithCodexEnv(env map[string]string) CodexOption {
-	cloned := cloneStringMap(env)
+	cloned := maps.Clone(env)
 
-	return func(options *CodexOptions) { options.Env = cloneStringMap(cloned) }
+	return func(options *CodexOptions) { options.Env = maps.Clone(cloned) }
 }
 
 // WithCodexExtraPathDirs configures the directories prepended to the session PATH.
@@ -85,9 +83,9 @@ func WithCodexExtraPathDirs(dirs ...string) CodexOption {
 
 // WithCodexOutputSchema configures structured output for every turn.
 func WithCodexOutputSchema(schema map[string]any) CodexOption {
-	cloned := cloneAnyMap(schema)
+	cloned := wire.CloneMap(schema)
 
-	return func(options *CodexOptions) { options.OutputSchema = cloneAnyMap(cloned) }
+	return func(options *CodexOptions) { options.OutputSchema = wire.CloneMap(cloned) }
 }
 
 // WithCodexEffort configures the reasoning effort.
@@ -107,16 +105,16 @@ func WithCodexPersonality(personality string) CodexOption {
 
 // WithCodexApprovalPolicy configures Codex's approval policy.
 func WithCodexApprovalPolicy(policy any) CodexOption {
-	cloned := cloneAny(policy)
+	cloned := wire.CloneValue(policy)
 
-	return func(options *CodexOptions) { options.ApprovalPolicy = cloneAny(cloned) }
+	return func(options *CodexOptions) { options.ApprovalPolicy = wire.CloneValue(cloned) }
 }
 
 // WithCodexSandboxPolicy configures Codex's sandbox policy.
 func WithCodexSandboxPolicy(policy any) CodexOption {
-	cloned := cloneAny(policy)
+	cloned := wire.CloneValue(policy)
 
-	return func(options *CodexOptions) { options.SandboxPolicy = cloneAny(cloned) }
+	return func(options *CodexOptions) { options.SandboxPolicy = wire.CloneValue(cloned) }
 }
 
 // Meta returns exactly {"codex": {"options": {...}}} with the non-zero fields.
@@ -128,7 +126,7 @@ func (options CodexOptions) Meta() map[string]any {
 	}
 
 	if options.Env != nil {
-		values[metaEnvKey] = cloneStringMap(options.Env)
+		values[metaEnvKey] = maps.Clone(options.Env)
 	}
 
 	if options.ExtraPathDirs != nil {
@@ -136,7 +134,7 @@ func (options CodexOptions) Meta() map[string]any {
 	}
 
 	if options.OutputSchema != nil {
-		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
+		values[metaOutputSchemaKey] = wire.CloneMap(options.OutputSchema)
 	}
 
 	if options.Effort != "" {
@@ -152,11 +150,11 @@ func (options CodexOptions) Meta() map[string]any {
 	}
 
 	if options.ApprovalPolicy != nil {
-		values[metaApprovalPolicyKey] = cloneAny(options.ApprovalPolicy)
+		values[metaApprovalPolicyKey] = wire.CloneValue(options.ApprovalPolicy)
 	}
 
 	if options.SandboxPolicy != nil {
-		values[metaSandboxPolicyKey] = cloneAny(options.SandboxPolicy)
+		values[metaSandboxPolicyKey] = wire.CloneValue(options.SandboxPolicy)
 	}
 
 	return map[string]any{vendor: map[string]any{metaOptionsKey: values}}
@@ -164,11 +162,11 @@ func (options CodexOptions) Meta() map[string]any {
 
 func (options CodexOptions) clone() CodexOptions {
 	cloned := options
-	cloned.Env = cloneStringMap(options.Env)
+	cloned.Env = maps.Clone(options.Env)
 	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
-	cloned.OutputSchema = cloneAnyMap(options.OutputSchema)
-	cloned.ApprovalPolicy = cloneAny(options.ApprovalPolicy)
-	cloned.SandboxPolicy = cloneAny(options.SandboxPolicy)
+	cloned.OutputSchema = wire.CloneMap(options.OutputSchema)
+	cloned.ApprovalPolicy = wire.CloneValue(options.ApprovalPolicy)
+	cloned.SandboxPolicy = wire.CloneValue(options.SandboxPolicy)
 
 	return cloned
 }
@@ -199,7 +197,7 @@ type sessionMeta struct {
 // namespaces are ignored; the lifecycle literal is refused by name.
 func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
 	if refusal := lifecycle.RejectKey(meta); refusal != nil {
-		return sessionMeta{}, invalidParam(refusal)
+		return sessionMeta{}, wire.ParamRefusal(refusal)
 	}
 
 	raw, exists := meta[vendor]
@@ -245,7 +243,7 @@ func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
 
 	values, isObject := rawOptions.(map[string]any)
 	if !isObject {
-		return sessionMeta{}, wire.Unsupported(metaOptionPath(""))
+		return sessionMeta{}, wire.Unsupported(wire.MetaOptionPath(vendor, ""))
 	}
 
 	options, err := parseCodexOptions(values)
@@ -268,7 +266,7 @@ func parseCodexOptions(values map[string]any) (CodexOptions, *acp.RequestError) 
 		case metaModelKey, metaEffortKey, metaServiceTierKey, metaPersonalityKey:
 			text, ok := item.(string)
 			if !ok || text == "" {
-				return CodexOptions{}, wire.Unsupported(metaOptionPath(key))
+				return CodexOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			switch key {
@@ -282,14 +280,14 @@ func parseCodexOptions(values map[string]any) (CodexOptions, *acp.RequestError) 
 				options.Personality = text
 			}
 		case metaEnvKey:
-			env, err := stringMapOption(item, metaOptionPath(key))
+			env, err := wire.StringMapOption(item, wire.MetaOptionPath(vendor, key))
 			if err != nil {
 				return CodexOptions{}, err
 			}
 
 			options.Env = env
 		case metaExtraPathDirsKey:
-			dirs, err := stringSliceOption(item, metaOptionPath(key))
+			dirs, err := wire.StringSliceOption(item, wire.MetaOptionPath(vendor, key))
 			if err != nil {
 				return CodexOptions{}, err
 			}
@@ -298,14 +296,14 @@ func parseCodexOptions(values map[string]any) (CodexOptions, *acp.RequestError) 
 		case metaOutputSchemaKey:
 			schema, ok := item.(map[string]any)
 			if !ok || len(schema) == 0 {
-				return CodexOptions{}, wire.Unsupported(metaOptionPath(key))
+				return CodexOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
-			options.OutputSchema = cloneAnyMap(schema)
+			options.OutputSchema = wire.CloneMap(schema)
 		case metaApprovalPolicyKey, metaSandboxPolicyKey:
 			policy, ok := policyOption(item)
 			if !ok {
-				return CodexOptions{}, wire.Unsupported(metaOptionPath(key))
+				return CodexOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			if key == metaApprovalPolicyKey {
@@ -314,7 +312,7 @@ func parseCodexOptions(values map[string]any) (CodexOptions, *acp.RequestError) 
 				options.SandboxPolicy = policy
 			}
 		default:
-			return CodexOptions{}, wire.Unsupported(metaOptionPath(key))
+			return CodexOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 		}
 	}
 
@@ -328,133 +326,12 @@ func policyOption(item any) (any, bool) {
 	case string:
 		return typed, typed != ""
 	case map[string]any:
-		return cloneAnyMap(typed), len(typed) > 0
+		return wire.CloneMap(typed), len(typed) > 0
 	default:
 		return nil, false
 	}
 }
 
 func validateCodexOptions(options CodexOptions) *acp.RequestError {
-	if err := process.ValidateNames(options.Env); err != nil {
-		var nameErr *process.NameError
-		if errors.As(err, &nameErr) {
-			return wire.Unsupported(metaOptionPath(metaEnvKey) + "." + nameErr.Key)
-		}
-
-		return wire.Unsupported(metaOptionPath(metaEnvKey))
-	}
-
-	if err := process.ValidateExtraPathDirs(options.ExtraPathDirs); err != nil {
-		var dirErr *process.PathDirError
-		if errors.As(err, &dirErr) {
-			return wire.Unsupported(fmt.Sprintf("%s[%d]", metaOptionPath(metaExtraPathDirsKey), dirErr.Index))
-		}
-
-		return wire.Unsupported(metaOptionPath(metaExtraPathDirsKey))
-	}
-
-	return nil
-}
-
-func metaOptionPath(key string) string {
-	path := "_meta." + vendor + "." + metaOptionsKey
-	if key == "" {
-		return path
-	}
-
-	return path + "." + key
-}
-
-func stringMapOption(value any, path string) (map[string]string, *acp.RequestError) {
-	switch typed := value.(type) {
-	case map[string]string:
-		return cloneStringMap(typed), nil
-	case map[string]any:
-		result := make(map[string]string, len(typed))
-		for key, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, wire.Unsupported(path + "." + key)
-			}
-
-			result[key] = text
-		}
-
-		return result, nil
-	default:
-		return nil, wire.Unsupported(path)
-	}
-}
-
-func stringSliceOption(value any, path string) ([]string, *acp.RequestError) {
-	switch typed := value.(type) {
-	case []string:
-		return slices.Clone(typed), nil
-	case []any:
-		result := make([]string, 0, len(typed))
-		for index, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, wire.Unsupported(fmt.Sprintf("%s[%d]", path, index))
-			}
-
-			result = append(result, text)
-		}
-
-		return result, nil
-	default:
-		return nil, wire.Unsupported(path)
-	}
-}
-
-func cloneAnyMap(values map[string]any) map[string]any {
-	if values == nil {
-		return nil
-	}
-
-	cloned := make(map[string]any, len(values))
-	for key, value := range values {
-		cloned[key] = cloneAny(value)
-	}
-
-	return cloned
-}
-
-func cloneAny(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(typed)
-	case []any:
-		cloned := make([]any, len(typed))
-		for index, item := range typed {
-			cloned[index] = cloneAny(item)
-		}
-
-		return cloned
-	case []string:
-		return slices.Clone(typed)
-	default:
-		return typed
-	}
-}
-
-func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
-	result := cloneAnyMap(base)
-	if result == nil {
-		result = map[string]any{}
-	}
-
-	for key, value := range overlay {
-		if valueMap, ok := value.(map[string]any); ok {
-			if existing, ok := result[key].(map[string]any); ok {
-				result[key] = mergeAnyMap(existing, valueMap)
-
-				continue
-			}
-		}
-
-		result[key] = cloneAny(value)
-	}
-
-	return result
+	return wire.ValidateSessionEnvironment(options.Env, options.ExtraPathDirs, wire.MetaOptionPath(vendor, ""))
 }

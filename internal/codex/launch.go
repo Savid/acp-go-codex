@@ -2,8 +2,8 @@ package codex
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -33,13 +33,7 @@ func (l Launch) Args() []string {
 	args := make([]string, 0, 5+2*len(l.ConfigOverrides))
 	args = append(args, "app-server", "--listen", "stdio://", "--disable", "plugins")
 
-	for _, key := range slices.Sorted(func(yield func(string) bool) {
-		for key := range l.ConfigOverrides {
-			if !yield(key) {
-				return
-			}
-		}
-	}) {
+	for _, key := range slices.Sorted(maps.Keys(l.ConfigOverrides)) {
 		args = append(args, "-c", key+"="+tomlValue(l.ConfigOverrides[key]))
 	}
 
@@ -94,59 +88,4 @@ func ProbeVersion(ctx context.Context, executable string, environment []string) 
 	}
 
 	return version, nil
-}
-
-// CheckMinimumVersion fails when version sorts below minimum.
-func CheckMinimumVersion(version string, minimum string) error {
-	left, err := versionParts(version)
-	if err != nil {
-		return err
-	}
-
-	right, err := versionParts(minimum)
-	if err != nil {
-		return err
-	}
-
-	for index := range max(len(left), len(right)) {
-		leftValue, rightValue := 0, 0
-		if index < len(left) {
-			leftValue = left[index]
-		}
-
-		if index < len(right) {
-			rightValue = right[index]
-		}
-
-		if leftValue < rightValue {
-			return fmt.Errorf("codex version %s is below the minimum supported version %s", version, minimum)
-		}
-
-		if leftValue > rightValue {
-			return nil
-		}
-	}
-
-	return nil
-}
-
-func versionParts(version string) ([]int, error) {
-	trimmed := strings.TrimPrefix(strings.TrimSpace(version), "v")
-	if trimmed == "" {
-		return nil, errors.New("empty version")
-	}
-
-	segments := strings.Split(trimmed, ".")
-	parts := make([]int, 0, len(segments))
-
-	for _, segment := range segments {
-		value, err := strconv.Atoi(segment)
-		if err != nil || value < 0 {
-			return nil, fmt.Errorf("invalid version %q", version)
-		}
-
-		parts = append(parts, value)
-	}
-
-	return parts, nil
 }

@@ -3,10 +3,11 @@ package codexacp
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
+	"maps"
 	"path/filepath"
-	"strings"
+	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,9 +29,6 @@ const (
 	runtimeShutdownTimeout = 10 * time.Second
 	// runtimeStartTimeout bounds the app-server handshake.
 	runtimeStartTimeout = 60 * time.Second
-	// stderrTailBytes is how much of the app-server's stderr the adapter
-	// retains for the process-exit cause.
-	stderrTailBytes = 8 << 10
 )
 
 // runtime is one app-server generation: the process every session's thread
@@ -39,7 +37,6 @@ type runtime struct {
 	homeLock *process.FileLock
 	proc     *process.Process
 	client   *codex.Client
-	stderr   *stderrTail
 	cancel   context.CancelFunc
 	// done is closed when the pump has stopped routing this generation.
 	done chan struct{}
@@ -62,81 +59,17 @@ func (rt *runtime) alive() bool {
 	return !rt.dead
 }
 
-// stderrTail retains the last bytes the app-server wrote to stderr.
-type stderrTail struct {
-	mu   sync.Mutex
-	data []byte
-}
-
-func (t *stderrTail) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.data = append(t.data, p...)
-	if len(t.data) > stderrTailBytes {
-		t.data = t.data[len(t.data)-stderrTailBytes:]
-	}
-
-	return len(p), nil
-}
-
-// lastLine is the final non-empty stderr line, which is where a dying harness
-// names its reason.
-func (t *stderrTail) lastLine() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	lines := strings.Split(strings.TrimSpace(string(t.data)), "\n")
-
-	return strings.TrimSpace(lines[len(lines)-1])
-}
-
 // ensureExecutable resolves the codex executable against the base environment
-// and probes its version once per agent.
+// and caches its completed version verdict through core.
 func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
-	a.versionOnce.Do(func() {
-		base, err := a.environment().Base()
-		if err != nil {
-			a.versionErr = err
+	executable, err := a.executable.Resolve(ctx, a.environment(), a.options.ExecutablePath, vendor, codex.MinimumVersion, codex.ProbeVersion)
+	if err != nil {
+		a.log.ErrorContext(ctx, "codex version probe failed", slog.String("reason", err.Error()))
 
-			return
-		}
-
-		selector := a.options.ExecutablePath
-		if selector == "" {
-			selector = vendor
-		}
-
-		executable, err := process.ResolveExecutable(selector, base)
-		if err != nil {
-			a.versionErr = err
-
-			return
-		}
-
-		version, err := codex.ProbeVersion(ctx, executable, base)
-		if err != nil {
-			a.versionErr = err
-
-			return
-		}
-
-		if err := codex.CheckMinimumVersion(version, codex.MinimumVersion); err != nil {
-			a.versionErr = err
-
-			return
-		}
-
-		a.executable = executable
-	})
-
-	if a.versionErr != nil {
-		a.log.ErrorContext(ctx, "codex version probe failed", slog.String("reason", a.versionErr.Error()))
-
-		return "", a.versionErr
+		return "", err
 	}
 
-	return a.executable, nil
+	return executable, nil
 }
 
 // ensureRuntime returns the live app-server generation, starting one
@@ -158,9 +91,8 @@ func (a *Agent) ensureRuntime(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		a.log.ErrorContext(ctx, "codex app-server start failed", slog.String("reason", err.Error()))
 
-		var seedErr *process.SeedFileError
-		if errors.As(err, &seedErr) {
-			return nil, wire.Unsupported("seedFiles")
+		if refusal := wire.SeedFileRefusal(err); refusal != nil {
+			return nil, refusal
 		}
 
 		return nil, wire.RuntimeUnavailable(vendor)
@@ -216,10 +148,6 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		return nil, err
 	}
 
-	tail := &stderrTail{}
-
-	go func() { _, _ = io.Copy(tail, proc.Stderr()) }()
-
 	// The read loop outlives the request that launched the app-server: the
 	// shutdown ladder ends it.
 	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
@@ -238,7 +166,6 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		homeLock:   homeLock,
 		proc:       proc,
 		client:     nativeClient,
-		stderr:     tail,
 		cancel:     cancelRead,
 		done:       make(chan struct{}),
 		nativePath: pathFromEnvironment(env),
@@ -357,12 +284,13 @@ func (a *Agent) sessionByThread(threadID string) *session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	s := a.sessions[acp.SessionId(threadID)]
-	if s == nil || isDeleted(a.deleted, s.id) {
-		return nil
+	for _, s := range a.sessions {
+		if s.nativeID == threadID && !isDeleted(a.deleted, s.id) {
+			return s
+		}
 	}
 
-	return s
+	return nil
 }
 
 // generationEnded records that an app-server generation stopped producing
@@ -373,6 +301,13 @@ func (a *Agent) generationEnded(ctx context.Context, rt *runtime) {
 
 	if err := rt.proc.Shutdown(shutdownCtx, runtimeShutdownGrace); err != nil {
 		_ = rt.proc.Kill()
+
+		// The lock is released only once the app-server has been reaped; a
+		// replacement writing the same home beside a live child corrupts it.
+		select {
+		case <-rt.proc.Done():
+		case <-shutdownCtx.Done():
+		}
 	}
 
 	_ = rt.homeLock.Close()
@@ -382,7 +317,7 @@ func (a *Agent) generationEnded(ctx context.Context, rt *runtime) {
 	rt.mu.Unlock()
 
 	a.mu.Lock()
-	sessions := collectSessions(a.sessions)
+	sessions := slices.Collect(maps.Values(a.sessions))
 	a.mu.Unlock()
 
 	for _, s := range sessions {
@@ -390,15 +325,6 @@ func (a *Agent) generationEnded(ctx context.Context, rt *runtime) {
 	}
 
 	a.observe.RecordProcessExit(ctx, "exited", rt.client.Err())
-}
-
-func collectSessions(sessions map[acp.SessionId]*session) []*session {
-	out := make([]*session, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, s)
-	}
-
-	return out
 }
 
 // stopGeneration runs the native rungs of the shutdown ladder for one
@@ -418,7 +344,11 @@ func (a *Agent) stopGeneration(ctx context.Context, rt *runtime) {
 		rt.cancel()
 	}
 
+	// Closing the pipes ends the read loop of a pump that outlived the
+	// shutdown, and the join guarantees nothing still writes the cycle state
+	// the caller settles from.
 	_ = rt.proc.Close()
+	<-rt.done
 }
 
 // stopRuntime stops the live generation, if any.
@@ -441,16 +371,16 @@ func (a *Agent) transportFailure(ctx context.Context, rt *runtime, err error) *a
 	defer cancel()
 
 	if result, waitErr := rt.proc.Wait(waitCtx); waitErr == nil {
-		message := "codex app-server exited with status " + itoa(result.ExitCode)
+		message := "codex app-server exited with status " + strconv.Itoa(result.ExitCode)
 		if result.Signal != 0 {
-			message = "codex app-server was killed by signal " + itoa(result.Signal)
+			message = "codex app-server was killed by signal " + strconv.Itoa(result.Signal)
 		}
 
-		if line := rt.stderr.lastLine(); line != "" {
+		if line := rt.proc.StderrLastLine(); line != "" {
 			message += ": " + line
 		}
 
-		return turnFailure(wire.CauseProcessExit, message)
+		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProcessExit, Message: message})
 	}
 
 	if err == nil {
@@ -461,5 +391,5 @@ func (a *Agent) transportFailure(ctx context.Context, rt *runtime, err error) *a
 		err = errors.New("codex app-server stream closed mid-turn")
 	}
 
-	return turnFailure(wire.CauseTransport, err.Error())
+	return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: err.Error()})
 }

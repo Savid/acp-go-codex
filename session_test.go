@@ -1,15 +1,18 @@
 package codexacp
 
 import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/stretchr/testify/require"
 
 	"github.com/savid/acp-go-core/wire"
 )
@@ -251,7 +254,7 @@ func TestCancelAndTimeout(t *testing.T) {
 		}()
 
 		h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(lifecycleEvents(updates)) >= 3 })
-		require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest(session.SessionId)))
+		require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
 
 		outcome := <-done
 		require.NoError(t, outcome.err)
@@ -358,18 +361,18 @@ func TestImageInputGates(t *testing.T) {
 	h.initialize()
 	session := h.newSession()
 
-	resp, err := h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId, acp.TextBlock("ECHO"), acp.ImageBlock(tinyPNG, "image/png")))
+	resp, err := h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.TextBlock("ECHO"), acp.ImageBlock(tinyPNG, "image/png")))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Contains(t, agentText(h.rec.snapshot()), "images:1")
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId, acp.ImageBlock("not base64!", "image/png")))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ImageBlock("not base64!", "image/png")))
 	require.Equal(t, "invalid_base64", requestErrorData(t, err)["error"])
 
 	_, err = h.conn.SetSessionConfigOption(h.ctx(), SetModelRequest(session.SessionId, "text-only"))
 	require.NoError(t, err)
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId, acp.ImageBlock(tinyPNG, "image/png")))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ImageBlock(tinyPNG, "image/png")))
 	require.Equal(t, "unsupported_by_model", requestErrorData(t, err)["error"])
 }
 
@@ -401,7 +404,7 @@ func TestConfigOptions(t *testing.T) {
 	require.EqualValues(t, 1000, modelMeta["contextWindow"])
 	require.Equal(t, acp.SessionConfigValueId("gpt-x"), values[len(values)-1].Value)
 
-	resp, err := h.conn.SetSessionConfigOption(h.ctx(), SetConfigOptionRequest(session.SessionId, configMode, "plan"))
+	resp, err := h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configMode, "plan"))
 	require.NoError(t, err)
 
 	for _, option := range resp.ConfigOptions {
@@ -410,10 +413,17 @@ func TestConfigOptions(t *testing.T) {
 		}
 	}
 
-	_, err = h.conn.SetSessionConfigOption(h.ctx(), SetConfigOptionRequest(session.SessionId, configEffort, ""))
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configEffort, ""))
 	require.Equal(t, "value", requestErrorData(t, err)["field"])
 
-	_, err = h.conn.SetSessionConfigOption(h.ctx(), SetConfigOptionRequest(session.SessionId, "bogus", "x"))
+	// mode is the adapter's own menu, so a value outside it is refused rather
+	// than advertised back as a current value the menu does not carry.
+	for _, value := range []acp.SessionConfigValueId{"", "banana"} {
+		_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configMode, value))
+		require.Equal(t, "value", requestErrorData(t, err)["field"])
+	}
+
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, "bogus", "x"))
 	require.Equal(t, "configId", requestErrorData(t, err)["field"])
 
 	_, err = h.conn.SetSessionConfigOption(h.ctx(), acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: session.SessionId, ConfigId: "x", Value: true}})
@@ -495,4 +505,30 @@ func TestAgentCloseStopsRuntime(t *testing.T) {
 
 	_, err = h.prompt(session.SessionId, "HELLO", nil)
 	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+}
+
+func TestLateDialogAfterCancellationIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, state := range []string{"cancelled turn", "timed out", "closed", "disconnected"} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			s := &session{rt: &runtime{}, turn: &turn{}}
+			switch state {
+			case "cancelled turn":
+				s.turn.cancelled = true
+			case "timed out":
+				s.turn.timedOut = true
+			case "closed":
+				s.closing = true
+			case "disconnected":
+				s.rt = nil
+			}
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			release := s.registerDialog("late-native-request", cancel)
+			require.ErrorIs(t, context.Cause(ctx), errDialogCancelled)
+			release()
+			s.callbacks.Wait()
+		})
+	}
 }

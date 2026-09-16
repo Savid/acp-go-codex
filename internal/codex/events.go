@@ -58,7 +58,6 @@ const (
 
 	itemTypeAgentMessage     = "agentMessage"
 	itemTypeReasoning        = "reasoning"
-	itemTypeUserMessage      = "userMessage"
 	itemTypeCommandExecution = "commandExecution"
 	itemTypeFileChange       = "fileChange"
 	itemTypeMCPToolCall      = "mcpToolCall"
@@ -68,7 +67,6 @@ const (
 	itemTypeWebSearch        = "webSearch"
 
 	statusCompleted = "completed"
-	statusFailed    = "failed"
 )
 
 // Event is one decoded app-server notification.
@@ -82,7 +80,6 @@ type Event struct {
 	// Text carries a delta or, when Completed, the whole text of the item.
 	Text      string
 	Completed bool
-	Diff      string
 	Plan      []PlanStep
 	Tool      ToolEvent
 	Image     ImageEvent
@@ -129,7 +126,6 @@ type Usage struct {
 // TokenUsage is the thread/tokenUsage/updated payload.
 type TokenUsage struct {
 	Last               Usage
-	Total              Usage
 	ModelContextWindow int64
 }
 
@@ -182,7 +178,6 @@ func DecodeEvent(notification Notification) Event {
 		event.Tool = ToolEvent{ID: event.ItemID, Content: event.Text}
 	case notifyPatchUpdated, notifyTurnDiffUpdated:
 		event.Kind = EventDiffUpdated
-		event.Diff = firstNonEmpty(stringValue(params, "diff"), stringValue(params, "patch"))
 	case notifyTokenUsageUpdated:
 		event.Kind = EventUsageUpdated
 		event.Usage = tokenUsageFromParams(params)
@@ -404,15 +399,10 @@ func tokenUsageFromParams(params map[string]any) TokenUsage {
 
 	usage := TokenUsage{
 		Last:               usageFromMap(mapValue(raw, "last")),
-		Total:              usageFromMap(mapValue(raw, "total")),
 		ModelContextWindow: int64Value(raw, "modelContextWindow"),
 	}
 	if usage.Last == (Usage{}) {
 		usage.Last = usageFromMap(raw)
-	}
-
-	if usage.Total == (Usage{}) {
-		usage.Total = usage.Last
 	}
 
 	return usage

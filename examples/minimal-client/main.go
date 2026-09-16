@@ -15,7 +15,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
-	codexacp "github.com/savid/acp-go-codex"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const agentPackage = "github.com/savid/acp-go-codex/cmd/acp-go-codex"
@@ -172,7 +172,7 @@ func converse(ctx context.Context, conn agentConnection, cwd string, prompt stri
 		return err
 	}
 
-	session, err := conn.NewSession(ctx, codexacp.NewSessionRequest(cwd))
+	session, err := conn.NewSession(ctx, wire.NewSessionRequest(cwd))
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func converse(ctx context.Context, conn agentConnection, cwd string, prompt stri
 		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	}()
 
-	resp, err := conn.Prompt(ctx, codexacp.TextPromptRequest(session.SessionId, prompt))
+	resp, err := conn.Prompt(ctx, wire.TextPromptRequest(session.SessionId, prompt))
 	if err != nil {
 		return err
 	}

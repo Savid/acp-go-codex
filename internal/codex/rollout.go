@@ -57,7 +57,6 @@ func DecodeRow(row []byte) (RolloutRow, error) {
 type SessionMeta struct {
 	ID        string
 	Timestamp time.Time
-	Cwd       string
 }
 
 // ParseSessionMeta reads the thread identity from a session_meta row. It
@@ -68,7 +67,7 @@ func ParseSessionMeta(row []byte) (SessionMeta, bool) {
 		return SessionMeta{}, false
 	}
 
-	meta := SessionMeta{ID: stringValue(decoded.Payload, fieldID), Cwd: stringValue(decoded.Payload, fieldCwd)}
+	meta := SessionMeta{ID: stringValue(decoded.Payload, fieldID)}
 	if meta.ID == "" {
 		return SessionMeta{}, false
 	}

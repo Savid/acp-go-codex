@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/stretchr/testify/require"
-
 	"github.com/savid/acp-go-codex/internal/codex"
 	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/sessionlog"
+	"github.com/savid/acp-go-core/wire"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMirrorListLoadResumeDelete(t *testing.T) {
@@ -25,17 +27,17 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 
 	cwd := t.TempDir()
 
-	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd, WithSessionCodexOptions(NewCodexOptions(WithCodexEffort("low")))))
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, WithSessionCodexOptions(NewCodexOptions(WithCodexEffort("low")))))
 	require.NoError(t, err)
 
 	_, err = h.prompt(session.SessionId, "ECHO first", nil)
 	require.NoError(t, err)
 
-	rows, err := store.Load(context.Background(), acpcore.SessionKey{SessionID: string(session.SessionId)})
+	rows, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
 	require.NoError(t, err)
 	require.Len(t, rows, 3)
 
-	records, err := store.Load(context.Background(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	records, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
 	require.NoError(t, err)
 	require.NotEmpty(t, records)
 
@@ -45,7 +47,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 	require.Equal(t, "low", record.Effort)
 	require.NotEmpty(t, record.RolloutPath)
 
-	list, err := h.conn.ListSessions(h.ctx(), ListSessionsRequest())
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
 	require.Len(t, list.Sessions, 1)
 	require.Equal(t, "ECHO first", *list.Sessions[0].Title)
@@ -55,7 +57,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 
 	// Load replays the mirrored rows from a fresh session over the same
 	// thread; the native rollout wins because it is at least as long.
-	load, err := h.conn.LoadSession(h.ctx(), LoadSessionRequest(session.SessionId, cwd))
+	load, err := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
 	require.NoError(t, err)
 	require.NotEmpty(t, load.ConfigOptions)
 
@@ -83,7 +85,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 	// materializes it back into the home at the path the app-server resolves.
 	require.NoError(t, os.Remove(record.RolloutPath))
 
-	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest(session.SessionId, cwd))
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
 	require.NoError(t, err)
 
 	matches, err := filepath.Glob(filepath.Join(h.home, "sessions", "*", "*", "*", "rollout-*-"+string(session.SessionId)+".jsonl"))
@@ -98,14 +100,14 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 
-	_, err = h.conn.UnstableDeleteSession(h.ctx(), DeleteSessionRequest(session.SessionId))
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), wire.DeleteSessionRequest(session.SessionId))
 	require.NoError(t, err)
 
-	list, err = h.conn.ListSessions(h.ctx(), ListSessionsRequest())
+	list, err = h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
 	require.Empty(t, list.Sessions)
 
-	_, err = h.conn.LoadSession(h.ctx(), LoadSessionRequest(session.SessionId, cwd))
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
 	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 
 	// Native state survives the delete.
@@ -129,7 +131,7 @@ func TestRestoreRefusesDisagreement(t *testing.T) {
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
 
-	records, err := store.Load(context.Background(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	records, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
 	require.NoError(t, err)
 
 	var record sessionRecord
@@ -141,7 +143,7 @@ func TestRestoreRefusesDisagreement(t *testing.T) {
 	rows[1] = []byte(`{"type":"event_msg","payload":{"type":"user_message","message":"tampered"}}`)
 	require.NoError(t, codex.WriteRows(record.RolloutPath, rows))
 
-	_, err = h.conn.LoadSession(h.ctx(), LoadSessionRequest(session.SessionId, cwd))
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
 	require.Equal(t, "codex_restore_failed", requestErrorData(t, err)["error"])
 }
 
@@ -151,13 +153,13 @@ func TestUnknownAndInvalidSessionIDs(t *testing.T) {
 	h := newHarness(t)
 	h.initialize()
 
-	_, err := h.conn.LoadSession(h.ctx(), LoadSessionRequest("../escape", t.TempDir()))
+	_, err := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest("../escape", t.TempDir()))
 	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 
-	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest("missing-thread", t.TempDir()))
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest("missing-thread", t.TempDir()))
 	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 
-	_, err = h.conn.ListSessions(h.ctx(), ListSessionsRequest(WithListSessionsCursor("!!")))
+	_, err = h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest(wire.WithListSessionsCursor("!!")))
 	require.Equal(t, "cursor", requestErrorData(t, err)["field"])
 }
 
@@ -169,17 +171,17 @@ func TestConfigurationCommitsWithoutNewNativeRows(t *testing.T) {
 	session := h.newSession()
 	_, err := h.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
-	before, err := store.Load(t.Context(), acpcore.SessionKey{SessionID: string(session.SessionId)})
+	before, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
 	require.NoError(t, err)
 	_, err = h.conn.SetSessionConfigOption(h.ctx(), SetModelRequest(session.SessionId, "fake/text"))
 	require.NoError(t, err)
-	records, err := store.Load(t.Context(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	records, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	var record sessionRecord
 	require.NoError(t, json.Unmarshal(records[0], &record))
 	require.Equal(t, "fake/text", record.Model)
-	after, err := store.Load(t.Context(), acpcore.SessionKey{SessionID: string(session.SessionId)})
+	after, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(after), len(before))
 }
@@ -194,14 +196,14 @@ func TestMalformedStoreRecordFailsRestore(t *testing.T) {
 	require.NoError(t, err)
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
-	rows, err := store.Load(t.Context(), acpcore.SessionKey{SessionID: string(session.SessionId)})
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
 	require.NoError(t, err)
 	main := acpcore.SessionKey{SessionID: string(session.SessionId)}
 	require.NoError(t, store.Replace(t.Context(), main, []acpcore.SessionStoreReplacement{
 		{Key: main, Entries: rows},
 		{Key: acpcore.SessionKey{SessionID: main.SessionID, Subpath: configSubpath}, Entries: []acpcore.SessionStoreEntry{[]byte(`{"sessionId":"wrong"}`)}},
 	}))
-	_, err = h.conn.LoadSession(h.ctx(), LoadSessionRequest(session.SessionId, t.TempDir()))
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, t.TempDir()))
 	require.Equal(t, "codex_restore_failed", requestErrorData(t, err)["error"])
 }
 
@@ -242,9 +244,9 @@ func TestNewSessionFailsWhenInitialMirrorFails(t *testing.T) {
 	store.fail.Store(true)
 	h := newHarness(t, WithSessionStore(store))
 	h.initialize()
-	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, "codex_internal_failure", requestErrorData(t, err)["error"])
-	listed, err := h.conn.ListSessions(h.ctx(), ListSessionsRequest())
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
 	require.Empty(t, listed.Sessions)
 	store.fail.Store(false)
@@ -257,9 +259,9 @@ type blockedLoadStore struct {
 	entered, release chan struct{}
 }
 
-func (s *blockedLoadStore) Load(ctx context.Context, key acpcore.SessionKey) ([]acpcore.SessionStoreEntry, error) {
-	rows, err := s.SessionStore.Load(ctx, key)
-	if err == nil && key.Subpath == configSubpath && s.block.CompareAndSwap(true, false) {
+func (s *blockedLoadStore) Load(ctx context.Context, sessionID string) (map[string][]acpcore.SessionStoreEntry, error) {
+	rows, err := s.SessionStore.Load(ctx, sessionID)
+	if err == nil && s.block.CompareAndSwap(true, false) {
 		close(s.entered)
 		select {
 		case <-s.release:
@@ -277,7 +279,7 @@ func TestConcurrentColdRestoreIsRefusedBeforeBinding(t *testing.T) {
 	h := newHarness(t, WithSessionStore(store))
 	h.initialize()
 	cwd := t.TempDir()
-	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd))
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
 	require.NoError(t, err)
 	_, err = h.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
@@ -287,7 +289,7 @@ func TestConcurrentColdRestoreIsRefusedBeforeBinding(t *testing.T) {
 	done := make(chan error, 1)
 	ctx := h.ctx()
 	go func() {
-		_, loadErr := h.conn.LoadSession(ctx, LoadSessionRequest(session.SessionId, cwd))
+		_, loadErr := h.conn.LoadSession(ctx, wire.LoadSessionRequest(session.SessionId, cwd))
 		done <- loadErr
 	}()
 	select {
@@ -295,7 +297,7 @@ func TestConcurrentColdRestoreIsRefusedBeforeBinding(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("load did not reach configuration")
 	}
-	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest(session.SessionId, cwd))
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
 	close(store.release)
 	require.Equal(t, "session_restore", requestErrorData(t, err)["limit"])
 	require.NoError(t, <-done)
@@ -309,14 +311,14 @@ func TestLiveResumeAppliesOptionsAndRetainsDirectories(t *testing.T) {
 	h := newHarness(t, WithSessionStore(store))
 	h.initialize()
 	cwd, directory := t.TempDir(), t.TempDir()
-	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd, WithSessionAdditionalDirectories(directory)))
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, wire.WithSessionAdditionalDirectories(directory)))
 	require.NoError(t, err)
 	_, err = h.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
-	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest(session.SessionId, cwd,
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd,
 		WithSessionCodexOptions(NewCodexOptions(WithCodexModel("text-only")))))
 	require.NoError(t, err)
-	rows, err := store.Load(h.ctx(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	rows, err := loadEntries(h.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	var record sessionRecord
@@ -333,7 +335,7 @@ func TestRestoreIntoDifferentNativeHome(t *testing.T) {
 	h := newHarness(t, WithSessionStore(store))
 	h.initialize()
 	cwd := t.TempDir()
-	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd))
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
 	require.NoError(t, err)
 	_, err = h.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
@@ -342,11 +344,11 @@ func TestRestoreIntoDifferentNativeHome(t *testing.T) {
 	home := t.TempDir()
 	restored := newHarness(t, WithSessionStore(store), WithHome(home))
 	restored.initialize()
-	_, err = restored.conn.LoadSession(restored.ctx(), LoadSessionRequest(session.SessionId, cwd))
+	_, err = restored.conn.LoadSession(restored.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
 	require.NoError(t, err)
 	_, err = restored.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
-	rows, err := store.Load(restored.ctx(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	rows, err := loadEntries(restored.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
 	require.NoError(t, err)
 	var record sessionRecord
 	require.Len(t, rows, 1)
@@ -355,4 +357,234 @@ func TestRestoreIntoDifferentNativeHome(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, filepath.IsLocal(relative))
 	require.FileExists(t, record.RolloutPath)
+}
+
+func TestRestoreAcceptsACommittedEmptyConversation(t *testing.T) {
+	t.Parallel()
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+
+	cwd := t.TempDir()
+
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	// A generation whose main record is live but empty is a conversation whose
+	// native history is still empty, not a missing one.
+	main := acpcore.SessionKey{SessionID: string(session.SessionId)}
+	config := acpcore.SessionKey{SessionID: main.SessionID, Subpath: configSubpath}
+
+	records, err := loadEntries(t.Context(), store, config)
+	require.NoError(t, err)
+	require.NoError(t, store.Replace(t.Context(), main, []acpcore.SessionStoreReplacement{
+		{Key: main}, {Key: config, Entries: records},
+	}))
+
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+}
+
+func TestEmptyConversationCommitsItsConfiguration(t *testing.T) {
+	t.Parallel()
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+
+	cwd := filepath.Join(t.TempDir(), noNativeRowsDir)
+	require.NoError(t, os.MkdirAll(cwd, 0o700))
+
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd,
+		WithSessionCodexOptions(NewCodexOptions(WithCodexEffort("low")))))
+	require.NoError(t, err)
+
+	generation, err := store.Load(t.Context(), string(session.SessionId))
+	require.NoError(t, err)
+
+	rows, present := generation[acpcore.SessionStoreMainSubpath]
+	require.True(t, present, "an established empty conversation commits an empty main record")
+	require.Empty(t, rows)
+
+	var record sessionRecord
+	require.NoError(t, json.Unmarshal(generation[configSubpath][0], &record))
+	require.Equal(t, "low", record.Effort)
+
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+}
+
+func TestRestoreAdoptsRowsAppendedOutsideACP(t *testing.T) {
+	t.Parallel()
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+
+	cwd := t.TempDir()
+
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+
+	_, err = h.prompt(session.SessionId, "ECHO first", nil)
+	require.NoError(t, err)
+
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	records, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	require.NoError(t, err)
+
+	var record sessionRecord
+	require.NoError(t, json.Unmarshal(records[0], &record))
+
+	rows, err := codex.ReadRows(record.RolloutPath)
+	require.NoError(t, err)
+
+	native := append(rows, []byte(`{"type":"event_msg","payload":{"type":"agent_message","message":"continued natively"}}`))
+	require.NoError(t, codex.WriteRows(record.RolloutPath, native))
+
+	before := len(h.rec.snapshot())
+
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+
+	stored, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.Len(t, stored, len(native), "rows written to the rollout outside ACP were not adopted")
+
+	require.Contains(t, agentText(h.rec.snapshot()[before:]), "continued natively")
+}
+
+func TestNativeHomeLockRefusesASecondRuntime(t *testing.T) {
+	t.Parallel()
+
+	home := filepath.Join(t.TempDir(), "home")
+
+	first := newHarness(t, WithHome(home))
+	first.initialize()
+	first.newSession()
+
+	second := newHarness(t, WithHome(home))
+	second.initialize()
+
+	_, err := second.conn.NewSession(second.ctx(), wire.NewSessionRequest(t.TempDir()))
+	require.Equal(t, "codex_runtime_unavailable", requestErrorData(t, err)["error"])
+}
+
+func TestCommitWithNoRolloutIsAFailure(t *testing.T) {
+	t.Parallel()
+
+	s := &session{agent: NewAgent(), id: "sess-1"}
+	require.Error(t, s.commitMirror(t.Context()),
+		"a commit the session cannot attempt was reported as a durable generation")
+
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(rollout, nil, 0o600))
+
+	s.rolloutPath = rollout
+	s.cwd = t.TempDir()
+	require.NoError(t, s.commitMirror(t.Context()))
+}
+
+// Residual native state with no store entry is neither listed nor adopted.
+func TestResidualNativeStateIsNeverAdopted(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+
+	orphan := "00000000-0000-4000-8000-00000000abcd"
+	cwd := t.TempDir()
+	path := codex.RolloutPath(h.home, orphan, time.Now())
+	require.NoError(t, codex.WriteRows(path, [][]byte{
+		[]byte(`{"type":"session_meta","payload":{"id":"` + orphan + `","timestamp":"2026-09-15T00:00:00Z","cwd":"` + cwd + `"}}`),
+	}))
+
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(acp.SessionId(orphan), cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(acp.SessionId(orphan), cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+}
+
+type recoveryFaultStore struct {
+	acpcore.SessionStore
+	fail atomic.Bool
+}
+
+func (s *recoveryFaultStore) Replace(ctx context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("injected store failure")
+	}
+
+	return s.SessionStore.Replace(ctx, main, replacements)
+}
+
+func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(created.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	var record sessionRecord
+	rows, found, err := sessionlog.Load(t.Context(), store, string(created.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotEmpty(t, record.NativeSessionID)
+	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
+	id := acp.SessionId("acp-conversation-independent-of-native-id")
+	record.SessionID = string(id)
+	require.NoError(t, sessionlog.Commit(t.Context(), store, string(id), rows, record))
+	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
+
+	before := len(h.rec.snapshot())
+	loaded, err := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(id, cwd))
+	require.NoError(t, err)
+	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), loaded.Meta)
+	_, err = h.prompt(id, "HELLO", nil)
+	require.NoError(t, err)
+	for _, update := range h.rec.snapshot()[before:] {
+		require.Equal(t, id, update.SessionId)
+	}
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, id, listed.Sessions[0].SessionId)
+	require.Equal(t, loaded.Meta, listed.Sessions[0].Meta)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: id})
+	require.NoError(t, err)
+	listed, err = h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, loaded.Meta, listed.Sessions[0].Meta)
+	resumed, err := h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(id, cwd))
+	require.NoError(t, err)
+	require.Equal(t, loaded.Meta, resumed.Meta)
+	_, err = h.prompt(id, "HELLO", nil)
+	require.NoError(t, err)
+	var after sessionRecord
+	_, found, err = sessionlog.Load(t.Context(), store, string(id), &after)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, record.NativeSessionID, after.NativeSessionID)
+	require.Equal(t, string(id), after.SessionID)
 }

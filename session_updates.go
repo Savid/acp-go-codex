@@ -6,16 +6,14 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/coder/acp-go-sdk"
 
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const (
-	sessionTitleMaxRunes = 256
-
 	planStatusInProgress = "inProgress"
 	planStatusCompleted  = "completed"
 
@@ -91,7 +89,7 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 
 		return true, nil
 	case codex.EventError:
-		return false, turnFailure("provider", event.Text)
+		return false, wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: event.Text})
 	case codex.EventAgentMessageDelta:
 		return false, s.emitText(ctx, state, event, false)
 	case codex.EventReasoningDelta:
@@ -132,7 +130,7 @@ func (s *session) emitText(ctx context.Context, state *cycleState, event codex.E
 	text := event.Text
 
 	if event.Completed {
-		text = unstreamedSuffix(state.streamed[key], text)
+		text = wire.UnstreamedSuffix(state.streamed[key], text)
 		state.streamed[key] += text
 	} else {
 		state.streamed[key] += text
@@ -149,21 +147,6 @@ func (s *session) emitText(ctx context.Context, state *cycleState, event codex.E
 	state.agentText.WriteString(text)
 
 	return s.emit(ctx, acp.UpdateAgentMessageText(text))
-}
-
-// unstreamedSuffix reports the part of a terminal frame's text no delta of
-// this item already carried. Text that diverges from the streamed prefix
-// contributes nothing: the prefix is already with the client.
-func unstreamedSuffix(streamed string, full string) string {
-	if streamed == "" {
-		return full
-	}
-
-	if !strings.HasPrefix(full, streamed) {
-		return ""
-	}
-
-	return full[len(streamed):]
 }
 
 func (s *session) emitPlan(ctx context.Context, steps []codex.PlanStep) error {
@@ -242,7 +225,7 @@ func (s *session) emitSessionInfo(ctx context.Context, prompt []acp.ContentBlock
 	s.updatedAt = updatedAt
 
 	if s.title == "" {
-		if title := promptTitle(prompt); title != "" {
+		if title := wire.PromptTitle(prompt); title != "" {
 			s.title = title
 			update.Title = &title
 		}
@@ -250,31 +233,6 @@ func (s *session) emitSessionInfo(ctx context.Context, prompt []acp.ContentBlock
 	s.mu.Unlock()
 
 	_ = s.emit(ctx, acp.SessionUpdate{SessionInfoUpdate: &update})
-}
-
-func promptTitle(prompt []acp.ContentBlock) string {
-	for _, block := range prompt {
-		if block.Text == nil {
-			continue
-		}
-
-		if title := normalizeTitle(block.Text.Text); title != "" {
-			return title
-		}
-	}
-
-	return ""
-}
-
-func normalizeTitle(text string) string {
-	title := strings.Join(strings.Fields(text), " ")
-	if utf8.RuneCountInString(title) <= sessionTitleMaxRunes {
-		return title
-	}
-
-	runes := []rune(title)
-
-	return strings.TrimSpace(string(runes[:sessionTitleMaxRunes-3])) + "..."
 }
 
 // emitRawEvent forwards one native record on the raw-event channel when the

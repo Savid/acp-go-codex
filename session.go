@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -32,11 +31,12 @@ const (
 )
 
 // session is one ACP session: one Codex thread on the shared app-server.
-// The ACP session id is the native thread id.
+// The native thread ID addresses the app-server conversation.
 type session struct {
 	callbacks             sync.WaitGroup
 	agent                 *Agent
 	id                    acp.SessionId
+	nativeID              string
 	cwd                   string
 	additionalDirectories []string
 	options               CodexOptions
@@ -50,6 +50,7 @@ type session struct {
 	// is gone, until the next explicit operation rebinds it.
 	rt          *runtime
 	rolloutPath string
+	images      []storedImage
 	mirrored    int
 	model       string
 	mode        string
@@ -61,29 +62,39 @@ type session struct {
 	contextWindow int64
 	title         string
 	updatedAt     string
-	closing       bool
-	closeDone     chan struct{}
-	closeErr      error
-	turn          *turn
-	cycle         *cycle
-	dialogs       map[string]*dialog
+	// lastTerminalTurn is the native turn id of the last cycle this session
+	// terminalized. Records naming it are a native tail, not new work.
+	lastTerminalTurn string
+	// generationLost records that the generation the session was bound on
+	// ended, so the incarnation is fenced once its owed terminal event is out.
+	generationLost bool
+	// promptCancel ends the in-flight prompt's own cancellation scope. The
+	// scope outlives the request context, so a superseded handler context
+	// never ends a turn the session still owns.
+	promptCancel context.CancelFunc
+	closing      bool
+	closeDone    chan struct{}
+	closeErr     error
+	turn         *turn
+	cycle        *cycle
+	dialogs      map[string]*dialog
 
 	mirrorMu sync.Mutex
 	lcMu     sync.Mutex
-	lc       lifecycleState
+	lc       lifecycle.Publisher
 }
 
 // cycle is one foreground run: the work of one accepted prompt, or one
 // agent-origin run the thread started between prompts.
 type cycle struct {
-	turnID  string
-	cycleID string
-	origin  lifecycle.Cause
+	lifecycle.Cycle
 	// nativeTurnID is the turn id the app-server named.
 	nativeTurnID string
 	state        cycleState
 	// failure records a native failure observed during the run.
 	failure error
+	// terminal records that the cycle's one terminal event is claimed.
+	terminal bool
 }
 
 type turnEnd int
@@ -128,10 +139,8 @@ func (s *session) bind(rt *runtime, thread codex.Thread) {
 	defer s.mu.Unlock()
 
 	s.rt = rt
-
-	if thread.Path != "" {
-		s.rolloutPath = thread.Path
-	}
+	s.generationLost = false
+	s.rolloutPath = thread.Path
 
 	if s.model == "" {
 		s.model = thread.Model
@@ -177,7 +186,7 @@ func (s *session) threadStart() codex.ThreadStartRequest {
 // threadResume renders the thread/resume call for this session.
 func (s *session) threadResume() codex.ThreadResumeRequest {
 	return codex.ThreadResumeRequest{
-		ThreadID:      string(s.id),
+		ThreadID:      s.nativeID,
 		Cwd:           s.cwd,
 		Environment:   s.options.Env,
 		ExtraPathDirs: s.options.ExtraPathDirs,
@@ -237,9 +246,18 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 	c := s.cycle
 	closing := s.closing
 	bound := s.rt == rt
+	terminalTurn := s.lastTerminalTurn
 	s.mu.Unlock()
 
 	if !bound {
+		return
+	}
+
+	// A record naming the turn this session already terminalized is that
+	// turn's native tail, never work of whatever runs now. Adopting its id
+	// would stamp the live cycle with an id no later record of that cycle can
+	// match, and the cycle would never reach its own terminal.
+	if event.TurnID != "" && event.TurnID == terminalTurn {
 		return
 	}
 
@@ -250,9 +268,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 		}
 
 		settled, err := s.projectEvent(ctx, &t.cycle, event)
-		if err != nil && t.failure == nil {
-			t.failure = err
-		}
+		s.recordFailure(&t.cycle, err)
 
 		if settled {
 			t.settle(turnSettled)
@@ -264,9 +280,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 		}
 	case c != nil:
 		settled, err := s.projectEvent(ctx, c, event)
-		if err != nil && c.failure == nil {
-			c.failure = err
-		}
+		s.recordFailure(c, err)
 
 		if settled {
 			s.settleAgentCycle(ctx, c)
@@ -295,10 +309,10 @@ func bearsWork(event codex.Event) bool {
 // openAgentCycle opens the foreground for work the thread began with no
 // prompt in flight.
 func (s *session) openAgentCycle(ctx context.Context, event codex.Event) {
-	c := &cycle{origin: lifecycle.CauseActivity, nativeTurnID: event.TurnID}
+	c := &cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseActivity}, nativeTurnID: event.TurnID}
 	c.state.tools = make(map[string]*toolState)
 
-	if err := s.lcOpenAgentCycle(ctx, c); err != nil {
+	if err := s.lc.OpenAgentCycle(ctx, &c.Cycle); err != nil {
 		s.agent.log.ErrorContext(ctx, "open agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 
@@ -309,9 +323,8 @@ func (s *session) openAgentCycle(ctx context.Context, event codex.Event) {
 	s.cycle = c
 	s.mu.Unlock()
 
-	if _, err := s.projectEvent(ctx, c, event); err != nil {
-		c.failure = err
-	}
+	_, err := s.projectEvent(ctx, c, event)
+	s.recordFailure(c, err)
 }
 
 // settleAgentCycle runs the agent-origin settlement on the pump: the mirror
@@ -321,23 +334,51 @@ func (s *session) settleAgentCycle(ctx context.Context, c *cycle) {
 	defer cancel()
 
 	if err := s.commitMirror(settleCtx); err != nil {
-		s.lcFence()
+		// The incarnation ends with the failed commit; dropping the binding
+		// lets the next operation relaunch and publish a fresh one.
+		s.mu.Lock()
+		s.rt = nil
+		s.mu.Unlock()
+		s.lc.Fence()
 		s.agent.log.ErrorContext(settleCtx, "mirror commit after agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 	}
 
-	verdict := judgeCycle(c, false)
+	verdict := s.judgeCycle(c, false)
 
-	if err := s.lcIdle(settleCtx, c, verdict); err != nil {
-		s.agent.log.ErrorContext(settleCtx, "terminal idle for agent-origin cycle failed",
-			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+	if s.claimTerminal(c) {
+		if err := s.lcIdle(settleCtx, c, verdict); err != nil {
+			s.agent.log.ErrorContext(settleCtx, "terminal idle for agent-origin cycle failed",
+				slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+		}
 	}
 
 	s.mu.Lock()
+	if c.nativeTurnID != "" {
+		s.lastTerminalTurn = c.nativeTurnID
+	}
+
 	if s.cycle == c {
 		s.cycle = nil
 	}
 	s.mu.Unlock()
+}
+
+// claimTerminal reports whether the caller owns the cycle's one terminal
+// event. The pump and the shutdown ladder both reach an open agent-origin
+// cycle, and a second idle for one cycle is refused, fences the incarnation,
+// and surfaces as a failure of whichever operation published it.
+func (s *session) claimTerminal(c *cycle) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if c.terminal {
+		return false
+	}
+
+	c.terminal = true
+
+	return true
 }
 
 // runtimeEnded records that the generation the thread was bound on stopped
@@ -353,15 +394,21 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	}
 
 	s.rt = nil
+	s.generationLost = true
 	t := s.turn
 	c := s.cycle
-	s.cycle = nil
 	closing := s.closing
+
+	// While closing, the shutdown ladder is the one site that terminalizes
+	// the open cycle.
+	if !closing {
+		s.cycle = nil
+	}
 	s.mu.Unlock()
 	s.cancelDialogs()
 	s.callbacks.Wait()
 
-	if c != nil && !closing {
+	if c != nil && !closing && s.claimTerminal(c) {
 		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed})
 	}
 
@@ -373,7 +420,7 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	}
 
 	if !closing {
-		s.lcFence()
+		s.lc.Fence()
 	}
 }
 
@@ -383,28 +430,41 @@ func (s *session) interrupt(ctx context.Context, rt *runtime, nativeTurnID strin
 	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionAbortTimeout)
 	defer cancel()
 
-	if err := rt.client.InterruptTurn(abortCtx, string(s.id), nativeTurnID); err != nil {
+	if err := rt.client.InterruptTurn(abortCtx, s.nativeID, nativeTurnID); err != nil {
 		s.agent.log.DebugContext(abortCtx, "codex turn interrupt failed", slog.String("session_id", string(s.id)))
 	}
 }
 
-// cancel implements session/cancel: it cancels the in-flight turn, resolves
-// its pending dialogs, and interrupts the native turn. It is a silent no-op
-// with no turn.
+// cancel implements session/cancel: it ends the in-flight prompt's own
+// cancellation scope, resolves its pending dialogs, and interrupts the native
+// turn. It is a silent no-op with no prompt in flight.
 func (s *session) cancel(ctx context.Context) {
 	s.mu.Lock()
 	t := s.turn
 	rt := s.rt
+	cancelPrompt := s.promptCancel
 
-	if t == nil || t.cancelled {
+	if t != nil && t.cancelled {
 		s.mu.Unlock()
 
 		return
 	}
 
-	t.cancelled = true
-	nativeTurnID := t.nativeTurnID
+	nativeTurnID := ""
+
+	if t != nil {
+		t.cancelled = true
+		nativeTurnID = t.nativeTurnID
+	}
 	s.mu.Unlock()
+
+	if cancelPrompt != nil {
+		cancelPrompt()
+	}
+
+	if t == nil {
+		return
+	}
 
 	s.cancelDialogs()
 
@@ -502,12 +562,7 @@ func (s *session) acquireGate(limit string) (func(), error) {
 		return nil, wire.UnknownSession()
 	}
 
-	select {
-	case s.gate <- struct{}{}:
-		return func() { <-s.gate }, nil
-	default:
-		return nil, wire.Backpressure(limit)
-	}
+	return wire.AcquireSessionGate(s.gate, limit)
 }
 
 // close runs the shutdown ladder: mark closed, resolve pending dialogs and the
@@ -528,11 +583,16 @@ func (s *session) close(ctx context.Context) error {
 	s.closeDone = make(chan struct{})
 	t := s.turn
 	rt := s.rt
+	cancelPrompt := s.promptCancel
 
 	if t != nil {
 		t.cancelled = true
 	}
 	s.mu.Unlock()
+
+	if cancelPrompt != nil {
+		cancelPrompt()
+	}
 
 	s.cancelDialogs()
 	s.callbacks.Wait()
@@ -554,7 +614,7 @@ func (s *session) close(ctx context.Context) error {
 	if rt != nil && rt.alive() {
 		unsubscribeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionAbortTimeout)
 
-		if err := rt.client.UnsubscribeThread(unsubscribeCtx, string(s.id)); err != nil {
+		if err := rt.client.UnsubscribeThread(unsubscribeCtx, s.nativeID); err != nil {
 			s.agent.log.DebugContext(unsubscribeCtx, "codex thread unsubscribe failed", slog.String("session_id", string(s.id)))
 		}
 
@@ -576,13 +636,13 @@ func (s *session) close(ctx context.Context) error {
 	s.rt = nil
 	s.mu.Unlock()
 
-	if c != nil {
+	if len(errs) == 0 && c != nil && s.claimTerminal(c) {
 		if err := s.lcIdle(commitCtx, c, cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}); err != nil {
 			errs = append(errs, err)
 		}
 	}
 
-	s.lcFence()
+	s.lc.Fence()
 
 	s.mu.Lock()
 	s.closeErr = errors.Join(errs...)
@@ -591,8 +651,6 @@ func (s *session) close(ctx context.Context) error {
 
 	return s.closeErr
 }
-
-func itoa(value int) string { return strconv.Itoa(value) }
 
 // sandboxMode reduces a sandbox policy to the mode string thread/start
 // accepts; an object policy names its mode by type.
@@ -631,7 +689,7 @@ func (s *session) turnSandboxPolicy() any {
 			return typed
 		}
 	case map[string]any:
-		return cloneAnyMap(typed)
+		return wire.CloneMap(typed)
 	}
 
 	if len(s.additionalDirectories) == 0 {
@@ -662,6 +720,7 @@ func (s *session) sessionInfo() acp.SessionInfo {
 	}
 
 	info := acp.SessionInfo{
+		Meta:                  wire.NativeSessionMeta(vendor, s.nativeID),
 		SessionId:             s.id,
 		Title:                 &title,
 		Cwd:                   s.cwd,

@@ -10,6 +10,7 @@ import (
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
+	"github.com/savid/acp-go-core/wire"
 )
 
 // optionAccept is the native decision that allows one approval once.
@@ -302,67 +303,41 @@ func announcedRequest[T any](
 	}
 	defer releaseCall()
 
-	actionID, err := s.reserveAction(c)
-	if err != nil {
-		return zero, err
-	}
-
+	actionID := s.reserveAction(c)
 	if actionID == "" {
 		return send(ctx, nil)
 	}
 
-	type answer struct {
-		value T
-		err   error
-	}
-
-	answers := make(chan answer, 1)
-
-	var written <-chan struct{}
-	if t := s.agent.transportRef(); t != nil {
-		written = t.AwaitRequestWrite(actionID)
-	}
-
-	go func() {
-		value, err := send(ctx, s.actionCorrelation(c, actionID))
-		answers <- answer{value: value, err: err}
-	}()
-
-	if written != nil {
-		select {
-		case <-written:
-		case result := <-answers:
-			answers <- result
+	value, callErr := wire.CallAndAnnounce(ctx, s.agent.transportRef(), s.lc.Correlation(c.Cycle, actionID), send, func() {
+		if err := s.lc.ActionPending(ctx, c.Cycle, actionID, kind); err != nil {
+			s.agent.log.ErrorContext(ctx, "announce lifecycle action failed",
+				slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 		}
-	}
+	})
 
-	if err := s.lcActionPendingWithID(ctx, c, actionID, kind); err != nil {
-		s.agent.log.ErrorContext(ctx, "announce lifecycle action failed",
-			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
-	}
+	state := resolved(value, callErr)
 
-	result := <-answers
-	state := resolved(result.value, result.err)
-
-	if result.err != nil && errors.Is(context.Cause(ctx), errDialogCancelled) {
+	if callErr != nil && errors.Is(context.Cause(ctx), errDialogCancelled) {
 		state = lifecycle.ActionCancelled
 	}
 
-	if err := s.lcActionResolved(context.WithoutCancel(ctx), c, actionID, state); err != nil {
+	if err := s.lc.ActionResolved(context.WithoutCancel(ctx), c.Cycle, actionID, state); err != nil {
 		s.agent.log.ErrorContext(ctx, "resolve lifecycle action failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 	}
 
-	return result.value, result.err
+	return value, callErr
 }
 
-func (s *session) reserveAction(c *cycle) (string, error) {
+// reserveAction mints the action id one announced request publishes under, or
+// an empty id when the session has no open incarnation or cycle to own it.
+func (s *session) reserveAction(c *cycle) string {
 	s.lcMu.Lock()
 	defer s.lcMu.Unlock()
 
-	if s.lc.stream == nil || s.lc.stream.Fenced() || c.turnID == "" {
-		return "", nil
+	if !s.lc.Active() || c.TurnID == "" {
+		return ""
 	}
 
-	return s.nextLifecycleID("action"), nil
+	return s.lc.NextID("action")
 }

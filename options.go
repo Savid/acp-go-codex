@@ -6,6 +6,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/savid/acp-go-core/wire"
+
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -35,8 +37,8 @@ type Options struct {
 	// app-server as CODEX_HOME. Empty leaves Codex to resolve its home from the
 	// inherited environment exactly as it would from a shell.
 	Home string
-	// ScratchDir is the parent directory for ephemeral adapter state. Empty
-	// means the system temp directory.
+	// ScratchDir is an additional root image output may be read from. The
+	// adapter writes no ephemeral files of its own.
 	ScratchDir string
 	// InputHandoffRoot is the absolute directory under which handoff-form
 	// prompt images are read. Empty rejects the handoff form.
@@ -176,7 +178,7 @@ func WithHome(path string) Option {
 	return func(options *Options) { options.Home = path }
 }
 
-// WithScratchDir sets the parent directory for ephemeral adapter state.
+// WithScratchDir adds a root image output may be read from.
 func WithScratchDir(dir string) Option {
 	return func(options *Options) { options.ScratchDir = dir }
 }
@@ -200,13 +202,13 @@ func WithConfiguredModels(ids []string) Option {
 // WithEnv sets the static agent-scoped environment overlay applied to the
 // app-server after the inherited environment.
 func WithEnv(env map[string]string) Option {
-	return func(options *Options) { options.Env = cloneStringMap(env) }
+	return func(options *Options) { options.Env = maps.Clone(env) }
 }
 
 // WithCodexConfigOverrides passes config values to the app-server as
 // -c key=value. Nothing is written to disk.
 func WithCodexConfigOverrides(overrides map[string]any) Option {
-	return func(options *Options) { options.CodexConfigOverrides = cloneAnyMap(overrides) }
+	return func(options *Options) { options.CodexConfigOverrides = wire.CloneMap(overrides) }
 }
 
 // WithTracerProvider configures the OpenTelemetry tracer provider.
@@ -257,13 +259,5 @@ func WithImageLimits(limits ImageLimits) Option {
 // WithSeedFiles registers files written into Codex's home before the
 // app-server launches. Keys are paths relative to that home.
 func WithSeedFiles(files map[string]string) Option {
-	return func(options *Options) { options.SeedFiles = cloneStringMap(files) }
-}
-
-func cloneStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-
-	return maps.Clone(values)
+	return func(options *Options) { options.SeedFiles = maps.Clone(files) }
 }

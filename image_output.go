@@ -2,9 +2,7 @@ package codexacp
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 
@@ -15,51 +13,15 @@ import (
 	"github.com/savid/acp-go-core/wire"
 )
 
-// outputImage is one validated emitted image: the base64 payload, the
-// sniffed MIME, its decoded size, and its fingerprint.
-type outputImage struct {
-	data        string
-	mime        string
-	fingerprint string
-	sizeBytes   int64
-}
-
-// decodeOutputImage validates one inline native image for emission through
-// the core output gate. Output is not format-allowlisted: any sniffable
-// raster is emitted with its sniffed MIME.
-func decodeOutputImage(encoded string, declaredMIME string, limit int64) (outputImage, *image.OutputError) {
-	data, mime, size, failure := image.DecodeInline(encoded, limit)
-	if failure != nil {
-		return outputImage{}, failure
-	}
-
-	if declaredMIME != "" && declaredMIME != mime && image.IsImageMIME(declaredMIME) {
-		return outputImage{}, &image.OutputError{Reason: image.ReasonMediaTypeMismatch, Message: "declared media type does not match the image"}
-	}
-
-	return fingerprinted(data, mime, size), nil
-}
-
-func fingerprinted(data []byte, mime string, size int64) outputImage {
-	digest := sha256.Sum256(data)
-
-	return outputImage{
-		data:        base64.StdEncoding.EncodeToString(data),
-		mime:        mime,
-		fingerprint: hex.EncodeToString(digest[:]),
-		sizeBytes:   size,
-	}
-}
-
 // readOutputImage reads a harness-returned file through the core output gate
 // within the allowed roots.
-func (s *session) readOutputImage(path string, limit int64) (outputImage, *image.OutputError) {
+func (s *session) readOutputImage(path string, limit int64) (image.Output, *image.OutputError) {
 	data, mime, failure := image.ReadFile(path, s.outputRoots(), limit)
 	if failure != nil {
-		return outputImage{}, failure
+		return image.Output{}, failure
 	}
 
-	return fingerprinted(data, mime, int64(len(data))), nil
+	return image.Output{Data: base64.StdEncoding.EncodeToString(data), MIME: mime, SizeBytes: int64(len(data))}, nil
 }
 
 // outputRoots are the directories a native image path may be read from: the
@@ -95,8 +57,6 @@ type toolState struct {
 	// content-bearing update extends it so no delivered item disappears
 	// under ACP's whole-array replacement.
 	content []acp.ToolCallContent
-	// imageBytes is the decoded size of every image the array carries.
-	imageBytes int64
 }
 
 func (state *cycleState) tool(id string) *toolState {
@@ -312,23 +272,23 @@ func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, e
 	limits := s.agent.options.ImageLimits.core()
 
 	var (
-		output  outputImage
+		output  image.Output
 		failure *image.OutputError
 	)
 
 	switch {
 	case event.Result != "":
-		output, failure = decodeOutputImage(event.Result, "", limits.EffectiveOutputPerImage())
+		output, failure = image.DecodeOutput(event.Result, "", limits.EffectiveOutputPerImage())
 	case event.SavedPath != "":
 		output, failure = s.readOutputImage(event.SavedPath, limits.EffectiveOutputPerImage())
 	default:
 		failure = &image.OutputError{Reason: image.ReasonMissingFile, Message: "image output carried neither bytes nor a path"}
 	}
 
-	if failure == nil && output.sizeBytes > limits.EffectiveOutputPerToolCall() {
+	if failure == nil && output.SizeBytes > limits.EffectiveOutputPerToolCall() {
 		failure = &image.OutputError{
 			Reason: image.ReasonTooLarge, Message: "tool call image content exceeds the per-tool-call limit",
-			SizeBytes: output.sizeBytes, MaxBytes: limits.EffectiveOutputPerToolCall(),
+			SizeBytes: output.SizeBytes, MaxBytes: limits.EffectiveOutputPerToolCall(),
 		}
 	}
 
@@ -348,8 +308,11 @@ func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, e
 		return wire.TurnFailed(vendor, failure.TurnFailure())
 	}
 
-	tool.content = []acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(output.data, output.mime))}
-	tool.imageBytes = output.sizeBytes
+	s.mu.Lock()
+	s.images = append(s.images, storedImage{ID: id, Kind: event.Kind, Data: output.Data, MIME: output.MIME})
+	s.mu.Unlock()
+
+	tool.content = []acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(output.Data, output.MIME))}
 	state.imagesEmitted = true
 
 	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(acp.ToolCallStatusCompleted), acp.WithUpdateContent(tool.content)))
