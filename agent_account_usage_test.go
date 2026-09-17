@@ -45,11 +45,14 @@ func TestAccountUsageReadsThroughTheSharedRuntime(t *testing.T) {
 	response, err := callAccountUsage(t, h, map[string]any{})
 	require.NoError(t, err)
 
-	observed, parseErr := time.Parse(time.RFC3339, response.ObservedAt)
+	observed, parseErr := time.Parse(time.RFC3339, response.Limits[0].ObservedAt)
 	require.NoError(t, parseErr)
 	require.False(t, observed.Before(before.Truncate(time.Second)))
 
-	response.ObservedAt = ""
+	for i := range response.Limits {
+		response.Limits[i].ObservedAt = ""
+		response.Limits[i].StaleAt = ""
+	}
 	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "pro", UsageAllowed: new(true), Limits: []wire.AccountUsageLimit{
 		{ID: "codex/primary", WindowSeconds: 604800, UsedPercent: 23, ResetsAt: "2026-09-21T03:22:18Z"},
 		{ID: "codex_bengalfox/primary", Label: "GPT-5.3-Codex-Spark", WindowSeconds: 18000, UsedPercent: 0, ResetsAt: "2026-09-17T03:43:31Z"},
@@ -135,7 +138,7 @@ func TestAccountUsageResponseMapping(t *testing.T) {
 	single := codex.AccountUsage{Limits: map[string]codex.UsageLimit{"codex": {Secondary: &codex.UsageWindow{UsedPercent: 130}}}}
 	response, err := accountUsageResponse(" pro ", single, now)
 	require.NoError(t, err)
-	require.Equal(t, wire.AccountUsageResponse{Available: true, ObservedAt: "2026-09-17T02:41:03Z", Plan: "pro", Limits: []wire.AccountUsageLimit{{ID: "codex/secondary", UsedPercent: 130}}}, response, "a window with no length or reset carries neither; the account's plan is used and trimmed")
+	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "pro", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", StaleAt: "2026-09-17T02:42:03Z", ID: "codex/secondary", UsedPercent: 130}}}, response, "a window with no length or reset carries neither; the account's plan is used and trimmed")
 
 	response, err = accountUsageResponse("pro", codex.AccountUsage{Limits: map[string]codex.UsageLimit{"a": {}, "b": {}}}, now)
 	require.NoError(t, err)

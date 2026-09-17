@@ -104,7 +104,7 @@ the shared app-server. Initialize advertises it as
 `{"method": "_codex/accountUsage", "scope": "agent"}`. The answer carries one
 limit per window present, keyed `<key>/primary` or
 `<key>/secondary` by the native limit key, with its used percent, length, and
-reset time, the account's plan type as `plan`, and the app-server's own
+reset time, its `observedAt` and one-minute `staleAt`, the account's plan type as `plan`, and the app-server's own
 `ordinaryUsageAllowed` as `usageAllowed` when it states one. An optional
 `sessionId` is validated but does not scope the read. A read on an idle Agent
 starts the app-server and takes the native-home lock exactly as a new session

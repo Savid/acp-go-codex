@@ -99,7 +99,7 @@ type accountWindow struct {
 // per present window, keyed <limitId>/primary or <limitId>/secondary, with the
 // account's plan type as plan.
 func accountUsageResponse(plan string, usage codex.AccountUsage, now time.Time) (wire.AccountUsageResponse, error) {
-	response := wire.AccountUsageResponse{Available: true, ObservedAt: wire.AccountUsageTime(now), Plan: strings.TrimSpace(plan), UsageAllowed: usage.OrdinaryUsageAllowed}
+	response := wire.AccountUsageResponse{Available: true, Plan: strings.TrimSpace(plan), UsageAllowed: usage.OrdinaryUsageAllowed}
 
 	for _, limit := range usage.Sorted() {
 		if limit.ID == "" || limit.ID != strings.TrimSpace(limit.ID) {
@@ -111,7 +111,7 @@ func accountUsageResponse(plan string, usage codex.AccountUsage, now time.Time) 
 				continue
 			}
 
-			entry := wire.AccountUsageLimit{ID: limit.ID + "/" + w.suffix, Label: strings.TrimSpace(limit.Name), UsedPercent: w.window.UsedPercent}
+			entry := wire.AccountUsageLimit{ObservedAt: wire.AccountUsageTime(now), StaleAt: wire.AccountUsageTime(now.Add(time.Minute)), ID: limit.ID + "/" + w.suffix, Label: strings.TrimSpace(limit.Name), UsedPercent: w.window.UsedPercent}
 			if minutes := w.window.WindowDurationMins; minutes > 0 && minutes <= math.MaxInt64/60 {
 				entry.WindowSeconds = minutes * 60
 			}
