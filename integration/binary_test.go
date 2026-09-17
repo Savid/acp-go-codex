@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,14 @@ func TestSmokeSessionLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, init.AuthMethods)
 	require.True(t, init.AgentCapabilities.LoadSession)
+
+	raw, err := h.conn.CallExtension(ctx, codexacp.AccountUsageMethod, map[string]any{})
+	require.NoError(t, err)
+
+	var usage wire.AccountUsageResponse
+
+	require.NoError(t, json.Unmarshal(raw, &usage))
+	require.NoError(t, usage.Validate(), "the native account reads map to the contract shape")
 
 	cwd := t.TempDir()
 

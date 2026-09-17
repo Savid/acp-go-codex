@@ -1,15 +1,11 @@
 package codex
 
 import (
-	"context"
 	"fmt"
 	"maps"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 )
 
 // Native environment variables Codex reads for its home.
@@ -17,10 +13,6 @@ const (
 	EnvCodexHome = "CODEX_HOME"
 	EnvHome      = "HOME"
 )
-
-// MinimumVersion is the lowest `codex --version` the adapter accepts: the
-// version its behavior was verified against.
-const MinimumVersion = "0.153.4"
 
 // Launch describes one app-server process.
 type Launch struct {
@@ -67,25 +59,4 @@ func CodexHome(home string, lookup func(string) (string, bool)) string {
 	userHome, _ := lookup(EnvHome)
 
 	return filepath.Join(userHome, ".codex")
-}
-
-var versionPattern = regexp.MustCompile(`\d+\.\d+\.\d+`)
-
-// ProbeVersion runs `codex --version` against the resolved executable with the
-// given environment and returns the reported version.
-func ProbeVersion(ctx context.Context, executable string, environment []string) (string, error) {
-	command := exec.CommandContext(ctx, executable, "--version")
-	command.Env = slices.Clone(environment)
-
-	output, err := command.Output()
-	if err != nil {
-		return "", fmt.Errorf("probe codex version: %w", err)
-	}
-
-	version := versionPattern.FindString(string(output))
-	if version == "" {
-		return "", fmt.Errorf("probe codex version: could not parse %q", strings.TrimSpace(string(output)))
-	}
-
-	return version, nil
 }

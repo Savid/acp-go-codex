@@ -3,7 +3,6 @@ package codexacp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -111,7 +110,6 @@ type turn struct {
 	submission lifecycle.Submission
 	accepted   bool
 	cancelled  bool
-	timedOut   bool
 	ended      turnEnd
 	settled    chan struct{}
 	settleOnce sync.Once
@@ -473,31 +471,9 @@ func (s *session) cancel(ctx context.Context) {
 	}
 }
 
-// timeout ends a turn that exceeded the configured deadline.
-func (s *session) timeout(ctx context.Context, t *turn) {
-	s.mu.Lock()
-	rt := s.rt
-
-	if s.turn != t || t.cancelled || t.timedOut {
-		s.mu.Unlock()
-
-		return
-	}
-
-	t.timedOut = true
-	nativeTurnID := t.nativeTurnID
-	s.mu.Unlock()
-
-	s.cancelDialogs()
-
-	if rt != nil && rt.alive() {
-		s.interrupt(ctx, rt, nativeTurnID)
-	}
-}
-
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
-	if s.closing || s.rt == nil || (s.turn != nil && (s.turn.cancelled || s.turn.timedOut)) {
+	if s.closing || s.rt == nil || (s.turn != nil && s.turn.cancelled) {
 		s.mu.Unlock()
 		cancel(errDialogCancelled)
 
@@ -731,8 +707,4 @@ func (s *session) sessionInfo() acp.SessionInfo {
 	}
 
 	return info
-}
-
-func formatDeadline(timeout time.Duration) string {
-	return fmt.Sprintf("codex turn exceeded %s", timeout)
 }

@@ -27,6 +27,9 @@ const (
 	// RawEventMethod is the notification carrying one raw app-server event
 	// when a session opted in through _meta.codex.rawEvent.enabled.
 	RawEventMethod = "_codex/rawEvent"
+	// AccountUsageMethod is the request reading the logged-in account's
+	// rate-limit windows through the shared app-server.
+	AccountUsageMethod = "_codex/accountUsage"
 	// SessionStoreFormat identifies the store layout this package writes: raw
 	// Codex rollout rows under the main subpath plus the adapter's session
 	// record under the config subpath.
@@ -73,8 +76,6 @@ type Agent struct {
 	// runtimeMu serializes starting and replacing the shared app-server.
 	runtimeMu sync.Mutex
 	runtime   *runtime
-
-	executable process.Executable
 }
 
 var (
@@ -324,7 +325,8 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.codex.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
 			},
-			"sessionStore": map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
+			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeAgent),
+			"sessionStore":                 map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
 			"structuredOutput": map[string]any{
 				"config": wire.MetaOptionPath(vendor, metaOutputSchemaKey), nativeResultKey: "_meta.codex." + structuredOutputKey, "schema": "json_schema",
 			},
@@ -397,9 +399,18 @@ func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeReque
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
-// HandleExtensionMethod answers every extension method with method-not-found.
-// The only extension surface is the outbound RawEventMethod notification.
-func (a *Agent) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+// HandleExtensionMethod serves the account-usage read; every other extension
+// method is method-not-found.
+func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if method == AccountUsageMethod {
+		response, err := a.accountUsage(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+
+		return response, nil
+	}
+
 	var envelope struct {
 		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP reserves this wire spelling.
 	}
@@ -477,7 +488,6 @@ func (a *Agent) environment() process.Environment {
 	}
 }
 
-// internalClassNativeStart is the one documented codex_internal_failure
-// class: a native thread that could not be started or configured for a
-// session.
+// internalClassNativeStart is the codex_internal_failure class of a native
+// thread that could not be started or configured for a session.
 const internalClassNativeStart = "native_start"

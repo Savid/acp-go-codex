@@ -20,14 +20,24 @@ import (
 // The test binary doubles as a fake app-server: TestMain runs fakeCodex when
 // this variable is set in the environment the adapter launched it with.
 const (
-	fakeCodexEnv        = "ACP_GO_CODEX_TEST_FAKE"
-	fakeCodexEnvDump    = "ACP_GO_CODEX_TEST_ENV_DUMP"
-	fakeCodexEnvVersion = "ACP_GO_CODEX_TEST_VERSION"
+	fakeCodexEnv     = "ACP_GO_CODEX_TEST_FAKE"
+	fakeCodexEnvDump = "ACP_GO_CODEX_TEST_ENV_DUMP"
 	// fakeCodexEnvResumeHold names a file the fake creates when a thread/resume
 	// arrives that it will never answer, so a test can act while the adapter is
 	// still rebinding the thread.
 	fakeCodexEnvResumeHold = "ACP_GO_CODEX_TEST_RESUME_HOLD"
-	fakeCodexVersion       = "0.154.0"
+	// fakeCodexEnvAccount selects the account answers: a ChatGPT pro login with
+	// the snapshots below, no login, an API-key login, a ChatGPT login with no
+	// window, or a rate-limit read the app-server rejects.
+	fakeCodexEnvAccount    = "ACP_GO_CODEX_TEST_ACCOUNT"
+	fakeCodexAccountNone   = "none"
+	fakeCodexAccountAPIKey = "apiKey"
+	fakeCodexAccountEmpty  = "empty"
+	fakeCodexAccountRefuse = "refuse"
+
+	// The native window members of one rate-limit snapshot.
+	fakeWindowPrimary   = "primary"
+	fakeWindowSecondary = "secondary"
 
 	// tinyPNG is a valid 1x1 PNG.
 	tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
@@ -41,6 +51,19 @@ var fakeModels = []map[string]any{
 	{"id": "vision", "displayName": "Fake Vision", "contextWindow": 1000, "inputModalities": []string{"text", "image"},
 		"defaultReasoningEffort": "medium", "supportedReasoningEfforts": []map[string]any{{"reasoningEffort": "low"}, {"reasoningEffort": "medium"}}},
 	{"id": "text-only", "displayName": "Fake Text", "contextWindow": 500, "inputModalities": []string{"text"}},
+}
+
+// fakeAccountUsage is the native account/rateLimits/read shape: the per-limit
+// map beside a bare snapshot and credit members the adapter never reads.
+var fakeAccountUsage = map[string]any{
+	"ordinaryUsageAllowed": true,
+	"rateLimits":           map[string]any{"limitId": "codex", "limitName": nil, fakeWindowPrimary: map[string]any{"usedPercent": 23, "windowDurationMins": 10080, "resetsAt": 1789960938}, fakeWindowSecondary: nil, "credits": map[string]any{"hasCredits": false}, "planType": "pro"},
+	"rateLimitsByLimitId": map[string]any{
+		"codex":           map[string]any{"limitId": "codex", "limitName": nil, fakeWindowPrimary: map[string]any{"usedPercent": 23, "windowDurationMins": 10080, "resetsAt": 1789960938}, fakeWindowSecondary: nil, "planType": "pro"},
+		"codex_bengalfox": map[string]any{"limitId": "codex_bengalfox", "limitName": "GPT-5.3-Codex-Spark", fakeWindowPrimary: map[string]any{"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1789616611}, fakeWindowSecondary: map[string]any{"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1790203411}, "planType": "pro"},
+	},
+	"rateLimitResetCredits": map[string]any{"availableCount": 1},
+	"accountId":             "acct-1",
 }
 
 type fakeThread struct {
@@ -67,17 +90,6 @@ type fakeCodex struct {
 }
 
 func runFakeCodex(args []string) int {
-	if slices.Contains(args, "--version") {
-		version := os.Getenv(fakeCodexEnvVersion)
-		if version == "" {
-			version = fakeCodexVersion
-		}
-
-		fmt.Println("codex-cli " + version)
-
-		return 0
-	}
-
 	if dump := os.Getenv(fakeCodexEnvDump); dump != "" {
 		_ = os.WriteFile(dump, []byte(strings.Join(os.Environ(), "\n")+"\n"), 0o600)
 	}
@@ -226,6 +238,39 @@ func (f *fakeCodex) dispatch(line []byte) {
 		f.startTurn(frame.ID, frame.Params)
 	case "turn/interrupt":
 		f.interrupt(frame.ID, frame.Params)
+	case "account/read":
+		if frame.Params == nil {
+			f.fail(frame.ID, -32602, "Invalid params: missing field `params`")
+
+			return
+		}
+
+		switch os.Getenv(fakeCodexEnvAccount) {
+		case fakeCodexAccountNone:
+			f.respond(frame.ID, map[string]any{"account": nil, "requiresOpenaiAuth": true})
+		case fakeCodexAccountAPIKey:
+			f.respond(frame.ID, map[string]any{"account": map[string]any{"type": fakeCodexAccountAPIKey}, "requiresOpenaiAuth": true})
+		default:
+			f.respond(frame.ID, map[string]any{"account": map[string]any{"type": "chatgpt", "email": "fake@example.test", "planType": "pro"}, "requiresOpenaiAuth": true})
+		}
+	case "account/rateLimits/read":
+		if exclude, _ := frame.Params["excludeResetCreditDetails"].(bool); !exclude {
+			f.fail(frame.ID, -32602, "Invalid params: excludeResetCreditDetails must be true")
+
+			return
+		}
+
+		switch os.Getenv(fakeCodexEnvAccount) {
+		case fakeCodexAccountEmpty:
+			// A snapshot with neither window is the only no-allowance shape the
+			// app-server produces; it never answers with no snapshot at all.
+			snapshot := map[string]any{"limitId": "codex", "limitName": nil, fakeWindowPrimary: nil, fakeWindowSecondary: nil, "planType": "pro"}
+			f.respond(frame.ID, map[string]any{"ordinaryUsageAllowed": nil, "rateLimits": snapshot, "rateLimitsByLimitId": map[string]any{"codex": snapshot}})
+		case fakeCodexAccountRefuse:
+			f.fail(frame.ID, -32000, "rate limits unavailable")
+		default:
+			f.respond(frame.ID, fakeAccountUsage)
+		}
 	default:
 		f.fail(frame.ID, -32601, "method not found")
 	}

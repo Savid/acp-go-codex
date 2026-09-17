@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -59,17 +60,20 @@ func (rt *runtime) alive() bool {
 	return !rt.dead
 }
 
-// ensureExecutable resolves the codex executable against the base environment
-// and caches its completed version verdict through core.
+// ensureExecutable resolves the codex executable against the base
+// environment, so a session directory can never shadow it.
 func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
-	executable, err := a.executable.Resolve(ctx, a.environment(), a.options.ExecutablePath, vendor, codex.MinimumVersion, codex.ProbeVersion)
-	if err != nil {
-		a.log.ErrorContext(ctx, "codex version probe failed", slog.String("reason", err.Error()))
-
-		return "", err
+	base, err := a.environment().Base()
+	if err == nil {
+		var executable string
+		if executable, err = process.ResolveExecutable(cmp.Or(a.options.ExecutablePath, vendor), base); err == nil {
+			return executable, nil
+		}
 	}
 
-	return executable, nil
+	a.log.ErrorContext(ctx, "codex executable resolution failed", slog.String("reason", err.Error()))
+
+	return "", err
 }
 
 // ensureRuntime returns the live app-server generation, starting one

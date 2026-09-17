@@ -12,17 +12,16 @@ in its own home, so a session started over ACP can be continued natively with
 
 - `cmd/acp-go-codex`: stdio entrypoint, OpenTelemetry setup, signals, flags.
 - Root `agent*.go`, `options.go`, `request_builders.go`: the public ACP
-  surface, option validation, the vendor session-option constructors, and the
-  shared app-server generation with its event pump; the shared ACP transport
-  orders publication.
+  surface, option validation, the vendor session-option constructors, the
+  account-usage read, and the shared app-server generation with its event
+  pump; the shared ACP transport orders publication.
 - Root `session*.go`, `image_output.go`: one session's thread binding, prompt
   turns, approvals and elicitation, lifecycle stream, store mirror, replay,
   config options, and image output.
-- `internal/codex`: the app-server JSON-RPC client, launch arguments and
-  version probe, event decoding, server request mapping, thread configuration,
-  home locking, and the rollout file layout.
+- `internal/codex`: the app-server JSON-RPC client, launch arguments,
+  event decoding, server request mapping, thread configuration,
+  the account reads, home locking, and the rollout file layout.
 - `integration`: gated tests against the installed codex.
-- `examples`: runnable ACP clients.
 
 ## Commands
 
@@ -68,5 +67,5 @@ changing anything app-server-facing.
   or fail open on a denied or cancelled answer.
 - Do not log prompts, tool input or output, or raw native event bodies by
   default.
-- Reject every ACP extension method; the only extension surface is the
-  outbound raw-event notification.
+- Serve `_codex/accountUsage` and reject every other ACP extension method;
+  the only outbound extension surface is the raw-event notification.

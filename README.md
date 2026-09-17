@@ -26,7 +26,7 @@ record saves both IDs with the matching native history.
 go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
 ```
 
-Requires `codex` 0.153.4 or newer on `PATH` or named with `-path`.
+Verified against `codex` 0.154.0, found on `PATH` or named with `-path`.
 
 ## Run
 
@@ -58,10 +58,9 @@ err := codexacp.Serve(ctx, os.Stdin, os.Stdout,
 Options: `WithExecutablePath`, `WithHome`, `WithScratchDir`,
 `WithInputHandoffRoot`, `WithDefaultModel`, `WithConfiguredModels`, `WithEnv`,
 `WithCodexConfigOverrides`, `WithSeedFiles`, `WithSessionStore`,
-`WithSessionStoreLoadTimeout`, `WithTurnTimeout`, `WithConcurrencyLimits`,
-`WithImageLimits`, `WithLogger`, `WithTracerProvider`, `WithMeterProvider`,
-`WithTextMapPropagator`, `WithAgentName`, `WithAgentTitle`,
-`WithAgentVersion`.
+`WithConcurrencyLimits`, `WithImageLimits`, `WithLogger`,
+`WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`,
+`WithAgentName`, `WithAgentTitle`, `WithAgentVersion`.
 
 `WithCodexConfigOverrides` passes `-c key=value` to the app-server; the
 `shell_environment_policy` keyspace is reserved for session environments.
@@ -96,6 +95,23 @@ installed CLI and preserves this native behavior.
 `effort`, `service_tier`, and `personality`. Values forward to the next turn;
 `mode` accepts only its own two values, and `effort` and `personality` reject
 an empty value.
+
+### Account usage
+
+`_codex/accountUsage` reads the ChatGPT account's allowance windows through
+the shared app-server. Initialize advertises it as
+`_meta.codex.accountUsage` with the value
+`{"method": "_codex/accountUsage", "scope": "agent"}`. The answer carries one
+limit per window present, keyed `<key>/primary` or
+`<key>/secondary` by the native limit key, with its used percent, length, and
+reset time, the account's plan type as `plan`, and the app-server's own
+`ordinaryUsageAllowed` as `usageAllowed` when it states one. An optional
+`sessionId` is validated but does not scope the read. A read on an idle Agent
+starts the app-server and takes the native-home lock exactly as a new session
+would. A home with no login answers
+`{"available": false, "reason": "not_authenticated"}`; an API-key or Bedrock
+login, or a ChatGPT account with no window, answers
+`{"available": false, "reason": "not_reported"}`.
 
 ### Session store
 

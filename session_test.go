@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 
@@ -263,17 +262,6 @@ func TestCancelAndTimeout(t *testing.T) {
 		events := lifecycleEvents(h.rec.snapshot())
 		require.Equal(t, "cancelled", events[len(events)-1]["outcome"])
 	})
-
-	t.Run("timeout", func(t *testing.T) {
-		t.Parallel()
-
-		h := newHarness(t, WithTurnTimeout(200*time.Millisecond))
-		h.initialize()
-		session := h.newSession()
-
-		_, err := h.prompt(session.SessionId, "SLOW", nil)
-		require.Equal(t, "timeout", requestErrorData(t, err)["cause"])
-	})
 }
 
 func TestProcessExitFailsTurnAndReplacesRuntime(t *testing.T) {
@@ -509,15 +497,13 @@ func TestAgentCloseStopsRuntime(t *testing.T) {
 
 func TestLateDialogAfterCancellationIsRefused(t *testing.T) {
 	t.Parallel()
-	for _, state := range []string{"cancelled turn", "timed out", "closed", "disconnected"} {
+	for _, state := range []string{"cancelled turn", "closed", "disconnected"} {
 		t.Run(state, func(t *testing.T) {
 			t.Parallel()
 			s := &session{rt: &runtime{}, turn: &turn{}}
 			switch state {
 			case "cancelled turn":
 				s.turn.cancelled = true
-			case "timed out":
-				s.turn.timedOut = true
 			case "closed":
 				s.closing = true
 			case "disconnected":

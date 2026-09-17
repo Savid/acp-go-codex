@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -112,7 +114,10 @@ func TestProtocolAdmission(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t)
-	h.initialize()
+
+	vendorMeta, ok := h.initialize().AgentCapabilities.Meta["codex"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeAgent), vendorMeta[wire.AccountUsageCapabilityKey])
 
 	for _, method := range []string{"_codex/anything"} {
 		_, err := h.conn.CallExtension(h.ctx(), method, map[string]any{})
@@ -319,17 +324,6 @@ func TestActiveSessionLimit(t *testing.T) {
 	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
 }
 
-func TestVersionFloor(t *testing.T) {
-	t.Parallel()
-
-	h := newHarness(t, WithEnv(map[string]string{fakeCodexEnv: "1", fakeCodexEnvVersion: "0.1.0"}))
-	h.initialize()
-
-	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
-	require.Equal(t, -32603, requestErrorCode(t, err))
-	require.Equal(t, "codex_runtime_unavailable", requestErrorData(t, err)["error"])
-}
-
 func TestClosedAgentRefusesRequests(t *testing.T) {
 	t.Parallel()
 
@@ -339,6 +333,21 @@ func TestClosedAgentRefusesRequests(t *testing.T) {
 
 	_, err := agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, -32600, requestErrorCode(t, err))
+
+	_, err = agent.accountUsage(context.Background(), json.RawMessage(`{}`))
+	require.Equal(t, -32600, requestErrorCode(t, err))
+	require.Equal(t, "agent closed", requestErrorData(t, err)["error"], "a closed agent refuses the read before any runtime start")
+}
+
+func TestDefaultExecutableResolvesFromTheBasePath(t *testing.T) {
+	t.Parallel()
+
+	bin := t.TempDir()
+	require.NoError(t, os.Symlink(os.Args[0], filepath.Join(bin, vendor)))
+
+	h := newHarness(t, WithExecutablePath(""), WithEnv(map[string]string{fakeCodexEnv: "1", "PATH": bin}))
+	h.initialize()
+	h.newSession()
 }
 
 func TestCommandSilence(t *testing.T) {
