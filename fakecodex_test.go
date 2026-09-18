@@ -334,7 +334,7 @@ func (f *fakeCodex) resumeThread(id json.RawMessage, params map[string]any) {
 
 	matches, _ := filepath.Glob(filepath.Join(f.home, "sessions", "*", "*", "*", "rollout-*-"+threadID+".jsonl"))
 	if len(matches) == 0 {
-		f.fail(id, -32000, "no rollout found for thread id "+threadID)
+		f.fail(id, -32600, "no rollout found for thread id "+threadID)
 
 		return
 	}

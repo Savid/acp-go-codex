@@ -121,6 +121,9 @@ and the adapter's session record under `config`, format
 rollout in Codex's home when it is at least as long as the stored copy, adopt
 the rows it holds beyond it, and materialize the stored copy at the path the
 app-server resolves the thread id to otherwise.
+If Codex never persisted an empty thread, load and resume create a new native
+thread while retaining the ACP session id. The new binding is committed before
+the response. Nonempty history and other native failures never take this path.
 Native rows and session configuration commit as one store generation. A
 configuration change is durable even when no native rows were added. The same
 generation captures admitted generated and viewed image bytes under `config`,

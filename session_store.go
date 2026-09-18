@@ -228,6 +228,33 @@ func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored sto
 	return path, rows, nil
 }
 
+// resumeStoredThread replaces an unpersisted empty thread while retaining the
+// ACP identity. The caller commits the new native binding before publication.
+func (s *session) resumeStoredThread(ctx context.Context, rt *runtime, rows [][]byte) (codex.Thread, error) {
+	thread, err := rt.client.ResumeThread(ctx, s.threadResume(), rt.nativePath)
+	if err == nil || len(rows) != 0 || !codex.IsMissingThread(err, s.nativeID) {
+		return thread, err
+	}
+
+	native, readErr := codex.ReadRows(s.rolloutPath)
+	if readErr != nil {
+		return codex.Thread{}, readErr
+	}
+
+	if len(native) != 0 {
+		return codex.Thread{}, err
+	}
+
+	thread, err = rt.client.StartThread(ctx, s.threadStart(), rt.nativePath)
+	if err != nil {
+		return codex.Thread{}, err
+	}
+
+	s.nativeID = thread.ID
+
+	return thread, nil
+}
+
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 

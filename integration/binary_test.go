@@ -57,6 +57,35 @@ func TestSmokeSessionLifecycle(t *testing.T) {
 	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 }
 
+func TestSmokeEmptySessionRecovery(t *testing.T) {
+	requireIntegration(t)
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, false, codexacp.WithSessionStore(store))
+	ctx := h.ctx(t)
+	_, err := h.conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.NoError(t, err)
+	cwd := t.TempDir()
+	created, err := h.conn.NewSession(ctx, wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	h.stop()
+
+	for _, home := range []string{h.home, t.TempDir()} {
+		restored := newHarnessAt(t, false, home, codexacp.WithSessionStore(store))
+		_, err = restored.conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+		require.NoError(t, err)
+		resumed, err := restored.conn.ResumeSession(ctx, wire.ResumeSessionRequest(created.SessionId, cwd))
+		require.NoError(t, err)
+		require.NotEmpty(t, nativeSessionID(t, resumed.Meta))
+		listed, err := restored.conn.ListSessions(ctx, wire.ListSessionsRequest())
+		require.NoError(t, err)
+		require.Len(t, listed.Sessions, 1)
+		require.Equal(t, created.SessionId, listed.Sessions[0].SessionId)
+		require.Equal(t, resumed.Meta, listed.Sessions[0].Meta)
+		restored.stop()
+	}
+}
+
 func TestLivePromptResumeAndPath(t *testing.T) {
 	requireLive(t)
 

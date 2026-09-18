@@ -174,6 +174,14 @@ func (c *Client) ResumeThread(ctx context.Context, req ThreadResumeRequest, nati
 	return thread, nil
 }
 
+// IsMissingThread recognizes the native refusal for a thread with no rollout.
+func IsMissingThread(err error, threadID string) bool {
+	var rpcErr *RPCError
+
+	return errors.As(err, &rpcErr) && rpcErr.Code == -32600 &&
+		rpcErr.Message == "no rollout found for thread id "+threadID
+}
+
 // UnsubscribeThread releases the app-server's thread subscription. An
 // app-server without the method is not a failure.
 func (c *Client) UnsubscribeThread(ctx context.Context, threadID string) error {

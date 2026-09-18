@@ -395,7 +395,7 @@ func TestRestoreAcceptsACommittedEmptyConversation(t *testing.T) {
 func TestEmptyConversationCommitsItsConfiguration(t *testing.T) {
 	t.Parallel()
 
-	store := acpcore.NewInMemorySessionStore()
+	store := &recoveryFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
 	h := newHarness(t, WithSessionStore(store))
 	h.initialize()
 
@@ -420,6 +420,34 @@ func TestEmptyConversationCommitsItsConfiguration(t *testing.T) {
 	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
 	require.Len(t, listed.Sessions, 1)
+
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(record.RolloutPath))
+	before, err := store.Load(t.Context(), string(session.SessionId))
+	require.NoError(t, err)
+	store.fail.Store(true)
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "codex_restore_failed", requestErrorData(t, err)["error"])
+	after, err := store.Load(t.Context(), string(session.SessionId))
+	require.NoError(t, err)
+	require.Equal(t, before, after, "failed recovery must preserve the committed binding")
+	store.fail.Store(false)
+
+	resumed, err := h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	require.NotEqual(t, session.Meta, resumed.Meta)
+	after, err = store.Load(t.Context(), string(session.SessionId))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(after[configSubpath][0], &record))
+	require.Equal(t, string(session.SessionId), record.SessionID)
+	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), resumed.Meta)
+	require.Equal(t, "low", record.Effort)
+	listed, err = h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, session.SessionId, listed.Sessions[0].SessionId)
+	require.Equal(t, resumed.Meta, listed.Sessions[0].Meta)
 }
 
 func TestRestoreAdoptsRowsAppendedOutsideACP(t *testing.T) {

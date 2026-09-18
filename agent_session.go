@@ -326,7 +326,7 @@ func (a *Agent) restore(
 	s.rolloutPath = path
 	s.mirrored = len(rows)
 
-	thread, err := rt.client.ResumeThread(ctx, s.threadResume(), rt.nativePath)
+	thread, err := s.resumeStoredThread(ctx, rt, rows)
 	if err != nil {
 		return nil, nil, a.restoreRefused(ctx, sessionID, err)
 	}
