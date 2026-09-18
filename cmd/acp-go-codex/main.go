@@ -23,7 +23,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags := flag.NewFlagSet("acp-go-codex", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	codexPath := flags.String("path", "", "codex executable; a bare name is searched on PATH")
+	executablePath := flags.String("path", "", "codex executable; a bare name is searched on PATH")
 	home := flags.String("home", "", "Codex home passed as CODEX_HOME; empty inherits Codex's own resolution")
 	scratchDir := flags.String("scratch-dir", "", "additional read root for image output written outside the workspace")
 	model := flags.String("model", "", "default model for new sessions")
@@ -63,7 +63,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	options := []codexacp.Option{
 		codexacp.WithAgentVersion(version()),
-		codexacp.WithExecutablePath(*codexPath),
+		codexacp.WithExecutablePath(*executablePath),
 		codexacp.WithHome(*home),
 		codexacp.WithScratchDir(*scratchDir),
 		codexacp.WithDefaultModel(*model),

@@ -115,7 +115,7 @@ func accountUsageResponse(plan string, usage codex.AccountUsage, now time.Time) 
 				continue
 			}
 
-			entry := wire.AccountUsageLimit{ObservedAt: wire.AccountUsageTime(now), StaleAt: wire.AccountUsageTime(now.Add(time.Minute)), ID: limit.ID + "/" + w.suffix, Label: strings.TrimSpace(limit.Name), UsedPercent: w.window.UsedPercent}
+			entry := wire.AccountUsageLimit{ObservedAt: wire.AccountUsageTime(now), StaleAt: wire.AccountUsageTime(now.Add(wire.AccountUsageFreshness)), ID: limit.ID + "/" + w.suffix, Label: strings.TrimSpace(limit.Name), UsedPercent: w.window.UsedPercent}
 			if minutes := w.window.WindowDurationMins; minutes > 0 && minutes <= math.MaxInt64/60 {
 				entry.WindowSeconds = minutes * 60
 			}

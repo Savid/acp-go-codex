@@ -23,6 +23,10 @@ const (
 	metaApprovalPolicyKey = "approvalPolicy"
 	metaSandboxPolicyKey  = "sandboxPolicy"
 	metaEnabledKey        = "enabled"
+
+	// metaStructuredOutputKey names both the discovery object and the result
+	// member native structured output lands on.
+	metaStructuredOutputKey = "structuredOutput"
 )
 
 // CodexOptions is the per-session options struct carried at

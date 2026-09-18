@@ -8,13 +8,13 @@ import (
 
 // WithSessionCodexOptions merges codex-specific options into _meta.codex.options.
 func WithSessionCodexOptions(options CodexOptions) wire.SessionRequestOption {
-	return wire.WithSessionMetaValue(options.clone().Meta())
+	return wire.WithSessionMetaValue(options.Meta())
 }
 
 // WithSessionOutputSchema sets the JSON schema the turn's final answer must
 // satisfy; it rides outputSchema on turn/start.
 func WithSessionOutputSchema(schema map[string]any) wire.SessionRequestOption {
-	return wire.WithSessionMetaValue(CodexOptions{OutputSchema: wire.CloneMap(schema)}.Meta())
+	return wire.WithSessionMetaValue(CodexOptions{OutputSchema: schema}.Meta())
 }
 
 // WithSessionRawEvents toggles raw codex event emission for the session.

@@ -37,7 +37,8 @@ const (
 
 	vendor = "codex"
 
-	capabilityMethodKey = "method"
+	capabilityMethodKey      = "method"
+	capabilityElicitationKey = "elicitation"
 )
 
 // client is the host side of the connection, as the sessions use it.
@@ -131,6 +132,7 @@ func (a *Agent) validateOptions() *acp.RequestError {
 		err   error
 	}{
 		{"home", process.ValidateOptionalAbsolutePath(options.Home)},
+		{"scratchDir", process.ValidateOptionalAbsolutePath(options.ScratchDir)},
 		{"inputHandoffRoot", image.ValidateHandoffRoot(options.InputHandoffRoot)},
 		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
 		{metaEnvKey, process.ValidateNames(options.Env)},
@@ -254,11 +256,12 @@ func (a *Agent) Close() error {
 
 	a.closed = true
 	sessions := slices.Collect(maps.Values(a.sessions))
-	a.conn = nil
 	a.mu.Unlock()
 
 	var errs []error
 
+	// The ladder's terminal events still need the connection, so it is cleared
+	// only once every session has run its own shutdown.
 	for _, s := range sessions {
 		if err := s.close(context.Background()); err != nil {
 			errs = append(errs, err)
@@ -267,6 +270,7 @@ func (a *Agent) Close() error {
 
 	a.mu.Lock()
 	clear(a.sessions)
+	a.conn = nil
 	a.mu.Unlock()
 
 	a.stopRuntime(context.Background())
@@ -320,16 +324,14 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 
 	capabilityMeta := map[string]any{
 		vendor: map[string]any{
-			"elicitation": map[string]any{"unstable": true, "scope": "session", "tracks": "ACP v1 elicitation"},
+			capabilityElicitationKey: map[string]any{"unstable": true, "scope": "session", "tracks": "ACP v1 elicitation"},
 			metaRawEventKey: map[string]any{
 				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.codex.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
 			},
 			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeAgent),
 			"sessionStore":                 map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
-			"structuredOutput": map[string]any{
-				"config": wire.MetaOptionPath(vendor, metaOutputSchemaKey), nativeResultKey: "_meta.codex." + structuredOutputKey, "schema": "json_schema",
-			},
+			metaStructuredOutputKey:        wire.StructuredOutputAdvertisement(vendor),
 		},
 		wire.MediaEnvelopeKey: image.MediaEnvelope(a.options.ImageLimits.core(), image.Envelope{DocumentFormats: []string{}}),
 	}

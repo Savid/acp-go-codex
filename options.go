@@ -5,14 +5,13 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/savid/acp-go-core/wire"
-
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/image"
+	"github.com/savid/acp-go-core/wire"
 )
 
 // Option configures the Codex ACP agent.

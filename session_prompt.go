@@ -16,13 +16,7 @@ import (
 	"github.com/savid/acp-go-core/wire"
 )
 
-const (
-	limitSessionPrompt = "session_prompt"
-
-	// structuredOutputKey is where a schema-bound turn's parsed final answer
-	// rides on the prompt response.
-	structuredOutputKey = "structuredOutput"
-)
+const limitSessionPrompt = "session_prompt"
 
 // nativePrompt is one mapped prompt.
 type nativePrompt struct {
@@ -160,14 +154,6 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 	}
 	defer release()
 
-	s.mu.Lock()
-	busy := s.cycle != nil
-	s.mu.Unlock()
-
-	if busy {
-		return acp.PromptResponse{}, wire.Backpressure(limitSessionPrompt)
-	}
-
 	// The turn is driven by a session-owned scope, not by this request's
 	// context: the SDK cancels the previous prompt's context when a second
 	// one arrives for the same session, and a refused peer prompt must not
@@ -219,11 +205,19 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		settled:    make(chan struct{}),
 		finished:   make(chan struct{}),
 	}
-	defer close(t.finished)
-
+	// The busy check shares its critical section with the install, so a
+	// cycle the pump opens can neither be missed nor left without a settler.
 	s.mu.Lock()
+	if s.cycle != nil {
+		s.mu.Unlock()
+
+		return acp.PromptResponse{}, wire.Backpressure(limitSessionPrompt)
+	}
+
 	s.turn = t
 	s.mu.Unlock()
+
+	defer close(t.finished)
 
 	defer func() {
 		s.mu.Lock()
@@ -398,7 +392,7 @@ func (s *session) structuredOutputMeta(text string) map[string]any {
 		return nil
 	}
 
-	return map[string]any{vendor: map[string]any{structuredOutputKey: value}}
+	return map[string]any{vendor: map[string]any{metaStructuredOutputKey: value}}
 }
 
 // mirrorFailure maps a failed mirror commit onto the turn-failure shape. A

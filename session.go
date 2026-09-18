@@ -310,14 +310,24 @@ func (s *session) openAgentCycle(ctx context.Context, event codex.Event) {
 	c := &cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseActivity}, nativeTurnID: event.TurnID}
 	c.state.tools = make(map[string]*toolState)
 
+	// The check, the open event, and the install share one critical section,
+	// so a prompt cannot install a turn between them and leave a turn and a
+	// cycle live at once.
+	s.mu.Lock()
+	if s.turn != nil || s.cycle != nil || s.closing {
+		s.mu.Unlock()
+
+		return
+	}
+
 	if err := s.lc.OpenAgentCycle(ctx, &c.Cycle); err != nil {
+		s.mu.Unlock()
 		s.agent.log.ErrorContext(ctx, "open agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 
 		return
 	}
 
-	s.mu.Lock()
 	s.cycle = c
 	s.mu.Unlock()
 

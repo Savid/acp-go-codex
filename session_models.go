@@ -96,16 +96,11 @@ func selectOption(id acp.SessionConfigId, name string, category acp.SessionConfi
 // modelSelectOptions lists the native catalog, then host-listed ids the
 // catalog lacks, then the current model when nothing else names it.
 func modelSelectOptions(model string, models []codex.Model, hostListed []string) acp.SessionConfigSelectOptionsUngrouped {
-	values := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models)+len(hostListed)+1)
-	seen := make(map[string]struct{}, len(models)+len(hostListed)+1)
-
+	rows := make([]wire.ModelRow, 0, len(models))
 	for index := range models {
 		info := &models[index]
-		if _, ok := seen[info.ID]; ok {
-			continue
-		}
 
-		meta := map[string]any{"modelId": info.ID}
+		meta := map[string]any{}
 		if info.ContextWindow > 0 {
 			meta["contextWindow"] = info.ContextWindow
 		}
@@ -114,29 +109,10 @@ func modelSelectOptions(model string, models []codex.Model, hostListed []string)
 			meta["supportedEffortLevels"] = slices.Clone(info.ReasoningEfforts)
 		}
 
-		option := acp.SessionConfigSelectOption{
-			Name:  firstNonEmpty(info.Name, info.ID),
-			Value: acp.SessionConfigValueId(info.ID),
-			Meta:  map[string]any{vendor: meta},
-		}
-		if info.Description != "" {
-			option.Description = &info.Description
-		}
-
-		values = append(values, option)
-		seen[info.ID] = struct{}{}
+		rows = append(rows, wire.ModelRow{ID: info.ID, Name: info.Name, Description: info.Description, Meta: meta})
 	}
 
-	for _, id := range append(slices.Clone(hostListed), model) {
-		if _, ok := seen[id]; ok || id == "" {
-			continue
-		}
-
-		values = append(values, acp.SessionConfigSelectOption{Name: id, Value: acp.SessionConfigValueId(id)})
-		seen[id] = struct{}{}
-	}
-
-	return values
+	return wire.ModelSelectOptions(vendor, model, rows, hostListed)
 }
 
 // effortSelectOptions renders the selected model's effort menu, falling back
