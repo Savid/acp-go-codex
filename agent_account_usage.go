@@ -37,6 +37,10 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 		return wire.AccountUsageResponse{}, refusal
 	}
 
+	if request.ProviderID != "" {
+		return wire.AccountUsageResponse{}, wire.Unsupported("providerId")
+	}
+
 	if request.SessionID != "" {
 		if _, lookupErr := a.session(ctx, request.SessionID); lookupErr != nil {
 			return wire.AccountUsageResponse{}, lookupErr
