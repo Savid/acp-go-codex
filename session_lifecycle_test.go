@@ -205,7 +205,7 @@ func TestCloseDoesNotRepeatAnAgentCycleTerminal(t *testing.T) {
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	require.NoError(t, os.WriteFile(rollout, nil, 0o600))
 
-	s := &session{agent: NewAgent(), id: "sess-1", cwd: t.TempDir(), rolloutPath: rollout}
+	s := &session{agent: NewAgent(), id: "sess-1", cwd: t.TempDir(), rolloutPath: rollout, gate: make(chan struct{}, 1)}
 
 	var delivered []map[string]any
 

@@ -105,18 +105,13 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 
 	if refusal == nil {
 		s.mu.Lock()
-		s.installed = true
 		s.closeDone = make(chan struct{})
 		s.mu.Unlock()
 		a.sessions[s.id] = s
 	}
 	a.mu.Unlock()
 
-	// A refused session was never announced, so its close owes the store
-	// nothing and only releases the native runtime.
 	if refusal != nil {
-		_ = s.close(ctx)
-
 		return refusal
 	}
 
@@ -129,16 +124,33 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 // response on a served connection, and emits it inline for an embedded host.
 // Codex has no command surface, so nothing else is published.
 func (a *Agent) scheduleOpen(ctx context.Context, s *session) error {
+	s.mu.Lock()
+	rt := s.rt
+	s.mu.Unlock()
+
 	if t := a.transportRef(); t != nil {
 		return t.RegisterHook(ctx, s.id, func(hookCtx context.Context) {
-			if err := s.openStream(hookCtx); err != nil {
+			// Establishment has committed; the gate keeps failure cleanup on its source.
+			release := wire.HoldSessionGate(s.gate)
+			defer release()
+
+			if err := s.openStream(hookCtx, rt); err != nil {
+				s.mu.Lock()
+				current := !s.closing && s.rt == rt
+				s.mu.Unlock()
+
+				if current {
+					_ = s.close(context.WithoutCancel(hookCtx))
+					a.detach(hookCtx, s)
+				}
+
 				a.log.ErrorContext(hookCtx, "publish session open failed",
 					slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 			}
 		})
 	}
 
-	return s.openStream(ctx)
+	return s.openStream(ctx, rt)
 }
 
 // NewSession starts a thread on the shared app-server.
@@ -180,12 +192,18 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	defer release()
 
 	if err := a.install(ctx, s); err != nil {
+		release()
+
+		_ = s.close(context.WithoutCancel(ctx))
+
 		return acp.NewSessionResponse{}, err
 	}
 
 	if err := s.commitMirror(ctx); err != nil {
 		a.log.ErrorContext(ctx, "initial mirror commit failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+		release()
+
 		_ = s.close(context.WithoutCancel(ctx))
 		a.detach(ctx, s)
 
@@ -193,6 +211,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	}
 
 	if err := a.scheduleOpen(ctx, s); err != nil {
+		release()
+
 		_ = s.close(context.WithoutCancel(ctx))
 		a.detach(ctx, s)
 
@@ -293,9 +313,9 @@ func (a *Agent) restore(
 			return a.restoreActive(ctx, active, replay, release)
 		}
 
-		closeErr := active.close(ctx)
-
 		release()
+
+		closeErr := active.close(ctx)
 
 		a.detach(ctx, active)
 
@@ -356,10 +376,16 @@ func (a *Agent) restore(
 	}()
 
 	if err := a.install(ctx, s); err != nil {
+		release()
+
+		_ = s.close(context.WithoutCancel(ctx))
+
 		return nil, nil, err
 	}
 
 	if err := s.commitMirror(ctx); err != nil {
+		release()
+
 		_ = s.close(context.WithoutCancel(ctx))
 		a.detach(ctx, s)
 
@@ -368,6 +394,8 @@ func (a *Agent) restore(
 
 	if replay {
 		if err := s.replay(ctx, rows, stored.record.Images); err != nil {
+			release()
+
 			_ = s.close(context.WithoutCancel(ctx))
 			a.detach(ctx, s)
 
@@ -376,6 +404,8 @@ func (a *Agent) restore(
 	}
 
 	if err := a.scheduleOpen(ctx, s); err != nil {
+		release()
+
 		_ = s.close(context.WithoutCancel(ctx))
 		a.detach(ctx, s)
 

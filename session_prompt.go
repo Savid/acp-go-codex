@@ -237,7 +237,7 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		// turn's own terminal event, so the next one publishes on a new
 		// stream.
 		if lost || t.ended == turnTransportEnded {
-			s.lc.Fence()
+			s.fenceStream()
 		}
 	}()
 
@@ -355,7 +355,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 		s.mu.Lock()
 		s.rt = nil
 		s.mu.Unlock()
-		s.lc.Fence()
+		s.fenceStream()
 		verdict.failure = s.mirrorFailure(&t.state, err)
 		verdict.outcome = lifecycle.OutcomeFailed
 	}

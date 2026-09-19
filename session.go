@@ -68,9 +68,8 @@ type session struct {
 	// scope outlives the request context, so a superseded handler context
 	// never ends a turn the session still owns.
 	promptCancel context.CancelFunc
-	// installed records that the agent published the session under its id,
-	// so close owes the store its final generation.
-	installed bool
+	// persisted marks a successfully committed mirror.
+	persisted bool
 	closing   bool
 	closeDone chan struct{}
 	closeErr  error
@@ -78,6 +77,7 @@ type session struct {
 	cycle     *cycle
 	dialogs   map[string]*dialog
 
+	openMu   sync.Mutex
 	mirrorMu sync.Mutex
 	lcMu     sync.Mutex
 	lc       lifecycle.Publisher
@@ -203,6 +203,14 @@ func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 		return rt, nil
 	}
 
+	if rt != nil {
+		select {
+		case <-rt.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
 	rt, err := s.agent.ensureRuntime(ctx)
 	if err != nil {
 		return nil, err
@@ -215,7 +223,7 @@ func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 
 	s.bind(rt, thread)
 
-	if err := s.openStream(ctx); err != nil {
+	if err := s.openStream(ctx, rt); err != nil {
 		return nil, err
 	}
 
@@ -235,8 +243,10 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 
 // handleEvent attributes one native event of the session's thread to the
 // foreground that owns it: the in-flight prompt, the open agent-origin
-// cycle, or, for work with neither, a new agent-origin cycle.
-func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Event) {
+// cycle, or, for work with neither, a new agent-origin cycle. It returns false
+// when process loss interrupts settlement, so queued tails cannot mutate the
+// cycle the prompt is still settling.
+func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Event) bool {
 	s.emitRawEvent(ctx, event)
 
 	s.mu.Lock()
@@ -248,7 +258,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 	s.mu.Unlock()
 
 	if !bound {
-		return
+		return true
 	}
 
 	// A record naming the turn this session already terminalized is that
@@ -256,7 +266,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 	// would stamp the live cycle with an id no later record of that cycle can
 	// match, and the cycle would never reach its own terminal.
 	if event.TurnID != "" && event.TurnID == terminalTurn {
-		return
+		return true
 	}
 
 	switch {
@@ -274,6 +284,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 			select {
 			case <-t.finished:
 			case <-rt.proc.Done():
+				return false
 			}
 		}
 	case c != nil:
@@ -288,6 +299,8 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 			s.openAgentCycle(ctx, event)
 		}
 	}
+
+	return true
 }
 
 // bearsWork reports whether a record says the thread is running work a cycle
@@ -347,7 +360,7 @@ func (s *session) settleAgentCycle(ctx context.Context, c *cycle) {
 		s.mu.Lock()
 		s.rt = nil
 		s.mu.Unlock()
-		s.lc.Fence()
+		s.fenceStream()
 		s.agent.log.ErrorContext(settleCtx, "mirror commit after agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 	}
@@ -401,7 +414,6 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		return
 	}
 
-	s.rt = nil
 	s.generationLost = true
 	t := s.turn
 	c := s.cycle
@@ -419,6 +431,15 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	if c != nil && !closing && s.claimTerminal(c) {
 		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed})
 	}
+
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+
+	s.mu.Lock()
+	if s.rt == rt {
+		s.rt = nil
+	}
+	s.mu.Unlock()
 
 	if t != nil {
 		// The prompt settles the turn and fences the stream after its idle.
@@ -566,11 +587,12 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.closing = true
+
+	joinEstablishment := !s.persisted
 	if s.closeDone == nil {
 		s.closeDone = make(chan struct{})
 	}
 
-	installed := s.installed
 	t := s.turn
 	rt := s.rt
 	cancelPrompt := s.promptCancel
@@ -611,12 +633,22 @@ func (s *session) close(ctx context.Context) error {
 		cancel()
 	}
 
+	// An initial mirror may not have started yet; its establishment owns the gate.
+	if joinEstablishment {
+		s.gate <- struct{}{}
+		defer func() { <-s.gate }()
+	}
+
+	s.mu.Lock()
+	persisted := s.persisted
+	s.mu.Unlock()
+
 	var errs []error
 
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
-	if installed {
+	if persisted {
 		if err := s.commitMirror(commitCtx); err != nil {
 			errs = append(errs, err)
 		}
@@ -634,7 +666,7 @@ func (s *session) close(ctx context.Context) error {
 		}
 	}
 
-	s.lc.Fence()
+	s.fenceStream()
 
 	s.mu.Lock()
 	s.closeErr = errors.Join(errs...)

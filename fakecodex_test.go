@@ -22,6 +22,8 @@ import (
 const (
 	fakeCodexEnv     = "ACP_GO_CODEX_TEST_FAKE"
 	fakeCodexEnvDump = "ACP_GO_CODEX_TEST_ENV_DUMP"
+	// fakeCodexEnvRequestSent signals that a native callback is on stdout.
+	fakeCodexEnvRequestSent = "ACP_GO_CODEX_TEST_REQUEST_SENT"
 	// fakeCodexEnvResumeHold names a file the fake creates when a thread/resume
 	// arrives that it will never answer, so a test can act while the adapter is
 	// still rebinding the thread.
@@ -178,6 +180,9 @@ func (f *fakeCodex) request(method string, params map[string]any) map[string]any
 	f.mu.Unlock()
 
 	f.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	if path := os.Getenv(fakeCodexEnvRequestSent); path != "" {
+		_ = os.WriteFile(path, nil, 0o600)
+	}
 
 	select {
 	case response := <-waiter:
@@ -563,7 +568,7 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		// naming the turn that just ended.
 		f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "tail-1", "delta": "tail"}))
 	case strings.HasPrefix(message, "AGENT"):
-		f.agentTurn(thread, message == "AGENTHANG")
+		f.agentTurn(thread, message == "AGENTHANG", message == "AGENTTOOL")
 	}
 }
 
@@ -628,7 +633,7 @@ func (f *fakeCodex) serverRequestTurn(message string, thread *fakeThread, scoped
 
 // agentTurn runs one turn the thread begins on its own, with no prompt in
 // flight: the agent-origin path the lifecycle capability advertises.
-func (f *fakeCodex) agentTurn(thread *fakeThread, hold bool) {
+func (f *fakeCodex) agentTurn(thread *fakeThread, hold, withTool bool) {
 	turnID := fakeUUID()
 	scoped := func(fields map[string]any) map[string]any {
 		out := map[string]any{"threadId": thread.id, "turnId": turnID}
@@ -638,6 +643,9 @@ func (f *fakeCodex) agentTurn(thread *fakeThread, hold bool) {
 	}
 
 	f.notify("turn/started", scoped(map[string]any{"turn": map[string]any{"id": turnID}}))
+	if withTool {
+		f.tool(thread, scoped, false)
+	}
 	f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "agent-1", "delta": "background"}))
 	f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": "agent-1", "type": "agentMessage", "text": "background"}}))
 	f.appendRow(thread, eventRow("agent_message", map[string]any{"message": "background"}))

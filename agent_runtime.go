@@ -49,8 +49,21 @@ type runtime struct {
 
 	mu         sync.Mutex
 	dead       bool
-	events     map[*session]chan codex.Event
+	events     map[*session]*sessionQueue
 	eventPumps sync.WaitGroup
+}
+
+type sessionQueue struct {
+	messages chan sessionMessage
+	// stopped prevents more delivery while the shared reader drains the
+	// remaining records of a generation whose worker has ended.
+	stopped bool
+}
+
+// sessionMessage preserves one thread's notification and request order.
+type sessionMessage struct {
+	event   codex.Event
+	request *codex.ServerRequest
 }
 
 func (rt *runtime) alive() bool {
@@ -218,8 +231,8 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 	defer close(rt.done)
 	defer func() {
 		rt.mu.Lock()
-		for _, events := range rt.events {
-			close(events)
+		for _, queue := range rt.events {
+			close(queue.messages)
 		}
 		rt.mu.Unlock()
 		rt.eventPumps.Wait()
@@ -240,7 +253,7 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 
 			event := codex.DecodeEvent(notification)
 			if s := a.sessionByThread(event.ThreadID); s != nil {
-				if !a.routeEvent(ctx, rt, s, event) {
+				if !a.routeMessage(ctx, rt, s, sessionMessage{event: event}) {
 					return
 				}
 			}
@@ -251,53 +264,58 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 				continue
 			}
 
-			a.routeRequest(rt, request)
+			if !a.routeRequest(ctx, rt, request) {
+				return
+			}
 		}
 	}
 }
 
-// routeEvent keeps each session's publication and settlement off the shared reader.
-func (a *Agent) routeEvent(ctx context.Context, rt *runtime, s *session, event codex.Event) bool {
+// routeMessage keeps each session's publication, callbacks and settlement off
+// the shared reader while preserving their native stream order.
+func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, message sessionMessage) bool {
 	rt.mu.Lock()
 
-	events := rt.events[s]
-	if events == nil {
-		if rt.events == nil {
-			rt.events = make(map[*session]chan codex.Event)
+	select {
+	case <-s.closeDone:
+		rt.mu.Unlock()
+
+		if message.request != nil {
+			a.respondUnowned(rt, *message.request)
 		}
 
-		events = make(chan codex.Event, 256)
-		rt.events[s] = events
-
-		rt.eventPumps.Go(func() {
-			defer func() {
-				rt.mu.Lock()
-				delete(rt.events, s)
-				rt.mu.Unlock()
-			}()
-
-			for {
-				select {
-				case queued, ok := <-events:
-					if !ok {
-						return
-					}
-
-					s.handleEvent(ctx, rt, queued)
-				case <-s.closeDone:
-					return
-				}
-			}
-		})
-	}
-	rt.mu.Unlock()
-
-	select {
-	case events <- event:
-		return true
-	case <-s.closeDone:
 		return true
 	default:
+	}
+
+	queue := rt.events[s]
+	if queue == nil {
+		if rt.events == nil {
+			rt.events = make(map[*session]*sessionQueue)
+		}
+
+		queue = &sessionQueue{messages: make(chan sessionMessage, 256)}
+		rt.events[s] = queue
+		rt.eventPumps.Go(func() { a.pumpSession(ctx, rt, s, queue) })
+	}
+
+	if queue.stopped {
+		rt.mu.Unlock()
+
+		if message.request != nil {
+			a.respondUnowned(rt, *message.request)
+		}
+
+		return true
+	}
+
+	select {
+	case queue.messages <- message:
+		rt.mu.Unlock()
+
+		return true
+	default:
+		rt.mu.Unlock()
 		a.log.ErrorContext(ctx, "codex session event queue exceeded capacity", slog.String("session_id", string(s.id)))
 
 		_ = rt.proc.Kill()
@@ -306,20 +324,62 @@ func (a *Agent) routeEvent(ctx context.Context, rt *runtime, s *session, event c
 	}
 }
 
-// routeRequest hands one server request to the session owning its thread. A
-// request naming no live session is answered as cancelled so the app-server
-// never waits on a session that is gone.
-func (a *Agent) routeRequest(rt *runtime, request codex.ServerRequest) {
+func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue *sessionQueue) {
+	defer func() {
+		rt.mu.Lock()
+		queue.stopped = true
+
+		select {
+		case <-s.closeDone:
+			delete(rt.events, s)
+		default:
+		}
+
+		var pending []codex.ServerRequest
+
+		for range len(queue.messages) {
+			if queued := <-queue.messages; queued.request != nil {
+				pending = append(pending, *queued.request)
+			}
+		}
+		rt.mu.Unlock()
+
+		for _, request := range pending {
+			a.respondUnowned(rt, request)
+		}
+	}()
+
+	for {
+		select {
+		case queued, ok := <-queue.messages:
+			if !ok {
+				return
+			}
+
+			if queued.request != nil {
+				s.handleRequest(rt, *queued.request, codex.RequestParams(*queued.request))
+			} else if !s.handleEvent(ctx, rt, queued.event) {
+				return
+			}
+		case <-s.closeDone:
+			return
+		}
+	}
+}
+
+// routeRequest queues one server request for the session owning its thread.
+// Requests naming no live session are answered as cancelled.
+func (a *Agent) routeRequest(ctx context.Context, rt *runtime, request codex.ServerRequest) bool {
 	params := codex.RequestParams(request)
 
 	s := a.sessionByThread(codex.RequestThreadID(params))
 	if s == nil {
 		a.respondUnowned(rt, request)
 
-		return
+		return true
 	}
 
-	s.handleRequest(rt, request, params)
+	return a.routeMessage(ctx, rt, s, sessionMessage{request: &request})
 }
 
 func (a *Agent) respondUnowned(rt *runtime, request codex.ServerRequest) {

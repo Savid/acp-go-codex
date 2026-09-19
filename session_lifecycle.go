@@ -11,8 +11,43 @@ import (
 
 func (s *session) lifecycleNegotiated() lifecycle.Negotiated { return s.agent.lifecycleNegotiated() }
 
-func (s *session) openStream(ctx context.Context) error {
+func (s *session) openStream(ctx context.Context, rt *runtime) error {
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+
+	s.mu.Lock()
+
+	if s.closing {
+		s.mu.Unlock()
+
+		return wire.UnknownSession()
+	}
+
+	if rt == nil || s.rt != rt || !rt.alive() {
+		s.mu.Unlock()
+
+		return wire.RuntimeUnavailable(vendor)
+	}
+
+	select {
+	case <-rt.proc.Done():
+		s.mu.Unlock()
+
+		return wire.RuntimeUnavailable(vendor)
+	default:
+	}
+
+	s.mu.Unlock()
+
 	return s.lc.Open(ctx, fmt.Sprintf("%s:%d", s.id, s.agent.nextIncarnation()), s.lifecycleNegotiated(), s.deliverLifecycle)
+}
+
+// fenceStream joins any opening publication before retiring its incarnation.
+func (s *session) fenceStream() {
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+
+	s.lc.Fence()
 }
 
 func (s *session) acceptTurn(ctx context.Context, t *turn) {
