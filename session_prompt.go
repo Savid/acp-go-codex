@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -127,7 +128,7 @@ func (s *session) turnStart(input []codex.UserInput) codex.TurnStartRequest {
 		req.CollaborationMode = map[string]any{
 			"mode": s.mode,
 			"settings": map[string]any{
-				metaModelKey: firstNonEmpty(s.model, modeDefault), "developer_instructions": nil, "reasoning_effort": effort,
+				metaModelKey: cmp.Or(s.model, modeDefault), "developer_instructions": nil, "reasoning_effort": effort,
 			},
 		}
 	}
@@ -242,16 +243,12 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 
 	nativeTurnID, err := rt.client.StartTurn(turnCtx, s.turnStart(mapped.input))
 	if err != nil {
-		s.lcMu.Lock()
-		accepted := t.accepted
-		s.lcMu.Unlock()
-
-		if !accepted {
+		if !s.turnAccepted(t) {
 			if turnCtx.Err() != nil {
 				return wire.CancelledResponse(params), nil
 			}
 
-			return acp.PromptResponse{}, s.dispatchFailure(ctx, rt, err)
+			return acp.PromptResponse{}, s.dispatchFailure(context.WithoutCancel(ctx), rt, err)
 		}
 	}
 
@@ -261,12 +258,12 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 	}
 	s.mu.Unlock()
 
-	s.acceptTurn(ctx, t)
+	s.acceptTurn(turnCtx, t)
 
 	select {
 	case <-t.settled:
 	case <-turnCtx.Done():
-		s.cancel(ctx)
+		s.cancel(context.WithoutCancel(ctx))
 
 		select {
 		case <-t.settled:
@@ -402,7 +399,7 @@ func (s *session) mirrorFailure(state *cycleState, err error) error {
 
 	failure := wire.TurnFailure{Cause: wire.CauseTransport, Message: "session mirror commit failed"}
 	if state.imagesEmitted {
-		failure.Message = "image output is no longer available from the session store"
+		failure.Message = "image output is no longer available from the artifact store"
 		failure.Stage = image.OutputStage
 		failure.Reason = image.ReasonStorageFailed
 	}

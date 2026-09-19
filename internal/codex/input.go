@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
 // ErrUnsupportedContentBlock reports a prompt content block Codex cannot
@@ -61,7 +63,7 @@ func PromptToUserInput(blocks []acp.ContentBlock, images []PromptImage) ([]UserI
 			input = append(input, resourceLinkInput(*block.ResourceLink))
 		case block.Resource != nil:
 			if text := block.Resource.Resource.TextResourceContents; text != nil {
-				input = append(input, UserInput{fieldType: inputText, inputText: fmt.Sprintf("\n<context ref=%q>\n%s\n</context>", text.Uri, text.Text)})
+				input = append(input, UserInput{fieldType: inputText, inputText: wire.ContextResourceText(text.Uri, text.Text)})
 
 				continue
 			}

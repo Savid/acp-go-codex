@@ -136,6 +136,7 @@ func ReadRows(path string) ([][]byte, error) {
 }
 
 // WriteRows materializes rows as a rollout file, creating its day directory.
+// The file is staged beside its final name and renamed into place.
 func WriteRows(path string, rows [][]byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create rollout directory: %w", err)
@@ -148,8 +149,26 @@ func WriteRows(path string, rows [][]byte) error {
 		content.WriteByte('\n')
 	}
 
-	if err := os.WriteFile(path, content.Bytes(), 0o600); err != nil {
-		return fmt.Errorf("write rollout file: %w", err)
+	staging, err := os.CreateTemp(filepath.Dir(path), ".acp-go-codex-*.jsonl")
+	if err != nil {
+		return fmt.Errorf("stage rollout file: %w", err)
+	}
+
+	_, writeErr := staging.Write(content.Bytes())
+	if closeErr := staging.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+
+	if writeErr != nil {
+		_ = os.Remove(staging.Name())
+
+		return fmt.Errorf("write rollout file: %w", writeErr)
+	}
+
+	if err := os.Rename(staging.Name(), path); err != nil {
+		_ = os.Remove(staging.Name())
+
+		return fmt.Errorf("publish rollout file: %w", err)
 	}
 
 	return nil

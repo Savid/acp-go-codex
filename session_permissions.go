@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -58,7 +59,7 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 		switch request.Method {
 		case codex.RequestCommandApproval, codex.RequestFileChangeApproval:
 			selected := s.requestPermission(ctx, c, permissionRequest{
-				toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
+				toolCallID: cmp.Or(codex.RequestItemID(params), string(request.ID)),
 				title:      codex.ApprovalTitle(request.Method, params),
 				kind:       codex.ApprovalKind(request.Method),
 				content:    codex.ApprovalContent(request.Method, params),
@@ -68,7 +69,7 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 			response = codex.ApprovalResponse(selected, params)
 		case codex.RequestPermissionsApproval:
 			selected := s.requestPermission(ctx, c, permissionRequest{
-				toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
+				toolCallID: cmp.Or(codex.RequestItemID(params), string(request.ID)),
 				title:      codex.ApprovalTitle(request.Method, params),
 				kind:       acp.ToolKindOther,
 				content:    codex.ApprovalContent(request.Method, params),
@@ -81,7 +82,7 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 		case codex.RequestMCPElicitation:
 			if codex.IsMCPToolApproval(params) {
 				selected := s.requestPermission(ctx, c, permissionRequest{
-					toolCallID: firstNonEmpty(codex.RequestItemID(params), string(request.ID)),
+					toolCallID: cmp.Or(codex.RequestItemID(params), string(request.ID)),
 					title:      codex.MCPToolApprovalTitle(params),
 					kind:       acp.ToolKindOther,
 					rawInput:   params,

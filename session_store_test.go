@@ -505,7 +505,9 @@ func TestNativeHomeLockRefusesASecondRuntime(t *testing.T) {
 	second.initialize()
 
 	_, err := second.conn.NewSession(second.ctx(), wire.NewSessionRequest(t.TempDir()))
-	require.Equal(t, "codex_runtime_unavailable", requestErrorData(t, err)["error"])
+	data := requestErrorData(t, err)
+	require.Equal(t, "codex_internal_failure", data["error"])
+	require.Equal(t, internalClassNativeStart, data["class"])
 }
 
 func TestCommitWithNoRolloutIsAFailure(t *testing.T) {
@@ -615,4 +617,84 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, record.NativeSessionID, after.NativeSessionID)
 	require.Equal(t, string(id), after.SessionID)
+}
+
+type blockedCommitStore struct {
+	acpcore.SessionStore
+	blockID atomic.Value
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockedCommitStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.blockID.Load() == key.SessionID {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func TestPeerPromptCompletesDuringMirrorCommit(t *testing.T) {
+	t.Parallel()
+	store := &blockedCommitStore{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize(withLifecycle())
+	first, second := h.newSession(), h.newSession()
+	store.blockID.Store(string(first.SessionId))
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := h.prompt(first.SessionId, "TAIL", promptMeta(1))
+		firstDone <- err
+	}()
+	defer func() {
+		close(store.release)
+		require.NoError(t, <-firstDone)
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(testTimeout):
+		t.Fatal("first prompt did not reach the mirror commit")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := h.prompt(second.SessionId, "HELLO", promptMeta(2))
+		secondDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("peer prompt waited for another session's mirror commit")
+	}
+}
+
+func TestFailedConfigChangeDoesNotReachTheNextCommit(t *testing.T) {
+	t.Parallel()
+	store := &mirrorFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession()
+	var before sessionRecord
+	_, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &before)
+	require.NoError(t, err)
+	require.True(t, found)
+	store.fail.Store(true)
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configModel, "changed"))
+	require.Error(t, err)
+	store.fail.Store(false)
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configMode, "plan"))
+	require.NoError(t, err)
+	var after sessionRecord
+	_, found, err = sessionlog.Load(t.Context(), store, string(session.SessionId), &after)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, before.Model, after.Model)
 }

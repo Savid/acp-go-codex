@@ -13,7 +13,7 @@ import (
 // client: a tool question travels only as a form, an MCP url elicitation only
 // as a url, and everything the client cannot take is answered natively with
 // no client call.
-func TestElicitationCapabilityMatrix(t *testing.T) {
+func TestElicitationCapabilityGating(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {

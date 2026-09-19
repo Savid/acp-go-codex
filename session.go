@@ -24,9 +24,6 @@ const (
 	// sessionSettleTimeout bounds one turn's settlement after the native run
 	// ended: the mirror commit and the terminal lifecycle event.
 	sessionSettleTimeout = 60 * time.Second
-	// processExitGrace is how long failure classification waits for a dead
-	// child to be reaped after its stdout closed.
-	processExitGrace = 2 * time.Second
 )
 
 // session is one ACP session: one Codex thread on the shared app-server.
@@ -71,12 +68,15 @@ type session struct {
 	// scope outlives the request context, so a superseded handler context
 	// never ends a turn the session still owns.
 	promptCancel context.CancelFunc
-	closing      bool
-	closeDone    chan struct{}
-	closeErr     error
-	turn         *turn
-	cycle        *cycle
-	dialogs      map[string]*dialog
+	// installed records that the agent published the session under its id,
+	// so close owes the store its final generation.
+	installed bool
+	closing   bool
+	closeDone chan struct{}
+	closeErr  error
+	turn      *turn
+	cycle     *cycle
+	dialogs   map[string]*dialog
 
 	mirrorMu sync.Mutex
 	lcMu     sync.Mutex
@@ -566,7 +566,11 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.closing = true
-	s.closeDone = make(chan struct{})
+	if s.closeDone == nil {
+		s.closeDone = make(chan struct{})
+	}
+
+	installed := s.installed
 	t := s.turn
 	rt := s.rt
 	cancelPrompt := s.promptCancel
@@ -612,8 +616,10 @@ func (s *session) close(ctx context.Context) error {
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
-	if err := s.commitMirror(commitCtx); err != nil {
-		errs = append(errs, err)
+	if installed {
+		if err := s.commitMirror(commitCtx); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	s.mu.Lock()

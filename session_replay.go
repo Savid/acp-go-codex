@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -74,7 +75,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 	emitted := make(map[string]bool)
 
 	for _, row := range decoded {
-		id := firstNonEmpty(payloadString(row.Payload, "id"), payloadString(row.Payload, "call_id"))
+		id := cmp.Or(payloadString(row.Payload, "id"), payloadString(row.Payload, "call_id"))
 		if row.Type == codex.RowTypeResponseItem && payloadString(row.Payload, fieldType) == itemImageGen {
 			if saved, ok := captured[id]; ok {
 				row.Payload[nativeResultKey] = saved.Data
@@ -144,7 +145,7 @@ func replayRow(row codex.RolloutRow, events replayEventKinds, limits image.Limit
 	case codex.RowTypeResponseItem:
 		return replayResponseItem(row.Payload, events, limits)
 	case codex.RowTypeCompacted:
-		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(firstNonEmpty(payloadString(row.Payload, "message"), compactedText))}, nil
+		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(cmp.Or(payloadString(row.Payload, "message"), compactedText))}, nil
 	default:
 		return nil, nil
 	}
@@ -161,11 +162,11 @@ func replayEvent(payload map[string]any) []acp.SessionUpdate {
 			return []acp.SessionUpdate{acp.UpdateAgentMessageText(text)}
 		}
 	case eventAgentReason, eventReasonRaw:
-		if text := firstNonEmpty(payloadString(payload, "text"), payloadString(payload, "message")); text != "" {
+		if text := cmp.Or(payloadString(payload, "text"), payloadString(payload, "message")); text != "" {
 			return []acp.SessionUpdate{acp.UpdateAgentThoughtText(text)}
 		}
 	case eventCompacted:
-		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(firstNonEmpty(payloadString(payload, "message"), compactedText))}
+		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(cmp.Or(payloadString(payload, "message"), compactedText))}
 	}
 
 	return nil
@@ -218,14 +219,14 @@ func replayResponseItem(payload map[string]any, events replayEventKinds, limits 
 }
 
 func replayToolStart(payload map[string]any, title string, kind acp.ToolKind, rawInput any) acp.SessionUpdate {
-	id := firstNonEmpty(payloadString(payload, "call_id"), payloadString(payload, "id"), title)
+	id := cmp.Or(payloadString(payload, "call_id"), payloadString(payload, "id"), title)
 
 	return acp.StartToolCall(acp.ToolCallId(id), title,
 		acp.WithStartKind(kind), acp.WithStartStatus(acp.ToolCallStatusCompleted), acp.WithStartRawInput(rawInput))
 }
 
 func replayToolOutput(payload map[string]any) []acp.SessionUpdate {
-	id := firstNonEmpty(payloadString(payload, "call_id"), payloadString(payload, "id"))
+	id := cmp.Or(payloadString(payload, "call_id"), payloadString(payload, "id"))
 	if id == "" {
 		return nil
 	}
@@ -245,7 +246,7 @@ func replayToolOutput(payload map[string]any) []acp.SessionUpdate {
 // it: a failed call carrying the same guidance text. Bytes that are present
 // but invalid still fail the restore.
 func replayImage(payload map[string]any, limits image.Limits) ([]acp.SessionUpdate, *image.OutputError) {
-	id := acp.ToolCallId(firstNonEmpty(payloadString(payload, "id"), payloadString(payload, "call_id"), "image"))
+	id := acp.ToolCallId(cmp.Or(payloadString(payload, "id"), payloadString(payload, "call_id"), "image"))
 	start := acp.StartToolCall(id, imageToolTitle(itemTypeImageGeneration), acp.WithStartKind(acp.ToolKindOther), acp.WithStartStatus(acp.ToolCallStatusCompleted))
 
 	result := payloadString(payload, nativeResultKey)
@@ -266,7 +267,7 @@ func replayImage(payload map[string]any, limits image.Limits) ([]acp.SessionUpda
 }
 
 func responseItemText(payload map[string]any) string {
-	if text := firstNonEmpty(payloadString(payload, "text"), payloadString(payload, "summary")); text != "" {
+	if text := cmp.Or(payloadString(payload, "text"), payloadString(payload, "summary")); text != "" {
 		return text
 	}
 
@@ -282,7 +283,7 @@ func responseItemText(payload map[string]any) string {
 		case string:
 			text.WriteString(typed)
 		case map[string]any:
-			text.WriteString(firstNonEmpty(payloadString(typed, "text"), payloadString(typed, "summary_text")))
+			text.WriteString(cmp.Or(payloadString(typed, "text"), payloadString(typed, "summary_text")))
 		}
 	}
 

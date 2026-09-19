@@ -3,12 +3,10 @@ package codexacp
 import (
 	"cmp"
 	"context"
-	"errors"
 	"log/slog"
 	"maps"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
@@ -49,8 +47,10 @@ type runtime struct {
 	// models is the catalog snapshot read at start.
 	models []codex.Model
 
-	mu   sync.Mutex
-	dead bool
+	mu         sync.Mutex
+	dead       bool
+	events     map[*session]chan codex.Event
+	eventPumps sync.WaitGroup
 }
 
 func (rt *runtime) alive() bool {
@@ -77,8 +77,9 @@ func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
 }
 
 // ensureRuntime returns the live app-server generation, starting one
-// replacement when the previous generation is gone. A replacement that cannot
-// start answers codex_runtime_unavailable.
+// replacement when the previous generation is gone. A first start that fails
+// is a native start failure; a replacement that cannot start answers
+// codex_runtime_unavailable.
 func (a *Agent) ensureRuntime(ctx context.Context) (*runtime, error) {
 	a.runtimeMu.Lock()
 	defer a.runtimeMu.Unlock()
@@ -99,7 +100,11 @@ func (a *Agent) ensureRuntime(ctx context.Context) (*runtime, error) {
 			return nil, refusal
 		}
 
-		return nil, wire.RuntimeUnavailable(vendor)
+		if a.runtime != nil {
+			return nil, wire.RuntimeUnavailable(vendor)
+		}
+
+		return nil, wire.InternalFailure(vendor, internalClassNativeStart)
 	}
 
 	a.runtime = rt
@@ -211,6 +216,15 @@ func pathFromEnvironment(env []string) string {
 // life of the process.
 func (a *Agent) pump(ctx context.Context, rt *runtime) {
 	defer close(rt.done)
+	defer func() {
+		rt.mu.Lock()
+		for _, events := range rt.events {
+			close(events)
+		}
+		rt.mu.Unlock()
+		rt.eventPumps.Wait()
+		a.generationEnded(ctx, rt)
+	}()
 
 	notifications := rt.client.Notifications()
 	requests := rt.client.Requests()
@@ -226,7 +240,9 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 
 			event := codex.DecodeEvent(notification)
 			if s := a.sessionByThread(event.ThreadID); s != nil {
-				s.handleEvent(ctx, rt, event)
+				if !a.routeEvent(ctx, rt, s, event) {
+					return
+				}
 			}
 		case request, ok := <-requests:
 			if !ok {
@@ -238,8 +254,56 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 			a.routeRequest(rt, request)
 		}
 	}
+}
 
-	a.generationEnded(ctx, rt)
+// routeEvent keeps each session's publication and settlement off the shared reader.
+func (a *Agent) routeEvent(ctx context.Context, rt *runtime, s *session, event codex.Event) bool {
+	rt.mu.Lock()
+
+	events := rt.events[s]
+	if events == nil {
+		if rt.events == nil {
+			rt.events = make(map[*session]chan codex.Event)
+		}
+
+		events = make(chan codex.Event, 256)
+		rt.events[s] = events
+
+		rt.eventPumps.Go(func() {
+			defer func() {
+				rt.mu.Lock()
+				delete(rt.events, s)
+				rt.mu.Unlock()
+			}()
+
+			for {
+				select {
+				case queued, ok := <-events:
+					if !ok {
+						return
+					}
+
+					s.handleEvent(ctx, rt, queued)
+				case <-s.closeDone:
+					return
+				}
+			}
+		})
+	}
+	rt.mu.Unlock()
+
+	select {
+	case events <- event:
+		return true
+	case <-s.closeDone:
+		return true
+	default:
+		a.log.ErrorContext(ctx, "codex session event queue exceeded capacity", slog.String("session_id", string(s.id)))
+
+		_ = rt.proc.Kill()
+
+		return false
+	}
 }
 
 // routeRequest hands one server request to the session owning its thread. A
@@ -289,7 +353,7 @@ func (a *Agent) sessionByThread(threadID string) *session {
 	defer a.mu.Unlock()
 
 	for _, s := range a.sessions {
-		if s.nativeID == threadID && !isDeleted(a.deleted, s.id) {
+		if s.nativeID == threadID && !a.deleted[s.id] {
 			return s
 		}
 	}
@@ -315,6 +379,7 @@ func (a *Agent) generationEnded(ctx context.Context, rt *runtime) {
 	}
 
 	_ = rt.homeLock.Close()
+	_ = rt.proc.Close()
 
 	rt.mu.Lock()
 	rt.dead = true
@@ -371,29 +436,5 @@ func (a *Agent) stopRuntime(ctx context.Context) {
 // the child's exit status and last stderr line where it died, otherwise the
 // transport error.
 func (a *Agent) transportFailure(ctx context.Context, rt *runtime, err error) *acp.RequestError {
-	waitCtx, cancel := context.WithTimeout(ctx, processExitGrace)
-	defer cancel()
-
-	if result, waitErr := rt.proc.Wait(waitCtx); waitErr == nil {
-		message := "codex app-server exited with status " + strconv.Itoa(result.ExitCode)
-		if result.Signal != 0 {
-			message = "codex app-server was killed by signal " + strconv.Itoa(result.Signal)
-		}
-
-		if line := rt.proc.StderrLastLine(); line != "" {
-			message += ": " + line
-		}
-
-		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProcessExit, Message: message})
-	}
-
-	if err == nil {
-		err = rt.client.Err()
-	}
-
-	if err == nil {
-		err = errors.New("codex app-server stream closed mid-turn")
-	}
-
-	return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: err.Error()})
+	return wire.TurnFailed(vendor, wire.TransportFailure(ctx, rt.proc, "codex app-server", err, rt.client.Err))
 }

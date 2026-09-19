@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"os"
@@ -106,7 +107,7 @@ func (s *session) publishToolStart(ctx context.Context, state *cycleState, event
 	state.toolsMu.Lock()
 	defer state.toolsMu.Unlock()
 
-	id := firstNonEmpty(event.ID, "codex-tool")
+	id := cmp.Or(event.ID, "codex-tool")
 
 	tool := state.tool(id)
 	if tool.terminal {
@@ -141,14 +142,14 @@ func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id st
 		return nil
 	}
 
-	tool := state.tool(firstNonEmpty(id, "codex-tool"))
+	tool := state.tool(cmp.Or(id, "codex-tool"))
 	if tool.terminal {
 		return nil
 	}
 
 	tool.content = append(tool.content, acp.ToolContent(acp.TextBlock(text)))
 
-	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(firstNonEmpty(id, "codex-tool")), acp.WithUpdateContent(append([]acp.ToolCallContent(nil), tool.content...))))
+	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(cmp.Or(id, "codex-tool")), acp.WithUpdateContent(append([]acp.ToolCallContent(nil), tool.content...))))
 }
 
 // publishToolTerminal emits the terminal status and the complete final
@@ -157,7 +158,7 @@ func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, ev
 	state.toolsMu.Lock()
 	defer state.toolsMu.Unlock()
 
-	id := firstNonEmpty(event.ID, "codex-tool")
+	id := cmp.Or(event.ID, "codex-tool")
 
 	tool := state.tool(id)
 	if tool.terminal {
@@ -223,7 +224,7 @@ func (s *session) publishImageStart(ctx context.Context, state *cycleState, even
 	state.toolsMu.Lock()
 	defer state.toolsMu.Unlock()
 
-	id := firstNonEmpty(event.ID, "codex-image")
+	id := cmp.Or(event.ID, "codex-image")
 
 	tool := state.tool(id)
 	if tool.published || tool.terminal {
@@ -247,7 +248,7 @@ func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, e
 	state.toolsMu.Lock()
 	defer state.toolsMu.Unlock()
 
-	id := firstNonEmpty(event.ID, "codex-image")
+	id := cmp.Or(event.ID, "codex-image")
 
 	tool := state.tool(id)
 	if tool.terminal {

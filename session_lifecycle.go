@@ -15,8 +15,6 @@ func (s *session) openStream(ctx context.Context) error {
 	return s.lc.Open(ctx, fmt.Sprintf("%s:%d", s.id, s.agent.nextIncarnation()), s.lifecycleNegotiated(), s.deliverLifecycle)
 }
 
-// acceptTurn publishes prompt acceptance once. lcMu also orders the cycle
-// identity Accept stamps against every reader of it.
 func (s *session) acceptTurn(ctx context.Context, t *turn) {
 	s.lcMu.Lock()
 	defer s.lcMu.Unlock()
@@ -29,6 +27,14 @@ func (s *session) acceptTurn(ctx context.Context, t *turn) {
 	if err := s.lc.Accept(ctx, &t.Cycle, t.submission); err != nil && t.failure == nil {
 		t.failure = err
 	}
+}
+
+// turnAccepted reports whether the turn's acceptance has been published.
+func (s *session) turnAccepted(t *turn) bool {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	return t.accepted
 }
 
 // recordFailure keeps the first failure one cycle observed. The pump and the

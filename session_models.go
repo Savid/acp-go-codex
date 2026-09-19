@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"slices"
 
@@ -59,7 +60,7 @@ func (s *session) configOptions() []acp.SessionConfigOption {
 	options := make([]acp.SessionConfigOption, 0, 5)
 
 	if values := modelSelectOptions(model, models, s.agent.options.ConfiguredModels); len(values) > 0 {
-		options = append(options, selectOption(configModel, "Model", acp.SessionConfigOptionCategoryModel, firstNonEmpty(model, modeDefault), values))
+		options = append(options, selectOption(configModel, "Model", acp.SessionConfigOptionCategoryModel, cmp.Or(model, modeDefault), values))
 	}
 
 	options = append(options, selectOption(configMode, "Mode", acp.SessionConfigOptionCategoryMode, mode, acp.SessionConfigSelectOptionsUngrouped{
@@ -123,7 +124,7 @@ func effortSelectOptions(model string, effort string, models []codex.Model) (str
 			continue
 		}
 
-		current := firstNonEmpty(effort, models[index].DefaultReasoningEffort)
+		current := cmp.Or(effort, models[index].DefaultReasoningEffort)
 
 		return current, menuOptions(models[index].ReasoningEfforts, current)
 	}
@@ -164,6 +165,14 @@ func (s *session) setConfigOption(ctx context.Context, configID acp.SessionConfi
 	defer release()
 
 	s.mu.Lock()
+
+	if s.cycle != nil {
+		s.mu.Unlock()
+
+		return nil, wire.Backpressure(limitSessionPrompt)
+	}
+
+	oldModel, oldMode, oldEffort, oldServiceTier, oldPersonality, oldContextWindow := s.model, s.mode, s.effort, s.serviceTier, s.personality, s.contextWindow
 
 	switch configID {
 	case configModel:
@@ -208,6 +217,10 @@ func (s *session) setConfigOption(ctx context.Context, configID acp.SessionConfi
 	s.mu.Unlock()
 
 	if err := s.commitMirror(ctx); err != nil {
+		s.mu.Lock()
+		s.model, s.mode, s.effort, s.serviceTier, s.personality, s.contextWindow = oldModel, oldMode, oldEffort, oldServiceTier, oldPersonality, oldContextWindow
+		s.mu.Unlock()
+
 		return nil, wire.InternalFailure(vendor, "")
 	}
 

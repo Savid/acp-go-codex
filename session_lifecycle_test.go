@@ -187,9 +187,6 @@ func TestNativeTailDoesNotStampTheNextTurn(t *testing.T) {
 	}
 	s := &session{agent: NewAgent(), rt: rt, turn: next, lastTerminalTurn: "turn-1"}
 
-	// The pump unparks when the previous prompt closes its turn, which is
-	// before the gate admits the next one, so a queued tail of the
-	// terminalized turn can land on a turn that has no native id yet.
 	s.handleEvent(t.Context(), rt, codex.Event{Kind: codex.EventAgentMessageDelta, TurnID: "turn-1", ItemID: "tail-1", Text: "tail"})
 
 	s.mu.Lock()
