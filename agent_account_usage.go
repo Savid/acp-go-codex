@@ -45,7 +45,9 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 	}
 
 	switch request.ProviderID {
-	case "", openaicodex.ProviderID, anthropic.ProviderID, opencodego.ProviderID, openrouter.ProviderID:
+	case "":
+		return wire.AccountUsageResponse{}, wire.Missing("providerId")
+	case openaicodex.ProviderID, anthropic.ProviderID, opencodego.ProviderID, openrouter.ProviderID:
 	default:
 		return wire.AccountUsageResponse{}, wire.Unsupported("providerId")
 	}
@@ -70,7 +72,7 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 	// through a gateway, ChatGPT included when no login holds it, is read from
 	// that gateway's report.
 	response := wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated)
-	if request.ProviderID == "" || request.ProviderID == openaicodex.ProviderID {
+	if request.ProviderID == openaicodex.ProviderID {
 		response, err = readAccountUsage(readCtx, rt.client)
 		if err != nil {
 			a.log.ErrorContext(ctx, "codex account usage read failed", slog.String("reason", err.Error()))
@@ -78,21 +80,19 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 			return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
 		}
 
-		if response.Available || request.ProviderID == "" {
+		if response.Available {
 			return response, nil
 		}
 	}
 
-	env, err := a.environment().Build()
-	if err != nil {
-		return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
-	}
+	response, err = gateway.ReadRoutes(readCtx, a.providerTransport, func(context.Context) ([]gateway.Route, error) {
+		env, envErr := a.environment().Build()
+		if envErr != nil {
+			return nil, envErr
+		}
 
-	routes, err := codex.GatewayRoutes(rt.home, a.options.CodexConfigOverrides, func(key string) (string, bool) { return process.Lookup(env, key) })
-	if err == nil {
-		response, err = gateway.ReadRoutes(readCtx, a.providerTransport, routes, request.ProviderID, response)
-	}
-
+		return codex.GatewayRoutes(rt.home, a.options.CodexConfigOverrides, func(key string) (string, bool) { return process.Lookup(env, key) })
+	}, request.ProviderID, response)
 	if err != nil {
 		a.log.ErrorContext(ctx, "codex account usage read failed", slog.String("reason", err.Error()))
 

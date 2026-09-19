@@ -218,7 +218,8 @@ func TestCloseDoesNotRepeatAnAgentCycleTerminal(t *testing.T) {
 	}))
 
 	c := &cycle{}
-	require.NoError(t, s.lc.OpenAgentCycle(t.Context(), &c.Cycle))
+	c.Cycle = s.lc.NewAgentCycle()
+	require.NoError(t, s.lc.OpenAgentCycle(t.Context(), c.Cycle))
 
 	s.mu.Lock()
 	s.cycle = c

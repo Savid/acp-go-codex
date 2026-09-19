@@ -47,7 +47,7 @@ func TestAccountUsageReadsThroughTheSharedRuntime(t *testing.T) {
 	h.initialize()
 
 	before := time.Now()
-	response, err := callAccountUsage(t, h, map[string]any{})
+	response, err := callAccountUsage(t, h, map[string]any{"providerId": "openai-codex"})
 	require.NoError(t, err)
 
 	observed, parseErr := time.Parse(time.RFC3339, response.Limits[0].ObservedAt)
@@ -64,12 +64,9 @@ func TestAccountUsageReadsThroughTheSharedRuntime(t *testing.T) {
 	}}, response)
 
 	sessionID := h.newSession().SessionId
-	withSession, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	withSession, err := callAccountUsage(t, h, map[string]any{"providerId": "openai-codex", accountUsageSessionField: sessionID})
 	require.NoError(t, err, "a live session id is accepted and does not scope the read")
 	require.Len(t, withSession.Limits, 3)
-
-	_, err = callAccountUsage(t, h, nil)
-	require.NoError(t, err, "absent params are the empty request")
 }
 
 func TestAccountUsageRefusals(t *testing.T) {
@@ -84,8 +81,9 @@ func TestAccountUsageRefusals(t *testing.T) {
 		params any
 		data   map[string]any
 	}{
-		{"unknown session", map[string]any{accountUsageSessionField: "nope"}, map[string]any{"error": "unknown session", "field": accountUsageSessionField}},
-		{"empty session", map[string]any{accountUsageSessionField: ""}, map[string]any{"error": "unsupported", "field": accountUsageSessionField}},
+		{"missing provider", map[string]any{}, map[string]any{"error": "missing", "field": "providerId"}},
+		{"unknown session", map[string]any{"providerId": "openai-codex", accountUsageSessionField: "nope"}, map[string]any{"error": "unknown session", "field": accountUsageSessionField}},
+		{"empty session", map[string]any{"providerId": "openai-codex", accountUsageSessionField: ""}, map[string]any{"error": "unsupported", "field": accountUsageSessionField}},
 		{"unadvertised provider", map[string]any{"providerId": "openai"}, map[string]any{"error": "unsupported", "field": "providerId"}},
 		{"lifecycle key", map[string]any{"_meta": map[string]any{wire.LifecycleKey: map[string]any{}}}, map[string]any{"error": "unsupported", "field": `_meta["` + wire.LifecycleKey + `"]`}},
 	}
@@ -99,7 +97,7 @@ func TestAccountUsageRefusals(t *testing.T) {
 	_, err := h.conn.UnstableDeleteSession(h.ctx(), wire.DeleteSessionRequest(sessionID))
 	require.NoError(t, err)
 
-	_, err = callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	_, err = callAccountUsage(t, h, map[string]any{"providerId": "openai-codex", accountUsageSessionField: sessionID})
 	require.Equal(t, -32602, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "unknown session", "field": accountUsageSessionField}, requestErrorData(t, err), "a tombstoned session")
 }
@@ -121,7 +119,7 @@ func TestAccountUsageUnavailableAndRefused(t *testing.T) {
 		h := newHarness(t, WithEnv(map[string]string{fakeCodexEnv: "1", fakeCodexEnvAccount: tc.account}))
 		h.initialize()
 
-		response, err := callAccountUsage(t, h, map[string]any{})
+		response, err := callAccountUsage(t, h, map[string]any{"providerId": "openai-codex"})
 		require.NoError(t, err, tc.account)
 		require.Equal(t, tc.expected, response, tc.account)
 	}
@@ -129,7 +127,7 @@ func TestAccountUsageUnavailableAndRefused(t *testing.T) {
 	refused := newHarness(t, WithEnv(map[string]string{fakeCodexEnv: "1", fakeCodexEnvAccount: fakeCodexAccountRefuse}))
 	refused.initialize()
 
-	_, err := callAccountUsage(t, refused, map[string]any{})
+	_, err := callAccountUsage(t, refused, map[string]any{"providerId": "openai-codex"})
 	require.Equal(t, -32603, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "codex_internal_failure", "class": "account_usage"}, requestErrorData(t, err))
 }
@@ -180,7 +178,7 @@ func TestAccountUsagePropagatesTraceContext(t *testing.T) {
 
 	const traceID = "0af7651916cd43dd8448eb211c80319c"
 
-	_, err := callAccountUsage(t, h, map[string]any{"_meta": map[string]any{"traceparent": "00-" + traceID + "-b7ad6b7169203331-01"}})
+	_, err := callAccountUsage(t, h, map[string]any{"providerId": "openai-codex", "_meta": map[string]any{"traceparent": "00-" + traceID + "-b7ad6b7169203331-01"}})
 	require.NoError(t, err)
 
 	var traced bool
@@ -215,8 +213,8 @@ const gatewayReport = `{"generatedAt":1,"reports":[{"provider":"anthropic","fetc
 func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	t.Parallel()
 	a := NewAgent(testOptions(t,
-		WithEnv(map[string]string{fakeCodexEnv: "1", "OMP_GATEWAY_KEY": "gateway-key", "PROXY_KEY": "proxy-key"}),
-		WithCodexConfigOverrides(map[string]any{"model_provider": "omp", "model_providers.omp.base_url": "https://gateway.example/v1", "model_providers.omp.env_key": "OMP_GATEWAY_KEY"}),
+		WithEnv(map[string]string{fakeCodexEnv: "1", "GATEWAY_GATEWAY_KEY": "gateway-key", "PROXY_KEY": "proxy-key"}),
+		WithCodexConfigOverrides(map[string]any{"model_provider": "gateway", "model_providers.gateway.base_url": "https://gateway.example/v1", "model_providers.gateway.env_key": "GATEWAY_GATEWAY_KEY"}),
 	)...)
 	t.Cleanup(func() { require.NoError(t, a.Close()) })
 	require.NoError(t, os.MkdirAll(a.options.Home, 0o700))
@@ -264,8 +262,8 @@ func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 func TestGatewayModelListReplacesThePresets(t *testing.T) {
 	t.Parallel()
 	a := NewAgent(testOptions(t,
-		WithEnv(map[string]string{fakeCodexEnv: "1", "OMP_GATEWAY_KEY": "gateway-key"}),
-		WithCodexConfigOverrides(map[string]any{"model_provider": "omp", "model_providers.omp.base_url": "https://gateway.example/v1", "model_providers.omp.env_key": "OMP_GATEWAY_KEY"}),
+		WithEnv(map[string]string{fakeCodexEnv: "1", "GATEWAY_GATEWAY_KEY": "gateway-key"}),
+		WithCodexConfigOverrides(map[string]any{"model_provider": "gateway", "model_providers.gateway.base_url": "https://gateway.example/v1", "model_providers.gateway.env_key": "GATEWAY_GATEWAY_KEY"}),
 		WithConfiguredModels([]string{"opencode-go/qwen3.8-flash"}),
 	)...)
 	t.Cleanup(func() { require.NoError(t, a.Close()) })

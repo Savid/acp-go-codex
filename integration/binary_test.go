@@ -29,7 +29,7 @@ func TestSmokeSessionLifecycle(t *testing.T) {
 	require.Empty(t, init.AuthMethods)
 	require.True(t, init.AgentCapabilities.LoadSession)
 
-	raw, err := h.conn.CallExtension(ctx, codexacp.AccountUsageMethod, map[string]any{})
+	raw, err := h.conn.CallExtension(ctx, codexacp.AccountUsageMethod, map[string]any{"providerId": "openai-codex"})
 	require.NoError(t, err)
 
 	var usage wire.AccountUsageResponse

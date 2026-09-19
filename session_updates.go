@@ -76,10 +76,15 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 	}
 
 	nativeTurnID := c.nativeTurnID
+	cancelled := c.cancelled
 	s.mu.Unlock()
 
 	if nativeTurnID != "" && event.TurnID != "" && event.TurnID != nativeTurnID {
 		return false, nil
+	}
+
+	if cancelled {
+		return event.Kind == codex.EventTurnCompleted, nil
 	}
 
 	switch event.Kind {

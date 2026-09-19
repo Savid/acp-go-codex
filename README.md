@@ -101,15 +101,16 @@ an empty value.
 When `model_provider` names a provider with its own `base_url`, and that base
 publishes a model list at `/v1/models`, the session's model menu is that list
 in place of the app-server's presets, so every model is named with the
-upstream the gateway sends it to.
+upstream the gateway sends it to. If the list is unavailable or empty, the
+app-server presets remain available.
 
 `_codex/accountUsage` reads the ChatGPT account's allowance windows through
-the shared app-server. `providerId` selects `openai-codex` (the default), or
+the shared app-server. `providerId` is required and selects `openai-codex`,
 `anthropic`, `opencode-go`, or `openrouter`; a provider `config.toml` or the launch
 overrides route through a gateway that publishes a usage report is read from
 that report with the key its `env_key` names. Initialize advertises it as
 `_meta.codex.accountUsage` with the value
-`{"method": "_codex/accountUsage", "scope": "agent"}`. The answer carries one
+`{"method": "_codex/accountUsage", "scope": "agent", "providers": ["openai-codex", "anthropic", "opencode-go", "openrouter"]}`. The answer carries one
 limit per window present, keyed `<key>/primary` or
 `<key>/secondary` by the native limit key, with its used percent, length, and
 reset time and its `observedAt`, the account's plan type as `plan`, and the app-server's own
