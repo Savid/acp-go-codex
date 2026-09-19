@@ -88,7 +88,7 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 		return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
 	}
 
-	routes, err := codex.GatewayRoutes(rt.home, func(key string) (string, bool) { return process.Lookup(env, key) })
+	routes, err := codex.GatewayRoutes(rt.home, a.options.CodexConfigOverrides, func(key string) (string, bool) { return process.Lookup(env, key) })
 	if err == nil {
 		response, err = gateway.ReadRoutes(readCtx, a.usageTransport, routes, request.ProviderID, response)
 	}

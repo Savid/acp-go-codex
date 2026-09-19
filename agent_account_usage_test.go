@@ -214,13 +214,19 @@ const gatewayReport = `{"generatedAt":1,"reports":[{"provider":"anthropic","fetc
 // that gateway's report with the key named by env_key.
 func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	t.Parallel()
-	a := NewAgent(testOptions(t, WithEnv(map[string]string{fakeCodexEnv: "1", "OMP_GATEWAY_KEY": "gateway-key"}))...)
+	a := NewAgent(testOptions(t,
+		WithEnv(map[string]string{fakeCodexEnv: "1", "OMP_GATEWAY_KEY": "gateway-key", "PROXY_KEY": "proxy-key"}),
+		WithCodexConfigOverrides(map[string]any{"model_provider": "omp", "model_providers.omp.base_url": "https://gateway.example/v1", "model_providers.omp.env_key": "OMP_GATEWAY_KEY"}),
+	)...)
 	t.Cleanup(func() { require.NoError(t, a.Close()) })
 	require.NoError(t, os.MkdirAll(a.options.Home, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(a.options.Home, "config.toml"), []byte("model_provider = \"omp\"\n\n[model_providers.omp]\nname = \"omp\"\nbase_url = \"https://gateway.example/v1\"\nenv_key = \"OMP_GATEWAY_KEY\"\nwire_api = \"responses\"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(a.options.Home, "config.toml"), []byte("[model_providers.proxy]\nname = \"proxy\"\nbase_url = \"https://proxy.example/v1\"\nenv_key = \"PROXY_KEY\"\n"), 0o600))
 	var asked []string
 	a.usageTransport = gatewayTransport(func(r *http.Request) (*http.Response, error) {
 		asked = append(asked, r.URL.Host+r.URL.Path+" "+r.Header.Get("Authorization"))
+		if r.URL.Host != "gateway.example" {
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+		}
 
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(gatewayReport))}, nil
 	})
@@ -233,7 +239,8 @@ func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, response.Available)
 	require.Equal(t, "5h", response.Limits[0].ID)
-	require.Equal(t, []string{"gateway.example/v1/usage Bearer gateway-key"}, asked)
+	require.Equal(t, []string{"gateway.example/v1/usage Bearer gateway-key", "proxy.example/v1/usage Bearer proxy-key"}[:1], asked[:1], "the launch override route is asked first, in name order")
+	require.Equal(t, []string{"gateway.example/v1/usage Bearer gateway-key"}, asked, "a covering route ends the walk")
 
 	params, err = json.Marshal(map[string]any{"providerId": "openrouter"})
 	require.NoError(t, err)
