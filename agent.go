@@ -57,12 +57,12 @@ type client interface {
 // Agent exposes the Codex app-server through ACP. One app-server serves every
 // session; each session owns one thread on it.
 type Agent struct {
-	// usageTransport carries shared provider usage reads; nil uses the default.
-	usageTransport http.RoundTripper
-	options        Options
-	log            *slog.Logger
-	observe        *observer.Observer
-	optionErr      *acp.RequestError
+	// providerTransport carries shared provider reads; nil uses the default.
+	providerTransport http.RoundTripper
+	options           Options
+	log               *slog.Logger
+	observe           *observer.Observer
+	optionErr         *acp.RequestError
 	// processEnv is the adapter's own environment, read once at construction.
 	processEnv []string
 	store      acpcore.SessionStore

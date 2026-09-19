@@ -98,6 +98,11 @@ an empty value.
 
 ### Account usage
 
+When `model_provider` names a provider with its own `base_url`, and that base
+publishes a model list at `/v1/models`, the session's model menu is that list
+in place of the app-server's presets, so every model is named with the
+upstream the gateway sends it to.
+
 `_codex/accountUsage` reads the ChatGPT account's allowance windows through
 the shared app-server. `providerId` selects `openai-codex` (the default), or
 `anthropic`, `opencode-go`, or `openrouter`; a provider `config.toml` or the launch

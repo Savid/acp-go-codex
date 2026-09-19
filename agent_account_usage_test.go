@@ -222,7 +222,11 @@ func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	require.NoError(t, os.MkdirAll(a.options.Home, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(a.options.Home, "config.toml"), []byte("[model_providers.proxy]\nname = \"proxy\"\nbase_url = \"https://proxy.example/v1\"\nenv_key = \"PROXY_KEY\"\n"), 0o600))
 	var asked []string
-	a.usageTransport = gatewayTransport(func(r *http.Request) (*http.Response, error) {
+	a.providerTransport = gatewayTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/v1/usage" {
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+		}
+
 		asked = append(asked, r.URL.Host+r.URL.Path+" "+r.Header.Get("Authorization"))
 		if r.URL.Host != "gateway.example" {
 			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
@@ -252,4 +256,40 @@ func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	require.NoError(t, err)
 	_, err = a.accountUsage(t.Context(), params)
 	require.Equal(t, map[string]any{"error": "unsupported", "field": "providerId"}, requestErrorData(t, err))
+}
+
+// A model provider routed through a gateway that publishes its model list
+// advertises that list, each id naming its upstream, in place of the
+// app-server's presets.
+func TestGatewayModelListReplacesThePresets(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t,
+		WithEnv(map[string]string{fakeCodexEnv: "1", "OMP_GATEWAY_KEY": "gateway-key"}),
+		WithCodexConfigOverrides(map[string]any{"model_provider": "omp", "model_providers.omp.base_url": "https://gateway.example/v1", "model_providers.omp.env_key": "OMP_GATEWAY_KEY"}),
+		WithConfiguredModels([]string{"opencode-go/qwen3.8-flash"}),
+	)...)
+	t.Cleanup(func() { require.NoError(t, a.Close()) })
+	a.providerTransport = gatewayTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "gateway.example" && r.URL.Path == "/v1/models" && r.Header.Get("Authorization") == "Bearer gateway-key" {
+			body := `{"object":"list","data":[{"id":"openai-codex/gpt-5.6-luna","display_name":"GPT-5.6-Luna","context_length":400000},{"id":"opencode-go/qwen3.8-flash"}]}`
+
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+	})
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.NoError(t, err)
+	session, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	var values []acp.SessionConfigValueId
+	for _, option := range session.ConfigOptions {
+		if option.Select != nil && option.Select.Id == configModel {
+			for _, value := range *option.Select.Options.Ungrouped {
+				values = append(values, value.Value)
+			}
+		}
+	}
+	require.Equal(t, []acp.SessionConfigValueId{"openai-codex/gpt-5.6-luna", "opencode-go/qwen3.8-flash"}, values, "the gateway's ids replace the presets; a configured id already listed is not repeated")
 }

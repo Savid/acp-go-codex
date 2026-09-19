@@ -14,6 +14,7 @@ import (
 
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/usage/gateway"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -212,10 +213,41 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		return nil, listErr
 	}
 
+	if brokered := a.gatewayModels(handshakeCtx, home, env); len(brokered) > 0 {
+		models = brokered
+	}
+
 	rt.models = models
 	started = true
 
 	return rt, nil
+}
+
+// gatewayModels is the model list of the gateway the active model provider
+// routes through, when it publishes one. Codex sends a model name to that
+// provider as given, so the gateway's ids, each naming its upstream, replace
+// the app-server's presets. A list that cannot be read leaves the presets.
+func (a *Agent) gatewayModels(ctx context.Context, home string, env []string) []codex.Model {
+	lookup := func(key string) (string, bool) { return process.Lookup(env, key) }
+
+	route, ok, err := codex.ActiveGatewayRoute(home, a.options.CodexConfigOverrides, lookup)
+	if err != nil || !ok {
+		return nil
+	}
+
+	listed, err := gateway.Models(ctx, a.providerTransport, route)
+	if err != nil {
+		a.log.WarnContext(ctx, "codex gateway model list unavailable", slog.String("provider", route.Provider), slog.String("reason", err.Error()))
+
+		return nil
+	}
+
+	models := make([]codex.Model, 0, len(listed))
+	for _, model := range listed {
+		models = append(models, codex.Model{ID: model.ID, Name: model.Name, ContextWindow: model.ContextWindow, InputModalities: model.Inputs})
+	}
+
+	return models
 }
 
 func pathFromEnvironment(env []string) string {

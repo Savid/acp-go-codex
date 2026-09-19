@@ -26,10 +26,12 @@ type modelProvider struct {
 // routes Codex sends requests through, each with the key the environment
 // holds under the provider's env_key.
 func GatewayRoutes(home string, overrides map[string]any, lookup func(string) (string, bool)) ([]gateway.Route, error) {
-	providers, err := configuredModelProviders(home)
+	config, err := configuredProviders(home)
 	if err != nil {
 		return nil, err
 	}
+
+	providers := config.ModelProviders
 
 	for key, value := range overrides {
 		name, field, ok := strings.Cut(strings.TrimPrefix(key, "model_providers."), ".")
@@ -78,26 +80,62 @@ func GatewayRoutes(home string, overrides map[string]any, lookup func(string) (s
 	return routes, nil
 }
 
-func configuredModelProviders(home string) (map[string]modelProvider, error) {
+// ActiveGatewayRoute is the route of the model provider Codex sends turns
+// to: the launch override's model_provider, else config.toml's, when that
+// provider declares its own base URL.
+func ActiveGatewayRoute(home string, overrides map[string]any, lookup func(string) (string, bool)) (gateway.Route, bool, error) {
+	config, err := configuredProviders(home)
+	if err != nil {
+		return gateway.Route{}, false, err
+	}
+
+	active := config.ModelProvider
+	if name, ok := overrides["model_provider"].(string); ok {
+		active = name
+	}
+
+	if active == "" {
+		return gateway.Route{}, false, nil
+	}
+
+	routes, err := GatewayRoutes(home, overrides, lookup)
+	if err != nil {
+		return gateway.Route{}, false, err
+	}
+
+	for _, route := range routes {
+		if route.Provider == active {
+			return route, true, nil
+		}
+	}
+
+	return gateway.Route{}, false, nil
+}
+
+type providerConfig struct {
+	ModelProvider  string                   `toml:"model_provider"`
+	ModelProviders map[string]modelProvider `toml:"model_providers"`
+}
+
+func configuredProviders(home string) (providerConfig, error) {
+	config := providerConfig{ModelProviders: map[string]modelProvider{}}
+
 	data, err := os.ReadFile(filepath.Join(home, "config.toml"))
 	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]modelProvider{}, nil
+		return config, nil
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("native config: %w", err)
+		return providerConfig{}, fmt.Errorf("native config: %w", err)
 	}
 
-	var config struct {
-		ModelProviders map[string]modelProvider `toml:"model_providers"`
-	}
 	if err := toml.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("native config: %w", err)
+		return providerConfig{}, fmt.Errorf("native config: %w", err)
 	}
 
 	if config.ModelProviders == nil {
-		return map[string]modelProvider{}, nil
+		config.ModelProviders = map[string]modelProvider{}
 	}
 
-	return config.ModelProviders, nil
+	return config, nil
 }
