@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -20,6 +21,10 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -52,10 +57,12 @@ type client interface {
 // Agent exposes the Codex app-server through ACP. One app-server serves every
 // session; each session owns one thread on it.
 type Agent struct {
-	options   Options
-	log       *slog.Logger
-	observe   *observer.Observer
-	optionErr *acp.RequestError
+	// usageTransport carries shared provider usage reads; nil uses the default.
+	usageTransport http.RoundTripper
+	options        Options
+	log            *slog.Logger
+	observe        *observer.Observer
+	optionErr      *acp.RequestError
 	// processEnv is the adapter's own environment, read once at construction.
 	processEnv []string
 	store      acpcore.SessionStore
@@ -325,7 +332,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.codex.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
 			},
-			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeAgent),
+			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeAgent, openaicodex.ProviderID, anthropic.ProviderID, opencodego.ProviderID, openrouter.ProviderID),
 			"sessionStore":                 map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
 			metaStructuredOutputKey:        wire.StructuredOutputAdvertisement(vendor),
 		},

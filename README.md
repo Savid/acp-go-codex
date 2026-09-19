@@ -99,7 +99,10 @@ an empty value.
 ### Account usage
 
 `_codex/accountUsage` reads the ChatGPT account's allowance windows through
-the shared app-server. Initialize advertises it as
+the shared app-server. `providerId` selects `openai-codex` (the default), or
+`anthropic`, `opencode-go`, or `openrouter`; a provider the home's `config.toml`
+routes through a gateway that publishes a usage report is read from that
+report with the key its `env_key` names. Initialize advertises it as
 `_meta.codex.accountUsage` with the value
 `{"method": "_codex/accountUsage", "scope": "agent"}`. The answer carries one
 limit per window present, keyed `<key>/primary` or

@@ -10,6 +10,13 @@ import (
 	"time"
 
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-core/process"
+	coreusage "github.com/savid/acp-go-core/usage"
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/gateway"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -37,7 +44,9 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 		return wire.AccountUsageResponse{}, refusal
 	}
 
-	if request.ProviderID != "" {
+	switch request.ProviderID {
+	case "", openaicodex.ProviderID, anthropic.ProviderID, opencodego.ProviderID, openrouter.ProviderID:
+	default:
 		return wire.AccountUsageResponse{}, wire.Unsupported("providerId")
 	}
 
@@ -57,11 +66,37 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 	readCtx, cancel := context.WithTimeout(ctx, wire.AccountUsageReadTimeout)
 	defer cancel()
 
-	response, err := readAccountUsage(readCtx, rt.client)
+	// The ChatGPT account is read natively; any provider the home routes
+	// through a gateway, ChatGPT included when no login holds it, is read from
+	// that gateway's report.
+	response := wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated)
+	if request.ProviderID == "" || request.ProviderID == openaicodex.ProviderID {
+		response, err = readAccountUsage(readCtx, rt.client)
+		if err != nil {
+			a.log.ErrorContext(ctx, "codex account usage read failed", slog.String("reason", err.Error()))
+
+			return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
+		}
+
+		if response.Available || request.ProviderID == "" {
+			return response, nil
+		}
+	}
+
+	env, err := a.environment().Build()
+	if err != nil {
+		return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
+	}
+
+	routes, err := codex.GatewayRoutes(rt.home, func(key string) (string, bool) { return process.Lookup(env, key) })
+	if err == nil {
+		response, err = gateway.ReadRoutes(readCtx, a.usageTransport, routes, request.ProviderID, response)
+	}
+
 	if err != nil {
 		a.log.ErrorContext(ctx, "codex account usage read failed", slog.String("reason", err.Error()))
 
-		return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
+		return wire.AccountUsageResponse{}, coreusage.RequestError(vendor, err)
 	}
 
 	return response, nil

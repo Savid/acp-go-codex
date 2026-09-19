@@ -13,6 +13,10 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -117,7 +121,7 @@ func TestProtocolAdmission(t *testing.T) {
 
 	vendorMeta, ok := h.initialize().AgentCapabilities.Meta["codex"].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeAgent), vendorMeta[wire.AccountUsageCapabilityKey])
+	require.Equal(t, map[string]any{"method": AccountUsageMethod, "scope": "agent", "providers": []any{openaicodex.ProviderID, anthropic.ProviderID, opencodego.ProviderID, openrouter.ProviderID}}, vendorMeta[wire.AccountUsageCapabilityKey])
 
 	for _, method := range []string{"_codex/anything"} {
 		_, err := h.conn.CallExtension(h.ctx(), method, map[string]any{})
