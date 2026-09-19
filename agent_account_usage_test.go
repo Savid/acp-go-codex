@@ -238,7 +238,7 @@ func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	response, err := a.accountUsage(t.Context(), params)
 	require.NoError(t, err)
 	require.True(t, response.Available)
-	require.Equal(t, "5h", response.Limits[0].ID)
+	require.Equal(t, "session", response.Limits[0].ID)
 	require.Equal(t, []string{"gateway.example/v1/usage Bearer gateway-key", "proxy.example/v1/usage Bearer proxy-key"}[:1], asked[:1], "the launch override route is asked first, in name order")
 	require.Equal(t, []string{"gateway.example/v1/usage Bearer gateway-key"}, asked, "a covering route ends the walk")
 
