@@ -493,7 +493,7 @@ func (a *Agent) stopRuntime(ctx context.Context) {
 }
 
 // transportFailure recovers the real cause behind a lost app-server stream:
-// the child's exit status and last stderr line where it died, otherwise the
+// the child's exit status and stderr tail where it died, otherwise the
 // transport error.
 func (a *Agent) transportFailure(ctx context.Context, rt *runtime, err error) *acp.RequestError {
 	return wire.TurnFailed(vendor, wire.TransportFailure(ctx, rt.proc, "codex app-server", err, rt.client.Err))
