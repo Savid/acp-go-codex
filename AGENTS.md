@@ -1,90 +1,71 @@
 # AGENTS.md
 
-Instructions for automated coding agents working in this repository.
-
 ## Purpose
 
-This Go ACP agent wraps the local `codex app-server` protocol using
-`github.com/coder/acp-go-sdk`. One Agent owns a shared app-server; logical
-sessions retain their own configuration, callbacks, routes, and store state.
+This Go module exposes the local `codex` CLI as an Agent Client Protocol
+agent. One `codex app-server` serves the agent; each ACP session is one Codex
+thread on it. Codex inherits the adapter's environment and keeps its rollouts
+in its own home, so a session started over ACP can be continued natively with
+`codex resume` afterwards.
 
 ## Project Map
 
-- `cmd/acp-go-codex`: process entrypoint for ACP stdio mode.
-- Root package: ACP agent surface, options, session lifecycle, prompt handling,
-  session load, auth, MCP bridge, and extension methods.
-- `internal/codex`: Codex provider boundary. Keep Codex CLI/app-server details
-  here instead of leaking them into ACP handlers.
-- `internal/lifecycle`: lifecycle negotiation, reducer, and event vocabulary.
-- `internal/observer`: OpenTelemetry instrumentation.
-- `docs/` and `examples/`: public behavior and embedding examples.
+- `cmd/acp-go-codex`: stdio entrypoint, OpenTelemetry setup, signals, flags.
+- Root `agent*.go`, `options.go`, `request_builders.go`: the public ACP
+  surface, option validation, the vendor session-option constructors, the
+  account-usage read, and the shared app-server generation with its event
+  pump; the shared ACP transport orders publication.
+- Root `session*.go`, `image_output.go`: one session's thread binding, prompt
+  turns, approvals and elicitation, lifecycle stream, store mirror, replay,
+  config options, and image output.
+- `internal/codex`: the app-server JSON-RPC client, launch arguments,
+  event decoding, server request mapping, thread configuration,
+  the account reads, home locking, and the rollout file layout.
+- `integration`: gated tests against the installed codex.
 
 ## Commands
 
 ```sh
-make audit
+make build
 make test
 make lint
+make audit
 make test-integration-smoke
 make test-integration-live
-make test-integration-attended
-make test-integration-keystore
 ```
 
-`make audit` runs local formatting, lint, build, race tests with statement
-coverage reporting, platform cross-compilation, module, vulnerability,
-modernization, and documentation checks. Inspect targets before running them.
-
-Integration runs require explicit operator intent and
-`ACP_GO_CODEX_RUN_INTEGRATION=1`. The targets set this gate. Smoke runs use the
-real CLI without model tokens. Live, attended auth, and keystore targets also
-set `ACP_GO_CODEX_RUN_LIVE_TOKENS=1`, `ACP_GO_CODEX_RUN_ATTENDED=1`, or
-`ACP_GO_CODEX_RUN_KEYSTORE=1`, respectively; none joins `make audit`. Attended
-runs fail when nobody approves. Keystore runs require a container runtime for
-the Linux present/absent matrix and a macOS host for its third configuration.
-
-Use `ACP_GO_CODEX_HARNESS_PATH`, `ACP_GO_CODEX_HOME`, `ACP_GO_CODEX_MODEL`, and
-`ACP_GO_CODEX_AGENT_BINARY` for the CLI, source home, model, and compiled adapter.
+`make test` runs with race detection and shuffled order. `make audit` is the
+full local gate. Integration targets need an installed `codex`; the live
+target spends model tokens and requires explicit operator intent.
 
 ## Coding Rules
 
-- Keep public API small and ACP-oriented.
-- Keep Codex protocol details inside `internal/codex`.
-- Prefer structured request/response types over ad hoc JSON maps.
-- Return explicit method-not-found or unsupported errors for ACP methods that are
-  outside the Codex adapter contract.
-- Keep public code and documentation self-contained and describe current behavior.
+- Follow Go idioms: `ctx` first, `%w` for wrapped errors, small interfaces at
+  the consumer. Keep native protocol details in `internal/codex` and ACP glue
+  beside its handler.
+- Shared family behavior comes from `github.com/savid/acp-go-core`; never copy
+  it here.
+- The adapter does no isolation: the app-server inherits the process
+  environment and the agent overlay; each thread carries its own session env
+  and `PATH` through its shell environment policy.
+- Native state is never deleted. The session store is the durability
+  boundary; the rollout in Codex's home is the native copy.
+- Unit tests never require an installed codex: the test binary doubles as a
+  scripted fake app-server. Keep the fake's protocol in step with
+  `internal/codex`.
+- A comment states what the code does or why a constraint exists.
 
-## Testing Rules
+## Verification
 
-- Use `testify/require` for assertions.
-- Prefer table-driven tests for Codex app-server mapping and event-decoding
-  cases in `internal/codex`.
-- Run `go test ./...` for ordinary changes; use `make test` for session, MCP,
-  concurrency, or cancellation changes, and run `make lint` before completion.
-- Report statement coverage and preserve canonical lifecycle fixtures. Do not add
-  tests or production seams solely to increase coverage.
-- Unit tests may use in-memory transports and the placeholder Codex client.
-- Native compatibility claims require the real CLI. Deterministic transports and
-  compiled initialize/EOF tests prove only adapter behavior and startup.
-- Keep live prompts deterministic with exact sentinel replies, and assert the
-  ACP stop reason plus streamed updates where practical.
+Run `go test ./...` for ordinary changes and `make lint` for Go edits. Run
+`make audit` once changes settle. Run the integration smoke target after
+changing anything app-server-facing.
 
-## Security And Boundaries
+## Boundaries
 
-- Do not silently bypass permission prompts. Mapping Codex
-  `item/permissions/requestApproval` onto the ACP `session/request_permission`
-  flow is load-bearing for user trust in this agent.
-- Do not alter borrowed Codex CLI authentication state. ACP `logout`
-  closes adapter sessions and calls native account logout, and is refused unless
-  `WithCodexAllowAccountLogout` is set for an adapter-owned `CODEX_HOME`.
-- Do not log auth material (`auth.json` contents, refresh tokens, ChatGPT
-  tokens), user secrets, prompts, tool input, tool output, or raw Codex
-  app-server event bodies. Account metadata surfaced over ACP is redacted.
-- Managed native launches and prepared-tree transitions use `HostAuthority`
-  without ordinary fallback. A prepared tree stays opaque until successful
-  reclaim; failed preparation leaves its cleanup with the host.
-- Integration tests must launch Codex with a hermetic temp `CODEX_HOME`, clear
-  copied refresh tokens, and fail rather than launch without isolated auth.
-  `OPENAI_API_KEY` with no explicit source home uses a fresh home; otherwise
-  tests copy the configured source home and require env auth or copied `auth.json`.
+- Approval requests are the session permission system. Never bypass the host
+  or fail open on a denied or cancelled answer.
+- Do not log prompts, tool input or output, or raw native event bodies by
+  default.
+- Serve `_codex/accountUsage` and reject every other ACP extension method;
+  the only outbound extension surface is the raw-event notification.
