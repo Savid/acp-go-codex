@@ -188,7 +188,7 @@ func TestNativeTailDoesNotStampTheNextTurn(t *testing.T) {
 	}
 	s := &session{agent: NewAgent(), rt: rt, turn: next, lastTerminalTurn: "turn-1"}
 
-	s.handleEvent(t.Context(), rt, codex.Event{Kind: codex.EventAgentMessageDelta, TurnID: "turn-1", ItemID: "tail-1", Text: "tail"})
+	s.handleEvent(t.Context(), rt, nil, codex.Event{Kind: codex.EventAgentMessageDelta, TurnID: "turn-1", ItemID: "tail-1", Text: "tail"})
 
 	s.mu.Lock()
 	adopted := next.nativeTurnID
@@ -333,7 +333,7 @@ func TestCapturedNativeBetweenPromptRecords(t *testing.T) {
 	for _, frame := range frames {
 		var notification codex.Notification
 		require.NoError(t, json.Unmarshal(frame, &notification))
-		require.True(t, s.handleEvent(t.Context(), rt, codex.DecodeEvent(notification)))
+		require.True(t, s.handleEvent(t.Context(), rt, nil, codex.DecodeEvent(notification)))
 	}
 
 	rec.mu.Lock()

@@ -203,9 +203,16 @@ func (s *session) threadResume() codex.ThreadResumeRequest {
 func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 	s.mu.Lock()
 	rt := s.rt
+	lost := s.generationLost
 	s.mu.Unlock()
 
 	if rt != nil && rt.alive() {
+		if lost {
+			// Containment is still joining this session's worker on the live
+			// generation; binding now would feed a stopped queue.
+			return nil, wire.RuntimeUnavailable(vendor)
+		}
+
 		return rt, nil
 	}
 
@@ -252,7 +259,11 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 // cycle, or, for work with neither, a new agent-origin cycle. It returns false
 // when process loss interrupts settlement, so queued tails cannot mutate the
 // cycle the prompt is still settling.
-func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Event) bool {
+// handleEvent projects one record onto the session. stopped is the worker's
+// queue fence: a settled turn waits for its prompt to finish unless the queue
+// is stopped first, since containment joins this worker from the prompt's own
+// goroutine.
+func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan struct{}, event codex.Event) bool {
 	s.emitRawEvent(ctx, event)
 
 	s.mu.Lock()
@@ -289,6 +300,8 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event codex.Even
 
 			select {
 			case <-t.finished:
+			case <-stopped:
+				return false
 			case <-rt.proc.Done():
 				return false
 			}
@@ -613,7 +626,7 @@ func (s *session) cycleCancelled(c *cycle) bool {
 
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
-	if s.closing || s.rt == nil || ((s.turn != nil && (s.turn.cancelled || s.turn.settling)) || (s.cycle != nil && (s.cycle.cancelled || s.cycle.settling))) {
+	if s.closing || s.rt == nil || s.generationLost || ((s.turn != nil && (s.turn.cancelled || s.turn.settling)) || (s.cycle != nil && (s.cycle.cancelled || s.cycle.settling))) {
 		s.mu.Unlock()
 		cancel(errDialogCancelled)
 

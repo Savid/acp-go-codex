@@ -51,3 +51,27 @@ func TestSetModelRequestNamesTheModelSelector(t *testing.T) {
 	require.Equal(t, configModel, request.ValueId.ConfigId)
 	require.Equal(t, acp.SessionConfigValueId("gpt-x"), request.ValueId.Value)
 }
+
+func TestOptionConstructorsRideTheOwnedNamespace(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{"type": "object"}
+	policy := map[string]any{"type": sandboxReadOnly}
+	request := wire.NewSessionRequest(t.TempDir(), WithSessionCodexOptions(NewCodexOptions(
+		WithCodexOutputSchema(schema), WithCodexPersonality("terse"), WithCodexSandboxPolicy(policy),
+	)))
+
+	parsed, err := parseSessionMeta(request.Meta)
+	require.Nil(t, err)
+	require.Equal(t, schema, parsed.options.OutputSchema)
+	require.Equal(t, "terse", parsed.options.Personality)
+	require.Equal(t, policy, parsed.options.SandboxPolicy)
+}
+
+func TestValidateCodexSessionMeta(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, ValidateCodexSessionMeta(nil))
+	require.NoError(t, ValidateCodexSessionMeta(NewCodexOptions(WithCodexModel("gpt-x")).Meta()))
+	require.Error(t, ValidateCodexSessionMeta(map[string]any{"codex": "x"}))
+}

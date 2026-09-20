@@ -21,10 +21,6 @@ import (
 )
 
 const (
-	// internalClassAccountUsage is the codex_internal_failure class of a native
-	// account-usage read that failed.
-	internalClassAccountUsage = "account_usage"
-
 	// The suffixes of the limit ids the read answers with, one per native
 	// window.
 	windowPrimary   = "primary"
@@ -77,7 +73,7 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 		if err != nil {
 			a.log.ErrorContext(ctx, "codex account usage read failed", slog.String("reason", err.Error()))
 
-			return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
+			return wire.AccountUsageResponse{}, coreusage.RequestError(vendor, err)
 		}
 
 		if response.Available {

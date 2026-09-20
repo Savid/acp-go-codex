@@ -461,7 +461,7 @@ func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue 
 
 			if queued.request != nil {
 				s.handleRequest(rt, *queued.request, codex.RequestParams(*queued.request))
-			} else if !s.handleEvent(ctx, rt, queued.event) {
+			} else if !s.handleEvent(ctx, rt, queue.done, queued.event) {
 				return
 			}
 		case <-s.closeDone:

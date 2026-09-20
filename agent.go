@@ -269,11 +269,11 @@ func (a *Agent) Close() error {
 		a.detach(context.Background(), s)
 	}
 
+	a.stopRuntime(context.Background())
+
 	a.mu.Lock()
 	a.conn = nil
 	a.mu.Unlock()
-
-	a.stopRuntime(context.Background())
 
 	return errors.Join(errs...)
 }
