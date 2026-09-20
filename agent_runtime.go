@@ -7,6 +7,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -214,7 +215,7 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		return nil, listErr
 	}
 
-	if brokered := a.gatewayModels(handshakeCtx, home, env); len(brokered) > 0 {
+	if brokered := a.gatewayModels(handshakeCtx, home, env, models); len(brokered) > 0 {
 		models = brokered
 	}
 
@@ -228,7 +229,7 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 // routes through, when it publishes one. Codex sends a model name to that
 // provider as given, so the gateway's ids, each naming its upstream, replace
 // the app-server's presets. A list that cannot be read leaves the presets.
-func (a *Agent) gatewayModels(ctx context.Context, home string, env []string) []codex.Model {
+func (a *Agent) gatewayModels(ctx context.Context, home string, env []string, presets []codex.Model) []codex.Model {
 	lookup := func(key string) (string, bool) { return process.Lookup(env, key) }
 
 	route, ok, err := codex.ActiveGatewayRoute(home, a.options.CodexConfigOverrides, lookup)
@@ -243,9 +244,29 @@ func (a *Agent) gatewayModels(ctx context.Context, home string, env []string) []
 		return nil
 	}
 
+	return gatewayModelsWithPresetEfforts(listed, presets)
+}
+
+// gatewayModelsWithPresetEfforts converts a gateway's list into model entries.
+// A gateway id ends in the upstream model's own name; when that name is an
+// app-server preset, Codex sends the preset's reasoning efforts to the
+// provider unchanged, so the entry carries the preset's ladder and default.
+// Any other id carries no effort menu.
+func gatewayModelsWithPresetEfforts(listed []gateway.Model, presets []codex.Model) []codex.Model {
+	byName := make(map[string]codex.Model, len(presets))
+	for _, preset := range presets {
+		byName[preset.ID] = preset
+	}
+
 	models := make([]codex.Model, 0, len(listed))
 	for _, model := range listed {
-		models = append(models, codex.Model{ID: model.ID, Name: model.Name, ContextWindow: model.ContextWindow, InputModalities: model.Inputs})
+		entry := codex.Model{ID: model.ID, Name: model.Name, ContextWindow: model.ContextWindow, InputModalities: model.Inputs}
+		if preset, ok := byName[model.ID[strings.LastIndex(model.ID, "/")+1:]]; ok {
+			entry.ReasoningEfforts = slices.Clone(preset.ReasoningEfforts)
+			entry.DefaultReasoningEffort = preset.DefaultReasoningEffort
+		}
+
+		models = append(models, entry)
 	}
 
 	return models

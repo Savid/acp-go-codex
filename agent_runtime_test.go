@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-core/usage/gateway"
 )
 
 func queueTestAgent(t *testing.T, extra ...Option) (*Agent, *recorder, *blockedCommitStore, func()) {
@@ -235,4 +237,30 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 
 		return sa.rt == nil
 	}, 5*time.Second, 5*time.Millisecond, "the contained session detaches from the live generation")
+}
+
+func TestGatewayModelsCarryPresetEfforts(t *testing.T) {
+	t.Parallel()
+
+	ladder := []string{"minimal", effortMedium, "xhigh"}
+	presets := []codex.Model{{ID: "gpt-5.6-luna", ReasoningEfforts: slices.Clone(ladder), DefaultReasoningEffort: effortMedium}}
+	listed := []gateway.Model{
+		{ID: "openai-codex/gpt-5.6-luna", Name: "GPT-5.6-Luna", ContextWindow: 272000, Inputs: []string{"text"}},
+		{ID: "openrouter/openai/gpt-5.6-luna", Name: "Luna via OpenRouter"},
+		{ID: "opencode-go/qwen3.8-flash", Name: "Qwen3.8 Flash"},
+	}
+
+	models := gatewayModelsWithPresetEfforts(listed, presets)
+
+	require.Len(t, models, 3)
+	require.Equal(t, ladder, models[0].ReasoningEfforts)
+	require.Equal(t, effortMedium, models[0].DefaultReasoningEffort)
+	require.Equal(t, ladder, models[1].ReasoningEfforts)
+	require.Empty(t, models[2].ReasoningEfforts)
+	require.Empty(t, models[2].DefaultReasoningEffort)
+	require.Equal(t, int64(272000), models[0].ContextWindow)
+	require.Equal(t, []string{"text"}, models[0].InputModalities)
+
+	presets[0].ReasoningEfforts[0] = "mutated"
+	require.Equal(t, ladder[0], models[0].ReasoningEfforts[0])
 }
