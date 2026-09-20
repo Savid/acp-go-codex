@@ -54,6 +54,14 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 		defer cancel(nil)
 		defer unregister()
 
+		// A prompt's dialogs end with its turn, resolved as cancelled like
+		// every other session-ended dialog; an agent-origin cycle has no turn
+		// and its dialogs end with the session.
+		if t != nil {
+			stop := context.AfterFunc(t.ctx, func() { cancel(errDialogCancelled) })
+			defer stop()
+		}
+
 		var response any
 
 		switch request.Method {

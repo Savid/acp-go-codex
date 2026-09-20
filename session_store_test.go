@@ -756,3 +756,36 @@ func TestFailedSessionOpenReleasesActiveSlot(t *testing.T) {
 	_, err = a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 }
+
+func TestDeleteWinsAgainstPreparedLoad(t *testing.T) {
+	t.Parallel()
+	store := &blockedLoadStore{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	store.block.Store(true)
+	done := make(chan error, 1)
+	ctx := h.ctx()
+	go func() {
+		_, loadErr := h.conn.LoadSession(ctx, wire.LoadSessionRequest(session.SessionId, cwd))
+		done <- loadErr
+	}()
+	select {
+	case <-store.entered:
+	case <-ctx.Done():
+		t.Fatal("load did not reach stored configuration")
+	}
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
+	close(store.release)
+	require.NoError(t, err)
+	require.Equal(t, "unknown session", requestErrorData(t, <-done)["error"])
+	list, err := h.conn.ListSessions(h.ctx(), acp.ListSessionsRequest{})
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+}

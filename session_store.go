@@ -177,7 +177,12 @@ func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored sto
 
 	// A committed conversation whose native history is still empty carries
 	// only its recorded location: no header to read, nothing to reconcile.
+	// The location must still lie inside the home the thread resumes from.
 	if len(stored.rows) == 0 {
+		if relative, pathErr := filepath.Rel(home, path); pathErr != nil || !filepath.IsLocal(relative) {
+			return "", nil, a.restoreRefused(ctx, sessionID, errors.New("stored rollout path is outside the native home"))
+		}
+
 		return path, nil, nil
 	}
 

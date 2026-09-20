@@ -110,6 +110,10 @@ const (
 type turn struct {
 	cycle
 	submission lifecycle.Submission
+	// ctx is the turn's own lifecycle context, which its dialogs derive from
+	// so a cancelled prompt ends them. It is not a request context: the
+	// prompt handler owns and cancels it.
+	ctx        context.Context //nolint:containedctx // The turn owns this context; the prompt handler cancels it.
 	accepted   bool
 	ended      turnEnd
 	settled    chan struct{}
