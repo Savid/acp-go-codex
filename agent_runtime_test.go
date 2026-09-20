@@ -222,6 +222,20 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 
 	require.True(t, rt.alive(), "one session's overflow must not kill the shared app-server")
 
+	// The stopped queue stays registered, so a later frame neither starts a
+	// second worker nor reaches the session.
+	rt.mu.Lock()
+	queue := rt.events[sa]
+	rt.mu.Unlock()
+	require.NotNil(t, queue)
+	require.True(t, queue.stopped)
+
+	a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventTurnStarted, ThreadID: sa.nativeID, TurnID: "background"}})
+
+	rt.mu.Lock()
+	require.Same(t, queue, rt.events[sa], "overflow keeps its stopped queue until containment retires it")
+	rt.mu.Unlock()
+
 	// The peer still completes a turn on the same app-server.
 	prompt := wire.TextPromptRequest(peer.SessionId, "hi")
 	prompt.Meta = promptMeta(1)
@@ -237,6 +251,79 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 
 		return sa.rt == nil
 	}, 5*time.Second, 5*time.Millisecond, "the contained session detaches from the live generation")
+
+	rt.mu.Lock()
+	_, registered := rt.events[sa]
+	rt.mu.Unlock()
+	require.False(t, registered, "containment retires the queue once its worker has exited")
+}
+
+// TestCancelOfAnIgnoredInterruptContainsOnlyThatSession proves a native turn
+// that ignores its interrupt costs only its own session: the prompt answers
+// cancelled, the shared app-server survives, and a peer still completes.
+func TestCancelOfAnIgnoredInterruptContainsOnlyThatSession(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	a.attach(newRecorder(), nil)
+
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
+	require.NoError(t, err)
+
+	stuck, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	peer, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	ss, err := a.session(t.Context(), stuck.SessionId)
+	require.NoError(t, err)
+	ss.mu.Lock()
+	rt := ss.rt
+	ss.mu.Unlock()
+	require.NotNil(t, rt)
+
+	type result struct {
+		response acp.PromptResponse
+		err      error
+	}
+
+	done := make(chan result, 1)
+
+	go func() {
+		prompt := wire.TextPromptRequest(stuck.SessionId, "STUCK")
+		prompt.Meta = promptMeta(1)
+		response, promptErr := a.Prompt(t.Context(), prompt)
+		done <- result{response: response, err: promptErr}
+	}()
+
+	require.Eventually(t, func() bool {
+		ss.mu.Lock()
+		defer ss.mu.Unlock()
+
+		return ss.turn != nil && ss.turn.nativeTurnID != ""
+	}, 5*time.Second, 5*time.Millisecond)
+
+	require.NoError(t, a.Cancel(t.Context(), acp.CancelNotification{SessionId: stuck.SessionId}))
+
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		require.Equal(t, acp.StopReasonCancelled, got.response.StopReason)
+	case <-time.After(sessionAbortTimeout + 5*time.Second):
+		t.Fatal("the cancelled prompt did not settle after the native turn ignored its interrupt")
+	}
+
+	require.True(t, rt.alive(), "an ignored interrupt must not stop the shared app-server")
+
+	ss.mu.Lock()
+	unbound := ss.rt == nil
+	ss.mu.Unlock()
+	require.True(t, unbound, "the contained session leaves the live generation")
+
+	prompt := wire.TextPromptRequest(peer.SessionId, "hi")
+	prompt.Meta = promptMeta(2)
+	response, err := a.Prompt(t.Context(), prompt)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
 }
 
 func TestGatewayModelsCarryPresetEfforts(t *testing.T) {

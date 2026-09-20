@@ -269,11 +269,12 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		select {
 		case <-t.settled:
 		case <-time.After(sessionAbortTimeout):
-			// The native turn ignored the interrupt. Ending the generation
-			// stops the pump, so nothing is still writing the cycle state the
-			// response is judged from.
-			s.agent.stopGeneration(context.WithoutCancel(ctx), rt)
-			t.settle(turnTransportEnded)
+			// The native turn ignored the interrupt: contain this session so
+			// nothing still writes the cycle state the response is judged
+			// from, and leave the shared app-server to its peers.
+			rt.stopQueue(s)
+			s.contain(context.WithoutCancel(ctx), rt, wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: "codex did not end the turn after its interrupt"}))
+			t.settle(turnContained)
 		}
 	}
 

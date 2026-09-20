@@ -58,9 +58,46 @@ type runtime struct {
 type sessionQueue struct {
 	messages chan sessionMessage
 	done     chan struct{}
-	// stopped prevents more delivery while the shared reader drains the
-	// remaining records of a generation whose worker has ended.
+	exited   chan struct{}
+	// stopped drops later records for this session on this generation; the
+	// queue stays registered until retireQueue joins its worker, so no second
+	// worker can start while the first still runs.
 	stopped bool
+}
+
+// stopQueue fences a session's delivery on this generation.
+func (rt *runtime) stopQueue(s *session) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	queue := rt.events[s]
+	if queue == nil || queue.stopped {
+		return
+	}
+
+	queue.stopped = true
+	close(queue.done)
+}
+
+// retireQueue joins a session's worker and forgets its queue, so the
+// session's next binding on this generation starts a fresh one.
+func (rt *runtime) retireQueue(s *session) {
+	rt.mu.Lock()
+	queue := rt.events[s]
+	rt.mu.Unlock()
+
+	if queue == nil {
+		return
+	}
+
+	<-queue.exited
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	if rt.events[s] == queue {
+		delete(rt.events, s)
+	}
 }
 
 // sessionMessage preserves one thread's notification and request order.
@@ -348,7 +385,7 @@ func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, messa
 			rt.events = make(map[*session]*sessionQueue)
 		}
 
-		queue = &sessionQueue{messages: make(chan sessionMessage, 256), done: make(chan struct{})}
+		queue = &sessionQueue{messages: make(chan sessionMessage, 256), done: make(chan struct{}), exited: make(chan struct{})}
 		rt.events[s] = queue
 		rt.eventPumps.Go(func() { a.pumpSession(ctx, rt, s, queue) })
 	}
@@ -371,7 +408,6 @@ func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, messa
 	default:
 		queue.stopped = true
 		close(queue.done)
-		delete(rt.events, s)
 		rt.mu.Unlock()
 
 		a.log.ErrorContext(ctx, "codex session event queue exceeded capacity; containing the session", slog.String("session_id", string(s.id)))
@@ -382,13 +418,16 @@ func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, messa
 
 		// Contain only this session; the shared app-server and its peers keep
 		// running. Run off the shared reader so a stalled session cannot pin it.
-		rt.eventPumps.Go(func() { s.contain(ctx, rt) })
+		failure := wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: "the host stopped reading this session's notifications"})
+
+		rt.eventPumps.Go(func() { s.contain(ctx, rt, failure) })
 
 		return true
 	}
 }
 
 func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue *sessionQueue) {
+	defer close(queue.exited)
 	defer func() {
 		rt.mu.Lock()
 		queue.stopped = true

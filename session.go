@@ -456,17 +456,17 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	}
 }
 
-// contain ends one session's binding when the host stopped reading this
-// session's notifications. The shared app-server and every peer session keep
-// running; the contained session's in-flight work fails with a transport
-// cause, its stream fences, and its next operation rebinds on the live
-// generation.
-func (s *session) contain(ctx context.Context, rt *runtime) {
-	failure := wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: "the host stopped reading this session's notifications"})
-
+// contain ends one session's binding on a generation whose delivery for it
+// has been stopped, because the host stopped reading its notifications or the
+// native turn ignored its interrupt. The shared app-server and every peer
+// session keep running; the contained session's in-flight work fails with the
+// given cause, its stream fences, its worker is joined, and its next operation
+// rebinds on the live generation.
+func (s *session) contain(ctx context.Context, rt *runtime, failure error) {
 	s.mu.Lock()
 	if s.rt != rt {
 		s.mu.Unlock()
+		rt.retireQueue(s)
 
 		return
 	}
@@ -494,6 +494,11 @@ func (s *session) contain(ctx context.Context, rt *runtime) {
 	if c != nil && !closing && s.claimTerminal(c) {
 		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: failure})
 	}
+
+	// The worker is joined while the binding still stands, so no rebind can
+	// start a second worker beside it. openMu is not held for the join: the
+	// worker may fence the stream on its way out.
+	rt.retireQueue(s)
 
 	s.openMu.Lock()
 	defer s.openMu.Unlock()

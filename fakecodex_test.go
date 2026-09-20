@@ -75,6 +75,7 @@ type fakeThread struct {
 	turn    string
 	abort   chan struct{}
 	done    chan struct{}
+	stuck   bool
 	entries int
 }
 
@@ -404,6 +405,7 @@ func (f *fakeCodex) startTurn(id json.RawMessage, params map[string]any) {
 	thread.turn = fakeUUID()
 	thread.abort = make(chan struct{})
 	thread.done = make(chan struct{})
+	thread.stuck = strings.HasPrefix(message.String(), "STUCK")
 
 	f.respond(id, map[string]any{"turn": map[string]any{"id": thread.turn}})
 
@@ -417,7 +419,7 @@ func (f *fakeCodex) interrupt(id json.RawMessage, params map[string]any) {
 	thread := f.threads[threadID]
 	f.mu.Unlock()
 
-	if thread != nil && thread.abort != nil {
+	if thread != nil && thread.abort != nil && !thread.stuck {
 		select {
 		case <-thread.abort:
 		default:
@@ -524,6 +526,8 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 			status = "interrupted"
 		case <-time.After(30 * time.Second):
 		}
+	case strings.HasPrefix(message, "STUCK"):
+		time.Sleep(30 * time.Second)
 	case strings.HasPrefix(message, "JSON"):
 		text = `{"answer": 42}`
 	case strings.HasPrefix(message, "PLAN"):
