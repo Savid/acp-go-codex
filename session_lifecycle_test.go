@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -272,4 +273,75 @@ func TestCloseBackgroundCycleRequiresCommit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// rawNotifyRecorder records the raw-event extension notifications the agent
+// sends through a directly attached client.
+type rawNotifyRecorder struct{ *recorder }
+
+func (r *rawNotifyRecorder) NotifyExtension(_ context.Context, method string, params any) error {
+	if method == RawEventMethod {
+		data, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+
+		r.mu.Lock()
+		r.raw = append(r.raw, data)
+		r.mu.Unlock()
+	}
+
+	return nil
+}
+
+// TestCapturedNativeBetweenPromptRecords replays the captured app-server
+// notifications under testdata/native that reach a thread with no turn in
+// flight, through the real decoder and the session's own event handling:
+// every record is delivered as a raw event outside any prompt, and none
+// bears work, so no agent-origin cycle opens and no lifecycle transition is
+// published.
+func TestCapturedNativeBetweenPromptRecords(t *testing.T) {
+	t.Parallel()
+
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(&rawNotifyRecorder{recorder: rec}, nil)
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir(), WithSessionRawEvents(true)))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.rt
+	require.Nil(t, s.turn)
+	s.mu.Unlock()
+
+	data, err := os.ReadFile("testdata/native/agent-origin.json")
+	require.NoError(t, err)
+	data = []byte(strings.ReplaceAll(string(data), "fixture-thread", s.nativeID))
+	var frames []json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &frames))
+	require.NotEmpty(t, frames)
+
+	rec.mu.Lock()
+	rawBefore := len(rec.raw)
+	rec.mu.Unlock()
+	before := len(lifecycleEvents(rec.snapshot()))
+
+	for _, frame := range frames {
+		var notification codex.Notification
+		require.NoError(t, json.Unmarshal(frame, &notification))
+		require.True(t, s.handleEvent(t.Context(), rt, codex.DecodeEvent(notification)))
+	}
+
+	rec.mu.Lock()
+	rawAfter := len(rec.raw)
+	rec.mu.Unlock()
+	require.Equal(t, len(frames), rawAfter-rawBefore, "every between-prompt record is delivered as a raw event with no prompt in flight")
+	require.Empty(t, lifecycleEvents(rec.snapshot())[before:], "between-prompt records bear no work and open no cycle")
+	s.mu.Lock()
+	require.Nil(t, s.cycle)
+	s.mu.Unlock()
 }
