@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,8 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-codex/internal/codex"
 )
 
 func queueTestAgent(t *testing.T, extra ...Option) (*Agent, *recorder, *blockedCommitStore, func()) {
@@ -160,4 +163,76 @@ func TestProcessExitDoesNotPublishQueuedTerminalTail(t *testing.T) {
 	result := <-done
 	require.NoError(t, result.err)
 	require.Equal(t, acp.StopReasonEndTurn, result.response.StopReason)
+}
+
+// gateClient blocks SessionUpdate for one session id until released, so a test
+// can stall one session's pump without touching any peer.
+type gateClient struct {
+	*recorder
+	target acp.SessionId
+	block  chan struct{}
+}
+
+func (g *gateClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
+	if params.SessionId == g.target {
+		select {
+		case <-g.block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return g.recorder.SessionUpdate(ctx, params)
+}
+
+// TestSessionOverflowContainsWithoutKillingPeers proves a stalled session whose
+// event queue overflows is contained alone: the shared app-server survives and
+// a peer session still completes a turn.
+func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
+	gate := &gateClient{recorder: newRecorder(), block: make(chan struct{})}
+
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	a.attach(gate, nil)
+
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
+	require.NoError(t, err)
+
+	stalled, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	peer, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	gate.target = stalled.SessionId
+
+	sa, err := a.session(t.Context(), stalled.SessionId)
+	require.NoError(t, err)
+	sa.mu.Lock()
+	rt := sa.rt
+	sa.mu.Unlock()
+	require.NotNil(t, rt)
+
+	// Flood the stalled session past its 256-slot queue. Its pump blocks on the
+	// first publish to the gated client, so the rest overflow and contain it.
+	for range 400 {
+		a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventTurnStarted, ThreadID: sa.nativeID, TurnID: "background"}})
+	}
+
+	require.True(t, rt.alive(), "one session's overflow must not kill the shared app-server")
+
+	// The peer still completes a turn on the same app-server.
+	prompt := wire.TextPromptRequest(peer.SessionId, "hi")
+	prompt.Meta = promptMeta(1)
+	response, err := a.Prompt(t.Context(), prompt)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+
+	// Releasing the stalled client lets containment finish and detach it.
+	close(gate.block)
+	require.Eventually(t, func() bool {
+		sa.mu.Lock()
+		defer sa.mu.Unlock()
+
+		return sa.rt == nil
+	}, 5*time.Second, 5*time.Millisecond, "the contained session detaches from the live generation")
 }

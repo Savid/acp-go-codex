@@ -56,6 +56,7 @@ type runtime struct {
 
 type sessionQueue struct {
 	messages chan sessionMessage
+	done     chan struct{}
 	// stopped prevents more delivery while the shared reader drains the
 	// remaining records of a generation whose worker has ended.
 	stopped bool
@@ -326,7 +327,7 @@ func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, messa
 			rt.events = make(map[*session]*sessionQueue)
 		}
 
-		queue = &sessionQueue{messages: make(chan sessionMessage, 256)}
+		queue = &sessionQueue{messages: make(chan sessionMessage, 256), done: make(chan struct{})}
 		rt.events[s] = queue
 		rt.eventPumps.Go(func() { a.pumpSession(ctx, rt, s, queue) })
 	}
@@ -347,12 +348,22 @@ func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, messa
 
 		return true
 	default:
+		queue.stopped = true
+		close(queue.done)
+		delete(rt.events, s)
 		rt.mu.Unlock()
-		a.log.ErrorContext(ctx, "codex session event queue exceeded capacity", slog.String("session_id", string(s.id)))
 
-		_ = rt.proc.Kill()
+		a.log.ErrorContext(ctx, "codex session event queue exceeded capacity; containing the session", slog.String("session_id", string(s.id)))
 
-		return false
+		if message.request != nil {
+			a.respondUnowned(rt, *message.request)
+		}
+
+		// Contain only this session; the shared app-server and its peers keep
+		// running. Run off the shared reader so a stalled session cannot pin it.
+		rt.eventPumps.Go(func() { s.contain(ctx, rt) })
+
+		return true
 	}
 }
 
@@ -394,6 +405,8 @@ func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue 
 				return
 			}
 		case <-s.closeDone:
+			return
+		case <-queue.done:
 			return
 		}
 	}

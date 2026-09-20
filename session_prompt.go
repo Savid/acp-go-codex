@@ -346,6 +346,8 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	switch {
 	case cancelled:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
+	case t.ended == turnContained:
+		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.cycleFailure(&t.cycle)}
 	case t.ended == turnTransportEnded:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.agent.transportFailure(settleCtx, rt, nil)}
 	default:

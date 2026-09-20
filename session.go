@@ -104,6 +104,7 @@ const (
 	turnRunning turnEnd = iota
 	turnSettled
 	turnTransportEnded
+	turnContained
 )
 
 // turn is one accepted prompt.
@@ -446,6 +447,65 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	if t != nil {
 		// The prompt settles the turn and fences the stream after its idle.
 		t.settle(turnTransportEnded)
+
+		return
+	}
+
+	if !closing {
+		s.lc.Fence()
+	}
+}
+
+// contain ends one session's binding when the host stopped reading this
+// session's notifications. The shared app-server and every peer session keep
+// running; the contained session's in-flight work fails with a transport
+// cause, its stream fences, and its next operation rebinds on the live
+// generation.
+func (s *session) contain(ctx context.Context, rt *runtime) {
+	failure := wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: "the host stopped reading this session's notifications"})
+
+	s.mu.Lock()
+	if s.rt != rt {
+		s.mu.Unlock()
+
+		return
+	}
+
+	s.generationLost = true
+	t := s.turn
+	c := s.cycle
+	closing := s.closing
+
+	if !closing {
+		s.cycle = nil
+	}
+	s.mu.Unlock()
+
+	s.cancelDialogs()
+	s.callbacks.Wait()
+
+	switch {
+	case t != nil:
+		s.recordFailure(&t.cycle, failure)
+	case c != nil:
+		s.recordFailure(c, failure)
+	}
+
+	if c != nil && !closing && s.claimTerminal(c) {
+		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: failure})
+	}
+
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+
+	s.mu.Lock()
+	if s.rt == rt {
+		s.rt = nil
+	}
+	s.mu.Unlock()
+
+	if t != nil {
+		t.settle(turnContained)
 
 		return
 	}
