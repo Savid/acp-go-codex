@@ -81,7 +81,7 @@ func TestInitializeLifecycleAnswer(t *testing.T) {
 	answer, ok := resp.Meta[wire.LifecycleKey].(map[string]any)
 	require.True(t, ok)
 	require.EqualValues(t, 1, answer["version"])
-	require.Equal(t, false, answer["updatesOutsidePrompt"])
+	require.Equal(t, true, answer["updatesOutsidePrompt"])
 	require.Equal(t, []any{}, answer["activityKinds"])
 	require.NotContains(t, resp.AgentCapabilities.Meta, wire.LifecycleKey)
 }
