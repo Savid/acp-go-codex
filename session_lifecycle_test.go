@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
-	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
@@ -117,42 +115,6 @@ func TestCloseFencesStream(t *testing.T) {
 	require.Len(t, state.Turns, 1)
 }
 
-func TestAgentOriginCycleRunsWithNoPromptInFlight(t *testing.T) {
-	t.Parallel()
-
-	store := acpcore.NewInMemorySessionStore()
-	h := newHarness(t, WithSessionStore(store))
-	h.initialize(withLifecycle())
-	session := h.newSession()
-
-	_, err := h.prompt(session.SessionId, "AGENT", promptMeta(1))
-	require.NoError(t, err)
-
-	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(lifecycleEvents(updates)) >= 6 })
-
-	events := lifecycleEvents(h.rec.snapshot())
-	require.Equal(t, []string{
-		"lifecycle_snapshot", "prompt_accepted", "state_update:running", "state_update:idle",
-		"state_update:running", "state_update:idle",
-	}, eventTypes(events))
-	require.Equal(t, "activity", events[4]["cause"])
-	require.Equal(t, "activity", events[5]["cause"])
-	require.Equal(t, "success", events[5]["outcome"])
-
-	state := reduceAll(t, session.SessionId, h.rec.snapshot())
-	require.Equal(t, lifecycle.ForegroundIdle, state.Foreground.State)
-	require.Len(t, state.Turns, 2)
-
-	// The agent-origin cycle commits its own rows before its terminal idle.
-	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
-	require.NoError(t, err)
-	require.Len(t, rows, 4)
-
-	resp, err := h.prompt(session.SessionId, "HELLO", promptMeta(2))
-	require.NoError(t, err)
-	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
-}
-
 func TestNativeTailAfterCompletionOpensNoCycle(t *testing.T) {
 	t.Parallel()
 
@@ -200,81 +162,6 @@ func TestNativeTailDoesNotStampTheNextTurn(t *testing.T) {
 	require.True(t, settled, "the new turn's own turn/completed was filtered, so its prompt never settles")
 }
 
-func TestCloseDoesNotRepeatAnAgentCycleTerminal(t *testing.T) {
-	t.Parallel()
-
-	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	require.NoError(t, os.WriteFile(rollout, nil, 0o600))
-
-	s := &session{agent: NewAgent(), id: "sess-1", cwd: t.TempDir(), rolloutPath: rollout, gate: make(chan struct{}, 1)}
-
-	var delivered []map[string]any
-
-	negotiated := lifecycle.Negotiated{Version: 1, UpdatesOutsidePrompt: true, ActivityKinds: []lifecycle.ActivityKind{}}
-	require.NoError(t, s.lc.Open(t.Context(), "sess-1:1", negotiated, func(_ context.Context, envelope map[string]any) error {
-		event, _ := envelope["event"].(map[string]any)
-		delivered = append(delivered, event)
-
-		return nil
-	}))
-
-	c := &cycle{}
-	c.Cycle = s.lc.NewAgentCycle()
-	require.NoError(t, s.lc.OpenAgentCycle(t.Context(), c.Cycle))
-
-	s.mu.Lock()
-	s.cycle = c
-	s.mu.Unlock()
-
-	// The pump reaches the cycle's terminal idle first; close then finds the
-	// cycle still installed.
-	require.True(t, s.claimTerminal(c))
-	require.NoError(t, s.lcIdle(t.Context(), c, cycleVerdict{outcome: lifecycle.OutcomeSuccess, stopReason: lifecycle.StopReasonEndTurn}))
-
-	require.NoError(t, s.close(t.Context()),
-		"close published a second terminal event for a cycle the pump had already ended")
-	require.Equal(t, []string{"lifecycle_snapshot", "state_update:running", "state_update:idle"}, eventTypes(delivered))
-}
-
-func TestCloseBackgroundCycleRequiresCommit(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(map[bool]string{false: "committed", true: "failed"}[fail], func(t *testing.T) {
-			store := &recoveryFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
-			h := newHarness(t, WithSessionStore(store))
-			h.initialize(withLifecycle())
-			created := h.newSession()
-			_, err := h.prompt(created.SessionId, "AGENTHANG", promptMeta(1))
-			require.NoError(t, err)
-			h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
-				events := lifecycleEvents(updates)
-
-				return len(events) >= 5 && events[4]["state"] == "running"
-			})
-			before := len(lifecycleEvents(h.rec.snapshot()))
-			store.fail.Store(fail)
-			_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
-			store.fail.Store(false)
-			if fail {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-			terminal := 0
-			for _, event := range lifecycleEvents(h.rec.snapshot())[before:] {
-				if event["state"] == "idle" {
-					terminal++
-					require.Equal(t, "cancelled", event["outcome"])
-				}
-			}
-			if fail {
-				require.Zero(t, terminal)
-			} else {
-				require.Equal(t, 1, terminal)
-			}
-		})
-	}
-}
-
 // rawNotifyRecorder records the raw-event extension notifications the agent
 // sends through a directly attached client.
 type rawNotifyRecorder struct{ *recorder }
@@ -318,7 +205,7 @@ func TestCapturedNativeBetweenPromptRecords(t *testing.T) {
 	require.Nil(t, s.turn)
 	s.mu.Unlock()
 
-	data, err := os.ReadFile("testdata/native/agent-origin.json")
+	data, err := os.ReadFile("testdata/native/between-prompt.json")
 	require.NoError(t, err)
 	data = []byte(strings.ReplaceAll(string(data), "fixture-thread", s.nativeID))
 	var frames []json.RawMessage
@@ -340,10 +227,7 @@ func TestCapturedNativeBetweenPromptRecords(t *testing.T) {
 	rawAfter := len(rec.raw)
 	rec.mu.Unlock()
 	require.Equal(t, len(frames), rawAfter-rawBefore, "every between-prompt record is delivered as a raw event with no prompt in flight")
-	require.Empty(t, lifecycleEvents(rec.snapshot())[before:], "between-prompt records bear no work and open no cycle")
-	s.mu.Lock()
-	require.Nil(t, s.cycle)
-	s.mu.Unlock()
+	require.Empty(t, lifecycleEvents(rec.snapshot())[before:], "between-prompt records bear no work and open nothing")
 }
 
 // negotiatedAnswer decodes the lifecycle answer the initialize response carries.
@@ -401,7 +285,7 @@ func idleTransitions(updates []acp.SessionNotification, sessionID acp.SessionId)
 // TestOrdinaryContentAttributesToTheForeground proves the contract's
 // attribution rule over a recorded stream: every content update arrives
 // while the foreground is live, and no vendor namespace hints a turn or
-// message. AGENT leaves an agent-origin turn behind its prompt.
+// message.
 func TestOrdinaryContentAttributesToTheForeground(t *testing.T) {
 	t.Parallel()
 
@@ -409,13 +293,13 @@ func TestOrdinaryContentAttributesToTheForeground(t *testing.T) {
 	negotiated := negotiatedAnswer(t, h.initialize(withLifecycle()))
 	session := h.newSession()
 
-	for n, text := range []string{"TOOL", "AGENT"} {
+	for n, text := range []string{"TOOL", "HELLO"} {
 		_, err := h.prompt(session.SessionId, text, promptMeta(n+1))
 		require.NoError(t, err)
 	}
 
 	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
-		return idleTransitions(updates, session.SessionId) >= 3
+		return idleTransitions(updates, session.SessionId) >= 2
 	})
 
 	updates := h.rec.snapshot()

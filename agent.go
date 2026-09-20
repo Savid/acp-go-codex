@@ -314,7 +314,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 
 	var negotiated lifecycle.Negotiated
 	if present {
-		negotiated = lifecycle.Answer(lifecycle.Negotiated{UpdatesOutsidePrompt: true, ActivityKinds: []lifecycle.ActivityKind{}})
+		negotiated = lifecycle.Answer(lifecycle.Negotiated{UpdatesOutsidePrompt: false, ActivityKinds: []lifecycle.ActivityKind{}})
 	}
 
 	encoding := wire.SelectPositionEncoding(params.ClientCapabilities.PositionEncodings)

@@ -571,8 +571,6 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		// State the harness writes after its own completion signal, still
 		// naming the turn that just ended.
 		f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "tail-1", "delta": "tail"}))
-	case strings.HasPrefix(message, "AGENT"):
-		f.agentTurn(thread, message == "AGENTHANG", message == "AGENTTOOL")
 	}
 }
 
@@ -633,30 +631,6 @@ func (f *fakeCodex) serverRequestTurn(message string, thread *fakeThread, scoped
 
 		return action
 	}
-}
-
-// agentTurn runs one turn the thread begins on its own, with no prompt in
-// flight: the agent-origin path the lifecycle capability advertises.
-func (f *fakeCodex) agentTurn(thread *fakeThread, hold, withTool bool) {
-	turnID := fakeUUID()
-	scoped := func(fields map[string]any) map[string]any {
-		out := map[string]any{"threadId": thread.id, "turnId": turnID}
-		maps.Copy(out, fields)
-
-		return out
-	}
-
-	f.notify("turn/started", scoped(map[string]any{"turn": map[string]any{"id": turnID}}))
-	if withTool {
-		f.tool(thread, scoped, false)
-	}
-	f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "agent-1", "delta": "background"}))
-	f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": "agent-1", "type": "agentMessage", "text": "background"}}))
-	f.appendRow(thread, eventRow("agent_message", map[string]any{"message": "background"}))
-	if hold {
-		return
-	}
-	f.notify("turn/completed", scoped(map[string]any{"turn": map[string]any{"id": turnID, "status": "completed"}}))
 }
 
 func (f *fakeCodex) tool(thread *fakeThread, scoped func(map[string]any) map[string]any, withImage bool) {

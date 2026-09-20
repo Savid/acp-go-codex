@@ -2,8 +2,6 @@ package codexacp
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -11,7 +9,6 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	acpcore "github.com/savid/acp-go-core"
-	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
 
@@ -36,87 +33,6 @@ func queueTestAgent(t *testing.T, extra ...Option) (*Agent, *recorder, *blockedC
 	})
 
 	return a, rec, store, release
-}
-
-func TestBackgroundApprovalWaitsForPrecedingCommit(t *testing.T) {
-	t.Parallel()
-	sent := filepath.Join(t.TempDir(), "request-sent")
-	a, rec, store, release := queueTestAgent(t, WithEnv(map[string]string{fakeCodexEnv: "1", fakeCodexEnvRequestSent: sent}))
-	first, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
-	require.NoError(t, err)
-	peer, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
-	require.NoError(t, err)
-	store.blockID.Store(string(first.SessionId))
-	request := wire.TextPromptRequest(first.SessionId, "AGENTTOOL")
-	request.Meta = promptMeta(1)
-	done := make(chan error, 1)
-	go func() {
-		_, err := a.Prompt(t.Context(), request)
-		done <- err
-	}()
-	select {
-	case <-store.entered:
-	case <-time.After(testTimeout):
-		t.Fatal("prompt did not reach its mirror commit")
-	}
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(sent)
-
-		return err == nil
-	}, testTimeout, time.Millisecond)
-
-	// The callback is already on native stdout, so the peer's response also
-	// proves the shared reader accepted it while the first commit is held.
-	peerRequest := wire.TextPromptRequest(peer.SessionId, "HELLO")
-	peerRequest.Meta = promptMeta(2)
-	peerDone := make(chan error, 1)
-	go func() {
-		_, promptErr := a.Prompt(t.Context(), peerRequest)
-		peerDone <- promptErr
-	}()
-	select {
-	case err := <-peerDone:
-		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("peer prompt waited for another session's commit")
-	}
-	rec.mu.Lock()
-	early := len(rec.permissions)
-	rec.mu.Unlock()
-	require.Zero(t, early, "the next cycle's approval bypassed the preceding commit")
-
-	release()
-	require.NoError(t, <-done)
-	rec.waitFor(t, func(updates []acp.SessionNotification) bool {
-		for _, event := range lifecycleEvents(updates) {
-			if event["cause"] == string(lifecycle.CauseActivity) && event["state"] == string(lifecycle.ForegroundIdle) {
-				return true
-			}
-		}
-
-		return false
-	})
-	var owner any
-	for _, event := range lifecycleEvents(rec.snapshot()) {
-		if event["cause"] == string(lifecycle.CauseActivity) && event["state"] == string(lifecycle.ForegroundRunning) {
-			owner = event["turnId"]
-
-			break
-		}
-	}
-	require.NotNil(t, owner)
-	rec.mu.Lock()
-	permissions := append([]acp.RequestPermissionRequest(nil), rec.permissions...)
-	rec.mu.Unlock()
-	require.Len(t, permissions, 1)
-	envelope, ok := permissions[0].Meta[wire.LifecycleKey].(map[string]any)
-	require.True(t, ok)
-	action, ok := envelope["action"].(map[string]any)
-	require.True(t, ok)
-	actionOwner, ok := action["owner"].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, owner, actionOwner["id"])
-	reduceAll(t, first.SessionId, rec.snapshot())
 }
 
 func TestProcessExitDoesNotPublishQueuedTerminalTail(t *testing.T) {
@@ -214,10 +130,35 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 	sa.mu.Unlock()
 	require.NotNil(t, rt)
 
+	// A turn must be in flight for the pump to publish anything.
+	done := make(chan error, 1)
+
+	go func() {
+		prompt := wire.TextPromptRequest(stalled.SessionId, "SLOW")
+		prompt.Meta = promptMeta(1)
+		_, promptErr := a.Prompt(t.Context(), prompt)
+		done <- promptErr
+	}()
+
+	var nativeTurnID string
+
+	require.Eventually(t, func() bool {
+		sa.mu.Lock()
+		defer sa.mu.Unlock()
+
+		if sa.turn == nil || sa.turn.nativeTurnID == "" {
+			return false
+		}
+
+		nativeTurnID = sa.turn.nativeTurnID
+
+		return true
+	}, 5*time.Second, 5*time.Millisecond)
+
 	// Flood the stalled session past its 256-slot queue. Its pump blocks on the
 	// first publish to the gated client, so the rest overflow and contain it.
 	for range 400 {
-		a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventTurnStarted, ThreadID: sa.nativeID, TurnID: "background"}})
+		a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: sa.nativeID, TurnID: nativeTurnID, ItemID: "delta", Text: "x"}})
 	}
 
 	require.True(t, rt.alive(), "one session's overflow must not kill the shared app-server")
@@ -230,7 +171,7 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 	require.NotNil(t, queue)
 	require.True(t, queue.stopped)
 
-	a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventTurnStarted, ThreadID: sa.nativeID, TurnID: "background"}})
+	a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: sa.nativeID, TurnID: nativeTurnID, ItemID: "delta", Text: "y"}})
 
 	rt.mu.Lock()
 	require.Same(t, queue, rt.events[sa], "overflow keeps its stopped queue until containment retires it")
@@ -238,13 +179,21 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 
 	// The peer still completes a turn on the same app-server.
 	prompt := wire.TextPromptRequest(peer.SessionId, "hi")
-	prompt.Meta = promptMeta(1)
+	prompt.Meta = promptMeta(2)
 	response, err := a.Prompt(t.Context(), prompt)
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
 
-	// Releasing the stalled client lets containment finish and detach it.
+	// Releasing the stalled client lets containment finish, fail the prompt,
+	// and detach the session.
 	close(gate.block)
+
+	select {
+	case promptErr := <-done:
+		require.Error(t, promptErr, "the contained session's prompt fails")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the contained session's prompt did not settle")
+	}
 	require.Eventually(t, func() bool {
 		sa.mu.Lock()
 		defer sa.mu.Unlock()

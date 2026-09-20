@@ -207,15 +207,8 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		settled:    make(chan struct{}),
 		finished:   make(chan struct{}),
 	}
-	// The busy check shares its critical section with the install, so a
-	// cycle the pump opens can neither be missed nor left without a settler.
+
 	s.mu.Lock()
-	if s.cycle != nil {
-		s.mu.Unlock()
-
-		return acp.PromptResponse{}, wire.Backpressure(limitSessionPrompt)
-	}
-
 	s.turn = t
 	s.mu.Unlock()
 

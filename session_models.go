@@ -166,12 +166,6 @@ func (s *session) setConfigOption(ctx context.Context, configID acp.SessionConfi
 
 	s.mu.Lock()
 
-	if s.cycle != nil {
-		s.mu.Unlock()
-
-		return nil, wire.Backpressure(limitSessionPrompt)
-	}
-
 	oldModel, oldMode, oldEffort, oldServiceTier, oldPersonality, oldContextWindow := s.model, s.mode, s.effort, s.serviceTier, s.personality, s.contextWindow
 
 	switch configID {

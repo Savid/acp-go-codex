@@ -25,11 +25,8 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 	s.mu.Lock()
 	t := s.turn
 
-	switch {
-	case s.turn != nil:
-		c = &s.turn.cycle
-	case s.cycle != nil:
-		c = s.cycle
+	if t != nil {
+		c = &t.cycle
 	}
 
 	closing := s.closing

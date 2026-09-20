@@ -74,7 +74,6 @@ type session struct {
 	closeDone chan struct{}
 	closeErr  error
 	turn      *turn
-	cycle     *cycle
 	dialogs   map[string]*dialog
 
 	openMu   sync.Mutex
@@ -83,8 +82,7 @@ type session struct {
 	lc       lifecycle.Publisher
 }
 
-// cycle is one foreground run: the work of one accepted prompt, or one
-// agent-origin run the thread started between prompts.
+// cycle is one foreground run: the work of one accepted prompt.
 type cycle struct {
 	lifecycle.Cycle
 	cancelled bool
@@ -94,8 +92,6 @@ type cycle struct {
 	state        cycleState
 	// failure records a native failure observed during the run.
 	failure error
-	// terminal records that the cycle's one terminal event is claimed.
-	terminal bool
 }
 
 type turnEnd int
@@ -268,8 +264,6 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan s
 
 	s.mu.Lock()
 	t := s.turn
-	c := s.cycle
-	closing := s.closing
 	bound := s.rt == rt
 	terminalTurn := s.lastTerminalTurn
 	s.mu.Unlock()
@@ -286,36 +280,28 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan s
 		return true
 	}
 
-	switch {
-	case t != nil:
-		if bearsWork(event) {
-			s.acceptTurn(ctx, t)
-		}
+	// A record with no prompt in flight is a session-scoped tail: the thread
+	// runs no work outside a client turn.
+	if t == nil {
+		return true
+	}
 
-		settled, err := s.projectEvent(ctx, &t.cycle, event)
-		s.recordFailure(&t.cycle, err)
+	if bearsWork(event) {
+		s.acceptTurn(ctx, t)
+	}
 
-		if settled {
-			t.settle(turnSettled)
+	settled, err := s.projectEvent(ctx, &t.cycle, event)
+	s.recordFailure(&t.cycle, err)
 
-			select {
-			case <-t.finished:
-			case <-stopped:
-				return false
-			case <-rt.proc.Done():
-				return false
-			}
-		}
-	case c != nil:
-		settled, err := s.projectEvent(ctx, c, event)
-		s.recordFailure(c, err)
+	if settled {
+		t.settle(turnSettled)
 
-		if settled {
-			s.settleAgentCycle(ctx, c)
-		}
-	default:
-		if bearsWork(event) && !closing {
-			s.openAgentCycle(ctx, rt, event)
+		select {
+		case <-t.finished:
+		case <-stopped:
+			return false
+		case <-rt.proc.Done():
+			return false
 		}
 	}
 
@@ -336,88 +322,6 @@ func bearsWork(event codex.Event) bool {
 	}
 }
 
-// openAgentCycle reserves the foreground before publishing native work.
-func (s *session) openAgentCycle(ctx context.Context, rt *runtime, event codex.Event) {
-	c := &cycle{Cycle: s.lc.NewAgentCycle(), nativeTurnID: event.TurnID}
-	c.state.tools = make(map[string]*toolState)
-
-	s.mu.Lock()
-	if s.turn != nil || s.cycle != nil || s.closing || s.rt != rt {
-		s.mu.Unlock()
-
-		return
-	}
-
-	s.cycle = c
-	s.mu.Unlock()
-	s.recordFailure(c, s.lc.OpenAgentCycle(ctx, c.Cycle))
-	s.mu.Lock()
-	current := s.rt == rt && s.cycle == c && !s.closing
-	s.mu.Unlock()
-
-	if !current {
-		return
-	}
-
-	_, err := s.projectEvent(ctx, c, event)
-	s.recordFailure(c, err)
-}
-
-// settleAgentCycle runs the agent-origin settlement on the pump: the mirror
-// commit, then the terminal idle.
-func (s *session) settleAgentCycle(ctx context.Context, c *cycle) {
-	s.beginSettlement(c)
-
-	settleCtx, cancel := context.WithTimeout(ctx, sessionSettleTimeout)
-	defer cancel()
-
-	if err := s.commitMirror(settleCtx); err != nil {
-		// The incarnation ends with the failed commit; dropping the binding
-		// lets the next operation relaunch and publish a fresh one.
-		s.mu.Lock()
-		s.rt = nil
-		s.mu.Unlock()
-		s.fenceStream()
-		s.agent.log.ErrorContext(settleCtx, "mirror commit after agent-origin cycle failed",
-			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
-	}
-
-	if s.claimTerminal(c) {
-		verdict := s.judgeCycle(c, s.cycleCancelled(c))
-		if err := s.lcIdle(settleCtx, c, verdict); err != nil {
-			s.agent.log.ErrorContext(settleCtx, "terminal idle for agent-origin cycle failed",
-				slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
-		}
-	}
-
-	s.mu.Lock()
-	if c.nativeTurnID != "" {
-		s.lastTerminalTurn = c.nativeTurnID
-	}
-
-	if s.cycle == c {
-		s.cycle = nil
-	}
-	s.mu.Unlock()
-}
-
-// claimTerminal reports whether the caller owns the cycle's one terminal
-// event. The pump and the shutdown ladder both reach an open agent-origin
-// cycle, and a second idle for one cycle is refused, fences the incarnation,
-// and surfaces as a failure of whichever operation published it.
-func (s *session) claimTerminal(c *cycle) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if c.terminal {
-		return false
-	}
-
-	c.terminal = true
-
-	return true
-}
-
 // runtimeEnded records that the generation the thread was bound on stopped
 // producing events. An in-flight prompt learns its transport ended; an open
 // agent-origin cycle ends failed; the incarnation's stream is fenced once its
@@ -432,21 +336,10 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 
 	s.generationLost = true
 	t := s.turn
-	c := s.cycle
 	closing := s.closing
-
-	// While closing, the shutdown ladder is the one site that terminalizes
-	// the open cycle.
-	if !closing {
-		s.cycle = nil
-	}
 	s.mu.Unlock()
 	s.cancelDialogs()
 	s.callbacks.Wait()
-
-	if c != nil && !closing && s.claimTerminal(c) {
-		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed})
-	}
 
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
@@ -486,26 +379,14 @@ func (s *session) contain(ctx context.Context, rt *runtime, failure error) {
 
 	s.generationLost = true
 	t := s.turn
-	c := s.cycle
 	closing := s.closing
-
-	if !closing {
-		s.cycle = nil
-	}
 	s.mu.Unlock()
 
 	s.cancelDialogs()
 	s.callbacks.Wait()
 
-	switch {
-	case t != nil:
+	if t != nil {
 		s.recordFailure(&t.cycle, failure)
-	case c != nil:
-		s.recordFailure(c, failure)
-	}
-
-	if c != nil && !closing && s.claimTerminal(c) {
-		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: failure})
 	}
 
 	// The worker is joined while the binding still stands, so no rebind can
@@ -548,15 +429,11 @@ func (s *session) interrupt(ctx context.Context, rt *runtime, nativeTurnID strin
 // native work. The interrupt is joined by the session's shutdown ladder.
 func (s *session) cancel(ctx context.Context) {
 	s.mu.Lock()
-	t, c := s.turn, s.cycle
+	t := s.turn
 	rt := s.rt
 	cancelPrompt := s.promptCancel
 
-	if t != nil {
-		c = &t.cycle
-	}
-
-	if c == nil {
+	if t == nil {
 		s.mu.Unlock()
 
 		if cancelPrompt != nil {
@@ -566,7 +443,8 @@ func (s *session) cancel(ctx context.Context) {
 		return
 	}
 
-	if c.cancelled || c.terminal {
+	c := &t.cycle
+	if c.cancelled {
 		s.mu.Unlock()
 
 		return
@@ -611,22 +489,12 @@ func (s *session) claimCancellation(c *cycle) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	c.terminal = true
-
-	return c.cancelled
-}
-
-// cycleCancelled reads cancellation under the foreground admission lock.
-func (s *session) cycleCancelled(c *cycle) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	return c.cancelled
 }
 
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
-	if s.closing || s.rt == nil || s.generationLost || ((s.turn != nil && (s.turn.cancelled || s.turn.settling)) || (s.cycle != nil && (s.cycle.cancelled || s.cycle.settling))) {
+	if s.closing || s.rt == nil || s.generationLost || (s.turn != nil && (s.turn.cancelled || s.turn.settling)) {
 		s.mu.Unlock()
 		cancel(errDialogCancelled)
 
@@ -777,16 +645,8 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	c := s.cycle
-	s.cycle = nil
 	s.rt = nil
 	s.mu.Unlock()
-
-	if len(errs) == 0 && c != nil && s.claimTerminal(c) {
-		if err := s.lcIdle(commitCtx, c, cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}); err != nil {
-			errs = append(errs, err)
-		}
-	}
 
 	s.fenceStream()
 
