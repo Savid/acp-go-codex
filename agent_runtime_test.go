@@ -300,3 +300,55 @@ func TestGatewayModelsCarryPresetEfforts(t *testing.T) {
 	presets[0].ReasoningEfforts[0] = "mutated"
 	require.Equal(t, ladder[0], models[0].ReasoningEfforts[0])
 }
+
+// TestCancelWithATerminalAtTheAbortDeadlineSettles lands the native terminal
+// event at the moment the abort timer fires, so whichever side wins the race
+// the prompt settles and the agent closes.
+func TestCancelWithATerminalAtTheAbortDeadlineSettles(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	a.attach(newRecorder(), nil)
+
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
+	require.NoError(t, err)
+
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+
+	done := make(chan acp.PromptResponse, 1)
+
+	go func() {
+		prompt := wire.TextPromptRequest(created.SessionId, "LATE")
+		prompt.Meta = promptMeta(1)
+		response, _ := a.Prompt(t.Context(), prompt)
+		done <- response
+	}()
+
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		return s.turn != nil && s.turn.nativeTurnID != ""
+	}, 5*time.Second, 5*time.Millisecond)
+
+	require.NoError(t, a.Cancel(t.Context(), acp.CancelNotification{SessionId: created.SessionId}))
+
+	select {
+	case response := <-done:
+		require.Equal(t, acp.StopReasonCancelled, response.StopReason)
+	case <-time.After(sessionAbortTimeout + 10*time.Second):
+		t.Fatal("the cancelled prompt did not settle")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- a.Close() }()
+
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("close hung behind a worker waiting on the prompt")
+	}
+}

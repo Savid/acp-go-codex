@@ -69,13 +69,16 @@ var fakeAccountUsage = map[string]any{
 }
 
 type fakeThread struct {
-	id      string
-	cwd     string
-	path    string
-	turn    string
-	abort   chan struct{}
-	done    chan struct{}
-	stuck   bool
+	id    string
+	cwd   string
+	path  string
+	turn  string
+	abort chan struct{}
+	done  chan struct{}
+	stuck bool
+	// late acknowledges an interrupt at once and lands the terminal frame at
+	// the abort deadline, so both sides of the containment race are exercised.
+	late    bool
 	entries int
 }
 
@@ -406,6 +409,7 @@ func (f *fakeCodex) startTurn(id json.RawMessage, params map[string]any) {
 	thread.abort = make(chan struct{})
 	thread.done = make(chan struct{})
 	thread.stuck = strings.HasPrefix(message.String(), "STUCK")
+	thread.late = strings.HasPrefix(message.String(), "LATE")
 
 	f.respond(id, map[string]any{"turn": map[string]any{"id": thread.turn}})
 
@@ -426,7 +430,9 @@ func (f *fakeCodex) interrupt(id json.RawMessage, params map[string]any) {
 			close(thread.abort)
 		}
 
-		<-thread.done
+		if !thread.late {
+			<-thread.done
+		}
 	}
 
 	f.respond(id, map[string]any{})
@@ -528,6 +534,11 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		}
 	case strings.HasPrefix(message, "STUCK"):
 		time.Sleep(30 * time.Second)
+	case strings.HasPrefix(message, "LATE"):
+		<-thread.abort
+		time.Sleep(sessionAbortTimeout)
+
+		status = "interrupted"
 	case strings.HasPrefix(message, "JSON"):
 		text = `{"answer": 42}`
 	case strings.HasPrefix(message, "PLAN"):
