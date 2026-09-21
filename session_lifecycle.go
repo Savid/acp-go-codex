@@ -3,7 +3,6 @@ package codexacp
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/wire"
@@ -54,7 +53,7 @@ func (s *session) openStream(ctx context.Context, rt *runtime) error {
 
 	s.mu.Unlock()
 
-	return s.lc.Open(ctx, fmt.Sprintf("%s:%d", s.id, s.agent.nextIncarnation()), s.lifecycleNegotiated(), s.deliverLifecycle)
+	return s.lc.Open(ctx, lifecycle.NewIncarnation(string(s.id)), s.lifecycleNegotiated(), s.deliverLifecycle)
 }
 
 // fenceStream joins any opening publication before retiring its incarnation.
