@@ -1,0 +1,90 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "mcpServer/startupStatus/updated",
+    "params": {
+      "threadId": "fixture-thread",
+      "name": "playwright",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "mcpServer/startupStatus/updated",
+    "params": {
+      "threadId": "fixture-thread",
+      "name": "codex_apps",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "fixture-thread",
+      "status": {
+        "type": "idle"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "thread/tokenUsage/updated",
+    "params": {
+      "threadId": "fixture-thread",
+      "turnId": "01a0bd3a-d78e-7b00-9a6c-0637fa0ea364",
+      "tokenUsage": {
+        "total": {
+          "totalTokens": 13881,
+          "inputTokens": 13876,
+          "cachedInputTokens": 12032,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 5,
+          "reasoningOutputTokens": 0
+        },
+        "last": {
+          "totalTokens": 13881,
+          "inputTokens": 13876,
+          "cachedInputTokens": 12032,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 5,
+          "reasoningOutputTokens": 0
+        },
+        "modelContextWindow": 258400
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "thread/goal/cleared",
+    "params": {
+      "threadId": "fixture-thread"
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "mcpServer/startupStatus/updated",
+    "params": {
+      "threadId": "fixture-thread",
+      "name": "codex_apps",
+      "status": "ready",
+      "error": null,
+      "failureReason": null
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "mcpServer/startupStatus/updated",
+    "params": {
+      "threadId": "fixture-thread",
+      "name": "playwright",
+      "status": "ready",
+      "error": null,
+      "failureReason": null
+    }
+  }
+]

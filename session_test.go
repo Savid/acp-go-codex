@@ -2,675 +2,724 @@ package codexacp
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-codex/internal/codex"
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
 )
 
-// The native turn id is what thread-scoped containment targets, so it must be
-// readable while a turn runs and must never be cleared by an id-less event.
-func TestSessionActiveTurnIDTracksNativeTurn(t *testing.T) {
-	session := &session{}
-	require.Empty(t, session.activeTurnID())
+func TestPromptStreamsTextAndUsage(t *testing.T) {
+	t.Parallel()
 
-	session.setTurnID("native-turn-1")
-	require.Equal(t, "native-turn-1", session.activeTurnID())
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
 
-	session.setTurnID("")
-	require.Equal(t, "native-turn-1", session.activeTurnID())
+	resp, err := h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.NotNil(t, resp.Usage)
+	require.Equal(t, 15, resp.Usage.TotalTokens)
 
-	session.setTurnID("native-turn-2")
-	require.Equal(t, "native-turn-2", session.activeTurnID())
-	session.stageTurnID("")
-	require.Equal(t, "native-turn-2", session.activeTurnID())
+	updates := h.rec.snapshot()
+	require.Equal(t, "Hello world", agentText(updates))
+
+	var usage *acp.SessionUsageUpdate
+
+	for _, update := range updates {
+		if update.Update.UsageUpdate != nil {
+			usage = update.Update.UsageUpdate
+		}
+	}
+
+	require.NotNil(t, usage)
+	require.Equal(t, 1000, usage.Size)
+	require.Equal(t, 15, usage.Used)
 }
 
-func TestCanceledTurnIsNotAnActiveNativeRequestTarget(t *testing.T) {
-	session := &session{}
-	_ = session.beginTurn(context.Background(), "turn-nonce")
-	session.setTurnID("native-turn")
+func TestTerminalFrameContributesOnlySuffix(t *testing.T) {
+	t.Parallel()
 
-	nonce, active := session.activeTurnNonceForNativeTurn("native-turn")
-	require.Equal(t, "turn-nonce", nonce)
-	require.True(t, active)
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
 
-	session.cancelTurn()
-	nonce, active = session.activeTurnNonceForNativeTurn("native-turn")
-	require.Equal(t, "turn-nonce", nonce)
-	require.False(t, active)
-	session.finishTurn()
+	_, err := h.prompt(session.SessionId, "SUFFIX", nil)
+	require.NoError(t, err)
+	require.Equal(t, "Hello", agentText(h.rec.snapshot()))
+
+	_, err = h.prompt(session.SessionId, "THINK", nil)
+	require.NoError(t, err)
+
+	var thoughts strings.Builder
+
+	for _, update := range h.rec.snapshot() {
+		if chunk := update.Update.AgentThoughtChunk; chunk != nil && chunk.Content.Text != nil {
+			thoughts.WriteString(chunk.Content.Text.Text)
+		}
+	}
+
+	require.Equal(t, "hmm", thoughts.String())
+	require.Equal(t, "Hellook", agentText(h.rec.snapshot()))
 }
 
-func TestTurnContainmentWaitBranches(t *testing.T) {
-	containErr := errors.New("containment failed")
-	done := make(chan struct{})
-	close(done)
-	completed := &session{
-		cancel: func() {},
-		turnContainment: &turnContainment{
-			done: done, err: containErr, started: true,
-		},
-	}
-	require.ErrorIs(t, completed.shutdownActiveTurn(context.Background()), containErr)
+func TestToolPermissionAllowAndDeny(t *testing.T) {
+	t.Parallel()
 
-	waiting := &session{
-		cancel: func() {},
-		turnContainment: &turnContainment{
-			done: make(chan struct{}), started: true,
-		},
+	h := newHarness(t, WithSessionStore(nil))
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "TOOL", promptMeta(1))
+	require.NoError(t, err)
+
+	h.rec.mu.Lock()
+	require.Len(t, h.rec.permissions, 1)
+	permission := h.rec.permissions[0]
+	h.rec.mu.Unlock()
+
+	require.Equal(t, acp.ToolCallId("call-1"), permission.ToolCall.ToolCallId)
+	require.Equal(t, "ls", *permission.ToolCall.Title)
+	require.Len(t, permission.Options, 4)
+	require.Contains(t, permission.Meta, wire.LifecycleKey)
+
+	var statuses []acp.ToolCallStatus
+
+	for _, update := range h.rec.snapshot() {
+		switch {
+		case update.Update.ToolCall != nil:
+			statuses = append(statuses, update.Update.ToolCall.Status)
+		case update.Update.ToolCallUpdate != nil && update.Update.ToolCallUpdate.Status != nil:
+			statuses = append(statuses, *update.Update.ToolCallUpdate.Status)
+		}
 	}
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	require.ErrorIs(t, waiting.shutdownActiveTurn(canceled), context.Canceled)
-	require.ErrorIs(t, waiting.awaitTurnContainment(canceled), context.Canceled)
+
+	require.Equal(t, []acp.ToolCallStatus{acp.ToolCallStatusPending, acp.ToolCallStatusInProgress, acp.ToolCallStatusCompleted}, statuses)
+
+	types := eventTypes(lifecycleEvents(h.rec.snapshot()))
+	require.Contains(t, types, "action_update:pending")
+	require.Contains(t, types, "state_update:requires_action")
+	require.Contains(t, types, "action_update:accepted")
+
+	h.rec.mu.Lock()
+	h.rec.answer = func(acp.RequestPermissionRequest) acp.RequestPermissionResponse {
+		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("decline")}
+	}
+	h.rec.mu.Unlock()
+
+	_, err = h.prompt(session.SessionId, "TOOL", promptMeta(2))
+	require.NoError(t, err)
+
+	failed := false
+
+	for _, update := range h.rec.snapshot() {
+		if update.Update.ToolCallUpdate != nil && update.Update.ToolCallUpdate.Status != nil && *update.Update.ToolCallUpdate.Status == acp.ToolCallStatusFailed {
+			failed = true
+		}
+	}
+
+	require.True(t, failed)
+	require.Contains(t, eventTypes(lifecycleEvents(h.rec.snapshot())), "action_update:declined")
 }
 
-func TestShutdownActiveTurnCancelsInteractionStartedDuringContainment(t *testing.T) {
-	client := &blockingInterruptClient{
-		spyCodexClient:   newSpyCodexClient(),
-		runStarted:       make(chan struct{}),
-		interruptStarted: make(chan struct{}),
-		interruptRelease: make(chan struct{}),
-	}
-	session := &session{
-		agent: NewAgent(), client: client, codexThreadID: "thread",
-	}
-	_ = session.beginTurn(context.Background(), "turn-nonce")
-	session.setTurnID("native-turn")
+func TestToolImageOutput(t *testing.T) {
+	t.Parallel()
 
-	shutdownDone := make(chan error, 1)
-	go func() {
-		shutdownDone <- session.shutdownActiveTurn(context.Background())
-	}()
-	awaitTestSignal(t, client.interruptStarted, "client.interruptStarted")
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
 
-	interactionCtx, finishInteraction := session.beginInteraction(context.Background(), "during-containment")
-	close(client.interruptRelease)
+	_, err := h.prompt(session.SessionId, "TOOLIMAGE", nil)
+	require.NoError(t, err)
 
-	require.NoError(t, <-shutdownDone)
-	require.ErrorIs(t, interactionCtx.Err(), context.Canceled)
-	session.mu.Lock()
-	require.Empty(t, session.interactions)
-	session.mu.Unlock()
+	images := 0
 
-	finishInteraction()
-	session.finishTurn()
-}
+	for _, update := range h.rec.snapshot() {
+		if update.Update.ToolCallUpdate == nil {
+			continue
+		}
 
-func TestContainDeadSessionFromRetiredGeneration(t *testing.T) {
-	client := newSpyCodexClient()
-	agent := NewAgent()
-	session := &session{
-		agent: agent, id: "session", client: client,
-		codexThreadID: "thread", clientDead: true,
-	}
+		for _, content := range update.Update.ToolCallUpdate.Content {
+			if content.Content != nil && content.Content.Content.Image != nil {
+				images++
 
-	require.NoError(t, session.containSession(context.Background()))
-}
-
-func TestSessionInteractionCancellationBranches(t *testing.T) {
-	session := &session{}
-	release, err := session.acquireTurn(context.Background())
-	if err != nil {
-		t.Fatalf("acquireTurn returned error: %v", err)
-	}
-	backpressureErr := func() error {
-		_, err := session.acquireTurn(context.Background())
-
-		return err
-	}()
-	if backpressureErr == nil {
-		t.Fatal("acquireTurn ignored prompt backpressure")
-	}
-
-	var reqErr *acp.RequestError
-	if !errors.As(backpressureErr, &reqErr) || reqErr.Code != -32600 {
-		t.Fatalf("backpressure error = %v, want -32600 invalid request", backpressureErr)
-	}
-	backpressureData, ok := reqErr.Data.(map[string]any)
-	if !ok || backpressureData[jsonFieldError] != valueBackpressure || backpressureData[jsonFieldLimit] != limitSessionPrompt {
-		t.Fatalf("backpressure payload = %#v, want {error:backpressure, limit:session_prompt}", reqErr.Data)
-	}
-	release()
-
-	interactionCtx, finish := session.beginInteraction(t.Context(), "")
-	if interactionCtx.Err() != nil {
-		t.Fatal("interaction without parent started canceled")
-	}
-	finish()
-	if interactionCtx.Err() == nil {
-		t.Fatal("interaction finish did not cancel context")
-	}
-
-	turnParent := context.Background()
-	_ = session.beginTurn(turnParent, "test-turn")
-	firstCtx, firstFinish := session.beginInteraction(context.Background(), "duplicate")
-	secondCtx, secondFinish := session.beginInteraction(context.Background(), "duplicate")
-	if firstCtx.Err() == nil {
-		t.Fatal("duplicate interaction did not detach first context")
-	}
-	session.cancelTurn()
-	if secondCtx.Err() == nil || !session.wasTurnCancelled() {
-		t.Fatal("cancelTurn did not cancel pending interaction")
-	}
-	lateCtx, lateFinish := session.beginInteraction(context.Background(), "after-cancel")
-	if !errors.Is(lateCtx.Err(), context.Canceled) {
-		t.Fatal("interaction created after turn cancellation started uncanceled")
-	}
-	firstFinish()
-	secondFinish()
-	lateFinish()
-	session.finishTurn()
-
-	_ = session.beginTurn(context.Background(), "test-turn")
-	turnInteraction, turnFinish := session.beginInteraction(context.Background(), "finish-turn")
-	session.finishTurn()
-	if turnInteraction.Err() == nil {
-		t.Fatal("finishTurn did not detach pending interaction")
-	}
-	turnFinish()
-}
-
-func TestSessionSnapshotConcurrentAccountUpdates(t *testing.T) {
-	session := &session{
-		id:              "s",
-		cwd:             absTestPath("tmp", "project"),
-		codexThreadID:   "thread",
-		model:           "gpt",
-		modelProvider:   "openai",
-		reasoningEffort: "medium",
-		serviceTier:     "flex",
-		personality:     "pragmatic",
-		accountMeta:     map[string]any{"id": "acct"},
-	}
-
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				session.setAccount(map[string]any{"id": "acct", "planType": "plus"})
+				require.Equal(t, "image/png", content.Content.Content.Image.MimeType)
 			}
 		}
-	}()
-	defer func() {
-		close(stop)
-		<-done
-	}()
-	for range 1000 {
-		meta := sessionResponseMeta(session.snapshot())
-		codexMeta := asType[map[string]any](t, meta[codexMetaKey])
-		if _, ok := meta["github.com/savid/acp-go-codex"]; ok {
-			t.Fatal("deleted package-path meta was emitted")
+	}
+
+	require.Equal(t, 1, images)
+}
+
+func TestElicitationFormAndFallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("form supported", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize(withLifecycle(), withFormElicitation())
+		session := h.newSession()
+
+		h.rec.mu.Lock()
+		h.rec.elicit = func(request acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+			require.NotNil(t, request.Form)
+			require.Contains(t, request.Form.Meta, wire.LifecycleKey)
+			require.Contains(t, request.Form.RequestedSchema.Properties, "name")
+
+			return acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{"name": "Ada"}}}, nil
 		}
-		asType[map[string]any](t, codexMeta[codexAccountMetaKey])["id"] = "changed"
-		nextMeta := sessionResponseMeta(session.snapshot())
-		nextCodexMeta := asType[map[string]any](t, nextMeta[codexMetaKey])
-		if asType[map[string]any](t, nextCodexMeta[codexAccountMetaKey])["id"] == "changed" {
-			t.Fatal("session account meta aliases response meta")
-		}
-		_ = codexAuthRequiredError(errors.New("not logged in"), session.accountMetaSnapshot())
-	}
-}
+		h.rec.mu.Unlock()
 
-func TestSessionCloseJoinsClientAndMaterializedErrors(t *testing.T) {
-	origRemoveRollout := removeMaterializedRolloutFile
-	t.Cleanup(func() { removeMaterializedRolloutFile = origRemoveRollout })
-	removeMaterializedRolloutFile = func(string) error {
-		return errors.New("remove failed")
-	}
-
-	session := &session{
-		agent:            NewAgent(),
-		client:           &errorCodexClient{spyCodexClient: newSpyCodexClient(), closeErr: errors.New("close failed")},
-		materializedPath: "/tmp/rollout.jsonl",
-	}
-	err := session.Close(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "remove failed") || strings.Contains(err.Error(), "close failed") {
-		t.Fatalf("logical session release error = %v", err)
-	}
-}
-
-type closeContextRecordingClient struct {
-	*spyCodexClient
-	closeCtxErr error
-}
-
-func (c *closeContextRecordingClient) Close(ctx context.Context) error {
-	c.closeCtxErr = ctx.Err()
-
-	return ctx.Err()
-}
-
-func TestSessionCloseUsesBoundedBackgroundContext(t *testing.T) {
-	client := &closeContextRecordingClient{spyCodexClient: newSpyCodexClient()}
-	agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return client, nil }))
-
-	resp, err := agent.NewSession(context.Background(), NewSessionRequest(absTestPath("tmp", "project")))
-	if err != nil {
-		t.Fatalf("NewSession returned error: %v", err)
-	}
-
-	if _, closeErr := agent.CloseSession(canceledContext(), acp.CloseSessionRequest{SessionId: resp.SessionId}); closeErr != nil {
-		t.Fatalf("CloseSession with canceled caller context returned error: %v", closeErr)
-	}
-	if client.closeCtxErr != nil {
-		t.Fatalf("native close ran under the caller's canceled context: %v", client.closeCtxErr)
-	}
-}
-
-type coordinatedSessionCloseClient struct {
-	*spyCodexClient
-	started chan struct{}
-	release chan struct{}
-	calls   atomic.Int64
-}
-
-func (c *coordinatedSessionCloseClient) UnsubscribeThread(ctx context.Context, _ string) error {
-	if c.calls.Add(1) == 1 {
-		close(c.started)
-	}
-
-	select {
-	case <-c.release:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func TestSessionCloseCoordinatesConcurrentCallersExactlyOnce(t *testing.T) {
-	var commits atomic.Int64
-	store := &appendFuncStore{append: func(context.Context, SessionKey, []SessionStoreEntry) error {
-		commits.Add(1)
-
-		return nil
-	}}
-	agent := NewAgent(WithSessionStore(store))
-	client := &coordinatedSessionCloseClient{
-		spyCodexClient: newSpyCodexClient(), started: make(chan struct{}), release: make(chan struct{}),
-	}
-	s := newSession(agent, "session", t.TempDir(), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
-	s.unsyncedEntries = []SessionStoreEntry{[]byte(`{"type":"event_msg"}`)}
-	agent.sessions[s.id] = s
-	agent.runtimeClient = client
-
-	// The winner is admitted first and parked inside the native unsubscribe, so
-	// every later caller provably finds a close operation still in flight and
-	// waits on it rather than memoizing a finished one. Each of those callers
-	// announces itself before entering Close, and the native side is released
-	// only once all of them have — so the waiting path, not the memoized one, is
-	// what the peers exercise.
-	const callers = 24
-	results := make(chan error, callers)
-
-	go func() { results <- s.Close(t.Context()) }()
-	awaitTestSignal(t, client.started, "client.started")
-	require.Equal(t, int64(1), client.calls.Load())
-
-	entering := make(chan struct{}, callers-1)
-	for range callers - 1 {
-		go func() {
-			entering <- struct{}{}
-			results <- s.Close(t.Context())
-		}()
-	}
-
-	for range callers - 1 {
-		awaitTestSignal(t, entering, "peer entering Close")
-	}
-
-	close(client.release)
-	for range callers {
-		require.NoError(t, <-results)
-	}
-
-	require.Equal(t, int64(1), client.calls.Load())
-	require.Equal(t, int64(2), commits.Load(), "close commits durable configuration and the resumable snapshot")
-}
-
-func TestEnsureLiveClientRelaunchFailures(t *testing.T) {
-	ctx := context.Background()
-
-	factoryErr := errors.New("relaunch factory failed")
-	newClientFails := &session{
-		agent:         NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return nil, factoryErr })),
-		id:            "relaunch-factory",
-		codexThreadID: "thread",
-		clientDead:    true,
-	}
-	newClientFails.agent.sessions[newClientFails.id] = newClientFails
-	newClientFails.agent.runtimeDead = true
-	if err := newClientFails.ensureLiveClient(ctx); !errors.Is(err, factoryErr) {
-		t.Fatalf("ensureLiveClient factory error = %v", err)
-	}
-	if !newClientFails.clientDead {
-		t.Fatal("failed relaunch must leave client dead")
-	}
-
-	resumeErr := errors.New("resume rejected")
-	resumeClient := &errorCodexClient{spyCodexClient: newSpyCodexClient(), resumeErr: resumeErr}
-	resumeFails := &session{
-		agent:         NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return resumeClient, nil })),
-		id:            "relaunch-resume",
-		codexThreadID: "thread",
-		clientDead:    true,
-	}
-	old := newSpyCodexClient()
-	resumeFails.client = old
-	resumeFails.agent.sessions[resumeFails.id] = resumeFails
-	resumeFails.agent.runtimeClient = old
-	resumeFails.agent.runtimeDead = true
-	resumeFails.agent.runtimeNativeRelease = func() error { return nil }
-	if err := resumeFails.ensureLiveClient(ctx); !errors.Is(err, resumeErr) {
-		t.Fatalf("ensureLiveClient resume error = %v", err)
-	}
-
-	// A prompt on a dead session whose relaunch fails surfaces the transport
-	// failure and keeps the session addressable.
-	if _, err := resumeFails.Prompt(ctx, TextPromptRequest("relaunch-resume", "test-turn", "hi")); !isTurnFailure(err, codex.CauseTransport) {
-		t.Fatalf("prompt after failed relaunch = %v, want transport failure", err)
-	}
-}
-
-func TestEnsureLiveClientPublishesOnlyCurrentSessionGeneration(t *testing.T) {
-	t.Run("canonical resumed rollout path", func(t *testing.T) {
-		replacement := newSpyCodexClient()
-		replacement.thread.Path = "/replacement/rollout.jsonl"
-		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-			return replacement, nil
-		}))
-		old := newSpyCodexClient()
-		active := &session{
-			agent: agent, id: "path", cwd: absTestPath("tmp", "project"),
-			codexThreadID: "thread-1", client: old, clientDead: true,
-		}
-		agent.sessions[active.id] = active
-		agent.runtimeClient = old
-		agent.runtimeDead = true
-
-		require.NoError(t, active.ensureLiveClient(context.Background()))
-		require.Equal(t, "/replacement/rollout.jsonl", active.rolloutPath)
-		require.NoError(t, agent.Close())
+		_, err := h.prompt(session.SessionId, "ASK", promptMeta(1))
+		require.NoError(t, err)
+		require.Equal(t, "hi Ada", agentText(h.rec.snapshot()))
+		require.Contains(t, eventTypes(lifecycleEvents(h.rec.snapshot())), "action_update:accepted")
 	})
 
-	for _, test := range []struct {
-		name          string
-		rebindFailure bool
-		mutate        func(*Agent, *session)
-		check         func(*testing.T, error)
-	}{
-		{
-			name: "logical session removed",
-			mutate: func(agent *Agent, active *session) {
-				agent.mu.Lock()
-				delete(agent.sessions, active.id)
-				agent.mu.Unlock()
-			},
-			check: func(t *testing.T, err error) {
-				t.Helper()
+	t.Run("form unsupported", func(t *testing.T) {
+		t.Parallel()
 
-				require.ErrorContains(t, err, "unknown session")
-			},
-		},
-		{
-			name: "runtime generation retired",
-			mutate: func(agent *Agent, active *session) {
-				agent.mu.Lock()
-				agent.runtimeDead = true
-				agent.mu.Unlock()
-			},
-			check: func(t *testing.T, err error) {
-				t.Helper()
+		h := newHarness(t)
+		h.initialize()
+		session := h.newSession()
 
-				require.ErrorIs(t, err, codex.ErrConnectionClosed)
-			},
-		},
-		{
-			name:          "logical session removed with rebind refusal",
-			rebindFailure: true,
-			mutate: func(agent *Agent, active *session) {
-				agent.mu.Lock()
-				delete(agent.sessions, active.id)
-				agent.mu.Unlock()
-			},
-			check: func(t *testing.T, err error) {
-				t.Helper()
-				require.ErrorContains(t, err, "unknown session")
-				require.ErrorContains(t, err, "native lifecycle is active")
-			},
-		},
-		{
-			name:          "runtime generation retired with rebind refusal",
-			rebindFailure: true,
-			mutate: func(agent *Agent, active *session) {
-				agent.mu.Lock()
-				agent.runtimeDead = true
-				agent.mu.Unlock()
-			},
-			check: func(t *testing.T, err error) {
-				t.Helper()
-				require.ErrorIs(t, err, codex.ErrConnectionClosed)
-				require.ErrorContains(t, err, "native lifecycle is active")
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			blocking := &blockingLifecycleCodexClient{
-				spyCodexClient: newSpyCodexClient(), resumeStarted: make(chan codex.ThreadResumeRequest, 1), resumeRelease: make(chan struct{}),
-			}
-			var replacement codex.Client = blocking
-			var activeReplacement *activeAfterSubscribeClient
-			if test.rebindFailure {
-				activeReplacement = &activeAfterSubscribeClient{blockingLifecycleCodexClient: blocking}
-				replacement = activeReplacement
-			}
-			agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) {
-				return replacement, nil
-			}))
-			old := newSpyCodexClient()
-			active := &session{
-				agent: agent, id: acp.SessionId(test.name), cwd: absTestPath("tmp", "project"),
-				codexThreadID: "thread-1", client: old, clientDead: true,
-			}
-			if activeReplacement != nil {
-				activeReplacement.active = active
-			}
-			agent.sessions[active.id] = active
-			agent.runtimeClient = old
-			agent.runtimeDead = true
+		_, err := h.prompt(session.SessionId, "ASK", nil)
+		require.NoError(t, err)
+		require.Equal(t, "declined", agentText(h.rec.snapshot()))
+	})
+}
 
-			done := make(chan error, 1)
-			go func() { done <- active.ensureLiveClient(context.Background()) }()
-			awaitTestSignal(t, blocking.resumeStarted, "blocking.resumeStarted")
-			test.mutate(agent, active)
-			close(blocking.resumeRelease)
-			test.check(t, <-done)
-			require.True(t, active.clientDead)
-			active.lifecycleMu.Lock()
-			active.lifecycleDeliveryActive = false
-			active.lifecycleMu.Unlock()
-			active.fenceSession()
-			require.NoError(t, agent.Close())
+func TestProviderFailureShape(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithSessionStore(nil))
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "ERROR", promptMeta(1))
+	require.Equal(t, -32603, requestErrorCode(t, err))
+
+	data := requestErrorData(t, err)
+	require.Equal(t, "codex_turn_failed", data["error"])
+	require.Equal(t, "provider", data["cause"])
+	require.Equal(t, "boom", data["message"])
+	require.EqualValues(t, 429, data["statusCode"])
+	require.Equal(t, "rate_limited", data["providerCode"])
+
+	events := lifecycleEvents(h.rec.snapshot())
+	last := events[len(events)-1]
+	require.Equal(t, "failed", last["outcome"])
+	require.NotContains(t, last, "stopReason")
+
+	_, err = h.prompt(session.SessionId, "REJECT", promptMeta(2))
+	require.Equal(t, "provider", requestErrorData(t, err)["cause"])
+	require.Equal(t, "no provider key", requestErrorData(t, err)["message"])
+
+	// The session stays addressable after a failure.
+	resp, err := h.prompt(session.SessionId, "HELLO", promptMeta(3))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+}
+
+func TestCancelAndTimeout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cancel", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize(withLifecycle())
+		session := h.newSession()
+
+		type result struct {
+			resp acp.PromptResponse
+			err  error
+		}
+
+		done := make(chan result, 1)
+
+		go func() {
+			resp, err := h.prompt(session.SessionId, "SLOW", promptMeta(1))
+			done <- result{resp: resp, err: err}
+		}()
+
+		h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(lifecycleEvents(updates)) >= 3 })
+		require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
+
+		outcome := <-done
+		require.NoError(t, outcome.err)
+		require.Equal(t, acp.StopReasonCancelled, outcome.resp.StopReason)
+
+		events := lifecycleEvents(h.rec.snapshot())
+		require.Equal(t, "cancelled", events[len(events)-1]["outcome"])
+	})
+}
+
+func TestProcessExitFailsTurnAndReplacesRuntime(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+	peer := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "DIE", promptMeta(1))
+	require.Equal(t, -32603, requestErrorCode(t, err))
+
+	data := requestErrorData(t, err)
+	require.Equal(t, "codex_turn_failed", data["error"])
+	require.Equal(t, "process_exit", data["cause"])
+	require.Contains(t, data["message"], "status 3")
+	require.Contains(t, data["message"], "fatal: dead")
+
+	// The next explicit operation starts one replacement and rebinds both
+	// threads through it, each on a fresh incarnation.
+	resp, err := h.prompt(session.SessionId, "HELLO", promptMeta(2))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+
+	resp, err = h.prompt(peer.SessionId, "ECHO peer", promptMeta(3))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+
+	streams := map[string]struct{}{}
+
+	for _, update := range h.rec.snapshot() {
+		if envelope, ok := update.Meta[wire.LifecycleKey].(map[string]any); ok {
+			if id, isString := envelope["streamId"].(string); isString {
+				streams[id] = struct{}{}
+			}
+		}
+	}
+
+	require.Len(t, streams, 4)
+}
+
+func TestStructuredOutput(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession(WithSessionOutputSchema(map[string]any{"type": "object"}))
+
+	resp, err := h.prompt(session.SessionId, "JSON", nil)
+	require.NoError(t, err)
+
+	codexMeta, _ := resp.Meta["codex"].(map[string]any)
+	require.Equal(t, map[string]any{"answer": float64(42)}, codexMeta["structuredOutput"])
+}
+
+func TestPlanUpdates(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "PLAN", nil)
+	require.NoError(t, err)
+
+	var plan *acp.SessionUpdatePlan
+
+	for _, update := range h.rec.snapshot() {
+		if update.Update.Plan != nil {
+			plan = update.Update.Plan
+		}
+	}
+
+	require.NotNil(t, plan)
+	require.Len(t, plan.Entries, 2)
+	require.Equal(t, acp.PlanEntryStatusCompleted, plan.Entries[0].Status)
+	require.Equal(t, acp.PlanEntryStatusInProgress, plan.Entries[1].Status)
+}
+
+func TestImageInputGates(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithDefaultModel("vision"))
+	h.initialize()
+	session := h.newSession()
+
+	resp, err := h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.TextBlock("ECHO"), acp.ImageBlock(tinyPNG, "image/png")))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Contains(t, agentText(h.rec.snapshot()), "images:1")
+
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ImageBlock("not base64!", "image/png")))
+	require.Equal(t, "invalid_base64", requestErrorData(t, err)["error"])
+
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), SetModelRequest(session.SessionId, "text-only"))
+	require.NoError(t, err)
+
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ImageBlock(tinyPNG, "image/png")))
+	require.Equal(t, "unsupported_by_model", requestErrorData(t, err)["error"])
+}
+
+func TestConfigOptions(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithDefaultModel("vision"), WithConfiguredModels([]string{"gpt-x"}))
+	h.initialize()
+	session := h.newSession(WithSessionCodexOptions(NewCodexOptions(WithCodexServiceTier("flex"))))
+
+	ids := map[acp.SessionConfigId]*acp.SessionConfigOptionSelect{}
+	for _, option := range session.ConfigOptions {
+		ids[option.Select.Id] = option.Select
+	}
+
+	require.Contains(t, ids, configModel)
+	require.Contains(t, ids, configMode)
+	require.Contains(t, ids, configEffort)
+	require.Contains(t, ids, configServiceTier)
+	require.NotContains(t, ids, configPersonality)
+	require.Equal(t, acp.SessionConfigValueId("vision"), ids[configModel].CurrentValue)
+	require.Equal(t, acp.SessionConfigValueId("medium"), ids[configEffort].CurrentValue)
+
+	values := *ids[configModel].Options.Ungrouped
+	require.Equal(t, acp.SessionConfigValueId("vision"), values[0].Value)
+
+	modelMeta, ok := values[0].Meta["codex"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1000, modelMeta["contextWindow"])
+	require.Equal(t, acp.SessionConfigValueId("gpt-x"), values[len(values)-1].Value)
+
+	resp, err := h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configMode, "plan"))
+	require.NoError(t, err)
+
+	for _, option := range resp.ConfigOptions {
+		if option.Select.Id == configMode {
+			require.Equal(t, acp.SessionConfigValueId("plan"), option.Select.CurrentValue)
+		}
+	}
+
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configEffort, ""))
+	require.Equal(t, "value", requestErrorData(t, err)["field"])
+
+	// mode is the adapter's own menu, so a value outside it is refused rather
+	// than advertised back as a current value the menu does not carry.
+	for _, value := range []acp.SessionConfigValueId{"", "banana"} {
+		_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configMode, value))
+		require.Equal(t, "value", requestErrorData(t, err)["field"])
+	}
+
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, "bogus", "x"))
+	require.Equal(t, "configId", requestErrorData(t, err)["field"])
+
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), acp.SetSessionConfigOptionRequest{Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: session.SessionId, ConfigId: "x", Value: true}})
+	require.Equal(t, "type", requestErrorData(t, err)["field"])
+}
+
+func TestRawEventsOptIn(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession(WithSessionRawEvents(true))
+
+	_, err := h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+
+	h.rec.waitFor(t, func([]acp.SessionNotification) bool {
+		h.rec.mu.Lock()
+		defer h.rec.mu.Unlock()
+
+		return len(h.rec.raw) >= 3
+	})
+
+	h.rec.mu.Lock()
+	raw := h.rec.raw
+	h.rec.mu.Unlock()
+
+	var first map[string]any
+	require.NoError(t, json.Unmarshal(raw[0], &first))
+	require.EqualValues(t, 1, first["sequence"])
+	require.Equal(t, string(session.SessionId), first["sessionId"])
+
+	event, _ := first["event"].(map[string]any)
+	require.Equal(t, "turn/started", event["method"])
+}
+
+func TestSessionEnvironmentReachesThread(t *testing.T) {
+	t.Parallel()
+
+	dump := filepath.Join(t.TempDir(), "env")
+	binDir := filepath.Join(t.TempDir(), "bin")
+
+	h := newHarness(t, WithEnv(map[string]string{
+		fakeCodexEnv: "1", fakeCodexEnvDump: dump, "ACP_GO_CODEX_TEST_AGENT": "agent", "ACP_GO_CODEX_INTERNAL_LEAK": "x",
+	}))
+	h.initialize()
+	h.newSession(WithSessionCodexOptions(NewCodexOptions(
+		WithCodexEnv(map[string]string{"ACP_GO_CODEX_TEST_SESSION": "session", "EMPTY": ""}),
+		WithCodexExtraPathDirs(binDir),
+	)))
+
+	processEnv, err := os.ReadFile(dump)
+	require.NoError(t, err)
+	require.Contains(t, string(processEnv), "ACP_GO_CODEX_TEST_AGENT=agent")
+	require.NotContains(t, string(processEnv), "ACP_GO_CODEX_INTERNAL_LEAK")
+	require.Contains(t, string(processEnv), codexHomeEnv+"="+h.home)
+
+	threadEnv, err := os.ReadFile(dump + ".thread")
+	require.NoError(t, err)
+
+	var set map[string]any
+	require.NoError(t, json.Unmarshal(threadEnv, &set))
+	require.Equal(t, "session", set["ACP_GO_CODEX_TEST_SESSION"])
+	require.Equal(t, "", set["EMPTY"])
+
+	path, _ := set["PATH"].(string)
+	require.True(t, strings.HasPrefix(path, binDir+string(os.PathListSeparator)), path)
+}
+
+func TestAgentCloseStopsRuntime(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+}
+
+func TestLateDialogAfterCancellationIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, state := range []string{"cancelled turn", "closed", "disconnected"} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			s := &session{rt: &runtime{}, turn: &turn{}}
+			switch state {
+			case "cancelled turn":
+				s.turn.cancelled = true
+			case "closed":
+				s.closing = true
+			case "disconnected":
+				s.rt = nil
+			}
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			release := s.registerDialog("late-native-request", cancel)
+			require.ErrorIs(t, context.Cause(ctx), errDialogCancelled)
+			release()
+			s.callbacks.Wait()
 		})
 	}
 }
 
-type activeAfterSubscribeClient struct {
-	*blockingLifecycleCodexClient
-	active *session
-}
-
-func (c *activeAfterSubscribeClient) SubscribeThread(ctx context.Context, threadID string) (codex.ThreadEventStream, error) {
-	stream, err := c.blockingLifecycleCodexClient.SubscribeThread(ctx, threadID)
-	if err == nil {
-		c.active.lifecycleMu.Lock()
-		c.active.lifecycleDeliveryActive = true
-		c.active.lifecycleMu.Unlock()
-	}
-
-	return stream, err
-}
-
-type canaryPreparationFailureClient struct {
-	*runtimeRecordingClient
-	session *session
-}
-
-func (c *canaryPreparationFailureClient) RunTurn(context.Context, codex.TurnStartRequest) (codex.Turn, error) {
-	c.session.lifecycleMu.Lock()
-	c.session.lifecycleDeliveryActive = true
-	c.session.lifecycleMu.Unlock()
-
-	return codex.Turn{}, errors.New("runtime_ready failed")
-}
-
-func TestEnsureLiveClientContainsBrokerAndCanaryRecoveryFailures(t *testing.T) {
-	t.Run("broker rebind", func(t *testing.T) {
-		replacement := newSpyCodexClient()
-		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return replacement, nil }))
-		old := newSpyCodexClient()
-		active := &session{agent: agent, id: "session", codexThreadID: "thread", client: old, clientDead: true, lifecycleClosing: true}
-		agent.sessions[active.id] = active
-		agent.runtimeClient = old
-		agent.runtimeDead = true
-		require.ErrorContains(t, active.ensureLiveClient(t.Context()), "lifecycle is closing")
-		active.lifecycleClosing = false
-		require.NoError(t, agent.Close())
-	})
-
-	t.Run("canary rebind succeeds", func(t *testing.T) {
-		replacement := &runtimeFailureClient{
-			runtimeRecordingClient: newRuntimeRecordingClient(),
-			events:                 []codex.Event{{Kind: codex.EventCompleted, StopReason: codex.StopReasonEndTurn}},
+func TestCloseJoinsFirstMirrorAndFencesOpening(t *testing.T) {
+	t.Parallel()
+	for _, agentClose := range []bool{false, true} {
+		name := "close_session"
+		if agentClose {
+			name = "close_agent"
 		}
-		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return replacement, nil }))
-		old := newSpyCodexClient()
-		active := &session{
-			agent: agent, id: "session", codexThreadID: "thread", client: old, clientDead: true,
-			mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example.test/mcp", nil)},
-		}
-		agent.sessions[active.id] = active
-		agent.runtimeClient = old
-		agent.runtimeDead = true
-		require.ErrorContains(t, active.ensureLiveClient(t.Context()), "marker was not observed")
-		require.NoError(t, agent.Close())
-	})
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := &commitBarrier{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan acpcore.SessionKey, 1), release: make(chan struct{})}
+			release := sync.OnceFunc(func() { close(store.release) })
+			t.Cleanup(release)
+			store.block.Store(true)
+			a := NewAgent(testOptions(t, WithSessionStore(store))...)
+			t.Cleanup(func() { _ = a.Close() })
+			rec := newRecorder()
+			a.attach(rec, nil)
+			request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+			withLifecycle()(&request)
+			_, err := a.Initialize(t.Context(), request)
+			require.NoError(t, err)
+			cwd := t.TempDir()
+			created := make(chan error, 1)
+			go func() {
+				_, createErr := a.NewSession(t.Context(), wire.NewSessionRequest(cwd))
+				created <- createErr
+			}()
+			var key acpcore.SessionKey
+			select {
+			case key = <-store.entered:
+			case <-time.After(testTimeout):
+				t.Fatal("creation did not reach its first mirror")
+			}
+			s, err := a.session(t.Context(), acp.SessionId(key.SessionID))
+			require.NoError(t, err)
+			s.mu.Lock()
+			rt := s.rt
+			s.mu.Unlock()
+			closed := make(chan error, 1)
+			go func() {
+				if agentClose {
+					closed <- a.Close()
 
-	t.Run("canary rebind refusal joins", func(t *testing.T) {
-		replacement := &canaryPreparationFailureClient{runtimeRecordingClient: newRuntimeRecordingClient()}
-		agent := NewAgent(withClientFactory(func(context.Context, codex.Options) (codex.Client, error) { return replacement, nil }))
-		old := newSpyCodexClient()
-		active := &session{
-			agent: agent, id: "session", codexThreadID: "thread", client: old, clientDead: true,
-			mcpServers: []acp.McpServer{HTTPMCPServer("marker", "https://example.test/mcp", nil)},
-		}
-		replacement.session = active
-		agent.sessions[active.id] = active
-		agent.runtimeClient = old
-		agent.runtimeDead = true
-		err := active.ensureLiveClient(t.Context())
-		require.ErrorContains(t, err, "marker was not observed")
-		require.ErrorContains(t, err, "native lifecycle is active")
-		active.lifecycleMu.Lock()
-		active.lifecycleDeliveryActive = false
-		active.lifecycleMu.Unlock()
-		active.fenceSession()
-		require.NoError(t, agent.Close())
-	})
-}
+					return
+				}
+				_, err := a.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: acp.SessionId(key.SessionID)})
+				closed <- err
+			}()
+			require.Eventually(t, func() bool {
+				s.mu.Lock()
+				defer s.mu.Unlock()
 
-type blockingUnsubscribeErrorClient struct {
-	*errorCodexClient
-	started chan struct{}
-	release chan struct{}
-}
-
-func (c *blockingUnsubscribeErrorClient) UnsubscribeThread(ctx context.Context, _ string) error {
-	close(c.started)
-
-	select {
-	case <-c.release:
-		return errors.New("retired connection")
-	case <-ctx.Done():
-		return ctx.Err()
+				return s.closing
+			}, testTimeout, time.Millisecond)
+			select {
+			case err := <-closed:
+				t.Fatalf("close returned while the first mirror was blocked: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			release()
+			select {
+			case err := <-closed:
+				require.NoError(t, err)
+			case <-time.After(testTimeout):
+				t.Fatal("close did not join creation")
+			}
+			select {
+			case err := <-created:
+				require.Error(t, err, "a closing session must refuse its opening publication")
+			case <-time.After(testTimeout):
+				t.Fatal("creation did not release its gate before cleanup")
+			}
+			require.False(t, s.lc.Active())
+			before := len(rec.snapshot())
+			require.Error(t, s.openStream(t.Context(), rt))
+			require.Len(t, rec.snapshot(), before, "closed session published commands or a lifecycle snapshot")
+			require.False(t, s.lc.Active())
+		})
 	}
 }
 
-func TestSessionContainmentAcceptsConcurrentRuntimeRetirementProof(t *testing.T) {
-	client := &blockingUnsubscribeErrorClient{
-		errorCodexClient: &errorCodexClient{spyCodexClient: newSpyCodexClient()},
-		started:          make(chan struct{}),
-		release:          make(chan struct{}),
-	}
-	agent := NewAgent()
-	active := &session{
-		agent: agent, id: "unsubscribe-race", codexThreadID: "thread-1", client: client,
-	}
-	agent.sessions[active.id] = active
-	agent.runtimeClient = client
-
-	done := make(chan error, 1)
-	go func() { done <- active.containSession(context.Background()) }()
-	awaitTestSignal(t, client.started, "client.started")
-	active.setClientDead(true)
-	close(client.release)
-
-	require.EqualError(t, <-done, "retired connection")
-	require.False(t, agent.runtimeDead)
+func TestOpeningRejectsReplacedNativeGeneration(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	stale := s.rt
+	s.mu.Unlock()
+	transport, meta := prepareOpeningResponse(t)
+	a.attach(rec, transport)
+	require.NoError(t, a.scheduleOpen(transport.RequestContext(t.Context(), meta), s))
+	a.stopGeneration(t.Context(), stale)
+	require.False(t, s.lc.Active())
+	fresh, err := s.ensureBound(t.Context())
+	require.NoError(t, err)
+	require.NotSame(t, stale, fresh)
+	require.True(t, s.lc.Active())
+	before := len(rec.snapshot())
+	require.Error(t, s.openStream(t.Context(), stale))
+	require.Len(t, rec.snapshot(), before, "stale deferred opening published on the replacement generation")
+	require.True(t, s.lc.Active(), "stale opening fenced the replacement stream")
+	finishOpeningResponse(t, transport, s.id)
+	require.Len(t, rec.snapshot(), before, "stale hook published on the replacement generation")
+	current, err := a.session(t.Context(), s.id)
+	require.NoError(t, err)
+	require.Same(t, s, current)
+	require.True(t, s.lc.Active(), "stale hook closed the replacement stream")
 }
 
-func TestSessionTurnAndCloseOperationsFailClosedAtOwnershipBoundaries(t *testing.T) {
-	s := &session{closing: true}
-	_, err := s.beginPromptTurn(t.Context(), "nonce")
-	require.Error(t, err)
-	require.ErrorIs(t, s.shutdownActiveTurnForNonce(t.Context(), "nonce"), errTurnRouteMismatch)
-
-	s = &session{turnNonce: "current", cancel: func() {}, turnContainment: &turnContainment{done: make(chan struct{})}}
-	handled, err := s.shutdownPromptTurn(t.Context(), "stale", true)
-	require.True(t, handled)
-	require.ErrorIs(t, err, errTurnRouteMismatch)
-
-	completed := errors.New("memoized close")
-	done := make(chan struct{})
-	close(done)
-	s = &session{
-		closeOperation:  &sessionCloseOperation{done: done, err: completed},
-		closeContained:  true,
-		closeCommitDone: true,
-	}
-	require.ErrorIs(t, s.Close(t.Context()), completed)
-
-	done = make(chan struct{})
-	s = &session{closeOperation: &sessionCloseOperation{done: done}}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	require.ErrorIs(t, s.Close(ctx), context.Canceled)
-
-	s = &session{nativeEventDone: make(chan struct{})}
-	require.ErrorIs(t, s.unsubscribeContainedThread(ctx, newSpyCodexClient(), "thread"), context.Canceled)
+// openingCallbackClient exercises a synchronous embedded callback into admission.
+type openingCallbackClient struct {
+	*recorder
+	agent *Agent
 }
 
-func TestUnsubscribeContainedThreadJoinsRetirementFailure(t *testing.T) {
-	client := &errorCodexClient{
-		spyCodexClient: newSpyCodexClient(), unsubscribeErr: codex.ErrConnectionClosed,
+func (c *openingCallbackClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if err := c.agent.Cancel(ctx, acp.CancelNotification{SessionId: notification.SessionId}); err != nil {
+		return err
 	}
-	agent := NewAgent()
-	agent.runtimeClient = client
-	agent.runtimeNativeRelease = func() error { return ErrContainmentIncomplete }
-	s := newSession(agent, "session", absTestPath("tmp", "project"), nil, codex.Thread{ID: "thread"}, client, sessionMeta{}, nil)
-	agent.sessions[s.id] = s
 
-	err := s.unsubscribeContainedThread(t.Context(), client, "thread")
-	require.ErrorIs(t, err, codex.ErrConnectionClosed)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	return c.recorder.SessionUpdate(ctx, notification)
+}
+
+func TestOpeningAllowsSynchronousSessionCallback(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(&openingCallbackClient{recorder: rec, agent: a}, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	_, err = a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	require.NotEmpty(t, rec.snapshot())
+}
+
+func prepareOpeningResponse(t *testing.T) (*wire.Transport, map[string]any) {
+	t.Helper()
+	transport := wire.NewTransport(strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/new\",\"params\":{}}\n"), io.Discard)
+	t.Cleanup(transport.Close)
+	transport.Start()
+	inbound, err := io.ReadAll(transport.Reader())
+	require.NoError(t, err)
+
+	var frame struct {
+		Params acp.NewSessionRequest `json:"params"`
+	}
+
+	require.NoError(t, json.Unmarshal(inbound, &frame))
+
+	return transport, frame.Params.Meta
+}
+
+func finishOpeningResponse(t *testing.T, transport *wire.Transport, id acp.SessionId) {
+	t.Helper()
+	_, err := transport.Writer().Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n"))
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+	require.NoError(t, transport.AwaitSession(ctx, id))
+}
+
+func TestDeferredOpeningFailureDetachesSession(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))...)
+	t.Cleanup(func() { _ = a.Close() })
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	transport, meta := prepareOpeningResponse(t)
+	a.attach(&firstOpenFailureClient{recorder: newRecorder()}, transport)
+	newRequest := wire.NewSessionRequest(t.TempDir())
+	newRequest.Meta = meta
+	created, err := a.NewSession(t.Context(), newRequest)
+	require.NoError(t, err)
+	a.mu.Lock()
+	s := a.sessions[created.SessionId]
+	a.mu.Unlock()
+	require.NotNil(t, s)
+	finishOpeningResponse(t, transport, created.SessionId)
+	require.False(t, s.lc.Active())
+	a.mu.Lock()
+	_, installed := a.sessions[created.SessionId]
+	a.mu.Unlock()
+	require.False(t, installed, "failed deferred publication retained the active slot")
+	s.mu.Lock()
+	closed := s.closing
+	s.mu.Unlock()
+	require.True(t, closed)
 }
