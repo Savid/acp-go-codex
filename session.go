@@ -236,6 +236,10 @@ func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 	s.bind(rt, thread)
 
 	if err := s.openStream(ctx, rt); err != nil {
+		if errors.Is(err, errSessionClosing) {
+			return nil, s.closingRefusal()
+		}
+
 		return nil, err
 	}
 
