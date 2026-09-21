@@ -789,3 +789,92 @@ func TestDeleteWinsAgainstPreparedLoad(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, list.Sessions)
 }
+
+// countingStore counts the writes a session makes to the store.
+type countingStore struct {
+	acpcore.SessionStore
+	replaces atomic.Int32
+	deletes  atomic.Int32
+}
+
+func (s *countingStore) Replace(ctx context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	s.replaces.Add(1)
+
+	return s.SessionStore.Replace(ctx, main, replacements)
+}
+
+func (s *countingStore) Delete(ctx context.Context, key acpcore.SessionKey) error {
+	s.deletes.Add(1)
+
+	return s.SessionStore.Delete(ctx, key)
+}
+
+func TestEphemeralSessionNeverReachesTheStore(t *testing.T) {
+	t.Parallel()
+
+	store := &countingStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+
+	cwd := t.TempDir()
+	ephemeral := wire.WithSessionMeta(wire.SessionMeta{Ephemeral: true}.Apply(nil))
+
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, ephemeral))
+	require.NoError(t, err)
+
+	_, err = h.prompt(session.SessionId, "ECHO first", nil)
+	require.NoError(t, err)
+
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), wire.DeleteSessionRequest(session.SessionId))
+	require.NoError(t, err)
+
+	require.Zero(t, store.replaces.Load(), "an ephemeral session is never mirrored")
+	require.Zero(t, store.deletes.Load(), "deleting an ephemeral session leaves no tombstone")
+
+	generation, err := store.Load(t.Context(), string(session.SessionId))
+	require.NoError(t, err)
+	require.Nil(t, generation)
+
+	// A session opened without the flag still mirrors.
+	_, err = h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	require.Positive(t, store.replaces.Load())
+}
+
+func TestSessionMetaIsRefusedOnRestoreAndUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithSessionStore(acpcore.NewInMemorySessionStore()))
+	h.initialize()
+
+	cwd := t.TempDir()
+
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+
+	ephemeral := wire.WithSessionMeta(wire.SessionMeta{Ephemeral: true}.Apply(nil))
+
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd, ephemeral))
+	data := requestErrorData(t, err)
+	require.Equal(t, "unsupported", data["error"])
+	require.Equal(t, "_meta."+wire.SessionMetaKey, data["field"])
+
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd, ephemeral))
+	data = requestErrorData(t, err)
+	require.Equal(t, "unsupported", data["error"])
+	require.Equal(t, "_meta."+wire.SessionMetaKey, data["field"])
+
+	unknown := wire.WithSessionMeta(map[string]any{wire.SessionMetaKey: map[string]any{"persist": false}})
+
+	_, err = h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, unknown))
+	data = requestErrorData(t, err)
+	require.Equal(t, "unsupported", data["error"])
+	require.Equal(t, "_meta."+wire.SessionMetaKey+".persist", data["field"])
+}

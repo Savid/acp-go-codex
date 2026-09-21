@@ -32,6 +32,9 @@ type sessionStart struct {
 	cwd                   string
 	additionalDirectories []string
 	meta                  sessionMeta
+	// ephemeral is the host's statement that it deletes this session without
+	// needing it back, so the store never sees it.
+	ephemeral bool
 }
 
 func (a *Agent) validateStart(params sessionStart, mcpServers []acp.McpServer, meta map[string]any) (sessionStart, error) {
@@ -77,6 +80,7 @@ func (a *Agent) newSession(start sessionStart) *session {
 		cwd:                   start.cwd,
 		additionalDirectories: slices.Clone(start.additionalDirectories),
 		options:               options,
+		ephemeral:             start.ephemeral,
 		gate:                  make(chan struct{}, 1),
 		model:                 options.Model,
 		mode:                  modeDefault,
@@ -108,6 +112,10 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 		s.closeDone = make(chan struct{})
 		s.mu.Unlock()
 		a.sessions[s.id] = s
+
+		if s.ephemeral {
+			a.ephemeral[s.id] = true
+		}
 	}
 	a.mu.Unlock()
 
@@ -170,6 +178,13 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+
+	hostMeta, refusal := wire.DecodeSessionMeta(params.Meta)
+	if refusal != nil {
+		return acp.NewSessionResponse{}, refusal
+	}
+
+	start.ephemeral = hostMeta.Ephemeral
 
 	s := a.newSession(start)
 
@@ -286,6 +301,10 @@ func (a *Agent) restore(
 	start, err := a.validateStart(params, mcpServers, meta)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if refusal := wire.RefuseSessionMeta(meta); refusal != nil {
+		return nil, nil, refusal
 	}
 
 	if transport := a.transportRef(); transport != nil {
@@ -543,7 +562,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	active := make([]*session, 0, len(a.sessions))
 
 	for id, s := range a.sessions {
-		if !a.deleted[id] && (filter == "" || filter == s.cwd) {
+		if !a.deleted[id] && !s.ephemeral && (filter == "" || filter == s.cwd) {
 			active = append(active, s)
 		}
 	}
@@ -709,12 +728,21 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		return acp.UnstableDeleteSessionResponse{}, refusal
 	}
 
-	if err := a.store.Delete(deleteCtx, acpcore.SessionKey{SessionID: string(params.SessionId)}); err != nil {
-		return acp.UnstableDeleteSessionResponse{}, wire.InternalFailure(vendor, "")
+	a.mu.Lock()
+	ephemeral := a.ephemeral[params.SessionId]
+	a.mu.Unlock()
+
+	// An ephemeral session was never written, so the store has nothing to
+	// tombstone for it.
+	if !ephemeral {
+		if err := a.store.Delete(deleteCtx, acpcore.SessionKey{SessionID: string(params.SessionId)}); err != nil {
+			return acp.UnstableDeleteSessionResponse{}, wire.InternalFailure(vendor, "")
+		}
 	}
 
 	a.mu.Lock()
 	a.deleted[params.SessionId] = true
+	delete(a.ephemeral, params.SessionId)
 	s := a.sessions[params.SessionId]
 	a.mu.Unlock()
 
