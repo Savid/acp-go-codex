@@ -80,6 +80,45 @@ type fakeThread struct {
 	// the abort deadline, so both sides of the containment race are exercised.
 	late    bool
 	entries int
+	// usage is the thread's last usage report and total its cumulative usage.
+	usage map[string]any
+	total fakeTokens
+}
+
+// fakeTokens is one model request's usage as codex reports it: the input
+// includes the cached input, and the total is input plus output.
+type fakeTokens struct{ input, cached, output int }
+
+func (u fakeTokens) breakdown() map[string]any {
+	return map[string]any{
+		"inputTokens": u.input, "cachedInputTokens": u.cached, "cacheWriteInputTokens": 0,
+		"outputTokens": u.output, "reasoningOutputTokens": 0, "totalTokens": u.input + u.output,
+	}
+}
+
+// reportUsage reports a finished model request as codex does: its usage as
+// the last, added to the thread's cumulative total.
+func (f *fakeCodex) reportUsage(thread *fakeThread, scoped func(map[string]any) map[string]any, last fakeTokens) {
+	thread.total = fakeTokens{input: thread.total.input + last.input, cached: thread.total.cached + last.cached, output: thread.total.output + last.output}
+	f.notifyUsage(thread, scoped, last.breakdown())
+}
+
+// notifyUsage sends the thread's usage report with last as the last usage.
+func (f *fakeCodex) notifyUsage(thread *fakeThread, scoped func(map[string]any) map[string]any, last map[string]any) {
+	thread.usage = last
+	f.notify("thread/tokenUsage/updated", scoped(map[string]any{"tokenUsage": map[string]any{
+		"last": last, "total": thread.total.breakdown(), "modelContextWindow": 1000,
+	}}))
+}
+
+// command runs one shell command item to the given status.
+func (f *fakeCodex) command(scoped func(map[string]any) map[string]any, id string, status string) {
+	item := map[string]any{"id": id, "type": "commandExecution", "command": []string{"ls"}, "status": "inProgress"}
+	f.notify("item/started", scoped(map[string]any{"item": item}))
+
+	item = maps.Clone(item)
+	item["status"] = status
+	f.notify("item/completed", scoped(map[string]any{"item": item}))
 }
 
 type fakeCodex struct {
@@ -485,6 +524,7 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 	status := "completed"
 	text := "Hello world"
 	itemID := "msg-" + fakeUUID()
+	usage := fakeTokens{input: 10, output: 5}
 
 	delta := func(chunk string) {
 		f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": itemID, "delta": chunk}))
@@ -532,6 +572,8 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 			status = "interrupted"
 		case <-time.After(30 * time.Second):
 		}
+	case f.isUsageScript(message):
+		usage, text, status = f.usageTurn(thread, scoped, message)
 	case strings.HasPrefix(message, "STUCK"):
 		time.Sleep(30 * time.Second)
 	case strings.HasPrefix(message, "LATE"):
@@ -566,9 +608,7 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		f.appendRow(thread, eventRow("agent_message", map[string]any{"message": text}))
 	}
 
-	f.notify("thread/tokenUsage/updated", scoped(map[string]any{"tokenUsage": map[string]any{
-		"last": map[string]any{"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}, "modelContextWindow": 1000,
-	}}))
+	f.reportUsage(thread, scoped, usage)
 
 	turn := map[string]any{"id": turnID, "status": status}
 	if status == "failed" {
@@ -582,6 +622,58 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		// State the harness writes after its own completion signal, still
 		// naming the turn that just ended.
 		f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "tail-1", "delta": "tail"}))
+	}
+}
+
+// isUsageScript reports whether the message selects one of the usage
+// scripts below.
+func (f *fakeCodex) isUsageScript(message string) bool {
+	for _, prefix := range []string{"MULTI", "COMPACT", "STEPSLOW"} {
+		if strings.HasPrefix(message, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// usageTurn runs a usage script up to the turn's final request and returns
+// that request's usage, the final text, and the turn status.
+func (f *fakeCodex) usageTurn(thread *fakeThread, scoped func(map[string]any) map[string]any, message string) (fakeTokens, string, string) {
+	switch {
+	case strings.HasPrefix(message, "MULTI"):
+		// Three model requests, each reported once its tools finished: the
+		// first one's command was interrupted, and codex restates the second
+		// report before the third request completes.
+		f.command(scoped, "call-a", "failed")
+		f.reportUsage(thread, scoped, fakeTokens{input: 1000, output: 20})
+		f.command(scoped, "call-b", "completed")
+		f.reportUsage(thread, scoped, fakeTokens{input: 1100, cached: 1000, output: 30})
+		f.notifyUsage(thread, scoped, thread.usage)
+
+		return fakeTokens{input: 1150, cached: 1100, output: 10}, "finished", "completed"
+	case strings.HasPrefix(message, "COMPACT"):
+		// A request fills the context, codex compacts it with a summarizing
+		// request, reports its estimate of the compacted history, and the turn
+		// continues on it.
+		f.reportUsage(thread, scoped, fakeTokens{input: 5000, cached: 4000, output: 100})
+		f.notify("item/started", scoped(map[string]any{"item": map[string]any{"id": "compact-1", "type": "contextCompaction"}}))
+		f.notifyUsage(thread, scoped, thread.usage)
+		f.reportUsage(thread, scoped, fakeTokens{input: 4900, output: 150})
+		f.notifyUsage(thread, scoped, map[string]any{"inputTokens": 0, "cachedInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0, "totalTokens": 600})
+		f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": "compact-1", "type": "contextCompaction"}}))
+
+		return fakeTokens{input: 700, output: 20}, "compacted", "completed"
+	default:
+		f.command(scoped, "call-a", "completed")
+		f.reportUsage(thread, scoped, fakeTokens{input: 1000, output: 20})
+
+		select {
+		case <-thread.abort:
+			return fakeTokens{input: 10, output: 5}, "", "interrupted"
+		case <-time.After(30 * time.Second):
+			return fakeTokens{input: 10, output: 5}, "late", "completed"
+		}
 	}
 }
 

@@ -53,7 +53,6 @@ func (s *session) outputRoots() []string {
 // toolState is the exact-id lifecycle published for one native tool call.
 type toolState struct {
 	published bool
-	terminal  bool
 	// content is the last emitted complete content array; each later
 	// content-bearing update extends it so no delivered item disappears
 	// under ACP's whole-array replacement.
@@ -110,10 +109,6 @@ func (s *session) publishToolStart(ctx context.Context, state *cycleState, event
 	id := cmp.Or(event.ID, "codex-tool")
 
 	tool := state.tool(id)
-	if tool.terminal {
-		return nil
-	}
-
 	kind := toolKind(event.Kind)
 
 	if tool.published {
@@ -143,9 +138,6 @@ func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id st
 	}
 
 	tool := state.tool(cmp.Or(id, "codex-tool"))
-	if tool.terminal {
-		return nil
-	}
 
 	tool.content = append(tool.content, acp.ToolContent(acp.TextBlock(text)))
 
@@ -160,10 +152,10 @@ func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, ev
 
 	id := cmp.Or(event.ID, "codex-tool")
 
+	// The app-server says nothing more about an item once it completes.
+	defer delete(state.tools, id)
+
 	tool := state.tool(id)
-	if tool.terminal {
-		return nil
-	}
 
 	status := acp.ToolCallStatusCompleted
 	if event.Status == itemStatusFailed || event.Status == itemStatusDeclined {
@@ -192,8 +184,6 @@ func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, ev
 
 		tool.published = true
 	}
-
-	tool.terminal = true
 
 	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), opts...))
 }
@@ -227,7 +217,7 @@ func (s *session) publishImageStart(ctx context.Context, state *cycleState, even
 	id := cmp.Or(event.ID, "codex-image")
 
 	tool := state.tool(id)
-	if tool.published || tool.terminal {
+	if tool.published {
 		return nil
 	}
 
@@ -250,10 +240,10 @@ func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, e
 
 	id := cmp.Or(event.ID, "codex-image")
 
+	// The app-server says nothing more about an item once it completes.
+	defer delete(state.tools, id)
+
 	tool := state.tool(id)
-	if tool.terminal {
-		return nil
-	}
 
 	if !tool.published {
 		if err := s.emit(ctx, acp.StartToolCall(acp.ToolCallId(id), imageToolTitle(event.Kind),
@@ -263,8 +253,6 @@ func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, e
 
 		tool.published = true
 	}
-
-	tool.terminal = true
 
 	if event.Status == itemStatusFailed {
 		return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(acp.ToolCallStatusFailed), acp.WithUpdateRawOutput(event.Raw)))
@@ -313,10 +301,10 @@ func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, e
 	s.images = append(s.images, storedImage{ID: id, Kind: event.Kind, Data: output.Data, MIME: output.MIME})
 	s.mu.Unlock()
 
-	tool.content = []acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(output.Data, output.MIME))}
 	state.imagesEmitted = true
 
-	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(acp.ToolCallStatusCompleted), acp.WithUpdateContent(tool.content)))
+	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+		acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.ImageBlock(output.Data, output.MIME))})))
 }
 
 func imageToolTitle(kind string) string {

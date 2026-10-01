@@ -114,18 +114,23 @@ type ImageEvent struct {
 	Raw       map[string]any
 }
 
-// Usage is one token usage block.
+// Usage is one token usage breakdown. Input includes the cached input, and
+// Total is input plus output.
 type Usage struct {
 	Input      int64
-	Output     int64
 	CachedRead int64
+	CacheWrite int64
+	Output     int64
 	Reasoning  int64
 	Total      int64
 }
 
-// TokenUsage is the thread/tokenUsage/updated payload.
+// TokenUsage is the thread/tokenUsage/updated payload: the last model
+// request's usage, the thread's cumulative usage, and the context window
+// codex applies to the selected model, 0 when it reports none.
 type TokenUsage struct {
 	Last               Usage
+	Total              Usage
 	ModelContextWindow int64
 }
 
@@ -393,32 +398,21 @@ func turnFailure(turn map[string]any, params map[string]any) *TurnFailure {
 
 func tokenUsageFromParams(params map[string]any) TokenUsage {
 	raw := mapValue(params, "tokenUsage")
-	if raw == nil {
-		raw = mapValue(params, "usage")
-	}
 
-	usage := TokenUsage{
+	return TokenUsage{
 		Last:               usageFromMap(mapValue(raw, "last")),
+		Total:              usageFromMap(mapValue(raw, "total")),
 		ModelContextWindow: int64Value(raw, "modelContextWindow"),
 	}
-	if usage.Last == (Usage{}) {
-		usage.Last = usageFromMap(raw)
-	}
-
-	return usage
 }
 
 func usageFromMap(raw map[string]any) Usage {
-	usage := Usage{
+	return Usage{
 		Input:      int64Value(raw, "inputTokens"),
-		Output:     int64Value(raw, "outputTokens"),
 		CachedRead: int64Value(raw, "cachedInputTokens"),
+		CacheWrite: int64Value(raw, "cacheWriteInputTokens"),
+		Output:     int64Value(raw, "outputTokens"),
 		Reasoning:  int64Value(raw, "reasoningOutputTokens"),
 		Total:      int64Value(raw, "totalTokens"),
 	}
-	if usage.Total == 0 {
-		usage.Total = usage.Input + usage.Output
-	}
-
-	return usage
 }

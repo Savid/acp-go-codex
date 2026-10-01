@@ -53,11 +53,14 @@ type session struct {
 	effort      string
 	serviceTier string
 	personality string
-	// contextWindow is the selected model's context window from the last
-	// usage report or the catalog.
+	// contextWindow is the selected model's context window in the catalog:
+	// the gateway's listing or the app-server's presets, 0 when it states none.
 	contextWindow int64
-	title         string
-	updatedAt     string
+	// usage is the thread's last usage report, which the next report is
+	// compared against.
+	usage     codex.TokenUsage
+	title     string
+	updatedAt string
 	// lastTerminalTurn is the native turn id of the last cycle this session
 	// terminalized. Records naming it are a native tail, not new work.
 	lastTerminalTurn string
@@ -282,14 +285,15 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan s
 	// A record naming the turn this session already terminalized is that
 	// turn's native tail, never work of whatever runs now. Adopting its id
 	// would stamp the live cycle with an id no later record of that cycle can
-	// match, and the cycle would never reach its own terminal.
-	if event.TurnID != "" && event.TurnID == terminalTurn {
-		return true
-	}
+	// match, and the cycle would never reach its own terminal. A record with
+	// no prompt in flight is a session-scoped tail: the thread runs no work
+	// outside a client turn. A usage report among them still moves the
+	// thread's cumulative usage.
+	if t == nil || event.TurnID != "" && event.TurnID == terminalTurn {
+		if event.Kind == codex.EventUsageUpdated {
+			s.observeUsage(event.Usage)
+		}
 
-	// A record with no prompt in flight is a session-scoped tail: the thread
-	// runs no work outside a client turn.
-	if t == nil {
 		return true
 	}
 
