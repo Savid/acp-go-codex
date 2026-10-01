@@ -117,15 +117,13 @@ requests.
 A started thread's breakdown carries, as `responseId`, the id the model
 gateway returned for the request's response, taken from codex's response
 completion; a resumed thread's reports name no response, so its breakdowns
-carry none. Live `agent_message_chunk` and `agent_thought_chunk` updates
-carry no `messageId`: codex names a response only once it completes, after
-its text streamed. Replayed chunks carry the response id as `messageId`:
-the rollout records each response that completes with usage under its id
-after the response's output rows, and a record claims the assistant and
-reasoning rows written in its turn since the previous one. Codex records no
-id for a response that failed or reported no usage, so rows it wrote carry
-none when no later response of the turn completes, and otherwise that later
-response's id: the rollout does not tell the two responses' rows apart.
+carry none. `agent_message_chunk` and `agent_thought_chunk` updates never
+carry a `messageId`. Live, codex names a response only once it completes,
+after its text streamed. On replay, the rollout records each response that
+completes with usage under its id, after the response's output rows, but
+codex writes a response's output rows as each completes and records nothing
+for a response that failed and was retried, or reported no usage, so no
+rollout row can be tied to its response with certainty.
 
 ### Account usage
 

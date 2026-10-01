@@ -19,23 +19,6 @@ const (
 	RowTypeEventMsg     = "event_msg"
 	RowTypeResponseItem = "response_item"
 	RowTypeCompacted    = "compacted"
-	// RowTypeUsageRecord is the row codex writes as a model response
-	// completes with usage, naming the gateway's id for the response.
-	RowTypeUsageRecord = "token_usage_record"
-)
-
-// Rollout payload types that bound a turn or carry a model response's
-// output.
-const (
-	eventTaskStarted       = "task_started"
-	eventTaskComplete      = "task_complete"
-	eventTurnAborted       = "turn_aborted"
-	eventAgentMessage      = "agent_message"
-	eventAgentReasoning    = "agent_reasoning"
-	eventAgentReasoningRaw = "agent_reasoning_raw_content"
-	itemMessage            = "message"
-	itemReasoning          = "reasoning"
-	roleAssistant          = "assistant"
 )
 
 // The app-server keeps rollouts under `sessions/YYYY/MM/DD/` in its home,
@@ -244,65 +227,5 @@ func rolloutUsage(raw map[string]any) Usage {
 		Output:     int64Value(raw, "output_tokens"),
 		Reasoning:  int64Value(raw, "reasoning_output_tokens"),
 		Total:      int64Value(raw, "total_tokens"),
-	}
-}
-
-// ResponseIDs names, for each row, the gateway's id for the model response
-// that produced it, or "" for a row no response produced or none names.
-// Codex writes a response's output rows as each completes and then, once the
-// response completes with usage, one token_usage_record naming it, all within
-// the turn. A record therefore claims the output rows written in its turn
-// since the previous record. Codex records no id for a response that failed
-// or reported no usage: its output rows keep "" when no later record in the
-// turn follows, and otherwise fall to that record, since nothing in the
-// rollout separates them from the later response's rows.
-func ResponseIDs(rows []RolloutRow) []string {
-	ids := make([]string, len(rows))
-	pending := make([]int, 0)
-	turn := ""
-
-	for index, row := range rows {
-		switch {
-		case row.Type == RowTypeUsageRecord:
-			if turn != "" && stringValue(row.Payload, "turn_id") != turn {
-				continue
-			}
-
-			for _, owned := range pending {
-				ids[owned] = stringValue(row.Payload, "response_id")
-			}
-
-			pending = pending[:0]
-		case row.Type == RowTypeEventMsg && boundsTurn(stringValue(row.Payload, fieldType)):
-			pending = pending[:0]
-			turn = ""
-
-			if stringValue(row.Payload, fieldType) == eventTaskStarted {
-				turn = stringValue(row.Payload, "turn_id")
-			}
-		case responseOutput(row):
-			pending = append(pending, index)
-		}
-	}
-
-	return ids
-}
-
-func boundsTurn(kind string) bool {
-	return kind == eventTaskStarted || kind == eventTaskComplete || kind == eventTurnAborted
-}
-
-// responseOutput reports whether a row is a model response's assistant text
-// or reasoning, as a response item or its event copy.
-func responseOutput(row RolloutRow) bool {
-	kind := stringValue(row.Payload, fieldType)
-
-	switch row.Type {
-	case RowTypeResponseItem:
-		return kind == itemReasoning || (kind == itemMessage && stringValue(row.Payload, "role") == roleAssistant)
-	case RowTypeEventMsg:
-		return kind == eventAgentMessage || kind == eventAgentReasoning || kind == eventAgentReasoningRaw
-	default:
-		return false
 	}
 }

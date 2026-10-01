@@ -2,11 +2,13 @@ package codexacp
 
 import (
 	"maps"
+	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-codex/internal/codex"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
@@ -61,7 +63,7 @@ func usageSession(t *testing.T, path string) (*harness, acp.SessionId) {
 
 // usageSince returns the usage updates delivered after the first mark
 // notifications, each breakdown without its response id, which
-// TestResponseIDJoinsChunksToTheirCall proves.
+// TestResponseIDNamesOnlyTheReportedCall proves.
 func usageSince(h *harness, mark int) []acp.SessionUsageUpdate {
 	updates := usageUpdates(h.rec.snapshot()[mark:])
 
@@ -332,13 +334,14 @@ func chunkMessageIDs(updates []acp.SessionNotification) []string {
 	return ids
 }
 
-// TestResponseIDJoinsChunksToTheirCall proves the gateway's response id joins
-// a request's chunks to its breakdown. A started thread's breakdown carries
-// the id its response completion names and a resumed thread's, whose reports
-// name none, carries no id. Live chunks stream before codex names the id and
-// carry none; replayed chunks carry the id the rollout recorded for their
-// response, the one the started thread's breakdown carried.
-func TestResponseIDJoinsChunksToTheirCall(t *testing.T) {
+// TestResponseIDNamesOnlyTheReportedCall proves the gateway's response id
+// rides only the breakdown that reports its call. A started thread's
+// breakdown carries the id its response completion names, the one the
+// rollout records; a resumed thread's reports name none, so its breakdown
+// carries none. No chunk carries a messageId: live chunks stream before codex
+// names their response, and the rollout cannot tie a replayed row to its
+// response with certainty.
+func TestResponseIDNamesOnlyTheReportedCall(t *testing.T) {
 	t.Parallel()
 
 	for _, path := range usagePaths {
@@ -375,7 +378,7 @@ func TestResponseIDJoinsChunksToTheirCall(t *testing.T) {
 			require.NoError(t, err)
 
 			live := h.rec.snapshot()[mark:]
-			require.Equal(t, []string{"", ""}, chunkMessageIDs(live), "a live chunk streams before codex names its response")
+			require.Equal(t, []string{"", ""}, chunkMessageIDs(live))
 
 			usage := usageUpdates(live)
 			require.Len(t, usage, 1)
@@ -383,27 +386,45 @@ func TestResponseIDJoinsChunksToTheirCall(t *testing.T) {
 			call, ok := usage[0].Meta[wire.CallUsageKey].(map[string]any)
 			require.True(t, ok)
 
+			recorded := recordedResponseIDs(t, h, session)
 			responseID, named := call["responseId"].(string)
 			require.Equal(t, path == "started", named, "only a started thread's report names its response")
 
-			replayed := reload()
-			last := -1
-
-			for index, update := range replayed {
-				if update.Update.AgentMessageChunk != nil {
-					last = index
-				}
-			}
-
-			require.NotEqual(t, -1, last)
-			require.Equal(t, "ok", agentText(replayed[last:last+1]))
-
-			replayedID := chunkMessageIDs(replayed[last : last+1])[0]
-			require.True(t, strings.HasPrefix(replayedID, "gen-"))
-
 			if named {
-				require.Equal(t, responseID, replayedID)
+				require.Equal(t, recorded[len(recorded)-1], responseID)
 			}
+
+			replayed := reload()
+			ids := chunkMessageIDs(replayed)
+			require.NotEmpty(t, ids)
+			require.Equal(t, make([]string, len(ids)), ids, "a replayed chunk carries no messageId although the rollout records its turn's response")
 		})
 	}
+}
+
+// recordedResponseIDs lists the response ids the session's rollout records.
+func recordedResponseIDs(t *testing.T, h *harness, session acp.SessionId) []string {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(h.home, "sessions", "*", "*", "*", "rollout-*-"+string(session)+".jsonl"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+
+	rows, err := codex.ReadRows(matches[0])
+	require.NoError(t, err)
+
+	ids := make([]string, 0, len(rows))
+
+	for _, row := range rows {
+		decoded, decodeErr := codex.DecodeRow(row)
+		require.NoError(t, decodeErr)
+
+		if decoded.Type == "token_usage_record" {
+			ids = append(ids, payloadString(decoded.Payload, "response_id"))
+		}
+	}
+
+	require.NotEmpty(t, ids)
+
+	return ids
 }

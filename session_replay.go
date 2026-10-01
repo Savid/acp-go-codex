@@ -73,9 +73,8 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 	}
 
 	emitted := make(map[string]bool)
-	responseIDs := codex.ResponseIDs(decoded)
 
-	for index, row := range decoded {
+	for _, row := range decoded {
 		id := cmp.Or(payloadString(row.Payload, "id"), payloadString(row.Payload, "call_id"))
 		if row.Type == codex.RowTypeResponseItem && payloadString(row.Payload, fieldType) == itemImageGen {
 			if saved, ok := captured[id]; ok {
@@ -89,7 +88,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 			return s.agent.restoreRefused(ctx, s.id, failure)
 		}
 
-		if err := s.emit(ctx, withResponseID(updates, responseIDs[index])...); err != nil {
+		if err := s.emit(ctx, updates...); err != nil {
 			return err
 		}
 
@@ -111,25 +110,6 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 	}
 
 	return nil
-}
-
-// withResponseID gives the assistant and thought chunks a model response's
-// row produced the gateway's id for that response as their messageId.
-func withResponseID(updates []acp.SessionUpdate, responseID string) []acp.SessionUpdate {
-	if responseID == "" {
-		return updates
-	}
-
-	for _, update := range updates {
-		switch {
-		case update.AgentMessageChunk != nil:
-			update.AgentMessageChunk.MessageId = &responseID
-		case update.AgentThoughtChunk != nil:
-			update.AgentThoughtChunk.MessageId = &responseID
-		}
-	}
-
-	return updates
 }
 
 // emitStoredImage restores an admitted artifact whose native row contains only a path.
