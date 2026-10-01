@@ -107,7 +107,9 @@ those tools finished. A request reported with no tokens, as a gateway's
 response-cache replay is, sends nothing. After a compaction the update carries
 codex's estimate of the compacted history and no breakdown. `size` is the
 model's window in the gateway's model list, else the window codex last
-reported, else `0`. The prompt response sums the turn's requests.
+reported, else `0`; a model the list states no window for therefore reports
+`0` on a new thread's first request, whose response completes before codex
+first reports a window. The prompt response sums the turn's requests.
 
 ### Account usage
 

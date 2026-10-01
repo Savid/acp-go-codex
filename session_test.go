@@ -42,8 +42,8 @@ func TestPromptStreamsTextAndUsage(t *testing.T) {
 		}
 	}
 
-	// The session's model is outside the catalog, and the response completed
-	// before codex first reported a window.
+	// No gateway lists the session's model, and the response completed before
+	// codex first reported a window.
 	require.NotNil(t, usage)
 	require.Equal(t, 0, usage.Size)
 	require.Equal(t, 15, usage.Used)
@@ -391,9 +391,6 @@ func TestConfigOptions(t *testing.T) {
 	values := *ids[configModel].Options.Ungrouped
 	require.Equal(t, acp.SessionConfigValueId("vision"), values[0].Value)
 
-	modelMeta, ok := values[0].Meta["codex"].(map[string]any)
-	require.True(t, ok)
-	require.EqualValues(t, 1000, modelMeta["contextWindow"])
 	require.Equal(t, acp.SessionConfigValueId("gpt-x"), values[len(values)-1].Value)
 
 	resp, err := h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configMode, "plan"))

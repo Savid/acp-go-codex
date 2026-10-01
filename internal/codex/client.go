@@ -90,9 +90,11 @@ type TurnStartRequest struct {
 
 // Model is one model/list entry.
 type Model struct {
-	ID                     string
-	Name                   string
-	Description            string
+	ID          string
+	Name        string
+	Description string
+	// ContextWindow is the window a gateway's model list states for the
+	// model; the app-server's own list states none.
 	ContextWindow          int64
 	DefaultReasoningEffort string
 	ReasoningEfforts       []string
@@ -271,7 +273,6 @@ func (c *Client) ListModels(ctx context.Context) ([]Model, error) {
 			ID:                     id,
 			Name:                   firstNonEmpty(stringValue(item, "displayName"), stringValue(item, fieldName), id),
 			Description:            stringValue(item, "description"),
-			ContextWindow:          int64Value(item, "contextWindow"),
 			DefaultReasoningEffort: stringValue(item, "defaultReasoningEffort"),
 			ReasoningEfforts:       efforts,
 			InputModalities:        stringSliceValue(item["inputModalities"]),

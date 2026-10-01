@@ -30,17 +30,17 @@ func TestTextProjectionRejectsStaleAndRepeatedRecords(t *testing.T) {
 // resumed reports each request once the request's tools finished.
 var usagePaths = []string{"started", "resumed"}
 
-// usageSession opens a session on a model the catalog gives a 1000-token
-// window: a new thread, or, for the resumed path, the thread of a session
-// that answered one prompt, was closed, and was loaded again.
+// usageSession opens a session on a model the gateway lists with a
+// 1000-token window: a new thread, or, for the resumed path, the thread of a
+// session that answered one prompt, was closed, and was loaded again.
 func usageSession(t *testing.T, path string) (*harness, acp.SessionId) {
 	t.Helper()
 
-	h := newHarness(t, WithSessionStore(acpcore.NewInMemorySessionStore()))
+	h := newGatewayHarness(t, WithSessionStore(acpcore.NewInMemorySessionStore()))
 	h.initialize()
 
 	cwd := t.TempDir()
-	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, WithSessionCodexOptions(NewCodexOptions(WithCodexModel("vision")))))
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, WithSessionCodexOptions(NewCodexOptions(WithCodexModel("gw/wide")))))
 	require.NoError(t, err)
 
 	if path == "resumed" {
@@ -262,17 +262,18 @@ func TestCancelDuringToolKeepsResponseUsage(t *testing.T) {
 	}
 }
 
-// TestUsageWindowPrefersCatalog proves size is the catalog's window for the
-// selected model, and codex's reported window only for a model the catalog
-// states none for, unknown until codex first reports it.
-func TestUsageWindowPrefersCatalog(t *testing.T) {
+// TestUsageWindowPrefersGatewayList proves size is the window the gateway's
+// model list states for the selected model, and codex's reported window only
+// for a model the list states none for, unknown on a new thread's first
+// request, whose response completes before codex first reports it.
+func TestUsageWindowPrefersGatewayList(t *testing.T) {
 	t.Parallel()
 
-	for model, sizes := range map[string][]int{"vision": {1000, 1000}, "text-only": {500, 500}, "unlisted": {0, 1000}} {
+	for model, sizes := range map[string][]int{"gw/wide": {1000, 1000}, "gw/narrow": {500, 500}, "gw/unsized": {0, 1000}, "unlisted": {0, 1000}} {
 		t.Run(model, func(t *testing.T) {
 			t.Parallel()
 
-			h := newHarness(t)
+			h := newGatewayHarness(t)
 			h.initialize()
 			session := h.newSession(WithSessionCodexOptions(NewCodexOptions(WithCodexModel(model))))
 

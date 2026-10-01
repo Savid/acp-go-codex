@@ -214,12 +214,18 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 		}
 	}()
 
+	return agent.serve(ctx, input, output)
+}
+
+// serve answers the host on input and output until ctx ends or the host
+// disconnects.
+func (a *Agent) serve(ctx context.Context, input io.Reader, output io.Writer) error {
 	transport := wire.NewTransport(input, output)
 	defer transport.Close()
 
-	conn := acp.NewAgentSideConnection(agent, transport.Writer(), transport.Reader())
-	conn.SetLogger(agent.log)
-	agent.attach(conn, transport)
+	conn := acp.NewAgentSideConnection(a, transport.Writer(), transport.Reader())
+	conn.SetLogger(a.log)
+	a.attach(conn, transport)
 	transport.Start()
 
 	select {

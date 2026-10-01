@@ -54,9 +54,9 @@ const (
 )
 
 var fakeModels = []map[string]any{
-	{"id": "vision", "displayName": "Fake Vision", "contextWindow": 1000, "inputModalities": []string{"text", "image"},
+	{"id": "vision", "displayName": "Fake Vision", "inputModalities": []string{"text", "image"},
 		"defaultReasoningEffort": "medium", "supportedReasoningEfforts": []map[string]any{{"reasoningEffort": "low"}, {"reasoningEffort": "medium"}}},
-	{"id": "text-only", "displayName": "Fake Text", "contextWindow": 500, "inputModalities": []string{"text"}},
+	{"id": "text-only", "displayName": "Fake Text", "inputModalities": []string{"text"}},
 }
 
 // fakeAccountUsage is the native account/rateLimits/read shape: the per-limit

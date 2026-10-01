@@ -53,8 +53,8 @@ type session struct {
 	effort      string
 	serviceTier string
 	personality string
-	// contextWindow is the selected model's context window in the catalog:
-	// the gateway's listing or the app-server's presets, 0 when it states none.
+	// contextWindow is the selected model's context window in the gateway's
+	// model list, 0 when the list states none.
 	contextWindow int64
 	// usage is the thread's last usage report, which the next report is
 	// compared against.

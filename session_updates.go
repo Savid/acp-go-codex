@@ -319,10 +319,10 @@ func (s *session) emitTokenUsage(ctx context.Context, state *cycleState, usage c
 	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: used}})
 }
 
-// knownContextWindow is the selected model's context window: the catalog's,
-// else the one codex last reported, else 0. Codex reports the share of a known
-// model's window it lets the conversation use, and a fixed fallback for a
-// model it does not know, so a window the catalog states wins.
+// knownContextWindow is the selected model's context window: the gateway's
+// model list's, else the one codex last reported, else 0. Codex reports the
+// share of a known model's window it lets the conversation use, and a fixed
+// fallback for a model it does not know, so a window the gateway states wins.
 func (s *session) knownContextWindow() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
