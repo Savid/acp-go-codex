@@ -93,8 +93,11 @@ type Event struct {
 	// Response is the usage one completed model response reported, nil when
 	// it reported none.
 	Response *Usage
-	Stop     StopReason
-	Failure  *TurnFailure
+	// ResponseID is the id the model gateway returned for a completed model
+	// response.
+	ResponseID string
+	Stop       StopReason
+	Failure    *TurnFailure
 }
 
 // PlanStep is one entry of a plan update.
@@ -198,6 +201,7 @@ func DecodeEvent(notification Notification) Event {
 		event.Usage = tokenUsageFromParams(params)
 	case notifyResponseCompleted:
 		event.Kind = EventResponseCompleted
+		event.ResponseID = stringValue(params, "responseId")
 
 		if raw := mapValue(params, "usage"); raw != nil {
 			usage := usageFromMap(raw)

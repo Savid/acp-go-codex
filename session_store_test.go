@@ -35,7 +35,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 
 	rows, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
 	require.NoError(t, err)
-	require.Len(t, rows, 4)
+	require.Len(t, rows, 7)
 
 	records, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
 	require.NoError(t, err)
@@ -94,7 +94,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 
 	materialized, err := codex.ReadRows(matches[0])
 	require.NoError(t, err)
-	require.Len(t, materialized, 7)
+	require.Len(t, materialized, 13)
 
 	resp, err := h.prompt(session.SessionId, "ECHO third", nil)
 	require.NoError(t, err)

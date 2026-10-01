@@ -1,7 +1,9 @@
 package codexacp
 
 import (
+	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -58,9 +60,20 @@ func usageSession(t *testing.T, path string) (*harness, acp.SessionId) {
 }
 
 // usageSince returns the usage updates delivered after the first mark
-// notifications.
+// notifications, each breakdown without its response id, which
+// TestResponseIDJoinsChunksToTheirCall proves.
 func usageSince(h *harness, mark int) []acp.SessionUsageUpdate {
-	return usageUpdates(h.rec.snapshot()[mark:])
+	updates := usageUpdates(h.rec.snapshot()[mark:])
+
+	for index, update := range updates {
+		if call, ok := update.Meta[wire.CallUsageKey].(map[string]any); ok {
+			call = maps.Clone(call)
+			delete(call, "responseId")
+			updates[index].Meta = map[string]any{wire.CallUsageKey: call}
+		}
+	}
+
+	return updates
 }
 
 // callUpdate is the update reporting one model request: the context it left
@@ -288,6 +301,109 @@ func TestUsageWindowPrefersGatewayList(t *testing.T) {
 			}
 
 			require.Equal(t, sizes, got)
+		})
+	}
+}
+
+// chunkMessageIDs lists the messageId of each assistant and thought chunk in
+// delivery order, "" for a chunk that carries none.
+func chunkMessageIDs(updates []acp.SessionNotification) []string {
+	ids := make([]string, 0, len(updates))
+
+	for _, update := range updates {
+		var id *string
+
+		switch {
+		case update.Update.AgentMessageChunk != nil:
+			id = update.Update.AgentMessageChunk.MessageId
+		case update.Update.AgentThoughtChunk != nil:
+			id = update.Update.AgentThoughtChunk.MessageId
+		default:
+			continue
+		}
+
+		if id == nil {
+			id = new("")
+		}
+
+		ids = append(ids, *id)
+	}
+
+	return ids
+}
+
+// TestResponseIDJoinsChunksToTheirCall proves the gateway's response id joins
+// a request's chunks to its breakdown. A started thread's breakdown carries
+// the id its response completion names and a resumed thread's, whose reports
+// name none, carries no id. Live chunks stream before codex names the id and
+// carry none; replayed chunks carry the id the rollout recorded for their
+// response, the one the started thread's breakdown carried.
+func TestResponseIDJoinsChunksToTheirCall(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range usagePaths {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			h := newGatewayHarness(t, WithSessionStore(acpcore.NewInMemorySessionStore()))
+			h.initialize()
+
+			cwd := t.TempDir()
+			created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, WithSessionCodexOptions(NewCodexOptions(WithCodexModel("gw/wide")))))
+			require.NoError(t, err)
+
+			session := created.SessionId
+			reload := func() []acp.SessionNotification {
+				_, closeErr := h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session})
+				require.NoError(t, closeErr)
+
+				mark := len(h.rec.snapshot())
+				_, loadErr := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session, cwd))
+				require.NoError(t, loadErr)
+
+				return h.rec.snapshot()[mark:]
+			}
+
+			if path == "resumed" {
+				_, err = h.prompt(session, "HELLO", nil)
+				require.NoError(t, err)
+				reload()
+			}
+
+			mark := len(h.rec.snapshot())
+			_, err = h.prompt(session, "THINK", nil)
+			require.NoError(t, err)
+
+			live := h.rec.snapshot()[mark:]
+			require.Equal(t, []string{"", ""}, chunkMessageIDs(live), "a live chunk streams before codex names its response")
+
+			usage := usageUpdates(live)
+			require.Len(t, usage, 1)
+
+			call, ok := usage[0].Meta[wire.CallUsageKey].(map[string]any)
+			require.True(t, ok)
+
+			responseID, named := call["responseId"].(string)
+			require.Equal(t, path == "started", named, "only a started thread's report names its response")
+
+			replayed := reload()
+			last := -1
+
+			for index, update := range replayed {
+				if update.Update.AgentMessageChunk != nil {
+					last = index
+				}
+			}
+
+			require.NotEqual(t, -1, last)
+			require.Equal(t, "ok", agentText(replayed[last:last+1]))
+
+			replayedID := chunkMessageIDs(replayed[last : last+1])[0]
+			require.True(t, strings.HasPrefix(replayedID, "gen-"))
+
+			if named {
+				require.Equal(t, responseID, replayedID)
+			}
 		})
 	}
 }

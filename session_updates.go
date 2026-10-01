@@ -97,7 +97,7 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 		return false, nil
 	case codex.EventResponseCompleted:
 		if !foreign {
-			s.emitResponseCompleted(ctx, state, event.Response, !cancelled)
+			s.emitResponseCompleted(ctx, state, event.Response, event.ResponseID, !cancelled)
 		}
 
 		return false, nil
@@ -234,12 +234,14 @@ func contextTokens(usage codex.Usage) (int, bool) {
 	return int(usage.Total), usage.Total > 0
 }
 
-// callUsage is one model request's breakdown. Codex reports every figure for
+// callUsage is one model request's breakdown with the gateway's id for its
+// response, empty when the report names none. Codex reports every figure for
 // every request, and its input includes the input read from and written to a
 // prompt cache, so the uncached input is what remains of it; a remainder
 // below zero is no figure.
-func callUsage(usage codex.Usage) wire.CallUsage {
+func callUsage(usage codex.Usage, responseID string) wire.CallUsage {
 	call := wire.CallUsage{
+		ResponseID:        responseID,
 		CachedReadTokens:  new(int(usage.CachedRead)),
 		CachedWriteTokens: new(int(usage.CacheWrite)),
 		OutputTokens:      new(int(usage.Output)),
@@ -265,8 +267,8 @@ func (s *session) reportsResponses() bool {
 // joins the cycle's sum and, while the cycle is live, the update reports the
 // context the request left occupied with the request's breakdown. A request
 // whose usage reports no token is unknown and records nothing.
-func (s *session) recordRequest(ctx context.Context, state *cycleState, usage codex.Usage, live bool) {
-	call := callUsage(usage)
+func (s *session) recordRequest(ctx context.Context, state *cycleState, usage codex.Usage, responseID string, live bool) {
+	call := callUsage(usage, responseID)
 	if !call.Known() {
 		return
 	}
@@ -284,18 +286,19 @@ func (s *session) recordRequest(ctx context.Context, state *cycleState, usage co
 
 // emitResponseCompleted records the model request a response completion
 // reports, on a thread that reports its responses. It arrives as the
-// response completes, before the tools the response started run.
-func (s *session) emitResponseCompleted(ctx context.Context, state *cycleState, usage *codex.Usage, live bool) {
+// response completes, after the response's text streamed and before the
+// tools the response started run, and names the gateway's response id.
+func (s *session) emitResponseCompleted(ctx context.Context, state *cycleState, usage *codex.Usage, responseID string, live bool) {
 	if usage == nil || !s.reportsResponses() {
 		return
 	}
 
-	s.recordRequest(ctx, state, *usage, live)
+	s.recordRequest(ctx, state, *usage, responseID, live)
 }
 
 // emitTokenUsage handles one of the cycle's thread usage reports. Codex
 // reports once per model request, after the tools that request started have
-// finished. A report whose cumulative total moved records a new request,
+// finished, and names no response id. A report whose cumulative total moved records a new request,
 // unless the thread already reported it at its completion; one that restates
 // the previous report sends nothing; one that keeps the total and replaces
 // the last usage carries codex's estimate of the history it just compacted,
@@ -305,7 +308,7 @@ func (s *session) emitTokenUsage(ctx context.Context, state *cycleState, usage c
 
 	if usage.Total != previous.Total {
 		if !s.reportsResponses() {
-			s.recordRequest(ctx, state, usage.Last, live)
+			s.recordRequest(ctx, state, usage.Last, "", live)
 		}
 
 		return

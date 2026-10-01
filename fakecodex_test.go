@@ -130,10 +130,16 @@ func (f *fakeCodex) finalRequest(thread *fakeThread, scoped func(map[string]any)
 	}
 }
 
-// completeResponse announces a model response's completion on a thread that
-// reports its responses, first with the raw response item unless the
-// connection opted out of it.
+// completeResponse completes a model response as codex does: the rollout
+// records the response's usage under the gateway's id for it and, on a
+// thread that reports its responses, the completion is announced, first with
+// the raw response item unless the connection opted out of it.
 func (f *fakeCodex) completeResponse(thread *fakeThread, scoped func(map[string]any) map[string]any, usage fakeTokens) {
+	responseID := "gen-" + fakeUUID()
+	f.appendRow(thread, map[string]any{"type": "token_usage_record", "payload": map[string]any{
+		"thread_id": thread.id, "turn_id": scoped(nil)["turnId"], "response_id": responseID, "usage": snakeBreakdown(usage.breakdown()),
+	}})
+
 	if !thread.responses {
 		return
 	}
@@ -147,7 +153,7 @@ func (f *fakeCodex) completeResponse(thread *fakeThread, scoped func(map[string]
 	}
 
 	f.notify("rawResponse/completed", scoped(map[string]any{
-		"responseId": "resp-" + fakeUUID(), "usage": usage.breakdown(), "usageMetadata": nil,
+		"responseId": responseID, "usage": usage.breakdown(), "usageMetadata": nil,
 	}))
 }
 
@@ -646,6 +652,7 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		return out
 	}
 
+	f.appendRow(thread, eventRow("task_started", map[string]any{"turn_id": turnID}))
 	f.appendRow(thread, eventRow("user_message", map[string]any{"message": message}))
 	f.notify("turn/started", scoped(map[string]any{"turn": map[string]any{"id": turnID}}))
 
@@ -743,6 +750,7 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 	}
 
 	f.finalRequest(thread, scoped, usage)
+	f.appendRow(thread, eventRow("task_complete", map[string]any{"turn_id": turnID}))
 
 	turn := map[string]any{"id": turnID, "status": status}
 	if status == "failed" {
