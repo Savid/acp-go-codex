@@ -201,7 +201,8 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 	}
 
 	t := &turn{
-		cycle:      cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseSubmission}, state: cycleState{tools: make(map[string]*toolState)}},
+		Origin:     lifecycle.CauseSubmission,
+		state:      cycleState{tools: make(map[string]*toolState)},
 		submission: submission,
 		ctx:        turnCtx,
 		settled:    make(chan struct{}),
@@ -278,8 +279,7 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 // rejection carries its message as a provider failure, a dead process is a
 // process exit, and everything else is transport.
 func (s *session) dispatchFailure(ctx context.Context, rt *runtime, err error) error {
-	var rpcErr *codex.RPCError
-	if errors.As(err, &rpcErr) {
+	if rpcErr, ok := errors.AsType[*codex.RPCError](err); ok {
 		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: rpcErr.Message})
 	}
 
