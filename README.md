@@ -96,6 +96,19 @@ installed CLI and preserves this native behavior.
 `mode` accepts only its own two values, and `effort` and `personality` reject
 an empty value.
 
+### Usage updates
+
+Every model request reports one `usage_update`: `used` is the request's total
+tokens, the context it leaves occupied, and `_meta["acp-go.dev/callUsage"]`
+carries its breakdown (uncached input, cache reads, cache writes, output with
+reasoning). A thread the adapter started reports each request as its response
+completes, before the tools it started run; a resumed thread reports it once
+those tools finished. A request reported with no tokens, as a gateway's
+response-cache replay is, sends nothing. After a compaction the update carries
+codex's estimate of the compacted history and no breakdown. `size` is the
+model's window in the gateway's model list, else the window codex last
+reported, else `0`. The prompt response sums the turn's requests.
+
 ### Account usage
 
 When `model_provider` names a provider with its own `base_url`, and that base

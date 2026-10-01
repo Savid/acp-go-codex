@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -41,8 +42,10 @@ func TestPromptStreamsTextAndUsage(t *testing.T) {
 		}
 	}
 
+	// The session's model is outside the catalog, and the response completed
+	// before codex first reported a window.
 	require.NotNil(t, usage)
-	require.Equal(t, 1000, usage.Size)
+	require.Equal(t, 0, usage.Size)
 	require.Equal(t, 15, usage.Used)
 }
 
@@ -447,6 +450,34 @@ func TestRawEventsOptIn(t *testing.T) {
 
 	event, _ := first["event"].(map[string]any)
 	require.Equal(t, "turn/started", event["method"])
+
+	// The thread reports its response's completion; the adapter opted out of
+	// the raw response items, so none reaches the host.
+	h.rec.waitFor(t, func([]acp.SessionNotification) bool { return slices.Contains(rawEventMethods(h), "turn/completed") })
+	require.Contains(t, rawEventMethods(h), "rawResponse/completed")
+	require.NotContains(t, rawEventMethods(h), fakeRawItemMethod)
+}
+
+// rawEventMethods lists the native methods of the delivered raw events.
+func rawEventMethods(h *harness) []string {
+	h.rec.mu.Lock()
+	defer h.rec.mu.Unlock()
+
+	methods := make([]string, 0, len(h.rec.raw))
+
+	for _, raw := range h.rec.raw {
+		var payload struct {
+			Event struct {
+				Method string `json:"method"`
+			} `json:"event"`
+		}
+
+		if err := json.Unmarshal(raw, &payload); err == nil {
+			methods = append(methods, payload.Event.Method)
+		}
+	}
+
+	return methods
 }
 
 func TestSessionEnvironmentReachesThread(t *testing.T) {

@@ -20,6 +20,7 @@ const (
 	EventImageCompleted    EventKind = "image_completed"
 	EventDiffUpdated       EventKind = "diff_updated"
 	EventUsageUpdated      EventKind = "usage_updated"
+	EventResponseCompleted EventKind = "response_completed"
 	EventTurnStarted       EventKind = "turn_started"
 	EventTurnCompleted     EventKind = "turn_completed"
 	EventError             EventKind = "error"
@@ -52,6 +53,11 @@ const (
 	notifyPatchUpdated          = "item/fileChange/patchUpdated"
 	notifyTurnDiffUpdated       = "turn/diff/updated"
 	notifyTokenUsageUpdated     = "thread/tokenUsage/updated"
+	notifyResponseCompleted     = "rawResponse/completed"
+	// notifyResponseItemCompleted carries every raw response item of a thread
+	// that reports its responses. The adapter reads only each response's
+	// completion, so it opts out of the items.
+	notifyResponseItemCompleted = "rawResponseItem/completed"
 	notifyTurnStarted           = "turn/started"
 	notifyTurnCompleted         = "turn/completed"
 	notifyError                 = "error"
@@ -84,8 +90,11 @@ type Event struct {
 	Tool      ToolEvent
 	Image     ImageEvent
 	Usage     TokenUsage
-	Stop      StopReason
-	Failure   *TurnFailure
+	// Response is the usage one completed model response reported, nil when
+	// it reported none.
+	Response *Usage
+	Stop     StopReason
+	Failure  *TurnFailure
 }
 
 // PlanStep is one entry of a plan update.
@@ -114,8 +123,9 @@ type ImageEvent struct {
 	Raw       map[string]any
 }
 
-// Usage is one token usage breakdown. Input includes the cached input, and
-// Total is input plus output.
+// Usage is one token usage breakdown as the Responses API reports it: Input
+// includes the input read from and written to a prompt cache, Output includes
+// the reasoning, and Total is input plus output.
 type Usage struct {
 	Input      int64
 	CachedRead int64
@@ -186,6 +196,13 @@ func DecodeEvent(notification Notification) Event {
 	case notifyTokenUsageUpdated:
 		event.Kind = EventUsageUpdated
 		event.Usage = tokenUsageFromParams(params)
+	case notifyResponseCompleted:
+		event.Kind = EventResponseCompleted
+
+		if raw := mapValue(params, "usage"); raw != nil {
+			usage := usageFromMap(raw)
+			event.Response = &usage
+		}
 	case notifyTurnStarted:
 		event.Kind = EventTurnStarted
 	case notifyTurnCompleted:

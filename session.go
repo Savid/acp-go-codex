@@ -58,9 +58,12 @@ type session struct {
 	contextWindow int64
 	// usage is the thread's last usage report, which the next report is
 	// compared against.
-	usage     codex.TokenUsage
-	title     string
-	updatedAt string
+	usage codex.TokenUsage
+	// responseUsage marks a bound thread that reports each model
+	// response's usage as the response completes.
+	responseUsage bool
+	title         string
+	updatedAt     string
 	// lastTerminalTurn is the native turn id of the last cycle this session
 	// terminalized. Records naming it are a native tail, not new work.
 	lastTerminalTurn string
@@ -147,6 +150,7 @@ func (s *session) bind(rt *runtime, thread codex.Thread) {
 	s.rt = rt
 	s.generationLost = false
 	s.rolloutPath = thread.Path
+	s.responseUsage = thread.ReportsResponses
 
 	if s.model == "" {
 		s.model = thread.Model

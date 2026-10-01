@@ -20,6 +20,10 @@ import (
 // The test binary doubles as a fake app-server: TestMain runs fakeCodex when
 // this variable is set in the environment the adapter launched it with.
 const (
+	// fakeRawItemMethod carries each raw response item of a thread that
+	// reports its responses.
+	fakeRawItemMethod = "rawResponseItem/completed"
+
 	fakeCodexEnv     = "ACP_GO_CODEX_TEST_FAKE"
 	fakeCodexEnvDump = "ACP_GO_CODEX_TEST_ENV_DUMP"
 	// fakeCodexEnvRequestSent signals that a native callback is on stdout.
@@ -83,24 +87,95 @@ type fakeThread struct {
 	// usage is the thread's last usage report and total its cumulative usage.
 	usage map[string]any
 	total fakeTokens
+	// responses marks a thread that reports each model response's usage as
+	// the response completes.
+	responses bool
 }
 
 // fakeTokens is one model request's usage as codex reports it: the input
-// includes the cached input, and the total is input plus output.
-type fakeTokens struct{ input, cached, output int }
+// includes the input read from and written to a prompt cache, the output
+// includes the reasoning, and the total is input plus output.
+type fakeTokens struct{ input, cached, written, output, reasoning int }
 
 func (u fakeTokens) breakdown() map[string]any {
 	return map[string]any{
-		"inputTokens": u.input, "cachedInputTokens": u.cached, "cacheWriteInputTokens": 0,
-		"outputTokens": u.output, "reasoningOutputTokens": 0, "totalTokens": u.input + u.output,
+		"inputTokens": u.input, "cachedInputTokens": u.cached, "cacheWriteInputTokens": u.written,
+		"outputTokens": u.output, "reasoningOutputTokens": u.reasoning, "totalTokens": u.input + u.output,
 	}
 }
 
+func (u fakeTokens) plus(other fakeTokens) fakeTokens {
+	return fakeTokens{
+		input: u.input + other.input, cached: u.cached + other.cached, written: u.written + other.written,
+		output: u.output + other.output, reasoning: u.reasoning + other.reasoning,
+	}
+}
+
+// modelRequest runs one model request as codex does: the response completes,
+// the tools it started run, and the thread then reports the request's usage.
+func (f *fakeCodex) modelRequest(thread *fakeThread, scoped func(map[string]any) map[string]any, usage fakeTokens, tools func()) {
+	f.completeResponse(thread, scoped, usage)
+
+	if tools != nil {
+		tools()
+	}
+
+	f.reportUsage(thread, scoped, usage)
+}
+
+// finalRequest runs a turn's final model request, if it has one.
+func (f *fakeCodex) finalRequest(thread *fakeThread, scoped func(map[string]any) map[string]any, usage *fakeTokens) {
+	if usage != nil {
+		f.modelRequest(thread, scoped, *usage, nil)
+	}
+}
+
+// completeResponse announces a model response's completion on a thread that
+// reports its responses, first with the raw response item unless the
+// connection opted out of it.
+func (f *fakeCodex) completeResponse(thread *fakeThread, scoped func(map[string]any) map[string]any, usage fakeTokens) {
+	if !thread.responses {
+		return
+	}
+
+	f.mu.Lock()
+	optedOut := f.optedOut[fakeRawItemMethod]
+	f.mu.Unlock()
+
+	if !optedOut {
+		f.notify(fakeRawItemMethod, scoped(map[string]any{"item": map[string]any{"type": "message", "role": "assistant"}}))
+	}
+
+	f.notify("rawResponse/completed", scoped(map[string]any{
+		"responseId": "resp-" + fakeUUID(), "usage": usage.breakdown(), "usageMetadata": nil,
+	}))
+}
+
 // reportUsage reports a finished model request as codex does: its usage as
-// the last, added to the thread's cumulative total.
+// the last, added to the thread's cumulative total, also recorded in the
+// rollout.
 func (f *fakeCodex) reportUsage(thread *fakeThread, scoped func(map[string]any) map[string]any, last fakeTokens) {
-	thread.total = fakeTokens{input: thread.total.input + last.input, cached: thread.total.cached + last.cached, output: thread.total.output + last.output}
+	thread.total = thread.total.plus(last)
 	f.notifyUsage(thread, scoped, last.breakdown())
+	f.appendRow(thread, eventRow("token_count", map[string]any{"info": map[string]any{
+		"total_token_usage": snakeBreakdown(thread.total.breakdown()), "last_token_usage": snakeBreakdown(last.breakdown()),
+		"model_context_window": 1000,
+	}}))
+}
+
+// snakeBreakdown renders a usage breakdown with the rollout's field names.
+func snakeBreakdown(usage map[string]any) map[string]any {
+	names := map[string]string{
+		"inputTokens": "input_tokens", "cachedInputTokens": "cached_input_tokens", "cacheWriteInputTokens": "cache_write_input_tokens",
+		"outputTokens": "output_tokens", "reasoningOutputTokens": "reasoning_output_tokens", "totalTokens": "total_tokens",
+	}
+
+	out := make(map[string]any, len(usage))
+	for key, value := range usage {
+		out[names[key]] = value
+	}
+
+	return out
 }
 
 // notifyUsage sends the thread's usage report with last as the last usage.
@@ -132,6 +207,10 @@ type fakeCodex struct {
 	pending  map[string]chan map[string]any
 	nextID   int
 	shellEnv map[string]any
+	// experimental marks a connection that opted into the experimental API,
+	// and optedOut holds the notification methods it opted out of.
+	experimental bool
+	optedOut     map[string]bool
 }
 
 func runFakeCodex(args []string) int {
@@ -272,7 +351,7 @@ func (f *fakeCodex) dispatch(line []byte) {
 
 	switch frame.Method {
 	case "initialize":
-		f.respond(frame.ID, map[string]any{"userAgent": "fake"})
+		f.initialize(frame.ID, frame.Params)
 	case "initialized":
 	case "model/list":
 		f.respond(frame.ID, map[string]any{"models": fakeModels})
@@ -324,6 +403,26 @@ func (f *fakeCodex) dispatch(line []byte) {
 	}
 }
 
+// initialize records whether the connection opted into the experimental API
+// and the notification methods it opted out of.
+func (f *fakeCodex) initialize(id json.RawMessage, params map[string]any) {
+	capabilities, _ := params["capabilities"].(map[string]any)
+	methods, _ := capabilities["optOutNotificationMethods"].([]any)
+
+	f.mu.Lock()
+	f.experimental, _ = capabilities["experimentalApi"].(bool)
+	f.optedOut = make(map[string]bool, len(methods))
+
+	for _, method := range methods {
+		if name, ok := method.(string); ok {
+			f.optedOut[name] = true
+		}
+	}
+	f.mu.Unlock()
+
+	f.respond(id, map[string]any{"userAgent": "fake"})
+}
+
 func (f *fakeCodex) startThread(id json.RawMessage, params map[string]any) {
 	cwd, _ := params["cwd"].(string)
 	if model, _ := params["model"].(string); model == "REFUSE" {
@@ -332,9 +431,21 @@ func (f *fakeCodex) startThread(id json.RawMessage, params map[string]any) {
 		return
 	}
 
+	responses, _ := params["experimentalRawEvents"].(bool)
+
+	f.mu.Lock()
+	experimental := f.experimental
+	f.mu.Unlock()
+
+	if responses && !experimental {
+		f.fail(id, -32600, "thread/start.experimentalRawEvents requires experimentalApi capability")
+
+		return
+	}
+
 	f.recordConfig(params)
 
-	thread := &fakeThread{id: fakeUUID(), cwd: cwd}
+	thread := &fakeThread{id: fakeUUID(), cwd: cwd, responses: responses}
 	thread.path = codex.RolloutPath(f.home, thread.id, time.Now())
 
 	_ = os.MkdirAll(filepath.Dir(thread.path), 0o700)
@@ -401,12 +512,34 @@ func (f *fakeCodex) resumeThread(id json.RawMessage, params map[string]any) {
 	}
 
 	thread := &fakeThread{id: threadID, cwd: cwd, path: matches[0], entries: len(rows)}
+	seedUsage(thread, rows)
 
+	// A thread still loaded keeps reporting its responses: only thread/start
+	// opts a thread in, and nothing opts it out while it stays loaded.
 	f.mu.Lock()
+	if loaded := f.threads[threadID]; loaded != nil {
+		thread.responses = loaded.responses
+	}
+
 	f.threads[threadID] = thread
 	f.mu.Unlock()
 
 	f.respond(id, map[string]any{"thread": map[string]any{"id": threadID, "path": matches[0], "cwd": cwd}})
+}
+
+// seedUsage restores a resumed thread's usage from the rollout's last usage
+// record, as codex does.
+func seedUsage(thread *fakeThread, rows [][]byte) {
+	tokens := func(usage codex.Usage) fakeTokens {
+		return fakeTokens{
+			input: int(usage.Input), cached: int(usage.CachedRead), written: int(usage.CacheWrite),
+			output: int(usage.Output), reasoning: int(usage.Reasoning),
+		}
+	}
+
+	usage := codex.LastTokenUsage(rows)
+	thread.total = tokens(usage.Total)
+	thread.usage = tokens(usage.Last).breakdown()
 }
 
 func (f *fakeCodex) startTurn(id json.RawMessage, params map[string]any) {
@@ -524,7 +657,8 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 	status := "completed"
 	text := "Hello world"
 	itemID := "msg-" + fakeUUID()
-	usage := fakeTokens{input: 10, output: 5}
+	// usage is the turn's final request, nil for a turn that ends without one.
+	usage := &fakeTokens{input: 10, output: 5}
 
 	delta := func(chunk string) {
 		f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": itemID, "delta": chunk}))
@@ -608,7 +742,7 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 		f.appendRow(thread, eventRow("agent_message", map[string]any{"message": text}))
 	}
 
-	f.reportUsage(thread, scoped, usage)
+	f.finalRequest(thread, scoped, usage)
 
 	turn := map[string]any{"id": turnID, "status": status}
 	if status == "failed" {
@@ -628,7 +762,7 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 // isUsageScript reports whether the message selects one of the usage
 // scripts below.
 func (f *fakeCodex) isUsageScript(message string) bool {
-	for _, prefix := range []string{"MULTI", "COMPACT", "STEPSLOW"} {
+	for _, prefix := range []string{"MULTI", "COMPACT", "STEPSLOW", "HALTTOOL", "ZERO", "RESTATE"} {
 		if strings.HasPrefix(message, prefix) {
 			return true
 		}
@@ -638,41 +772,63 @@ func (f *fakeCodex) isUsageScript(message string) bool {
 }
 
 // usageTurn runs a usage script up to the turn's final request and returns
-// that request's usage, the final text, and the turn status.
-func (f *fakeCodex) usageTurn(thread *fakeThread, scoped func(map[string]any) map[string]any, message string) (fakeTokens, string, string) {
+// that request's usage, nil when the turn ends without one, the final text,
+// and the turn status.
+func (f *fakeCodex) usageTurn(thread *fakeThread, scoped func(map[string]any) map[string]any, message string) (*fakeTokens, string, string) {
 	switch {
 	case strings.HasPrefix(message, "MULTI"):
 		// Three model requests, each reported once its tools finished: the
-		// first one's command was interrupted, and codex restates the second
-		// report before the third request completes.
-		f.command(scoped, "call-a", "failed")
-		f.reportUsage(thread, scoped, fakeTokens{input: 1000, output: 20})
-		f.command(scoped, "call-b", "completed")
-		f.reportUsage(thread, scoped, fakeTokens{input: 1100, cached: 1000, output: 30})
+		// first one's command was interrupted, the second read and wrote the
+		// prompt cache, and codex restates the second report before the third
+		// request completes.
+		f.modelRequest(thread, scoped, fakeTokens{input: 1000, output: 20}, func() { f.command(scoped, "call-a", "failed") })
+		f.modelRequest(thread, scoped, fakeTokens{input: 1100, cached: 900, written: 100, output: 30, reasoning: 12}, func() { f.command(scoped, "call-b", "completed") })
 		f.notifyUsage(thread, scoped, thread.usage)
 
-		return fakeTokens{input: 1150, cached: 1100, output: 10}, "finished", "completed"
+		return &fakeTokens{input: 1150, cached: 1100, output: 10}, "finished", "completed"
 	case strings.HasPrefix(message, "COMPACT"):
 		// A request fills the context, codex compacts it with a summarizing
 		// request, reports its estimate of the compacted history, and the turn
 		// continues on it.
-		f.reportUsage(thread, scoped, fakeTokens{input: 5000, cached: 4000, output: 100})
+		f.modelRequest(thread, scoped, fakeTokens{input: 5000, cached: 4000, output: 100}, nil)
 		f.notify("item/started", scoped(map[string]any{"item": map[string]any{"id": "compact-1", "type": "contextCompaction"}}))
 		f.notifyUsage(thread, scoped, thread.usage)
-		f.reportUsage(thread, scoped, fakeTokens{input: 4900, output: 150})
+		f.modelRequest(thread, scoped, fakeTokens{input: 4900, output: 150}, nil)
 		f.notifyUsage(thread, scoped, map[string]any{"inputTokens": 0, "cachedInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0, "totalTokens": 600})
 		f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": "compact-1", "type": "contextCompaction"}}))
 
-		return fakeTokens{input: 700, output: 20}, "compacted", "completed"
-	default:
-		f.command(scoped, "call-a", "completed")
+		return &fakeTokens{input: 700, output: 20}, "compacted", "completed"
+	case strings.HasPrefix(message, "HALTTOOL"):
+		// The response completes and starts a command that runs until the
+		// interrupt; codex reports the request's usage only once the command
+		// is gone, after the cancel.
+		f.completeResponse(thread, scoped, fakeTokens{input: 1000, output: 20})
+		f.notify("item/started", scoped(map[string]any{"item": map[string]any{"id": "call-a", "type": "commandExecution", "command": []string{"sleep"}, "status": "inProgress"}}))
+		<-thread.abort
 		f.reportUsage(thread, scoped, fakeTokens{input: 1000, output: 20})
+
+		return nil, "", "interrupted"
+	case strings.HasPrefix(message, "ZERO"):
+		// A request, an empty compaction estimate, and two requests a
+		// gateway answered from its response cache with every token zero.
+		f.modelRequest(thread, scoped, fakeTokens{input: 1000, output: 20}, nil)
+		f.notifyUsage(thread, scoped, fakeTokens{}.breakdown())
+		f.modelRequest(thread, scoped, fakeTokens{}, nil)
+
+		return &fakeTokens{}, "cached", "completed"
+	case strings.HasPrefix(message, "RESTATE"):
+		// Codex restates the thread's last report before the turn's request.
+		f.notifyUsage(thread, scoped, thread.usage)
+
+		return &fakeTokens{input: 10, output: 5}, "restated", "completed"
+	default:
+		f.modelRequest(thread, scoped, fakeTokens{input: 1000, output: 20}, func() { f.command(scoped, "call-a", "completed") })
 
 		select {
 		case <-thread.abort:
-			return fakeTokens{input: 10, output: 5}, "", "interrupted"
+			return &fakeTokens{input: 10, output: 5}, "", "interrupted"
 		case <-time.After(30 * time.Second):
-			return fakeTokens{input: 10, output: 5}, "late", "completed"
+			return &fakeTokens{input: 10, output: 5}, "late", "completed"
 		}
 	}
 }
