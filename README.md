@@ -26,7 +26,7 @@ record saves both IDs with the matching native history.
 go install github.com/savid/acp-go-codex/cmd/acp-go-codex@latest
 ```
 
-Verified against `codex` 0.154.0, found on `PATH` or named with `-path`.
+`codex` is found on `PATH` or named with `-path`.
 
 ## Run
 
