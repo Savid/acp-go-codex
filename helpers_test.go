@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,14 +195,58 @@ type harness struct {
 func newHarness(t *testing.T, extra ...Option) *harness {
 	t.Helper()
 
+	return serveHarness(t, nil, extra...)
+}
+
+// gatewayModels is the model list the gateway of newGatewayHarness publishes:
+// two models with their windows and one that states none.
+const gatewayModels = `{"object":"list","data":[{"id":"gw/wide","context_length":1000},` +
+	`{"id":"gw/narrow","context_length":500},{"id":"gw/unsized"}]}`
+
+// newGatewayHarness serves an agent whose model provider routes through a
+// gateway that publishes gatewayModels.
+func newGatewayHarness(t *testing.T, extra ...Option) *harness {
+	t.Helper()
+
+	extra = append([]Option{
+		WithEnv(map[string]string{fakeCodexEnv: "1", "GATEWAY_GATEWAY_KEY": "gateway-key"}),
+		WithCodexConfigOverrides(map[string]any{
+			"model_provider": "gateway", "model_providers.gateway.base_url": "https://gateway.example/v1",
+			"model_providers.gateway.env_key": "GATEWAY_GATEWAY_KEY",
+		}),
+	}, extra...)
+
+	return serveHarness(t, gatewayTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "gateway.example" && r.URL.Path == "/v1/models" && r.Header.Get("Authorization") == "Bearer gateway-key" {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(gatewayModels))}, nil
+		}
+
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+	}), extra...)
+}
+
+// serveHarness serves an agent whose provider reads go through transport, the
+// default when nil.
+func serveHarness(t *testing.T, transport http.RoundTripper, extra ...Option) *harness {
+	t.Helper()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	clientReader, agentWriter := io.Pipe()
 	agentReader, clientWriter := io.Pipe()
 	rec := newRecorder()
 	served := make(chan error, 1)
 	options := testOptions(t, extra...)
+	agent := NewAgent(options...)
+	agent.providerTransport = transport
 
-	go func() { served <- Serve(ctx, agentReader, agentWriter, options...) }()
+	go func() {
+		err := agent.serve(ctx, agentReader, agentWriter)
+		if closeErr := agent.Close(); closeErr != nil {
+			err = closeErr
+		}
+
+		served <- err
+	}()
 
 	input := &requestWriter{Writer: clientWriter}
 	conn := acp.NewClientSideConnection(rec, input, clientReader)
@@ -318,6 +363,20 @@ func agentText(updates []acp.SessionNotification) string {
 	}
 
 	return text.String()
+}
+
+// usageUpdates returns the recorded usage_update payloads in delivery order,
+// without the variant discriminator the wire decoding fills in.
+func usageUpdates(updates []acp.SessionNotification) []acp.SessionUsageUpdate {
+	var usage []acp.SessionUsageUpdate
+
+	for _, update := range updates {
+		if payload := update.Update.UsageUpdate; payload != nil {
+			usage = append(usage, acp.SessionUsageUpdate{Size: payload.Size, Used: payload.Used, Cost: payload.Cost, Meta: payload.Meta})
+		}
+	}
+
+	return usage
 }
 
 // lifecycleEvents extracts the lifecycle envelopes in delivery order.

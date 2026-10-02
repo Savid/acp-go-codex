@@ -45,6 +45,10 @@ type Thread struct {
 	Path string
 	// Model is the model the thread reports, when the response names one.
 	Model string
+	// ReportsResponses marks a thread that sends rawResponse/completed with
+	// each model response's usage as the response completes. Only thread/start
+	// can opt a thread in.
+	ReportsResponses bool
 }
 
 // ThreadStartRequest is one thread/start call.
@@ -86,9 +90,11 @@ type TurnStartRequest struct {
 
 // Model is one model/list entry.
 type Model struct {
-	ID                     string
-	Name                   string
-	Description            string
+	ID          string
+	Name        string
+	Description string
+	// ContextWindow is the window a gateway's model list states for the
+	// model; the app-server's own list states none.
 	ContextWindow          int64
 	DefaultReasoningEffort string
 	ReasoningEfforts       []string
@@ -101,8 +107,11 @@ type Model struct {
 func (c *Client) Initialize(ctx context.Context) error {
 	var resp map[string]any
 	if err := c.Call(ctx, methodInitialize, map[string]any{
-		"clientInfo":   map[string]any{fieldName: clientName, "title": clientName, "version": "0.1.0"},
-		"capabilities": map[string]any{"experimentalApi": true},
+		"clientInfo": map[string]any{fieldName: clientName, "title": clientName, "version": "0.1.0"},
+		"capabilities": map[string]any{
+			"experimentalApi":           true,
+			"optOutNotificationMethods": []string{notifyResponseItemCompleted},
+		},
 	}, &resp); err != nil {
 		return err
 	}
@@ -110,10 +119,11 @@ func (c *Client) Initialize(ctx context.Context) error {
 	return c.Notify(methodInitialized, map[string]any{})
 }
 
-// StartThread starts a new thread. nativePath is the PATH the app-server
-// process itself runs with; the thread's PATH is composed ahead of it.
+// StartThread starts a new thread that reports each model response's usage
+// as the response completes. nativePath is the PATH the app-server process
+// itself runs with; the thread's PATH is composed ahead of it.
 func (c *Client) StartThread(ctx context.Context, req ThreadStartRequest, nativePath string) (Thread, error) {
-	params := map[string]any{}
+	params := map[string]any{"experimentalRawEvents": true}
 	setNonEmpty(params, fieldCwd, req.Cwd)
 	setNonEmpty(params, fieldModel, req.Model)
 	setNonEmpty(params, "serviceTier", req.ServiceTier)
@@ -135,11 +145,18 @@ func (c *Client) StartThread(ctx context.Context, req ThreadStartRequest, native
 	}
 
 	var resp map[string]any
-	if err := c.Call(ctx, methodThreadStart, params, &resp); err != nil {
+	if callErr := c.Call(ctx, methodThreadStart, params, &resp); callErr != nil {
+		return Thread{}, callErr
+	}
+
+	thread, err := threadFromResponse(resp)
+	if err != nil {
 		return Thread{}, err
 	}
 
-	return threadFromResponse(resp)
+	thread.ReportsResponses = true
+
+	return thread, nil
 }
 
 // ResumeThread resumes a thread by id. The app-server resolves the id against
@@ -256,7 +273,6 @@ func (c *Client) ListModels(ctx context.Context) ([]Model, error) {
 			ID:                     id,
 			Name:                   firstNonEmpty(stringValue(item, "displayName"), stringValue(item, fieldName), id),
 			Description:            stringValue(item, "description"),
-			ContextWindow:          int64Value(item, "contextWindow"),
 			DefaultReasoningEffort: stringValue(item, "defaultReasoningEffort"),
 			ReasoningEfforts:       efforts,
 			InputModalities:        stringSliceValue(item["inputModalities"]),

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -192,4 +193,39 @@ func FirstUserMessage(rows [][]byte) string {
 	}
 
 	return ""
+}
+
+// LastTokenUsage is the thread usage a rollout last recorded, which codex
+// restores when it resumes the thread. A rollout with none reads as zero.
+func LastTokenUsage(rows [][]byte) TokenUsage {
+	for _, row := range slices.Backward(rows) {
+		decoded, err := DecodeRow(row)
+		if err != nil || decoded.Type != RowTypeEventMsg || stringValue(decoded.Payload, fieldType) != "token_count" {
+			continue
+		}
+
+		info := mapValue(decoded.Payload, "info")
+		if info == nil {
+			continue
+		}
+
+		return TokenUsage{
+			Last:               rolloutUsage(mapValue(info, "last_token_usage")),
+			Total:              rolloutUsage(mapValue(info, "total_token_usage")),
+			ModelContextWindow: int64Value(info, "model_context_window"),
+		}
+	}
+
+	return TokenUsage{}
+}
+
+func rolloutUsage(raw map[string]any) Usage {
+	return Usage{
+		Input:      int64Value(raw, "input_tokens"),
+		CachedRead: int64Value(raw, "cached_input_tokens"),
+		CacheWrite: int64Value(raw, "cache_write_input_tokens"),
+		Output:     int64Value(raw, "output_tokens"),
+		Reasoning:  int64Value(raw, "reasoning_output_tokens"),
+		Total:      int64Value(raw, "total_tokens"),
+	}
 }

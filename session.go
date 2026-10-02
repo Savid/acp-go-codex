@@ -53,9 +53,15 @@ type session struct {
 	effort      string
 	serviceTier string
 	personality string
-	// contextWindow is the selected model's context window from the last
-	// usage report or the catalog.
+	// contextWindow is the selected model's context window in the gateway's
+	// model list, 0 when the list states none.
 	contextWindow int64
+	// usage is the thread's last usage report, which the next report is
+	// compared against.
+	usage codex.TokenUsage
+	// responseUsage marks a bound thread that reports each model
+	// response's usage as the response completes.
+	responseUsage bool
 	title         string
 	updatedAt     string
 	// lastTerminalTurn is the native turn id of the last cycle this session
@@ -144,6 +150,7 @@ func (s *session) bind(rt *runtime, thread codex.Thread) {
 	s.rt = rt
 	s.generationLost = false
 	s.rolloutPath = thread.Path
+	s.responseUsage = thread.ReportsResponses
 
 	if s.model == "" {
 		s.model = thread.Model
@@ -282,14 +289,15 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan s
 	// A record naming the turn this session already terminalized is that
 	// turn's native tail, never work of whatever runs now. Adopting its id
 	// would stamp the live cycle with an id no later record of that cycle can
-	// match, and the cycle would never reach its own terminal.
-	if event.TurnID != "" && event.TurnID == terminalTurn {
-		return true
-	}
+	// match, and the cycle would never reach its own terminal. A record with
+	// no prompt in flight is a session-scoped tail: the thread runs no work
+	// outside a client turn. A usage report among them still moves the
+	// thread's cumulative usage.
+	if t == nil || event.TurnID != "" && event.TurnID == terminalTurn {
+		if event.Kind == codex.EventUsageUpdated {
+			s.observeUsage(event.Usage)
+		}
 
-	// A record with no prompt in flight is a session-scoped tail: the thread
-	// runs no work outside a client turn.
-	if t == nil {
 		return true
 	}
 

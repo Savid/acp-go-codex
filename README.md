@@ -96,6 +96,35 @@ installed CLI and preserves this native behavior.
 `mode` accepts only its own two values, and `effort` and `personality` reject
 an empty value.
 
+### Usage updates
+
+Every model request reports one `usage_update`: `used` is the request's total
+tokens, the context it leaves occupied, and the update's `_meta` carries the
+request's token breakdown as `acp-go-core`'s `wire.CallUsage` (uncached input,
+cache reads, cache writes, output with reasoning). A thread the adapter started
+reports each request as its response completes, before the tools it started
+run; a resumed thread reports it once those tools finished. A request reported
+with no tokens, as a gateway's response-cache replay is, sends nothing. After a
+compaction the update carries codex's estimate of the compacted history and no
+breakdown. `size` is the model's window in the gateway's model list, else the
+window codex last reported, else `0`; a model the list states no window for
+therefore reports `0` on a new thread's first request, whose response completes
+before codex first reports a window. The prompt response sums the turn's
+requests.
+
+### Response ids
+
+A started thread's breakdown carries, as `responseId`, the id the model
+gateway returned for the request's response, taken from codex's response
+completion; a resumed thread's reports name no response, so its breakdowns
+carry none. `agent_message_chunk` and `agent_thought_chunk` updates never
+carry a `messageId`. Live, codex names a response only once it completes,
+after its text streamed. On replay, the rollout records each response that
+completes with usage under its id, after the response's output rows, but
+codex writes a response's output rows as each completes and records nothing
+for a response that failed and was retried, or reported no usage, so no
+rollout row can be tied to its response with certainty.
+
 ### Account usage
 
 When `model_provider` names a provider with its own `base_url`, and that base

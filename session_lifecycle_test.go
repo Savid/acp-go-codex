@@ -144,7 +144,7 @@ func TestNativeTailDoesNotStampTheNextTurn(t *testing.T) {
 
 	rt := &runtime{}
 	next := &turn{
-		cycle:    cycle{state: cycleState{tools: make(map[string]*toolState)}},
+		state:    cycleState{tools: make(map[string]*toolState)},
 		settled:  make(chan struct{}),
 		finished: make(chan struct{}),
 	}

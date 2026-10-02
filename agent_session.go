@@ -409,6 +409,7 @@ func (a *Agent) restore(
 	}
 
 	s.bind(rt, thread)
+	s.restoreUsage(rows)
 
 	release := wire.HoldSessionGate(s.gate)
 

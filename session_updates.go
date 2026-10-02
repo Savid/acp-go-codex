@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"strings"
@@ -31,18 +32,22 @@ const (
 
 // cycleState accumulates what one cycle streamed.
 type cycleState struct {
-	toolsMu       sync.Mutex
+	toolsMu sync.Mutex
+	// usage sums the usage of every model request the cycle recorded.
 	usage         *acp.Usage
 	stop          codex.StopReason
 	failure       *codex.TurnFailure
 	imagesEmitted bool
-	// agentText is the whole assistant text of the cycle, for structured
-	// output.
+	// agentText is the whole assistant text of the cycle, kept only for a
+	// session with structured output.
 	agentText strings.Builder
 	// streamed holds what each open item already streamed, so its terminal
-	// frame contributes only the suffix.
-	streamed map[string]string
-	tools    map[string]*toolState
+	// frame contributes only the suffix. A completed item leaves it; the last
+	// one stays in completed so a repeated terminal frame adds nothing.
+	streamed  map[string]string
+	completed struct{ key, text string }
+	// tools holds each tool call until the app-server completes its item.
+	tools map[string]*toolState
 }
 
 // emit delivers session updates to the host. A session with no attached
@@ -79,7 +84,26 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 	cancelled := c.cancelled
 	s.mu.Unlock()
 
-	if nativeTurnID != "" && event.TurnID != "" && event.TurnID != nativeTurnID {
+	foreign := nativeTurnID != "" && event.TurnID != "" && event.TurnID != nativeTurnID
+
+	switch event.Kind {
+	case codex.EventUsageUpdated:
+		if foreign {
+			s.observeUsage(event.Usage)
+		} else {
+			s.emitTokenUsage(ctx, state, event.Usage, !cancelled)
+		}
+
+		return false, nil
+	case codex.EventResponseCompleted:
+		if !foreign {
+			s.emitResponseCompleted(ctx, state, event.Response, event.ResponseID, !cancelled)
+		}
+
+		return false, nil
+	}
+
+	if foreign {
 		return false, nil
 	}
 
@@ -101,10 +125,6 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 		return false, s.emitText(ctx, state, event, true)
 	case codex.EventPlanUpdated:
 		return false, s.emitPlan(ctx, event.Plan)
-	case codex.EventUsageUpdated:
-		s.emitUsage(ctx, state, event.Usage)
-
-		return false, nil
 	case codex.EventToolStarted:
 		return false, s.publishToolStart(ctx, state, event.Tool)
 	case codex.EventToolDelta:
@@ -134,10 +154,15 @@ func (s *session) emitText(ctx context.Context, state *cycleState, event codex.E
 
 	text := event.Text
 
-	if event.Completed {
+	switch {
+	case event.Completed && key == state.completed.key:
+		text = wire.UnstreamedSuffix(state.completed.text, text)
+		state.completed.text += text
+	case event.Completed:
 		text = wire.UnstreamedSuffix(state.streamed[key], text)
-		state.streamed[key] += text
-	} else {
+		state.completed.key, state.completed.text = key, state.streamed[key]+text
+		delete(state.streamed, key)
+	default:
 		state.streamed[key] += text
 	}
 
@@ -149,7 +174,9 @@ func (s *session) emitText(ctx context.Context, state *cycleState, event codex.E
 		return s.emit(ctx, acp.UpdateAgentThoughtText(text))
 	}
 
-	state.agentText.WriteString(text)
+	if s.options.OutputSchema != nil {
+		state.agentText.WriteString(text)
+	}
 
 	return s.emit(ctx, acp.UpdateAgentMessageText(text))
 }
@@ -177,48 +204,163 @@ func (s *session) emitPlan(ctx context.Context, steps []codex.PlanStep) error {
 	return s.emit(ctx, acp.UpdatePlan(entries...))
 }
 
-// emitUsage reports the latest model request's usage. size is the model's
-// context window from the report, else the catalog value, else 0.
-func (s *session) emitUsage(ctx context.Context, state *cycleState, usage codex.TokenUsage) {
-	state.usage = acpUsage(usage.Last)
+// observeUsage records a usage report as the thread's last and returns the
+// one it replaces.
+func (s *session) observeUsage(usage codex.TokenUsage) codex.TokenUsage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	size := usage.ModelContextWindow
+	previous := s.usage
+	s.usage = usage
+
+	return previous
+}
+
+// restoreUsage takes the thread usage codex restores from the rollout when it
+// resumes the thread as the last report, so the thread's next report is
+// compared against it and a restatement of it reports nothing.
+func (s *session) restoreUsage(rows [][]byte) {
+	usage := codex.LastTokenUsage(rows)
 
 	s.mu.Lock()
-	if size == 0 {
-		size = s.contextWindow
-	} else {
-		s.contextWindow = size
-	}
+	s.usage = usage
 	s.mu.Unlock()
+}
 
-	if state.usage == nil && size == 0 {
+// contextTokens is the context a model request leaves occupied, counted as
+// codex counts it: the request's total tokens. After a compaction codex
+// reports its estimate of the compacted history the same way.
+func contextTokens(usage codex.Usage) (int, bool) {
+	return int(usage.Total), usage.Total > 0
+}
+
+// callUsage is one model request's breakdown with the gateway's id for its
+// response, empty when the report names none. Codex reports every figure for
+// every request, and its input includes the input read from and written to a
+// prompt cache, so the uncached input is what remains of it; a remainder
+// below zero is no figure.
+func callUsage(usage codex.Usage, responseID string) wire.CallUsage {
+	call := wire.CallUsage{
+		ResponseID:        responseID,
+		CachedReadTokens:  new(int(usage.CachedRead)),
+		CachedWriteTokens: new(int(usage.CacheWrite)),
+		OutputTokens:      new(int(usage.Output)),
+	}
+
+	if uncached := usage.Input - usage.CachedRead - usage.CacheWrite; uncached >= 0 {
+		call.InputTokens = new(int(uncached))
+	}
+
+	return call
+}
+
+// reportsResponses reports whether the bound thread reports each model
+// response's usage as the response completes.
+func (s *session) reportsResponses() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.responseUsage
+}
+
+// recordRequest records one finished model request of the cycle: its usage
+// joins the cycle's sum and, while the cycle is live, the update reports the
+// context the request left occupied with the request's breakdown. A request
+// whose usage reports no token is unknown and records nothing.
+func (s *session) recordRequest(ctx context.Context, state *cycleState, usage codex.Usage, responseID string, live bool) {
+	call := callUsage(usage, responseID)
+	if !call.Known() {
 		return
 	}
 
-	used := 0
-	if state.usage != nil {
-		used = state.usage.TotalTokens
+	state.usage = addUsage(state.usage, usage)
+
+	used, ok := contextTokens(usage)
+	if !live || !ok {
+		return
 	}
 
-	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: int(size), Used: used}})
+	update := &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: used, Meta: call.Apply(nil)}
+	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: update})
 }
 
-func acpUsage(usage codex.Usage) *acp.Usage {
-	if usage == (codex.Usage{}) {
-		return nil
+// emitResponseCompleted records the model request a response completion
+// reports, on a thread that reports its responses. It arrives as the
+// response completes, after the response's text streamed and before the
+// tools the response started run, and names the gateway's response id.
+func (s *session) emitResponseCompleted(ctx context.Context, state *cycleState, usage *codex.Usage, responseID string, live bool) {
+	if usage == nil || !s.reportsResponses() {
+		return
 	}
 
-	result := &acp.Usage{InputTokens: int(usage.Input), OutputTokens: int(usage.Output), TotalTokens: int(usage.Total)}
-	if usage.CachedRead > 0 {
-		result.CachedReadTokens = new(int(usage.CachedRead))
+	s.recordRequest(ctx, state, *usage, responseID, live)
+}
+
+// emitTokenUsage handles one of the cycle's thread usage reports. Codex
+// reports once per model request, after the tools that request started have
+// finished, and names no response id. A report whose cumulative total moved records a new request,
+// unless the thread already reported it at its completion; one that restates
+// the previous report sends nothing; one that keeps the total and replaces
+// the last usage carries codex's estimate of the history it just compacted,
+// which replaces the figure and describes no request.
+func (s *session) emitTokenUsage(ctx context.Context, state *cycleState, usage codex.TokenUsage, live bool) {
+	previous := s.observeUsage(usage)
+
+	if usage.Total != previous.Total {
+		if !s.reportsResponses() {
+			s.recordRequest(ctx, state, usage.Last, "", live)
+		}
+
+		return
 	}
 
-	if usage.Reasoning > 0 {
-		result.ThoughtTokens = new(int(usage.Reasoning))
+	used, ok := contextTokens(usage.Last)
+	if !live || !ok || usage.Last == previous.Last {
+		return
 	}
 
-	return result
+	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: used}})
+}
+
+// knownContextWindow is the selected model's context window: the gateway's
+// model list's, else the one codex last reported, else 0. Codex reports the
+// share of a known model's window it lets the conversation use, and a fixed
+// fallback for a model it does not know, so a window the gateway states wins.
+func (s *session) knownContextWindow() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return int(cmp.Or(s.contextWindow, s.usage.ModelContextWindow))
+}
+
+// addUsage adds one model request's usage to a cycle's sum.
+func addUsage(sum *acp.Usage, usage codex.Usage) *acp.Usage {
+	if sum == nil {
+		sum = &acp.Usage{}
+	}
+
+	sum.InputTokens += int(usage.Input)
+	sum.OutputTokens += int(usage.Output)
+	sum.TotalTokens += int(usage.Total)
+	sum.CachedReadTokens = addCount(sum.CachedReadTokens, usage.CachedRead)
+	sum.CachedWriteTokens = addCount(sum.CachedWriteTokens, usage.CacheWrite)
+	sum.ThoughtTokens = addCount(sum.ThoughtTokens, usage.Reasoning)
+
+	return sum
+}
+
+// addCount adds an optional breakdown count, leaving it absent while every
+// request reported none.
+func addCount(sum *int, count int64) *int {
+	if count <= 0 {
+		return sum
+	}
+
+	if sum == nil {
+		return new(int(count))
+	}
+
+	return new(*sum + int(count))
 }
 
 // emitSessionInfo records the turn's time and, on the first prompt, a title.

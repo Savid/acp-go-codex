@@ -281,13 +281,19 @@ func TestGatewayModelListReplacesThePresets(t *testing.T) {
 	session, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 
-	var values []acp.SessionConfigValueId
+	var (
+		values  []acp.SessionConfigValueId
+		windows []any
+	)
 	for _, option := range session.ConfigOptions {
 		if option.Select != nil && option.Select.Id == configModel {
 			for _, value := range *option.Select.Options.Ungrouped {
 				values = append(values, value.Value)
+				meta, _ := value.Meta["codex"].(map[string]any)
+				windows = append(windows, meta["contextWindow"])
 			}
 		}
 	}
 	require.Equal(t, []acp.SessionConfigValueId{"openai-codex/gpt-5.6-luna", "opencode-go/qwen3.8-flash"}, values, "the gateway's ids replace the presets; a configured id already listed is not repeated")
+	require.Equal(t, []any{int64(400000), nil}, windows, "a listed window rides the model option")
 }
