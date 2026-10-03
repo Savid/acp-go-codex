@@ -56,7 +56,7 @@ const (
 	tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
 	// noNativeRowsDir is the workspace base name that makes the fake open a
-	// thread whose rollout file exists with no rows at all.
+	// thread as codex does: the rollout is not written before the first turn.
 	noNativeRowsDir = "no-native-rows"
 )
 
@@ -491,11 +491,8 @@ func (f *fakeCodex) startThread(id json.RawMessage, params map[string]any) {
 	thread := &fakeThread{id: fakeUUID(), cwd: cwd, responses: responses}
 	thread.path = codex.RolloutPath(f.home, thread.id, time.Now())
 
-	_ = os.MkdirAll(filepath.Dir(thread.path), 0o700)
-
-	if filepath.Base(cwd) == noNativeRowsDir {
-		_ = os.WriteFile(thread.path, nil, 0o600)
-	} else {
+	if filepath.Base(cwd) != noNativeRowsDir {
+		_ = os.MkdirAll(filepath.Dir(thread.path), 0o700)
 		meta := map[string]any{"type": "session_meta", "payload": map[string]any{
 			"id": thread.id, "timestamp": time.Now().UTC().Format(time.RFC3339), "cwd": cwd,
 		}}
