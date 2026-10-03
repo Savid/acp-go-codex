@@ -108,6 +108,31 @@ func RolloutPath(home string, threadID string, stamp time.Time) string {
 	return filepath.Join(home, sessionsDirName, filepath.FromSlash(local.Format(rolloutDayForm)), name)
 }
 
+// RelocateRollout is the path under home of the rollout a recorded location
+// names. The recorded file name must be threadID's rollout; its start time
+// places the file in its day directory. It reports false for any other name.
+func RelocateRollout(home string, recorded string, threadID string) (string, bool) {
+	name := filepath.Base(recorded)
+
+	stamp, ok := strings.CutPrefix(name, rolloutNamePrefix)
+	if ok {
+		stamp, ok = strings.CutSuffix(stamp, "-"+threadID+rolloutNameSuffix)
+	}
+
+	if !ok {
+		return "", false
+	}
+
+	// The stamp is the wall-clock time codex named the file with; parsing it
+	// without a zone keeps exactly those fields for the day directory.
+	start, err := time.Parse(rolloutStampForm, stamp)
+	if err != nil {
+		return "", false
+	}
+
+	return filepath.Join(home, sessionsDirName, filepath.FromSlash(start.Format(rolloutDayForm)), name), true
+}
+
 // ReadRows reads a rollout file's non-empty lines. A missing file reads as
 // empty.
 func ReadRows(path string) ([][]byte, error) {

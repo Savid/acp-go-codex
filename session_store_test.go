@@ -463,7 +463,6 @@ func TestEmptyConversationCommitsItsConfiguration(t *testing.T) {
 
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
-	require.NoError(t, os.Remove(record.RolloutPath))
 	before, err := store.Load(t.Context(), string(session.SessionId))
 	require.NoError(t, err)
 	store.fail.Store(true)
@@ -488,6 +487,72 @@ func TestEmptyConversationCommitsItsConfiguration(t *testing.T) {
 	require.Len(t, listed.Sessions, 1)
 	require.Equal(t, session.SessionId, listed.Sessions[0].SessionId)
 	require.Equal(t, resumed.Meta, listed.Sessions[0].Meta)
+}
+
+// An empty conversation has no native rollout in any home, so restoring it
+// into a home other than the one that recorded it recovers the same way.
+func TestEmptyConversationRecoversInAnotherNativeHome(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := filepath.Join(t.TempDir(), noNativeRowsDir)
+	require.NoError(t, os.MkdirAll(cwd, 0o700))
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+
+	home := t.TempDir()
+	restored := newHarness(t, WithSessionStore(store), WithHome(home))
+	restored.initialize()
+	resumed, err := restored.conn.ResumeSession(restored.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
+	require.NoError(t, err)
+	require.NotEqual(t, created.Meta, resumed.Meta)
+
+	var record sessionRecord
+	_, found, err := sessionlog.Load(t.Context(), store, string(created.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), resumed.Meta)
+	relative, err := filepath.Rel(home, record.RolloutPath)
+	require.NoError(t, err)
+	require.True(t, filepath.IsLocal(relative), "the new binding names a rollout outside the resuming home")
+
+	listed, err := restored.conn.ListSessions(restored.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, created.SessionId, listed.Sessions[0].SessionId)
+	require.Equal(t, resumed.Meta, listed.Sessions[0].Meta)
+}
+
+// An empty conversation's recorded location is only re-rooted in the
+// resuming home when it names the bound thread's rollout.
+func TestEmptyConversationRefusesAForeignRolloutPath(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := filepath.Join(t.TempDir(), noNativeRowsDir)
+	require.NoError(t, os.MkdirAll(cwd, 0o700))
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+
+	var record sessionRecord
+	rows, _, err := sessionlog.Load(t.Context(), store, string(created.SessionId), &record)
+	require.NoError(t, err)
+
+	for _, foreign := range []string{
+		codex.RolloutPath(h.home, "00000000-0000-4000-8000-00000000abcd", time.Now()),
+		filepath.Join(t.TempDir(), "notes.jsonl"),
+	} {
+		record.RolloutPath = foreign
+		require.NoError(t, sessionlog.Commit(t.Context(), store, string(created.SessionId), rows, record))
+		_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
+		require.Equal(t, "codex_restore_failed", requestErrorData(t, err)["error"], foreign)
+	}
 }
 
 func TestRestoreAdoptsRowsAppendedOutsideACP(t *testing.T) {

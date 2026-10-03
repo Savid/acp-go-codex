@@ -181,13 +181,16 @@ func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored sto
 
 	// A committed conversation whose native history is still empty carries
 	// only its recorded location: no header to read, nothing to reconcile.
-	// The location must still lie inside the home the thread resumes from.
+	// Codex writes no rollout before a thread's first turn, so the recorded
+	// home may hold nothing for it; the location is re-rooted by its file name
+	// in the home the thread resumes from, never followed outside it.
 	if len(stored.rows) == 0 {
-		if relative, pathErr := filepath.Rel(home, path); pathErr != nil || !filepath.IsLocal(relative) {
-			return "", nil, a.restoreRefused(ctx, sessionID, errors.New("stored rollout path is outside the native home"))
+		local, ok := codex.RelocateRollout(home, path, stored.record.NativeSessionID)
+		if !ok {
+			return "", nil, a.restoreRefused(ctx, sessionID, errors.New("stored rollout path names no rollout for the native session"))
 		}
 
-		return path, nil, nil
+		return local, nil, nil
 	}
 
 	meta, ok := codex.ParseSessionMeta(stored.rows[0])
