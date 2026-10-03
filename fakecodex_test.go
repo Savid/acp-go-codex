@@ -32,6 +32,13 @@ const (
 	// arrives that it will never answer, so a test can act while the adapter is
 	// still rebinding the thread.
 	fakeCodexEnvResumeHold = "ACP_GO_CODEX_TEST_RESUME_HOLD"
+	// fakeCodexEnvNativeLog names a file the fake appends one line to for its
+	// launch and for every thread/start or thread/resume, so a test can count
+	// native work.
+	fakeCodexEnvNativeLog = "ACP_GO_CODEX_TEST_NATIVE_LOG"
+	// fakeCodexEnvStartGate names a file thread/start waits for, so a test can
+	// hold an establishment in native start.
+	fakeCodexEnvStartGate = "ACP_GO_CODEX_TEST_START_GATE"
 	// fakeCodexEnvAccount selects the account answers: a ChatGPT pro login with
 	// the snapshots below, no login, an API-key login, a ChatGPT login with no
 	// window, or a rate-limit read the app-server rejects.
@@ -230,6 +237,8 @@ func runFakeCodex(args []string) int {
 		return 2
 	}
 
+	logNative("app-server")
+
 	home := os.Getenv(codex.EnvCodexHome)
 	if home == "" {
 		home = filepath.Join(os.Getenv("HOME"), ".codex")
@@ -243,6 +252,22 @@ func runFakeCodex(args []string) int {
 	}
 
 	return f.serve(os.Stdin)
+}
+
+// logNative records one unit of native work in the test's native log.
+func logNative(kind string) {
+	path := os.Getenv(fakeCodexEnvNativeLog)
+	if path == "" {
+		return
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+
+	_, _ = file.WriteString(kind + "\n")
+	_ = file.Close()
 }
 
 func fakeUUID() string {
@@ -362,8 +387,10 @@ func (f *fakeCodex) dispatch(line []byte) {
 	case "model/list":
 		f.respond(frame.ID, map[string]any{"models": fakeModels})
 	case "thread/start":
+		logNative(frame.Method)
 		f.startThread(frame.ID, frame.Params)
 	case "thread/resume":
+		logNative(frame.Method)
 		f.resumeThread(frame.ID, frame.Params)
 	case "thread/unsubscribe":
 		f.respond(frame.ID, map[string]any{})
@@ -430,6 +457,16 @@ func (f *fakeCodex) initialize(id json.RawMessage, params map[string]any) {
 }
 
 func (f *fakeCodex) startThread(id json.RawMessage, params map[string]any) {
+	if gate := os.Getenv(fakeCodexEnvStartGate); gate != "" {
+		for {
+			if _, err := os.Stat(gate); err == nil {
+				break
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
 	cwd, _ := params["cwd"].(string)
 	if model, _ := params["model"].(string); model == "REFUSE" {
 		f.fail(id, -32000, "unknown model")

@@ -2,6 +2,10 @@ package codexacp
 
 import (
 	"context"
+	"maps"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -182,6 +186,116 @@ func TestRestoreWaitsForPreviousOpening(t *testing.T) {
 			s, err := a.session(t.Context(), created.SessionId)
 			require.NoError(t, err)
 			require.True(t, s.lc.Active())
+		})
+	}
+}
+
+// limitedHarness serves an agent limited to one active session whose native
+// work is counted in the returned log.
+func limitedHarness(t *testing.T, env map[string]string) (h *harness, log string) {
+	t.Helper()
+
+	log = filepath.Join(t.TempDir(), "native")
+	merged := map[string]string{fakeCodexEnv: "1", fakeCodexEnvNativeLog: log}
+	maps.Copy(merged, env)
+	h = newHarness(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), WithEnv(merged))
+	h.initialize()
+
+	return h, log
+}
+
+// nativeWork counts the app-server launches and thread starts or resumes
+// recorded in log.
+func nativeWork(log string) int {
+	data, _ := os.ReadFile(log)
+
+	return strings.Count(string(data), "\n")
+}
+
+func requireActiveSessionsBackpressure(t *testing.T, err error) {
+	t.Helper()
+
+	data := requestErrorData(t, err)
+	require.Equal(t, "backpressure", data["error"])
+	require.Equal(t, "active_sessions", data["limit"])
+}
+
+func TestActiveSessionLimitRefusesBeforeLaunch(t *testing.T) {
+	t.Parallel()
+
+	h, log := limitedHarness(t, nil)
+	h.newSession()
+	work := nativeWork(log)
+
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	requireActiveSessionsBackpressure(t, err)
+	require.Equal(t, work, nativeWork(log), "a refused session/new started native work")
+}
+
+func TestActiveSessionLimitCountsEstablishing(t *testing.T) {
+	t.Parallel()
+
+	gate := filepath.Join(t.TempDir(), "gate")
+	h, log := limitedHarness(t, map[string]string{fakeCodexEnvStartGate: gate})
+	release := sync.OnceFunc(func() { require.NoError(t, os.WriteFile(gate, nil, 0o600)) })
+	t.Cleanup(release)
+
+	ctx := h.ctx()
+	cwd := t.TempDir()
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := h.conn.NewSession(ctx, wire.NewSessionRequest(cwd))
+		done <- err
+	}()
+
+	// The app-server launch and the held thread/start.
+	require.Eventually(t, func() bool { return nativeWork(log) == 2 }, testTimeout, 5*time.Millisecond)
+
+	_, err := h.conn.NewSession(ctx, wire.NewSessionRequest(t.TempDir()))
+	requireActiveSessionsBackpressure(t, err)
+	require.Equal(t, 2, nativeWork(log), "a refused session/new started native work")
+
+	release()
+	require.NoError(t, <-done)
+}
+
+func TestActiveSessionLimitFailedLaunchFreesSlot(t *testing.T) {
+	t.Parallel()
+
+	h, _ := limitedHarness(t, nil)
+	refused := WithSessionCodexOptions(NewCodexOptions(WithCodexModel("REFUSE")))
+
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir(), refused))
+	require.Equal(t, "codex_internal_failure", requestErrorData(t, err)["error"])
+
+	h.newSession()
+}
+
+func TestActiveSessionLimitRefusesRestoreBeforeLaunch(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{acp.AgentMethodSessionLoad, acp.AgentMethodSessionResume} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			h, log := limitedHarness(t, nil)
+			cwd := t.TempDir()
+			created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+			require.NoError(t, err)
+			_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+			require.NoError(t, err)
+			h.newSession()
+			work := nativeWork(log)
+
+			if method == acp.AgentMethodSessionLoad {
+				_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(created.SessionId, cwd))
+			} else {
+				_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
+			}
+
+			requireActiveSessionsBackpressure(t, err)
+			require.Equal(t, work, nativeWork(log), "a refused restore started native work")
 		})
 	}
 }

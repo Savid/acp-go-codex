@@ -82,6 +82,9 @@ type Agent struct {
 	// their delete never touches the store.
 	ephemeral   map[acp.SessionId]bool
 	clientCalls chan struct{}
+	// starting counts establishing requests holding an active-session slot
+	// before their session is installed.
+	starting int
 
 	// runtimeMu serializes starting and replacing the shared app-server.
 	runtimeMu sync.Mutex
