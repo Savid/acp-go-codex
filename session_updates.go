@@ -73,6 +73,10 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 // reports whether the run settled. An update the host refused is returned so
 // the cycle can record it, but the native run keeps draining to its terminal.
 func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event) (bool, error) {
+	if event.Kind == codex.EventCompactionCompleted {
+		return false, s.projectCompaction(ctx, event)
+	}
+
 	state := &c.state
 
 	s.mu.Lock()

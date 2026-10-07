@@ -181,3 +181,16 @@ make test-integration-live    # spends model tokens
 
 Unit tests run the test binary as a scripted fake app-server and need no
 installed codex, credentials, or network.
+
+## Context compaction
+
+Reports successful live context-compaction completions. Native failures and
+interruptions can leave started items without an outcome, so the adapter
+publishes completions only. Trigger and context counts are unavailable.
+
+Notifications carry `acp-go.dev/compaction` on the notification’s `_meta`,
+with an otherwise empty `session_info_update`. The value is `acp-go-core`
+`wire.Compaction`: a required `compactionId` and `status`, and optional
+`trigger`, `contextBefore`, and `contextAfter`. Each completed attempt has a
+distinct ID. Unknown facts are omitted. These are live notifications; historical
+replay emits none. Usage accounting is independent.

@@ -19,7 +19,6 @@ const (
 	eventAgentMessage  = "agent_message"
 	eventAgentReason   = "agent_reasoning"
 	eventReasonRaw     = "agent_reasoning_raw_content"
-	eventCompacted     = "context_compacted"
 	itemMessage        = "message"
 	itemReasoning      = "reasoning"
 	itemFunctionCall   = "function_call"
@@ -29,8 +28,6 @@ const (
 	itemLocalShell     = "local_shell_call"
 	itemWebSearch      = "web_search_call"
 	itemImageGen       = "image_generation_call"
-
-	compactedText = "Context compacted"
 )
 
 // replay delivers mirrored rollout rows as session updates in row order.
@@ -145,7 +142,11 @@ func replayRow(row codex.RolloutRow, events replayEventKinds, limits image.Limit
 	case codex.RowTypeResponseItem:
 		return replayResponseItem(row.Payload, events, limits)
 	case codex.RowTypeCompacted:
-		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(cmp.Or(payloadString(row.Payload, "message"), compactedText))}, nil
+		if text := payloadString(row.Payload, "message"); text != "" {
+			return []acp.SessionUpdate{acp.UpdateAgentThoughtText(text)}, nil
+		}
+
+		return nil, nil
 	default:
 		return nil, nil
 	}
@@ -165,8 +166,6 @@ func replayEvent(payload map[string]any) []acp.SessionUpdate {
 		if text := cmp.Or(payloadString(payload, "text"), payloadString(payload, "message")); text != "" {
 			return []acp.SessionUpdate{acp.UpdateAgentThoughtText(text)}
 		}
-	case eventCompacted:
-		return []acp.SessionUpdate{acp.UpdateAgentThoughtText(cmp.Or(payloadString(payload, "message"), compactedText))}
 	}
 
 	return nil

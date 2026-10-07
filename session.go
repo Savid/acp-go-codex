@@ -29,6 +29,7 @@ const (
 // session is one ACP session: one Codex thread on the shared app-server.
 // The native thread ID addresses the app-server conversation.
 type session struct {
+	compactions           wire.Compactions
 	callbacks             sync.WaitGroup
 	agent                 *Agent
 	id                    acp.SessionId
@@ -294,6 +295,13 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan s
 	// outside a client turn. A usage report among them still moves the
 	// thread's cumulative usage.
 	if t == nil || event.TurnID != "" && event.TurnID == terminalTurn {
+		if event.Kind == codex.EventCompactionCompleted {
+			if err := s.projectCompaction(ctx, event); err != nil {
+				s.agent.log.WarnContext(ctx, "compaction notification failed",
+					slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+			}
+		}
+
 		if event.Kind == codex.EventUsageUpdated {
 			s.observeUsage(event.Usage)
 		}

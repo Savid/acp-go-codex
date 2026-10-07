@@ -51,3 +51,12 @@ func TestStreamedTextNamesNoResponse(t *testing.T) {
 		require.Empty(t, event.ResponseID)
 	}
 }
+
+func TestCompactionItemDecoding(t *testing.T) {
+	t.Parallel()
+	event := DecodeEvent(Notification{Method: "item/completed", Params: json.RawMessage(`{"threadId":"root","turnId":"turn","item":{"id":"attempt","type":"contextCompaction"}}`)})
+	require.Equal(t, EventCompactionCompleted, event.Kind)
+	require.Equal(t, "root", event.ThreadID)
+	require.Equal(t, "turn", event.TurnID)
+	require.Equal(t, "attempt", event.ItemID)
+}

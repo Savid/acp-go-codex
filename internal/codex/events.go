@@ -10,21 +10,22 @@ type EventKind string
 
 // The event kinds the adapter projects.
 const (
-	EventAgentMessageDelta EventKind = "agent_message_delta"
-	EventReasoningDelta    EventKind = "reasoning_delta"
-	EventPlanUpdated       EventKind = "plan_updated"
-	EventToolStarted       EventKind = "tool_started"
-	EventToolDelta         EventKind = "tool_delta"
-	EventToolCompleted     EventKind = "tool_completed"
-	EventImageStarted      EventKind = "image_started"
-	EventImageCompleted    EventKind = "image_completed"
-	EventDiffUpdated       EventKind = "diff_updated"
-	EventUsageUpdated      EventKind = "usage_updated"
-	EventResponseCompleted EventKind = "response_completed"
-	EventTurnStarted       EventKind = "turn_started"
-	EventTurnCompleted     EventKind = "turn_completed"
-	EventError             EventKind = "error"
-	EventRaw               EventKind = "raw"
+	EventCompactionCompleted EventKind = "compaction_completed"
+	EventAgentMessageDelta   EventKind = "agent_message_delta"
+	EventReasoningDelta      EventKind = "reasoning_delta"
+	EventPlanUpdated         EventKind = "plan_updated"
+	EventToolStarted         EventKind = "tool_started"
+	EventToolDelta           EventKind = "tool_delta"
+	EventToolCompleted       EventKind = "tool_completed"
+	EventImageStarted        EventKind = "image_started"
+	EventImageCompleted      EventKind = "image_completed"
+	EventDiffUpdated         EventKind = "diff_updated"
+	EventUsageUpdated        EventKind = "usage_updated"
+	EventResponseCompleted   EventKind = "response_completed"
+	EventTurnStarted         EventKind = "turn_started"
+	EventTurnCompleted       EventKind = "turn_completed"
+	EventError               EventKind = "error"
+	EventRaw                 EventKind = "raw"
 )
 
 // StopReason is how the app-server reported a turn ended.
@@ -62,15 +63,16 @@ const (
 	notifyTurnCompleted         = "turn/completed"
 	notifyError                 = "error"
 
-	itemTypeAgentMessage     = "agentMessage"
-	itemTypeReasoning        = "reasoning"
-	itemTypeCommandExecution = "commandExecution"
-	itemTypeFileChange       = "fileChange"
-	itemTypeMCPToolCall      = "mcpToolCall"
-	itemTypeDynamicToolCall  = "dynamicToolCall"
-	itemTypeImageGeneration  = "imageGeneration"
-	itemTypeImageView        = "imageView"
-	itemTypeWebSearch        = "webSearch"
+	itemTypeContextCompaction = "contextCompaction"
+	itemTypeAgentMessage      = "agentMessage"
+	itemTypeReasoning         = "reasoning"
+	itemTypeCommandExecution  = "commandExecution"
+	itemTypeFileChange        = "fileChange"
+	itemTypeMCPToolCall       = "mcpToolCall"
+	itemTypeDynamicToolCall   = "dynamicToolCall"
+	itemTypeImageGeneration   = "imageGeneration"
+	itemTypeImageView         = "imageView"
+	itemTypeWebSearch         = "webSearch"
 
 	statusCompleted = "completed"
 )
@@ -260,6 +262,8 @@ func completedItem(event *Event, params map[string]any) {
 	}
 
 	switch itemType := stringValue(item, fieldType); {
+	case itemType == itemTypeContextCompaction:
+		event.Kind = EventCompactionCompleted
 	case itemType == itemTypeAgentMessage:
 		event.Kind = EventAgentMessageDelta
 		event.Completed = true
