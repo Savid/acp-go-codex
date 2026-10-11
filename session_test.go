@@ -821,7 +821,8 @@ func TestReplacementRuntimeCutsATornRolloutTail(t *testing.T) {
 	t.Parallel()
 
 	store := acpcore.NewInMemorySessionStore()
-	h := newHarness(t, WithSessionStore(store))
+	logger, logs := capturedLogs()
+	h := newHarness(t, WithSessionStore(store), logger)
 	h.initialize()
 	session := h.newSession()
 
@@ -842,6 +843,8 @@ func TestReplacementRuntimeCutsATornRolloutTail(t *testing.T) {
 	resp, err := h.prompt(session.SessionId, "ECHO after", nil)
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+
+	require.Contains(t, logs.String(), "native session file tail repaired")
 
 	rows, err := readRollout(record.NativePath)
 	require.NoError(t, err)

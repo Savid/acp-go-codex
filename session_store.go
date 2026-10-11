@@ -97,8 +97,10 @@ func (s *session) commitMirror(ctx context.Context) error {
 	// describes the rows it is committed with; it takes s.mu, which is never
 	// held across a commit.
 	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
-	err := s.mirror.Commit(commitCtx, sessionlog.File(path), func(sessionlog.Tail) (any, error) { return s.record(), nil })
+	report, err := s.mirror.Commit(commitCtx, sessionlog.File(path), func(sessionlog.Tail) (any, error) { return s.record(), nil })
+	s.agent.observe.RecordRepublish(commitCtx, string(report.Republish))
 	finish(err)
+	s.logRepublish(ctx, report)
 
 	if err != nil {
 		return fmt.Errorf("commit session mirror: %w", err)
@@ -233,12 +235,12 @@ func (s *session) hydrate(ctx context.Context, stored storedSession, runtime *ru
 		return "", nil, fmt.Errorf("unload thread: %w", err)
 	}
 
-	rows, err := s.repairStored(ctx, stored, path)
+	repaired, err := s.repairStored(ctx, stored, path)
 	if err != nil {
 		return "", nil, err
 	}
 
-	rows, err = s.mirror.Hydrate(ctx, path, rows, stored.record, func(rows [][]byte) error {
+	rows, hydrated, err := s.mirror.Hydrate(ctx, path, repaired, stored.record, func(rows [][]byte) error {
 		if meta, ok := codex.ParseSessionMeta(rows[0]); !ok || meta.ID != nativeID {
 			return fmt.Errorf("rollout does not open with session_meta for %s", nativeID)
 		}
@@ -255,7 +257,24 @@ func (s *session) hydrate(ctx context.Context, stored storedSession, runtime *ru
 		return "", nil, err
 	}
 
+	if hydrated.Changed() {
+		s.agent.log.WarnContext(ctx, "native session file repaired on restore", slog.String("session_id", string(s.id)),
+			slog.Int64("torn_bytes_cut", hydrated.Tail.Cut), slog.Bool("record_terminated", hydrated.Tail.Terminated),
+			slog.Int64("invalid_bytes_cut", hydrated.InvalidCut), slog.Bool("rewritten_from_store", hydrated.Rewritten))
+	}
+
+	s.logRepublish(ctx, hydrated.Commit)
+
 	return path, rows, nil
+}
+
+// logRepublish warns when a commit republished the whole history to recover
+// from a rewritten native file or a failed append.
+func (s *session) logRepublish(ctx context.Context, report sessionlog.CommitReport) {
+	if report.Recovery() {
+		s.agent.log.WarnContext(ctx, "session mirror republished", slog.String("session_id", string(s.id)),
+			slog.String("reason", string(report.Republish)), slog.Any("append_error", report.AppendErr))
+	}
 }
 
 // repairStored repairs a stored cut-off call before hydration. A store that
@@ -277,8 +296,10 @@ func (s *session) repairStored(ctx context.Context, stored storedSession, path s
 	s.mirror.Reset()
 
 	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
-	err = s.mirror.Commit(commitCtx, sessionlog.Rows(rows), func(sessionlog.Tail) (any, error) { return stored.record, nil })
+	report, err := s.mirror.Commit(commitCtx, sessionlog.Rows(rows), func(sessionlog.Tail) (any, error) { return stored.record, nil })
+	s.agent.observe.RecordRepublish(commitCtx, string(report.Republish))
 	finish(err)
+	s.logRepublish(ctx, report)
 
 	if err != nil {
 		return nil, fmt.Errorf("republish repaired history: %w", err)

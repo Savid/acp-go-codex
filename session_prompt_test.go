@@ -239,7 +239,8 @@ func TestRestoreRepairsAStoredCutOffCall(t *testing.T) {
 			t.Parallel()
 
 			store := acpcore.NewInMemorySessionStore()
-			h := newHarness(t, WithSessionStore(store))
+			logger, logs := capturedLogs()
+			h := newHarness(t, WithSessionStore(store), logger)
 			h.initialize()
 
 			cwd := t.TempDir()
@@ -259,8 +260,9 @@ func TestRestoreRepairsAStoredCutOffCall(t *testing.T) {
 
 			unrepaired := cutOffRows(t, rows)
 
-			require.NoError(t, sessionlog.NewMirror(store, string(session.SessionId)).Commit(t.Context(), sessionlog.Rows(unrepaired),
-				func(sessionlog.Tail) (any, error) { return record, nil }))
+			_, err = sessionlog.NewMirror(store, string(session.SessionId)).Commit(t.Context(), sessionlog.Rows(unrepaired),
+				func(sessionlog.Tail) (any, error) { return record, nil })
+			require.NoError(t, err)
 
 			if nativeCutOff {
 				require.NoError(t, writeRollout(record.NativePath, unrepaired))
@@ -280,6 +282,8 @@ func TestRestoreRepairsAStoredCutOffCall(t *testing.T) {
 			native, err := readRollout(record.NativePath)
 			require.NoError(t, err)
 			require.Equal(t, native, restored)
+
+			require.Contains(t, logs.String(), "codex restore repaired cut-off function calls")
 
 			response, err := h.prompt(session.SessionId, "ECHO after", nil)
 			require.NoError(t, err)

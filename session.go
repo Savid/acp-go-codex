@@ -251,8 +251,14 @@ func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 	s.mu.Unlock()
 
 	if replaced && path != "" {
-		if cutErr := sessionlog.CutTornTail(path); cutErr != nil {
+		torn, cutErr := sessionlog.CutTornTail(path)
+		if cutErr != nil {
 			return nil, s.startFailure(ctx, cutErr)
+		}
+
+		if torn.Changed() {
+			s.agent.log.WarnContext(ctx, "native session file tail repaired", slog.String("session_id", string(s.id)),
+				slog.Int64("bytes_cut", torn.Cut), slog.Bool("record_terminated", torn.Terminated))
 		}
 	}
 

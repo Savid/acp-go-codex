@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -490,4 +491,31 @@ func writeRollout(path string, rows [][]byte) error {
 	_, err := sessionlog.WriteJSONL(path, rows)
 
 	return err
+}
+
+// logBuffer collects an agent's log output safely across goroutines.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
+// capturedLogs returns an option logging to the returned buffer.
+func capturedLogs() (Option, *logBuffer) {
+	logs := &logBuffer{}
+
+	return WithLogger(slog.New(slog.NewTextHandler(logs, nil))), logs
 }
