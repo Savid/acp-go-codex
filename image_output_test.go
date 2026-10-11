@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-codex/internal/codex"
@@ -91,4 +92,60 @@ func TestToolOutputDeliveryIsLinear(t *testing.T) {
 	require.Equal(t, strings.Repeat(delta, 1000), last)
 	require.LessOrEqual(t, deliveries, 12)
 	require.LessOrEqual(t, sent, 3*len(last))
+}
+
+// Slow tool output that never doubles is still delivered as it grows, at
+// most once per interval and within the delivery rate.
+func TestSlowToolOutputIsPaced(t *testing.T) {
+	t.Parallel()
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+
+	s := a.newSession(sessionStart{cwd: t.TempDir()})
+	clock := time.Unix(0, 0)
+	state := &cycleState{now: func() time.Time { return clock }}
+
+	deliveries := func() []string {
+		var texts []string
+
+		for _, notification := range rec.snapshot() {
+			if update := notification.Update.ToolCallUpdate; update != nil && len(update.Content) > 0 {
+				texts = append(texts, update.Content[0].Content.Content.Text.Text)
+			}
+		}
+
+		return texts
+	}
+
+	// A progress line every second for a minute, after a large first chunk
+	// so no later line doubles the output.
+	require.NoError(t, s.publishToolDelta(t.Context(), state, "call-1", strings.Repeat("x", 1000)))
+
+	for range 60 {
+		clock = clock.Add(time.Second)
+		require.NoError(t, s.publishToolDelta(t.Context(), state, "call-1", "progress\n"))
+	}
+
+	texts := deliveries()
+	require.Equal(t, 31, len(texts), "grown output was not delivered every two seconds")
+	require.Equal(t, 1000+60*len("progress\n"), len(texts[len(texts)-1]))
+
+	// Large output waits longer between timed deliveries.
+	state = &cycleState{now: func() time.Time { return clock }}
+	require.NoError(t, s.publishToolDelta(t.Context(), state, "call-2", strings.Repeat("y", 640<<10)))
+
+	before := len(deliveries())
+
+	for range 9 {
+		clock = clock.Add(time.Second)
+		require.NoError(t, s.publishToolDelta(t.Context(), state, "call-2", "z"))
+	}
+
+	require.Equal(t, before, len(deliveries()), "640 KiB of output was resent before ten seconds")
+
+	clock = clock.Add(2 * time.Second)
+	require.NoError(t, s.publishToolDelta(t.Context(), state, "call-2", "z"))
+	require.Equal(t, before+1, len(deliveries()))
 }

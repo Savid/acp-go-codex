@@ -32,6 +32,9 @@ const (
 // cycleState accumulates what one cycle streamed.
 type cycleState struct {
 	toolsMu sync.Mutex
+	// now reads the time tool output deliveries are paced by; nil is the
+	// wall clock.
+	now func() time.Time
 	// usage sums the usage of every model request the cycle recorded.
 	usage         *acp.Usage
 	stop          codex.StopReason
@@ -443,4 +446,12 @@ func isImageItem(item map[string]any) bool {
 	itemType, _ := item[fieldType].(string)
 
 	return itemType == itemTypeImageGeneration || itemType == itemTypeImageView || itemType == itemImageGen
+}
+
+func (state *cycleState) clock() time.Time {
+	if state.now != nil {
+		return state.now()
+	}
+
+	return time.Now()
 }

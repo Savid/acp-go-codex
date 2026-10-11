@@ -179,9 +179,11 @@ tool call it was.
 
 A tool call's streamed output travels as one text block. ACP replaces a tool
 call's whole content array on every update, so the output so far is resent
-each time; it is sent on the first delta and then whenever it has doubled
-since the last send, keeping the bytes sent linear in the output. The
-terminal update carries the complete output.
+each time. It is sent on the first delta and whenever it has doubled since
+the last send, which keeps those sends within twice the output. Output that
+grew without doubling is sent once the last send is two seconds old, or
+longer for large output, so these timed sends carry at most 64 KiB a second.
+The terminal update carries the complete output.
 
 ### Cut-off function calls
 

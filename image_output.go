@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 
@@ -55,12 +56,41 @@ func (s *session) outputRoots() []string {
 type toolState struct {
 	published bool
 	// output is the text the tool streamed. ACP replaces a tool call's whole
-	// content array on every update, so each delivery resends all of it;
-	// emitted is its length at the last delivery, and a delta is delivered
-	// only once the output has doubled since, keeping the bytes sent linear
-	// in the output. The terminal update carries the complete output.
+	// content array on every update, so each delivery resends all of it.
+	// emitted is its length at the last delivery and at when it was
+	// delivered. The terminal update carries the complete output.
 	output  strings.Builder
 	emitted int
+	at      time.Time
+}
+
+const (
+	// toolOutputInterval is the least time grown output that has not doubled
+	// waits for its delivery.
+	toolOutputInterval = 2 * time.Second
+	// toolOutputRate bounds the bytes per second those timed deliveries
+	// carry: larger output waits proportionally longer.
+	toolOutputRate = 64 << 10
+)
+
+// due reports whether the output so far is delivered now. Output that has
+// doubled since the last delivery is delivered at once, which keeps those
+// deliveries within twice the output. Output that only grew is delivered
+// once the last delivery is toolOutputInterval old, or longer for large
+// output, so timed deliveries carry at most toolOutputRate bytes a second.
+func (tool *toolState) due(now time.Time) bool {
+	length := tool.output.Len()
+
+	switch {
+	case length >= 2*tool.emitted:
+		return true
+	case length == tool.emitted:
+		return false
+	default:
+		wait := max(toolOutputInterval, time.Duration(length)*time.Second/toolOutputRate)
+
+		return now.Sub(tool.at) >= wait
+	}
 }
 
 func (state *cycleState) tool(id string) *toolState {
@@ -132,7 +162,7 @@ func (s *session) publishToolStart(ctx context.Context, state *cycleState, event
 }
 
 // publishToolDelta records one output delta and delivers the output so far
-// once it has doubled since the last delivery.
+// when it is due.
 func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id string, text string) error {
 	state.toolsMu.Lock()
 	defer state.toolsMu.Unlock()
@@ -146,11 +176,13 @@ func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id st
 
 	tool.output.WriteString(text)
 
-	if tool.output.Len() < 2*tool.emitted {
+	now := state.clock()
+	if !tool.due(now) {
 		return nil
 	}
 
 	tool.emitted = tool.output.Len()
+	tool.at = now
 
 	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(tool.output.String()))})))
 }
