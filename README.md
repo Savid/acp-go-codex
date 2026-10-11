@@ -156,24 +156,17 @@ login, or a ChatGPT account with no window, answers
 
 ### Session store
 
-`WithSessionStore` mirrors the thread's rollout rows under the main subpath
+`WithSessionStore` mirrors the thread's rollout, Codex's
+`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` file, under the main subpath
 and the adapter's session record under `config`, format
-`codex-rollout-jsonl-v2`. The record names the rollout as `nativePath` and
-carries the session's title, so listing reads no rows. Each commit reads only
-the rollout lines written since the previous one and appends them; the record
-is rewritten only when it changed. `session/load` and `session/resume` prefer
-the rollout in Codex's home when it is at least as long as the stored copy,
-adopt the rows it holds beyond it, and materialize the stored copy at the path
-the app-server resolves the thread id to otherwise.
-If Codex never persisted an empty thread, load and resume create a new native
-thread while retaining the ACP session id. The new binding is committed before
-the response. Nonempty history and other native failures never take this path.
-Native rows and session configuration commit as one store generation. A
-configuration change is durable even when no native rows were added. The same
-generation captures admitted generated and viewed image bytes under `config`,
-so image replay survives deletion of the original files. Invalid stored images
-fail load; an image the adapter refused at turn time replays as the failed
-tool call it was.
+`codex-rollout-jsonl-v2`. Commit, restore, and recovery follow
+[Sessions and the Session Store](https://github.com/savid/acp-go-core/blob/master/docs/03-sessions-and-store.md).
+The record holds the session id, the native thread id, the title, `cwd`,
+additional directories, the rollout as `nativePath`, the session environment
+and ordered path directories, the model, mode, effort, service tier,
+personality, approval and sandbox policies, the output schema, and admitted
+generated and viewed image bytes keyed by native tool identity, so image
+replay survives deletion of the original files.
 
 ### Tool output
 
