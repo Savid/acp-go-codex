@@ -623,7 +623,7 @@ func TestNativeHomeLockRefusesASecondRuntime(t *testing.T) {
 	_, err := second.conn.NewSession(second.ctx(), wire.NewSessionRequest(t.TempDir()))
 	data := requestErrorData(t, err)
 	require.Equal(t, "codex_internal_failure", data["error"])
-	require.Equal(t, internalClassNativeStart, data["class"])
+	require.Equal(t, wire.ClassNativeStart, data["class"])
 }
 
 func TestCommitWithNoRolloutIsAFailure(t *testing.T) {

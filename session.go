@@ -266,7 +266,7 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 		slog.String("reason", err.Error()),
 	)
 
-	return wire.InternalFailure(vendor, internalClassNativeStart)
+	return wire.InternalFailure(vendor, wire.ClassNativeStart)
 }
 
 // handleEvent attributes one native event of the session's thread to the

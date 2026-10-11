@@ -157,7 +157,7 @@ func (a *Agent) ensureRuntime(ctx context.Context) (*runtime, error) {
 			return nil, wire.RuntimeUnavailable(vendor)
 		}
 
-		return nil, wire.InternalFailure(vendor, internalClassNativeStart)
+		return nil, wire.InternalFailure(vendor, wire.ClassNativeStart)
 	}
 
 	a.runtime = rt
@@ -240,16 +240,20 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 	defer cancel()
 
 	if initErr := nativeClient.Initialize(handshakeCtx); initErr != nil {
+		failure := process.LaunchFailure(proc, "codex app-server", initErr)
+
 		a.stopGeneration(context.WithoutCancel(ctx), rt)
 
-		return nil, initErr
+		return nil, failure
 	}
 
 	models, listErr := nativeClient.ListModels(handshakeCtx)
 	if listErr != nil {
+		failure := process.LaunchFailure(proc, "codex app-server", listErr)
+
 		a.stopGeneration(context.WithoutCancel(ctx), rt)
 
-		return nil, listErr
+		return nil, failure
 	}
 
 	if brokered := a.gatewayModels(handshakeCtx, home, env, models); len(brokered) > 0 {
