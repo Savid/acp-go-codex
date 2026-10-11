@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -352,8 +353,8 @@ func (s *session) settleTurn(ctx context.Context, runtime *runtime, t *turn, par
 	if t.ended == turnSettled && !cancelled {
 		s.emitSessionInfo(settleCtx, params.Prompt)
 
-		if refusesInvalidArguments(verdict.failure) {
-			s.repairInvalidArguments(settleCtx, runtime)
+		if refusal := invalidArgumentsRefusal(verdict.failure); refusal != nil {
+			s.repairHistory(settleCtx, runtime, refusal)
 		}
 	}
 
@@ -425,54 +426,110 @@ func (s *session) mirrorFailure(state *cycleState, err error) error {
 	return wire.TurnFailed(vendor, failure)
 }
 
-// refusesInvalidArguments reports whether a turn failed because the provider
+// invalidArgumentsRefusal returns the turn failure's data when the provider
 // refused a function call in the thread's history whose arguments are not
-// JSON, as a model cut off mid-call leaves one.
-func refusesInvalidArguments(failure error) bool {
+// JSON, as a model cut off mid-call leaves one, and nil otherwise.
+func invalidArgumentsRefusal(failure error) map[string]any {
 	refusal, ok := errors.AsType[*acp.RequestError](failure)
 	if !ok {
-		return false
+		return nil
 	}
 
 	data, _ := refusal.Data.(map[string]any)
-	message, _ := data[wire.FieldMessage].(string)
+	if message, _ := data[wire.FieldMessage].(string); !codex.RefusesInvalidArguments(message) {
+		return nil
+	}
 
-	return codex.RefusesInvalidArguments(message)
+	return data
 }
+
+// Outcomes of the history repair a refused turn's failure reports under
+// fieldHistoryRepair.
+const (
+	fieldHistoryRepair    = "historyRepair"
+	historyRepairRepaired = "repaired"
+	historyRepairFailed   = "failed"
+)
 
 // threadRepairTimeout bounds unloading, repairing, and resuming a thread.
 const threadRepairTimeout = 15 * time.Second
 
-// repairInvalidArguments makes a thread usable again after the provider
-// refused a function call in its history whose arguments are not JSON: every
-// later request resends that call, so the thread could never complete
-// another turn. The thread is unloaded so its rollout is complete and
-// unwritten, each such call's arguments become an empty object, and the
-// thread is resumed from the repaired rollout. The call's output, which
-// already tells the model the arguments did not parse, is kept. The turn
-// still fails; the next one runs on the repaired history.
-func (s *session) repairInvalidArguments(ctx context.Context, runtime *runtime) {
-	ctx, cancel := context.WithTimeout(ctx, threadRepairTimeout)
-	defer cancel()
+// repairHistory makes a thread usable again after the provider refused a
+// function call in its history whose arguments are not JSON: every later
+// request resends that call, so the thread could never complete another
+// turn. It records the outcome in the refused turn's failure data. A thread
+// that could not be resumed is unbound, so the next operation rebinds it.
+func (s *session) repairHistory(ctx context.Context, runtime *runtime, failure map[string]any) {
+	repaired, err := s.repairInvalidArguments(ctx, runtime)
 
 	log := s.agent.log.With(slog.String("session_id", string(s.id)))
 
-	if err := runtime.client.UnloadThread(ctx, s.nativeID); err != nil {
-		log.WarnContext(ctx, "codex thread unload for repair failed", slog.String("reason", err.Error()))
-	} else if repaired, err := repairRollout(s.rolloutPath); err != nil {
-		log.WarnContext(ctx, "codex rollout repair failed", slog.String("reason", err.Error()))
-	} else {
-		log.WarnContext(ctx, "codex rollout function call arguments repaired", slog.Int("calls", repaired))
-	}
-
-	thread, err := runtime.client.ResumeThread(ctx, s.threadResume(), runtime.nativePath)
 	if err != nil {
-		log.WarnContext(ctx, "codex thread resume after repair failed", slog.String("reason", err.Error()))
+		failure[fieldHistoryRepair] = historyRepairFailed
+
+		log.WarnContext(ctx, "codex history repair failed", slog.Int("calls", repaired), slog.String("reason", err.Error()))
 
 		return
 	}
 
+	failure[fieldHistoryRepair] = historyRepairRepaired
+
+	log.WarnContext(ctx, "codex history repaired", slog.Int("calls", repaired))
+}
+
+// repairInvalidArguments unloads the thread so its rollout is complete and
+// no longer written, rewrites every function call's non-JSON arguments as an
+// empty object, and resumes the thread from the repaired rollout. The call's
+// output, which already tells the model the arguments did not parse, is
+// kept. A rewritten rollout no longer extends what the store holds, so the
+// mirror republishes it whole. It reports how many calls it repaired; a
+// rollout with none is an error, since the refusal stands.
+func (s *session) repairInvalidArguments(ctx context.Context, runtime *runtime) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, threadRepairTimeout)
+	defer cancel()
+
+	s.mu.Lock()
+	nativeID := s.nativeID
+	path := s.rolloutPath
+	resume := s.threadResume()
+	s.mu.Unlock()
+
+	if err := runtime.client.UnloadThread(ctx, nativeID); err != nil {
+		return 0, s.resumeAfterRepair(ctx, runtime, resume, fmt.Errorf("unload thread: %w", err))
+	}
+
+	repaired, err := repairRollout(path)
+	if repaired > 0 {
+		s.mirror.Reset()
+	}
+
+	if err == nil && repaired == 0 {
+		err = errors.New("the rollout holds no function call with arguments that are not JSON")
+	}
+
+	return repaired, s.resumeAfterRepair(ctx, runtime, resume, err)
+}
+
+// resumeAfterRepair resumes the thread whatever the repair did, and joins a
+// resume failure to the repair's own. A thread left unresumed is unbound.
+func (s *session) resumeAfterRepair(ctx context.Context, runtime *runtime, resume codex.ThreadResumeRequest, repairErr error) error {
+	thread, err := runtime.client.ResumeThread(ctx, resume, runtime.nativePath)
+	if err != nil {
+		// The turn's incarnation is fenced after its idle and the next
+		// operation rebinds the thread on a fresh one.
+		s.mu.Lock()
+		if s.runtime == runtime {
+			s.runtime = nil
+			s.generationLost = true
+		}
+		s.mu.Unlock()
+
+		return errors.Join(repairErr, fmt.Errorf("resume thread: %w", err))
+	}
+
 	s.bind(runtime, thread)
+
+	return repairErr
 }
 
 // repairRollout rewrites the rollout at path with every function call's

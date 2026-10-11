@@ -179,12 +179,16 @@ tool call it was.
 
 A model cut off mid-call leaves a function call whose arguments are not JSON
 in the rollout, and a provider that refuses such history fails every later
-turn with `function_call <id> has invalid JSON arguments`. When a turn fails
-with that refusal, the adapter unloads the thread, rewrites the arguments of
-every such call in the rollout as `{}`, keeps the call's output that told
-the model its arguments did not parse, and resumes the thread before
-committing. The failed turn still fails; the next turn runs on the repaired
-history.
+turn, for example with `function_call <id> has invalid JSON arguments`. When a
+turn fails with a refusal that names a function or tool call, its arguments,
+and JSON that does not parse, the adapter unloads the thread, rewrites the
+arguments of every such call in the rollout as `{}`, keeps the call's output
+that told the model its arguments did not parse, resumes the thread, and
+republishes the whole rollout to the store before the response. A restore
+whose stored copy still holds such a call repairs it the same way. The turn
+still fails; its error data adds `historyRepair`: `repaired` when the next
+turn runs on the repaired history, or `failed` when the rollout held no such
+call or the thread could not be unloaded, rewritten, or resumed.
 
 ## Development
 

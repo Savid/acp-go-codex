@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -197,15 +196,28 @@ func rolloutUsage(raw map[string]any) Usage {
 	}
 }
 
-// invalidArguments matches a provider refusal of a request whose history
-// holds a function call with arguments that are not JSON.
-var invalidArguments = regexp.MustCompile(`function_call \S+ has invalid JSON arguments`)
-
-// RefusesInvalidArguments reports whether a turn failure message is that
-// refusal. Every later request on the thread resends the call, so the thread
-// cannot continue until the call is repaired.
+// RefusesInvalidArguments reports whether a turn failure message is a
+// provider's refusal of a request whose history holds a function call with
+// arguments that are not JSON, such as "function_call call_1 has invalid
+// JSON arguments". Every later request on the thread resends the call, so the
+// thread cannot continue until the call is repaired. The message must name a
+// function or tool call, its arguments, and JSON that does not parse.
 func RefusesInvalidArguments(message string) bool {
-	return invalidArguments.MatchString(message)
+	lower := strings.ToLower(message)
+
+	return containsAny(lower, "function_call", "function call", "tool_call", "tool call", "tool_use") &&
+		strings.Contains(lower, "argument") &&
+		containsAny(lower, "invalid json", "not valid json", "malformed json", "unparsable json", "failed to parse")
+}
+
+func containsAny(text string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // emptyArguments replaces function call arguments that are not JSON.

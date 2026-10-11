@@ -57,6 +57,16 @@ func TestRepairCallArguments(t *testing.T) {
 	_, _, err = RepairCallArguments([][]byte{[]byte(`not json`)})
 	require.Error(t, err)
 
-	require.True(t, RefusesInvalidArguments(`{"error":{"message":"openai-responses: function_call call_3e9e has invalid JSON arguments","type":"invalid_request_error"}}`))
-	require.False(t, RefusesInvalidArguments("boom"))
+	for _, refusal := range []string{
+		`{"error":{"message":"openai-responses: function_call call_3e9e has invalid JSON arguments","type":"invalid_request_error"}}`,
+		`{"error":{"message":"openai-responses: function_call call_r2mpxDaewI3Yv0uLJIS0oNL8 has invalid JSON arguments","type":"invalid_request_error"}}`,
+		"Invalid 'input[12].arguments': function call arguments are not valid JSON.",
+		"tool_call 3 arguments: malformed JSON",
+	} {
+		require.True(t, RefusesInvalidArguments(refusal), refusal)
+	}
+
+	for _, other := range []string{"boom", "invalid JSON in request body", "rate limited on tool call", `{"error":{"message":"function_call output too large"}}`} {
+		require.False(t, RefusesInvalidArguments(other), other)
+	}
 }

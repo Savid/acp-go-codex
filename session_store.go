@@ -221,7 +221,15 @@ func (s *session) hydrate(ctx context.Context, stored storedSession, home string
 
 	nativeID := stored.record.NativeSessionID
 
-	rows, err := s.mirror.Hydrate(ctx, path, stored.rows, stored.record, func(rows [][]byte) error {
+	// A repair whose commit never landed leaves the store with a cut-off call
+	// the rollout no longer holds; the stored copy is repaired the same way so
+	// the two agree, and the next commit republishes it whole.
+	storedRows, repaired, err := codex.RepairCallArguments(stored.rows)
+	if err != nil {
+		return "", nil, err
+	}
+
+	rows, err := s.mirror.Hydrate(ctx, path, storedRows, stored.record, func(rows [][]byte) error {
 		if meta, ok := codex.ParseSessionMeta(rows[0]); !ok || meta.ID != nativeID {
 			return fmt.Errorf("rollout does not open with session_meta for %s", nativeID)
 		}
@@ -236,6 +244,10 @@ func (s *session) hydrate(ctx context.Context, stored storedSession, home string
 	})
 	if err != nil {
 		return "", nil, err
+	}
+
+	if repaired > 0 {
+		s.mirror.Reset()
 	}
 
 	return path, rows, nil

@@ -842,7 +842,8 @@ func (f *fakeCodex) afterTurn(scoped func(map[string]any) map[string]any, messag
 
 // gatewayRefuses reports whether the model gateway refuses the turn's
 // request, setting failure to its refusal: it refuses every request whose
-// history holds a function call with arguments that are not JSON. RUNAWAY
+// history holds a function call with arguments that are not JSON, and
+// REFUSEONLY draws that refusal for a history that holds none. RUNAWAY
 // leaves such a call, as a model cut off mid-call does: codex records the
 // call, tells the model its arguments did not parse, and resends it.
 func (f *fakeCodex) gatewayRefuses(thread *fakeThread, message string, failure *string) bool {
@@ -852,6 +853,10 @@ func (f *fakeCodex) gatewayRefuses(thread *fakeThread, message string, failure *
 	}
 
 	callID := invalidCall(thread.path)
+	if strings.HasPrefix(message, "REFUSEONLY") {
+		callID = "call-elsewhere"
+	}
+
 	if callID == "" {
 		return false
 	}

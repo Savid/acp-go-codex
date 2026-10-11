@@ -14,6 +14,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 
+	"github.com/savid/acp-go-codex/internal/codex"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
@@ -185,6 +186,7 @@ func TestInvalidCallArgumentsAreRepaired(t *testing.T) {
 	_, err := h.prompt(session.SessionId, "RUNAWAY", nil)
 	data := requestErrorData(t, err)
 	require.Contains(t, data["message"], "has invalid JSON arguments")
+	require.Equal(t, "repaired", data["historyRepair"])
 
 	var record sessionRecord
 	_, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
@@ -202,6 +204,91 @@ func TestInvalidCallArgumentsAreRepaired(t *testing.T) {
 	for index := range native {
 		require.JSONEq(t, string(native[index]), string(stored[index]))
 	}
+
+	response, err := h.prompt(session.SessionId, "ECHO after", nil)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+}
+
+// A refusal the rollout gives no cause for reports a failed repair, and the
+// thread stays usable.
+func TestUnfoundInvalidCallReportsAFailedRepair(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "REFUSEONLY", nil)
+	data := requestErrorData(t, err)
+	require.Equal(t, "failed", data["historyRepair"])
+
+	response, err := h.prompt(session.SessionId, "ECHO after", nil)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+}
+
+// A store that still holds the cut-off call a repaired rollout no longer
+// holds restores and is republished repaired.
+func TestRestoreRepairsAStoredCutOffCall(t *testing.T) {
+	t.Parallel()
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+
+	_, err = h.prompt(session.SessionId, "RUNAWAY", nil)
+	require.Error(t, err)
+
+	var record sessionRecord
+	rows, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	// The store keeps the row as codex wrote it, before the repair.
+	unrepaired := make([][]byte, len(rows))
+
+	for index, row := range rows {
+		unrepaired[index] = row
+
+		var decoded, payload map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(row, &decoded))
+
+		if json.Unmarshal(decoded["payload"], &payload) != nil || string(payload["call_id"]) != `"call-runaway"` || string(payload["type"]) != `"function_call"` {
+			continue
+		}
+
+		payload["arguments"], err = json.Marshal(`{"command":["ls`)
+		require.NoError(t, err)
+		decoded["payload"], err = json.Marshal(payload)
+		require.NoError(t, err)
+		unrepaired[index], err = json.Marshal(decoded)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, sessionlog.NewMirror(store, string(session.SessionId)).Commit(t.Context(), sessionlog.Rows(unrepaired),
+		func(sessionlog.Tail) (any, error) { return record, nil }))
+
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+
+	restored, _, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+	require.NoError(t, err)
+
+	_, cutOff, err := codex.RepairCallArguments(restored)
+	require.NoError(t, err)
+	require.Zero(t, cutOff, "the store still holds the cut-off call")
+
+	native, err := readRollout(record.NativePath)
+	require.NoError(t, err)
+	require.Len(t, restored, len(native))
 
 	response, err := h.prompt(session.SessionId, "ECHO after", nil)
 	require.NoError(t, err)
