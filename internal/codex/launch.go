@@ -20,10 +20,13 @@ type Launch struct {
 	ConfigOverrides map[string]any
 }
 
-// Args renders the app-server command line.
+// Args renders the app-server command line. The app-server unloads a thread
+// as soon as it is idle and no connection subscribes to it, so a closed
+// session's history leaves memory at once and a thread unloaded for repair
+// is ready to resume without waiting out the default delay.
 func (l Launch) Args() []string {
-	args := make([]string, 0, 5+2*len(l.ConfigOverrides))
-	args = append(args, "app-server", "--listen", "stdio://", "--disable", "plugins")
+	args := make([]string, 0, 7+2*len(l.ConfigOverrides))
+	args = append(args, "app-server", "--listen", "stdio://", "--disable", "plugins", "-c", "thread_unload_delay_secs=0")
 
 	for _, key := range slices.Sorted(maps.Keys(l.ConfigOverrides)) {
 		args = append(args, "-c", key+"="+tomlValue(l.ConfigOverrides[key]))

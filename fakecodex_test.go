@@ -393,7 +393,13 @@ func (f *fakeCodex) dispatch(line []byte) {
 		logNative(frame.Method)
 		f.resumeThread(frame.ID, frame.Params)
 	case "thread/unsubscribe":
-		f.respond(frame.ID, map[string]any{})
+		f.unsubscribe(frame.ID, frame.Params)
+	case "thread/loaded/list":
+		f.mu.Lock()
+		loaded := slices.Sorted(maps.Keys(f.threads))
+		f.mu.Unlock()
+
+		f.respond(frame.ID, map[string]any{"data": loaded, "nextCursor": nil})
 	case "turn/start":
 		f.startTurn(frame.ID, frame.Params)
 	case "turn/interrupt":
@@ -506,6 +512,32 @@ func (f *fakeCodex) startThread(id json.RawMessage, params map[string]any) {
 	f.mu.Unlock()
 
 	f.respond(id, map[string]any{"thread": map[string]any{"id": thread.id, "path": thread.path, "cwd": cwd}, "model": params["model"]})
+}
+
+// unsubscribe unloads the thread shortly after, as the app-server does with
+// an idle thread no connection subscribes to when its unload delay is zero.
+func (f *fakeCodex) unsubscribe(id json.RawMessage, params map[string]any) {
+	threadID, _ := params["threadId"].(string)
+
+	f.mu.Lock()
+	thread := f.threads[threadID]
+	f.mu.Unlock()
+
+	if thread == nil {
+		f.respond(id, map[string]any{"status": "notLoaded"})
+
+		return
+	}
+
+	f.respond(id, map[string]any{"status": "unsubscribed"})
+
+	time.AfterFunc(50*time.Millisecond, func() {
+		f.mu.Lock()
+		if f.threads[threadID] == thread {
+			delete(f.threads, threadID)
+		}
+		f.mu.Unlock()
+	})
 }
 
 // recordConfig keeps the last thread config so a test can read the shell
@@ -698,6 +730,8 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 	status := "completed"
 	text := "Hello world"
 	itemID := "msg-" + fakeUUID()
+	// failure is the turn's error message when it fails.
+	failure := "boom"
 	// usage is the turn's final request, nil for a turn that ends without one.
 	usage := &fakeTokens{input: 10, output: 5}
 
@@ -706,6 +740,8 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 	}
 
 	switch {
+	case f.gatewayRefuses(thread, message, &failure):
+		status, usage = "failed", nil
 	case strings.HasPrefix(message, "STALE"):
 		f.notify("item/agentMessage/delta", scoped(map[string]any{"turnId": "previous-turn", "itemId": "old-message", "delta": "stale text"}))
 	case strings.HasPrefix(message, "SUFFIX"):
@@ -788,17 +824,41 @@ func (f *fakeCodex) runTurn(thread *fakeThread, turnID string, message string, i
 
 	turn := map[string]any{"id": turnID, "status": status}
 	if status == "failed" {
-		turn["error"] = map[string]any{"message": "boom", "codexErrorInfo": map[string]any{"httpStatusCode": 429, "code": "rate_limited"}}
+		turn["error"] = map[string]any{"message": failure, "codexErrorInfo": map[string]any{"httpStatusCode": 429, "code": "rate_limited"}}
 	}
 
 	f.notify("turn/completed", scoped(map[string]any{"turn": turn}))
+	f.afterTurn(scoped, message)
+}
 
-	switch {
-	case strings.HasPrefix(message, "TAIL"):
+// afterTurn writes what a script sends after the turn completed.
+func (f *fakeCodex) afterTurn(scoped func(map[string]any) map[string]any, message string) {
+	if strings.HasPrefix(message, "TAIL") {
 		// State the harness writes after its own completion signal, still
 		// naming the turn that just ended.
 		f.notify("item/agentMessage/delta", scoped(map[string]any{"itemId": "tail-1", "delta": "tail"}))
 	}
+}
+
+// gatewayRefuses reports whether the model gateway refuses the turn's
+// request, setting failure to its refusal: it refuses every request whose
+// history holds a function call with arguments that are not JSON. RUNAWAY
+// leaves such a call, as a model cut off mid-call does: codex records the
+// call, tells the model its arguments did not parse, and resends it.
+func (f *fakeCodex) gatewayRefuses(thread *fakeThread, message string, failure *string) bool {
+	if strings.HasPrefix(message, "RUNAWAY") {
+		f.appendRow(thread, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call", "name": "shell", "call_id": "call-runaway", "arguments": `{"command":["ls`}})
+		f.appendRow(thread, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call_output", "call_id": "call-runaway", "output": "failed to parse function arguments"}})
+	}
+
+	callID := invalidCall(thread.path)
+	if callID == "" {
+		return false
+	}
+
+	*failure = `{"error":{"message":"openai-responses: function_call ` + callID + ` has invalid JSON arguments","type":"invalid_request_error"}}`
+
+	return true
 }
 
 // isUsageScript reports whether the message selects one of the usage
@@ -961,4 +1021,28 @@ func (f *fakeCodex) tool(thread *fakeThread, scoped func(map[string]any) map[str
 		f.notify("item/completed", scoped(map[string]any{"item": map[string]any{"id": "img-1", "type": "imageGeneration", "status": "completed", "result": tinyPNG}}))
 		f.appendRow(thread, map[string]any{"type": "response_item", "payload": map[string]any{"type": "image_generation_call", "id": "img-1", "status": "completed", "result": tinyPNG}})
 	}
+}
+
+// invalidCall names the first function call in the rollout at path whose
+// arguments are not JSON, or nothing.
+func invalidCall(path string) string {
+	rows, _ := readRollout(path)
+
+	for _, row := range rows {
+		var decoded map[string]any
+		if json.Unmarshal(row, &decoded) != nil || decoded["type"] != "response_item" {
+			continue
+		}
+
+		payload, _ := decoded["payload"].(map[string]any)
+		arguments, _ := payload["arguments"].(string)
+
+		if payload["type"] == "function_call" && !json.Valid([]byte(arguments)) {
+			callID, _ := payload["call_id"].(string)
+
+			return callID
+		}
+	}
+
+	return ""
 }

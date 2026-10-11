@@ -49,7 +49,8 @@ target spends model tokens and requires explicit operator intent.
   environment and the agent overlay; each thread carries its own session env
   and `PATH` through its shell environment policy.
 - Native state is never deleted. The session store is the durability
-  boundary; the rollout in Codex's home is the native copy.
+  boundary; the rollout in Codex's home is the native copy. The one native
+  rewrite is the cut-off function call repair the README describes.
 - Unit tests never require an installed codex: the test binary doubles as a
   scripted fake app-server. Keep the fake's protocol in step with
   `internal/codex`.

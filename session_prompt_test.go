@@ -14,6 +14,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -167,4 +169,41 @@ func TestPromptCancelledWhileRebinding(t *testing.T) {
 	require.Equal(t, acp.StopReasonCancelled, got.resp.StopReason)
 	require.Equal(t, before, eventTypes(lifecycleEvents(h.rec.snapshot())),
 		"a prompt the app-server never received opens no incarnation and publishes no acceptance")
+}
+
+// A provider refusal of a cut-off function call in the history repairs the
+// rollout, so the next turn runs instead of being refused again.
+func TestInvalidCallArgumentsAreRepaired(t *testing.T) {
+	t.Parallel()
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "RUNAWAY", nil)
+	data := requestErrorData(t, err)
+	require.Contains(t, data["message"], "has invalid JSON arguments")
+
+	var record sessionRecord
+	_, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Empty(t, invalidCall(record.NativePath), "the rollout still holds the cut-off call")
+
+	native, err := readRollout(record.NativePath)
+	require.NoError(t, err)
+
+	stored, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.Len(t, stored, len(native))
+
+	for index := range native {
+		require.JSONEq(t, string(native[index]), string(stored[index]))
+	}
+
+	response, err := h.prompt(session.SessionId, "ECHO after", nil)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
 }

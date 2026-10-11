@@ -64,6 +64,8 @@ Options: `WithExecutablePath`, `WithHome`, `WithScratchDir`,
 
 `WithCodexConfigOverrides` passes `-c key=value` to the app-server; the
 `shell_environment_policy` keyspace is reserved for session environments.
+The app-server runs with `-c thread_unload_delay_secs=0`, so a thread leaves
+memory as soon as its session closes.
 
 ### Session options
 
@@ -171,6 +173,17 @@ generation captures admitted generated and viewed image bytes under `config`,
 so image replay survives deletion of the original files. Invalid stored images
 fail load; an image the adapter refused at turn time replays as the failed
 tool call it was.
+
+### Cut-off function calls
+
+A model cut off mid-call leaves a function call whose arguments are not JSON
+in the rollout, and a provider that refuses such history fails every later
+turn with `function_call <id> has invalid JSON arguments`. When a turn fails
+with that refusal, the adapter unloads the thread, rewrites the arguments of
+every such call in the rollout as `{}`, keeps the call's output that told
+the model its arguments did not parse, and resumes the thread before
+committing. The failed turn still fails; the next turn runs on the repaired
+history.
 
 ## Development
 

@@ -14,6 +14,7 @@ import (
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-core/image"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -350,6 +351,10 @@ func (s *session) settleTurn(ctx context.Context, runtime *runtime, t *turn, par
 
 	if t.ended == turnSettled && !cancelled {
 		s.emitSessionInfo(settleCtx, params.Prompt)
+
+		if refusesInvalidArguments(verdict.failure) {
+			s.repairInvalidArguments(settleCtx, runtime)
+		}
 	}
 
 	if err := s.commitMirror(settleCtx); err != nil {
@@ -418,4 +423,74 @@ func (s *session) mirrorFailure(state *cycleState, err error) error {
 	}
 
 	return wire.TurnFailed(vendor, failure)
+}
+
+// refusesInvalidArguments reports whether a turn failed because the provider
+// refused a function call in the thread's history whose arguments are not
+// JSON, as a model cut off mid-call leaves one.
+func refusesInvalidArguments(failure error) bool {
+	refusal, ok := errors.AsType[*acp.RequestError](failure)
+	if !ok {
+		return false
+	}
+
+	data, _ := refusal.Data.(map[string]any)
+	message, _ := data[wire.FieldMessage].(string)
+
+	return codex.RefusesInvalidArguments(message)
+}
+
+// threadRepairTimeout bounds unloading, repairing, and resuming a thread.
+const threadRepairTimeout = 15 * time.Second
+
+// repairInvalidArguments makes a thread usable again after the provider
+// refused a function call in its history whose arguments are not JSON: every
+// later request resends that call, so the thread could never complete
+// another turn. The thread is unloaded so its rollout is complete and
+// unwritten, each such call's arguments become an empty object, and the
+// thread is resumed from the repaired rollout. The call's output, which
+// already tells the model the arguments did not parse, is kept. The turn
+// still fails; the next one runs on the repaired history.
+func (s *session) repairInvalidArguments(ctx context.Context, runtime *runtime) {
+	ctx, cancel := context.WithTimeout(ctx, threadRepairTimeout)
+	defer cancel()
+
+	log := s.agent.log.With(slog.String("session_id", string(s.id)))
+
+	if err := runtime.client.UnloadThread(ctx, s.nativeID); err != nil {
+		log.WarnContext(ctx, "codex thread unload for repair failed", slog.String("reason", err.Error()))
+	} else if repaired, err := repairRollout(s.rolloutPath); err != nil {
+		log.WarnContext(ctx, "codex rollout repair failed", slog.String("reason", err.Error()))
+	} else {
+		log.WarnContext(ctx, "codex rollout function call arguments repaired", slog.Int("calls", repaired))
+	}
+
+	thread, err := runtime.client.ResumeThread(ctx, s.threadResume(), runtime.nativePath)
+	if err != nil {
+		log.WarnContext(ctx, "codex thread resume after repair failed", slog.String("reason", err.Error()))
+
+		return
+	}
+
+	s.bind(runtime, thread)
+}
+
+// repairRollout rewrites the rollout at path with every function call's
+// non-JSON arguments replaced, and reports how many calls it repaired.
+func repairRollout(path string) (int, error) {
+	native, err := sessionlog.ReadJSONL(path, sessionlog.Cursor{})
+	if err != nil {
+		return 0, err
+	}
+
+	rows, repaired, err := codex.RepairCallArguments(native.Rows)
+	if err != nil || repaired == 0 {
+		return 0, err
+	}
+
+	if _, err := sessionlog.WriteJSONL(path, rows); err != nil {
+		return 0, err
+	}
+
+	return repaired, nil
 }

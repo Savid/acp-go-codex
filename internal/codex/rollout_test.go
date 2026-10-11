@@ -37,3 +37,26 @@ func TestRelocateRolloutKeepsTheRecordedName(t *testing.T) {
 		require.False(t, ok, refused)
 	}
 }
+
+func TestRepairCallArguments(t *testing.T) {
+	t.Parallel()
+
+	valid := []byte(`{"type":"response_item","payload":{"type":"function_call","call_id":"a","arguments":"{\"x\":1}"}}`)
+	cut := []byte(`{"timestamp":"t","type":"response_item","payload":{"type":"function_call","call_id":"b","name":"shell","arguments":"{\"command\":[\"ls"}}`)
+	output := []byte(`{"type":"response_item","payload":{"type":"function_call_output","call_id":"b","output":"{"}}`)
+	event := []byte(`{"type":"event_msg","payload":{"type":"user_message","message":"{"}}`)
+
+	rows, repaired, err := RepairCallArguments([][]byte{valid, cut, output, event})
+	require.NoError(t, err)
+	require.Equal(t, 1, repaired)
+	require.Equal(t, valid, rows[0])
+	require.JSONEq(t, `{"timestamp":"t","type":"response_item","payload":{"type":"function_call","call_id":"b","name":"shell","arguments":"{}"}}`, string(rows[1]))
+	require.Equal(t, output, rows[2])
+	require.Equal(t, event, rows[3])
+
+	_, _, err = RepairCallArguments([][]byte{[]byte(`not json`)})
+	require.Error(t, err)
+
+	require.True(t, RefusesInvalidArguments(`{"error":{"message":"openai-responses: function_call call_3e9e has invalid JSON arguments","type":"invalid_request_error"}}`))
+	require.False(t, RefusesInvalidArguments("boom"))
+}

@@ -364,11 +364,3 @@ func marshalRaw(value any) (json.RawMessage, error) {
 
 	return json.Marshal(value)
 }
-
-// IsMethodNotFound reports whether the app-server answered that it does not
-// implement the method.
-func IsMethodNotFound(err error) bool {
-	var rpcErr *RPCError
-
-	return errors.As(err, &rpcErr) && rpcErr.Code == -32601
-}

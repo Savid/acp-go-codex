@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 )
 
 // App-server method names the adapter calls.
@@ -14,6 +16,7 @@ const (
 	methodThreadStart       = "thread/start"
 	methodThreadResume      = "thread/resume"
 	methodThreadUnsubscribe = "thread/unsubscribe"
+	methodThreadLoadedList  = "thread/loaded/list"
 	methodTurnStart         = "turn/start"
 	methodTurnInterrupt     = "turn/interrupt"
 	methodModelList         = "model/list"
@@ -202,12 +205,64 @@ func IsMissingThread(err error, threadID string) bool {
 // UnsubscribeThread releases the app-server's thread subscription. An
 // app-server without the method is not a failure.
 func (c *Client) UnsubscribeThread(ctx context.Context, threadID string) error {
-	err := c.Call(ctx, methodThreadUnsubscribe, map[string]any{fieldThreadID: threadID}, nil)
-	if IsMethodNotFound(err) {
-		return nil
+	return c.Call(ctx, methodThreadUnsubscribe, map[string]any{fieldThreadID: threadID}, nil)
+}
+
+// threadUnloadPoll is how often UnloadThread asks whether the thread is gone.
+const threadUnloadPoll = 20 * time.Millisecond
+
+// UnloadThread unsubscribes from threadID and waits until the app-server no
+// longer holds it in memory, so its rollout is complete and a later resume
+// reads it afresh. The app-server unloads an idle thread no connection
+// subscribes to after its configured unload delay.
+func (c *Client) UnloadThread(ctx context.Context, threadID string) error {
+	if err := c.UnsubscribeThread(ctx, threadID); err != nil {
+		return err
 	}
 
-	return err
+	for {
+		loaded, err := c.loadedThreads(ctx)
+		if err != nil {
+			return err
+		}
+
+		if !slices.Contains(loaded, threadID) {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(threadUnloadPoll):
+		}
+	}
+}
+
+// loadedThreads lists the threads the app-server holds in memory.
+func (c *Client) loadedThreads(ctx context.Context) ([]string, error) {
+	var (
+		loaded []string
+		cursor *string
+	)
+
+	for {
+		var page struct {
+			Data       []string `json:"data"`
+			NextCursor *string  `json:"nextCursor"`
+		}
+
+		if err := c.Call(ctx, methodThreadLoadedList, map[string]any{"cursor": cursor}, &page); err != nil {
+			return nil, err
+		}
+
+		loaded = append(loaded, page.Data...)
+
+		if page.NextCursor == nil || *page.NextCursor == "" {
+			return loaded, nil
+		}
+
+		cursor = page.NextCursor
+	}
 }
 
 // StartTurn dispatches one turn and returns the native turn id the app-server
