@@ -37,7 +37,7 @@ func TestResponseCompletionCarriesItsUsage(t *testing.T) {
 func TestStreamedTextNamesNoResponse(t *testing.T) {
 	t.Parallel()
 
-	// Deltas codex 0.159.3 sent for the response the completion above names.
+	// Deltas sent for the response the completion above names.
 	frames := map[string]string{
 		notifyReasoningDelta: `{"contentIndex":0,"delta":"The","itemId":"rs_tmp_ihu3dhadkwh",` +
 			`"threadId":"01a0f7de-5336-72f2-a715-d9211c5fa1b4","turnId":"01a0f7de-5389-7613-b9a0-d61d0b7d2ebc"}`,
