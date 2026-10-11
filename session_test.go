@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
 )
@@ -812,4 +813,40 @@ func TestDeleteAwaitsDeferredOpening(t *testing.T) {
 	_, installed := a.sessions[created.SessionId]
 	a.mu.Unlock()
 	require.False(t, installed)
+}
+
+// A replacement app-server resumes a rollout whose last line the previous
+// one left unfinished without continuing that line.
+func TestReplacementRuntimeCutsATornRolloutTail(t *testing.T) {
+	t.Parallel()
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "DIE", nil)
+	require.Error(t, err)
+
+	var record sessionRecord
+	_, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	file, err := os.OpenFile(record.NativePath, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = file.WriteString(`{"type":"event_msg","payload":{"type":"agent_mess`)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	resp, err := h.prompt(session.SessionId, "ECHO after", nil)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+
+	rows, err := readRollout(record.NativePath)
+	require.NoError(t, err)
+
+	for _, row := range rows {
+		require.True(t, json.Valid(row), "a rollout row continues the torn line: %s", row)
+	}
 }

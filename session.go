@@ -47,7 +47,10 @@ type session struct {
 	mu sync.Mutex
 	// runtime is the generation the thread is bound on; nil once that generation
 	// is gone, until the next explicit operation rebinds it.
-	runtime     *runtime
+	runtime *runtime
+	// boundOn is the generation the thread was last bound on; it stays set
+	// once that generation is gone.
+	boundOn     *runtime
 	rolloutPath string
 	// images is the encoded array of admitted images the record carries.
 	images      json.RawMessage
@@ -152,6 +155,7 @@ func (s *session) bind(runtime *runtime, thread codex.Thread) {
 	defer s.mu.Unlock()
 
 	s.runtime = runtime
+	s.boundOn = runtime
 	s.generationLost = false
 	s.rolloutPath = thread.Path
 	s.responseUsage = thread.ReportsResponses
@@ -237,6 +241,19 @@ func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 	runtime, err := s.agent.ensureRuntime(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// A replacement app-server resumes a rollout the previous one may have
+	// left with a partly written last line; the new rows must not continue it.
+	s.mu.Lock()
+	replaced := s.boundOn != runtime
+	path := s.rolloutPath
+	s.mu.Unlock()
+
+	if replaced && path != "" {
+		if cutErr := sessionlog.CutTornTail(path); cutErr != nil {
+			return nil, s.startFailure(ctx, cutErr)
+		}
 	}
 
 	thread, err := runtime.client.ResumeThread(ctx, s.threadResume(), runtime.nativePath)
