@@ -37,19 +37,18 @@ const (
 func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImage) error {
 	limits := s.agent.options.ImageLimits.core()
 
-	decoded := make([]codex.RolloutRow, 0, len(rows))
 	hasEvents := replayEventKinds{}
 
+	// Every row is validated before anything is delivered; rows are decoded
+	// whole one at a time as they are delivered.
 	for _, row := range rows {
-		parsed, err := codex.DecodeRow(row)
+		kind, err := codex.DecodeRowKind(row)
 		if err != nil {
 			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 		}
 
-		decoded = append(decoded, parsed)
-
-		if parsed.Type == codex.RowTypeEventMsg {
-			hasEvents.observe(payloadString(parsed.Payload, fieldType))
+		if kind.Type == codex.RowTypeEventMsg {
+			hasEvents.observe(kind.PayloadType)
 		}
 	}
 
@@ -72,7 +71,12 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 
 	emitted := make(map[string]bool)
 
-	for _, row := range decoded {
+	for _, raw := range rows {
+		row, err := codex.DecodeRow(raw)
+		if err != nil {
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
+		}
+
 		id := cmp.Or(payloadString(row.Payload, "id"), payloadString(row.Payload, "call_id"))
 		if row.Type == codex.RowTypeResponseItem && payloadString(row.Payload, fieldType) == itemImageGen {
 			if saved, ok := captured[id]; ok {

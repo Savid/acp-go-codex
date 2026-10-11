@@ -50,6 +50,38 @@ func DecodeRow(row []byte) (RolloutRow, error) {
 	return decoded, nil
 }
 
+// RowKind is a rollout row's type and its payload's type.
+type RowKind struct {
+	Type        string
+	PayloadType string
+}
+
+// DecodeRowKind validates one rollout row as DecodeRow does and reads only
+// its row and payload types.
+func DecodeRowKind(row []byte) (RowKind, error) {
+	var decoded struct {
+		Type    string `json:"type"`
+		Payload *struct {
+			Type any `json:"type"`
+		} `json:"payload"`
+	}
+
+	if err := json.Unmarshal(row, &decoded); err != nil {
+		return RowKind{}, fmt.Errorf("decode rollout row: %w", err)
+	}
+
+	if decoded.Type == "" {
+		return RowKind{}, errors.New("rollout row has no type")
+	}
+
+	kind := RowKind{Type: decoded.Type}
+	if decoded.Payload != nil {
+		kind.PayloadType, _ = decoded.Payload.Type.(string)
+	}
+
+	return kind, nil
+}
+
 // SessionMeta is what the session_meta row names about the thread.
 type SessionMeta struct {
 	ID        string
