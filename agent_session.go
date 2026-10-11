@@ -658,7 +658,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 			continue
 		}
 
-		record, found, loadErr := a.loadStoredRecord(ctx, id)
+		record, found, loadErr := a.loadRecord(ctx, id)
 		if loadErr != nil {
 			a.log.ErrorContext(ctx, "codex session listing failed",
 				slog.String("session_id", string(id)), slog.String("reason", loadErr.Error()))
