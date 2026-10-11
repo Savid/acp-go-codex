@@ -314,7 +314,7 @@ func (s *session) judgeCycle(c *cycle, cancelled bool) cycleVerdict {
 			failure.ProviderCode = c.state.failure.ProviderCode
 		}
 
-		return cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: wire.TurnFailed(vendor, failure)}
+		return cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: &providerError{failure}}
 	case c.state.stop == codex.StopReasonCancelled:
 		return cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
 	default:
@@ -353,8 +353,8 @@ func (s *session) settleTurn(ctx context.Context, runtime *runtime, t *turn, par
 	if t.ended == turnSettled && !cancelled {
 		s.emitSessionInfo(settleCtx, params.Prompt)
 
-		if refusal := invalidArgumentsRefusal(verdict.failure); refusal != nil {
-			s.repairHistory(settleCtx, runtime, refusal)
+		if refusal, ok := errors.AsType[*providerError](verdict.failure); ok && codex.RefusesInvalidArguments(refusal.Message) {
+			refusal.Recovery = s.repairHistory(settleCtx, runtime)
 		}
 	}
 
@@ -381,6 +381,10 @@ func (s *session) settleTurn(ctx context.Context, runtime *runtime, t *turn, par
 
 	if err := s.lcIdle(settleCtx, &t.cycle, verdict); err != nil && verdict.failure == nil {
 		verdict.failure = err
+	}
+
+	if refusal, ok := errors.AsType[*providerError](verdict.failure); ok {
+		return acp.PromptResponse{}, wire.TurnFailed(vendor, refusal.TurnFailure)
 	}
 
 	if verdict.failure != nil {
@@ -426,30 +430,14 @@ func (s *session) mirrorFailure(state *cycleState, err error) error {
 	return wire.TurnFailed(vendor, failure)
 }
 
-// invalidArgumentsRefusal returns the turn failure's data when the provider
-// refused a function call in the thread's history whose arguments are not
-// JSON, as a model cut off mid-call leaves one, and nil otherwise.
-func invalidArgumentsRefusal(failure error) map[string]any {
-	refusal, ok := errors.AsType[*acp.RequestError](failure)
-	if !ok {
-		return nil
-	}
-
-	data, _ := refusal.Data.(map[string]any)
-	if message, _ := data[wire.FieldMessage].(string); !codex.RefusesInvalidArguments(message) {
-		return nil
-	}
-
-	return data
+// providerError is a turn the provider failed. It becomes the turn-failure
+// error only when the prompt answers, so a recovery the settlement ran is
+// reported with it.
+type providerError struct {
+	wire.TurnFailure
 }
 
-// Outcomes of the history repair a refused turn's failure reports under
-// fieldHistoryRepair.
-const (
-	fieldHistoryRepair    = "historyRepair"
-	historyRepairRepaired = "repaired"
-	historyRepairFailed   = "failed"
-)
+func (f *providerError) Error() string { return f.Message }
 
 // threadRepairTimeout bounds unloading, repairing, and resuming a thread.
 const threadRepairTimeout = 15 * time.Second
@@ -457,24 +445,22 @@ const threadRepairTimeout = 15 * time.Second
 // repairHistory makes a thread usable again after the provider refused a
 // function call in its history whose arguments are not JSON: every later
 // request resends that call, so the thread could never complete another
-// turn. It records the outcome in the refused turn's failure data. A thread
+// turn. It returns the recovery the refused turn's failure reports. A thread
 // that could not be resumed is unbound, so the next operation rebinds it.
-func (s *session) repairHistory(ctx context.Context, runtime *runtime, failure map[string]any) {
+func (s *session) repairHistory(ctx context.Context, runtime *runtime) string {
 	repaired, err := s.repairInvalidArguments(ctx, runtime)
 
 	log := s.agent.log.With(slog.String("session_id", string(s.id)))
 
 	if err != nil {
-		failure[fieldHistoryRepair] = historyRepairFailed
-
 		log.WarnContext(ctx, "codex history repair failed", slog.Int("calls", repaired), slog.String("reason", err.Error()))
 
-		return
+		return wire.RecoveryFailed
 	}
 
-	failure[fieldHistoryRepair] = historyRepairRepaired
-
 	log.WarnContext(ctx, "codex history repaired", slog.Int("calls", repaired))
+
+	return wire.RecoveryRecovered
 }
 
 // repairInvalidArguments unloads the thread so its rollout is complete and

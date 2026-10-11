@@ -186,7 +186,7 @@ func TestInvalidCallArgumentsAreRepaired(t *testing.T) {
 	_, err := h.prompt(session.SessionId, "RUNAWAY", nil)
 	data := requestErrorData(t, err)
 	require.Contains(t, data["message"], "has invalid JSON arguments")
-	require.Equal(t, "repaired", data["historyRepair"])
+	require.Equal(t, wire.RecoveryRecovered, data[wire.FieldRecovery])
 
 	var record sessionRecord
 	_, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
@@ -221,7 +221,7 @@ func TestUnfoundInvalidCallReportsAFailedRepair(t *testing.T) {
 
 	_, err := h.prompt(session.SessionId, "REFUSEONLY", nil)
 	data := requestErrorData(t, err)
-	require.Equal(t, "failed", data["historyRepair"])
+	require.Equal(t, wire.RecoveryFailed, data[wire.FieldRecovery])
 
 	response, err := h.prompt(session.SessionId, "ECHO after", nil)
 	require.NoError(t, err)

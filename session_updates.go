@@ -122,7 +122,7 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 
 		return true, nil
 	case codex.EventError:
-		return false, wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: event.Text})
+		return false, &providerError{wire.TurnFailure{Cause: wire.CauseProvider, Message: event.Text}}
 	case codex.EventAgentMessageDelta:
 		return false, s.emitText(ctx, state, event, false)
 	case codex.EventReasoningDelta:

@@ -194,9 +194,9 @@ arguments of every such call in the rollout as `{}`, keeps the call's output
 that told the model its arguments did not parse, resumes the thread, and
 republishes the whole rollout to the store before the response. A restore
 whose stored copy still holds such a call repairs it the same way. The turn
-still fails; its error data adds `historyRepair`: `repaired` when the next
-turn runs on the repaired history, or `failed` when the rollout held no such
-call or the thread could not be unloaded, rewritten, or resumed.
+still fails; its error data adds `recovery`: `recovered` when the next turn
+runs on the repaired history, or `failed` when the rollout held no such call
+or the thread could not be unloaded, rewritten, or resumed.
 
 ## Development
 
