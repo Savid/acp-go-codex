@@ -1165,3 +1165,39 @@ func BenchmarkTurnCommit(b *testing.B) {
 		require.NoError(b, s.commitMirror(b.Context()))
 	}
 }
+
+// A restore right after close waits for the closed thread to unload, so the
+// rollout it reconciles is complete and no app-server writes it afterwards.
+func TestRestoreWaitsForTheClosedThreadToUnload(t *testing.T) {
+	t.Parallel()
+
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store), WithEnv(map[string]string{fakeCodexEnv: "1", fakeCodexEnvSlowUnload: "1"}))
+	h.initialize()
+
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+
+	_, err = h.prompt(session.SessionId, "ECHO first", nil)
+	require.NoError(t, err)
+
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+
+	var record sessionRecord
+	stored, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	native, err := readRollout(record.NativePath)
+	require.NoError(t, err)
+	require.Equal(t, native, stored)
+	require.Contains(t, string(stored[len(stored)-1]), "shutdown_flush", "the restore did not wait for the unloading thread's last row")
+
+	_, err = h.prompt(session.SessionId, "ECHO after", nil)
+	require.NoError(t, err)
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -212,7 +213,9 @@ func appendImage(encoded json.RawMessage, saved storedImage) (json.RawMessage, e
 // newer rows are adopted; a missing or shorter one is materialized from the
 // store at the path the app-server resolves the thread id to. A
 // disagreement at a shared position, or a row Codex cannot read, fails the
-// restore. It returns the rollout path and the rows the session now holds.
+// restore. The thread is unloaded first, so no app-server still writes the
+// rollout while it is reconciled. It returns the rollout path and the rows
+// the session now holds.
 func (s *session) hydrate(ctx context.Context, stored storedSession, runtime *runtime) (string, [][]byte, error) {
 	path, err := hydratePath(stored, runtime.home)
 	if err != nil {
@@ -221,22 +224,21 @@ func (s *session) hydrate(ctx context.Context, stored storedSession, runtime *ru
 
 	nativeID := stored.record.NativeSessionID
 
-	// A stored cut-off call is repaired on both sides: the store's copy, and
-	// the rollout, which holds the same call unless a turn-time repair already
-	// rewrote it. The two then agree, and the next commit republishes the
-	// history whole.
-	storedRows, repaired, err := codex.RepairCallArguments(stored.rows)
+	unloadCtx, cancel := context.WithTimeout(ctx, threadUnloadTimeout)
+	err = runtime.client.UnloadThread(unloadCtx, nativeID)
+
+	cancel()
+
+	if err != nil {
+		return "", nil, fmt.Errorf("unload thread: %w", err)
+	}
+
+	rows, err := s.repairStored(ctx, stored, path)
 	if err != nil {
 		return "", nil, err
 	}
 
-	if repaired > 0 {
-		if repairErr := s.repairRestoredRollout(ctx, runtime, nativeID, path); repairErr != nil {
-			return "", nil, repairErr
-		}
-	}
-
-	rows, err := s.mirror.Hydrate(ctx, path, storedRows, stored.record, func(rows [][]byte) error {
+	rows, err = s.mirror.Hydrate(ctx, path, rows, stored.record, func(rows [][]byte) error {
 		if meta, ok := codex.ParseSessionMeta(rows[0]); !ok || meta.ID != nativeID {
 			return fmt.Errorf("rollout does not open with session_meta for %s", nativeID)
 		}
@@ -253,29 +255,39 @@ func (s *session) hydrate(ctx context.Context, stored storedSession, runtime *ru
 		return "", nil, err
 	}
 
-	if repaired > 0 {
-		s.mirror.Reset()
-	}
-
 	return path, rows, nil
 }
 
-// repairRestoredRollout repairs the cut-off calls in a rollout about to be
-// restored. The thread is unloaded first so no app-server writes the file
-// while it is rewritten.
-func (s *session) repairRestoredRollout(ctx context.Context, runtime *runtime, nativeID, path string) error {
-	ctx, cancel := context.WithTimeout(ctx, threadRepairTimeout)
-	defer cancel()
-
-	if err := runtime.client.UnloadThread(ctx, nativeID); err != nil {
-		return fmt.Errorf("unload thread for repair: %w", err)
+// repairStored repairs a stored cut-off call before hydration. A store that
+// holds one usually means the rollout holds the same call: the turn-time
+// repair failed or never ran. Both are repaired, and the repaired history is
+// republished to the store, so hydration reconciles the generation the store
+// holds. It returns the rows the store holds.
+func (s *session) repairStored(ctx context.Context, stored storedSession, path string) ([][]byte, error) {
+	rows, repaired, err := codex.RepairCallArguments(stored.rows)
+	if err != nil || repaired == 0 {
+		return stored.rows, err
 	}
 
-	if _, err := repairRollout(path); err != nil {
-		return fmt.Errorf("repair rollout: %w", err)
+	native, err := repairRollout(path)
+	if err != nil {
+		return nil, fmt.Errorf("repair rollout: %w", err)
 	}
 
-	return nil
+	s.mirror.Reset()
+
+	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
+	err = s.mirror.Commit(commitCtx, sessionlog.Rows(rows), func(sessionlog.Tail) (any, error) { return stored.record, nil })
+	finish(err)
+
+	if err != nil {
+		return nil, fmt.Errorf("republish repaired history: %w", err)
+	}
+
+	s.agent.log.WarnContext(ctx, "codex restore repaired cut-off function calls",
+		slog.String("session_id", string(s.id)), slog.Int("stored_calls", repaired), slog.Int("native_calls", native))
+
+	return rows, nil
 }
 
 // hydratePath is where the stored rollout is resident in home. A committed

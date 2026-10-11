@@ -36,6 +36,10 @@ const (
 	// launch and for every thread/start or thread/resume, so a test can count
 	// native work.
 	fakeCodexEnvNativeLog = "ACP_GO_CODEX_TEST_NATIVE_LOG"
+	// fakeCodexEnvSlowUnload makes an unloading thread flush a last rollout
+	// row in two writes with a pause between them, as a recorder still
+	// writing during shutdown does.
+	fakeCodexEnvSlowUnload = "ACP_GO_CODEX_TEST_SLOW_UNLOAD"
 	// fakeCodexEnvStartGate names a file thread/start waits for, so a test can
 	// hold an establishment in native start.
 	fakeCodexEnvStartGate = "ACP_GO_CODEX_TEST_START_GATE"
@@ -97,6 +101,8 @@ type fakeThread struct {
 	// responses marks a thread that reports each model response's usage as
 	// the response completes.
 	responses bool
+	// unloading marks a thread the fake is unloading.
+	unloading bool
 }
 
 // fakeTokens is one model request's usage as codex reports it: the input
@@ -531,13 +537,45 @@ func (f *fakeCodex) unsubscribe(id json.RawMessage, params map[string]any) {
 
 	f.respond(id, map[string]any{"status": "unsubscribed"})
 
+	f.mu.Lock()
+	unloading := thread.unloading
+	thread.unloading = true
+	f.mu.Unlock()
+
+	if unloading {
+		return
+	}
+
 	time.AfterFunc(50*time.Millisecond, func() {
+		if os.Getenv(fakeCodexEnvSlowUnload) != "" {
+			flushTorn(thread.path)
+		}
+
 		f.mu.Lock()
 		if f.threads[threadID] == thread {
 			delete(f.threads, threadID)
 		}
 		f.mu.Unlock()
 	})
+}
+
+// flushTorn appends one rollout row in two writes, leaving the file with an
+// unfinished last line between them.
+func flushTorn(path string) {
+	row, _ := json.Marshal(eventRow("shutdown_flush", map[string]any{"note": "written at unload"}))
+	half := len(row) / 2
+
+	for _, part := range [][]byte{row[:half], append(row[half:], '\n')} {
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return
+		}
+
+		_, _ = file.Write(part)
+		_ = file.Close()
+
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // recordConfig keeps the last thread config so a test can read the shell

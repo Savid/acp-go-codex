@@ -442,6 +442,9 @@ func (f *providerError) Error() string { return f.Message }
 // threadRepairTimeout bounds unloading, repairing, and resuming a thread.
 const threadRepairTimeout = 15 * time.Second
 
+// threadUnloadTimeout bounds waiting for the app-server to unload a thread.
+const threadUnloadTimeout = 15 * time.Second
+
 // repairHistory makes a thread usable again after the provider refused a
 // function call in its history whose arguments are not JSON: every later
 // request resends that call, so the thread could never complete another
