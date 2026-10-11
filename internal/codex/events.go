@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"encoding/json"
 	"strings"
 )
 
@@ -79,9 +78,11 @@ const (
 
 // Event is one decoded app-server notification.
 type Event struct {
-	Kind     EventKind
-	Method   string
-	Params   json.RawMessage
+	Kind   EventKind
+	Method string
+	// Params is the notification's decoded params, shared with the tool and
+	// image items the event names; consumers must not modify it.
+	Params   map[string]any
 	ThreadID string
 	TurnID   string
 	ItemID   string
@@ -159,12 +160,8 @@ type TurnFailure struct {
 // DecodeEvent classifies one notification. Every notification decodes; ones
 // the adapter does not model are EventRaw.
 func DecodeEvent(notification Notification) Event {
-	event := Event{Kind: EventRaw, Method: notification.Method, Params: notification.Params}
-
-	var params map[string]any
-	if len(notification.Params) > 0 {
-		_ = json.Unmarshal(notification.Params, &params)
-	}
+	params := notification.Params
+	event := Event{Kind: EventRaw, Method: notification.Method, Params: params}
 
 	event.ThreadID = stringValue(params, fieldThreadID)
 	event.TurnID = firstNonEmpty(stringValue(params, fieldTurnID), stringValue(mapValue(params, "turn"), fieldID))

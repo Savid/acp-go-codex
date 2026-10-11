@@ -460,7 +460,7 @@ func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue 
 			}
 
 			if queued.request != nil {
-				s.handleRequest(rt, *queued.request, codex.RequestParams(*queued.request))
+				s.handleRequest(rt, *queued.request, queued.request.Params)
 			} else if !s.handleEvent(ctx, rt, queue.done, queued.event) {
 				return
 			}
@@ -475,9 +475,7 @@ func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue 
 // routeRequest queues one server request for the session owning its thread.
 // Requests naming no live session are answered as cancelled.
 func (a *Agent) routeRequest(ctx context.Context, rt *runtime, request codex.ServerRequest) bool {
-	params := codex.RequestParams(request)
-
-	s := a.sessionByThread(codex.RequestThreadID(params))
+	s := a.sessionByThread(codex.RequestThreadID(request.Params))
 	if s == nil {
 		a.respondUnowned(rt, request)
 

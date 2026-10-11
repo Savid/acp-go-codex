@@ -163,18 +163,16 @@ func TestCompactionNativeOutcomes(t *testing.T) {
 	s.nativeID = "root"
 	for _, status := range []string{"failed", "interrupted", "completed"} {
 		c := &cycle{nativeTurnID: status}
-		item, err := json.Marshal(map[string]any{"threadId": "root", "turnId": status, "item": map[string]any{"id": "compaction", "type": "contextCompaction"}})
-		require.NoError(t, err)
+		item := map[string]any{"threadId": "root", "turnId": status, "item": map[string]any{"id": "compaction", "type": "contextCompaction"}}
 		start := codex.DecodeEvent(codex.Notification{Method: "item/started", Params: item})
-		_, err = s.projectEvent(t.Context(), c, start)
+		_, err := s.projectEvent(t.Context(), c, start)
 		require.NoError(t, err)
 		if status == "completed" {
 			completed := codex.DecodeEvent(codex.Notification{Method: "item/completed", Params: item})
 			_, err = s.projectEvent(t.Context(), c, completed)
 			require.NoError(t, err)
 		}
-		payload, err := json.Marshal(map[string]any{"threadId": "root", "turn": map[string]any{"id": status, "status": status}})
-		require.NoError(t, err)
+		payload := map[string]any{"threadId": "root", "turn": map[string]any{"id": status, "status": status}}
 		ended := codex.DecodeEvent(codex.Notification{Method: "turn/completed", Params: payload})
 		settled, err := s.projectEvent(t.Context(), c, ended)
 		require.NoError(t, err)

@@ -3,7 +3,6 @@ package codexacp
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -395,14 +394,11 @@ func (s *session) emitRawEvent(ctx context.Context, event codex.Event) {
 		return
 	}
 
-	payload := map[string]any{}
-	if len(event.Params) > 0 {
-		if err := json.Unmarshal(event.Params, &payload); err != nil {
-			return
-		}
+	payload, _ := redactImages(event.Params).(map[string]any)
+	if payload == nil {
+		payload = map[string]any{}
 	}
 
-	redactImages(payload)
 	payload["method"] = event.Method
 
 	notify := func(ctx context.Context, method string, params map[string]any) error {
@@ -414,22 +410,32 @@ func (s *session) emitRawEvent(ctx context.Context, event codex.Event) {
 	}
 }
 
-// redactImages replaces image result payloads with their encoded size.
-func redactImages(value any) {
+// redactImages copies a decoded value with every image result payload
+// replaced by its encoded size. The event's own params are shared with its
+// projection, so they are never modified.
+func redactImages(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
-		if result, ok := typed[nativeResultKey].(string); ok && result != "" && isImageItem(typed) {
-			typed[nativeResultKey] = ""
-			typed["resultBytes"] = len(result) / 4 * 3
+		copied := make(map[string]any, len(typed)+1)
+		for key, item := range typed {
+			copied[key] = redactImages(item)
 		}
 
-		for _, item := range typed {
-			redactImages(item)
+		if result, ok := typed[nativeResultKey].(string); ok && result != "" && isImageItem(typed) {
+			copied[nativeResultKey] = ""
+			copied["resultBytes"] = len(result) / 4 * 3
 		}
+
+		return copied
 	case []any:
-		for _, item := range typed {
-			redactImages(item)
+		copied := make([]any, len(typed))
+		for index, item := range typed {
+			copied[index] = redactImages(item)
 		}
+
+		return copied
+	default:
+		return value
 	}
 }
 

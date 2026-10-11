@@ -54,17 +54,6 @@ const (
 	modeURL          = "url"
 )
 
-// RequestParams decodes a server request's params. Malformed params yield a
-// nil map.
-func RequestParams(request ServerRequest) map[string]any {
-	var params map[string]any
-	if len(request.Params) > 0 {
-		_ = json.Unmarshal(request.Params, &params)
-	}
-
-	return params
-}
-
 // RequestThreadID returns the thread a server request addresses.
 func RequestThreadID(params map[string]any) string { return stringValue(params, fieldThreadID) }
 

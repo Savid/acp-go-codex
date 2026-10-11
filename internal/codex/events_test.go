@@ -1,7 +1,7 @@
 package codex
 
 import (
-	"encoding/json"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,10 +11,10 @@ func TestResponseCompletionCarriesItsUsage(t *testing.T) {
 	t.Parallel()
 
 	decode := func(params string) Event {
-		return DecodeEvent(Notification{Method: "rawResponse/completed", Params: json.RawMessage(params)})
+		return DecodeEvent(notification(t, "rawResponse/completed", params))
 	}
 
-	// A completion codex 0.159.3 sent for an OpenRouter Responses gateway.
+	// A completion sent for an OpenRouter Responses gateway.
 	event := decode(`{"responseId":"gen-1790864938-0aKnVVHJ8cC28luaL5g3","threadId":"01a0f7de-5336-72f2-a715-d9211c5fa1b4",` +
 		`"turnId":"01a0f7de-5389-7613-b9a0-d61d0b7d2ebc","usage":{"cacheWriteInputTokens":0,"cachedInputTokens":9472,` +
 		`"inputTokens":9537,"outputTokens":18,"reasoningOutputTokens":14,"totalTokens":9555},"usageMetadata":{"amount":null,` +
@@ -46,7 +46,7 @@ func TestStreamedTextNamesNoResponse(t *testing.T) {
 	}
 
 	for method, params := range frames {
-		event := DecodeEvent(Notification{Method: method, Params: json.RawMessage(params)})
+		event := DecodeEvent(notification(t, method, params))
 		require.NotEmpty(t, event.Text)
 		require.Empty(t, event.ResponseID)
 	}
@@ -54,9 +54,19 @@ func TestStreamedTextNamesNoResponse(t *testing.T) {
 
 func TestCompactionItemDecoding(t *testing.T) {
 	t.Parallel()
-	event := DecodeEvent(Notification{Method: "item/completed", Params: json.RawMessage(`{"threadId":"root","turnId":"turn","item":{"id":"attempt","type":"contextCompaction"}}`)})
+	event := DecodeEvent(notification(t, "item/completed", `{"threadId":"root","turnId":"turn","item":{"id":"attempt","type":"contextCompaction"}}`))
 	require.Equal(t, EventCompactionCompleted, event.Kind)
 	require.Equal(t, "root", event.ThreadID)
 	require.Equal(t, "turn", event.TurnID)
 	require.Equal(t, "attempt", event.ItemID)
+}
+
+// notification decodes a notification's params as the client does.
+func notification(t *testing.T, method string, params string) Notification {
+	t.Helper()
+
+	frame, ok := decodeInbound([]byte(`{"method":` + strconv.Quote(method) + `,"params":` + params + `}`))
+	require.True(t, ok)
+
+	return Notification{Method: frame.Method, Params: frame.Params}
 }

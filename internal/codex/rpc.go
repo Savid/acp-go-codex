@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,22 +8,17 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
 // ErrTransportClosed reports that the app-server stdout stream ended before a
 // call received its response.
 var ErrTransportClosed = errors.New("codex app-server transport closed")
 
-const (
-	jsonRPCVersion = "2.0"
-	// maxLineBytes bounds one app-server stdout line so one oversize frame
-	// cannot force an unbounded allocation before it is parsed.
-	maxLineBytes = 10 * 1024 * 1024
-	// initialLineBytes is the scanner's starting buffer.
-	initialLineBytes = 64 * 1024
-)
+const jsonRPCVersion = "2.0"
 
-// message is one JSON-RPC frame in either direction.
+// message is one JSON-RPC frame the adapter writes.
 type message struct {
 	JSONRPC string          `json:"jsonrpc,omitempty"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -45,18 +39,31 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("codex app-server request failed (code %d): %s", e.Code, e.Message)
 }
 
-// Notification is one app-server notification, undecoded.
+// inbound is one JSON-RPC frame the app-server writes, decoded in one pass.
+// Params decode straight into the map every consumer reads; a result stays
+// raw for the caller's typed decode.
+type inbound struct {
+	ID     json.RawMessage `json:"id"`
+	Method string          `json:"method"`
+	Params map[string]any  `json:"params"`
+	Result json.RawMessage `json:"result"`
+	Error  *RPCError       `json:"error"`
+}
+
+// Notification is one app-server notification. Params is nil when the
+// notification carried no params object.
 type Notification struct {
 	Method string
-	Params json.RawMessage
+	Params map[string]any
 }
 
 // ServerRequest is one request the app-server sent to the adapter, answered
-// through Client.Respond.
+// through Client.Respond. Params is nil when the request carried no params
+// object.
 type ServerRequest struct {
 	ID     json.RawMessage
 	Method string
-	Params json.RawMessage
+	Params map[string]any
 }
 
 // Client speaks the app-server's JSON-RPC protocol over its stdin and stdout.
@@ -64,13 +71,13 @@ type ServerRequest struct {
 // on channels in stream order. Delivery is synchronous, so the consumer keeps
 // draining both channels while calls are in flight.
 type Client struct {
-	stdin   io.Writer
-	scanner *bufio.Scanner
+	stdin  io.Writer
+	reader *wire.LineReader
 
 	writeMu sync.Mutex
 
 	pendingMu sync.Mutex
-	pending   map[string]chan message
+	pending   map[string]chan inbound
 	failed    bool
 	failure   error
 
@@ -84,13 +91,10 @@ type Client struct {
 // NewClient constructs a client over the app-server's stdin writer and stdout
 // reader.
 func NewClient(stdin io.Writer, stdout io.Reader) *Client {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, initialLineBytes), maxLineBytes)
-
 	return &Client{
 		stdin:         stdin,
-		scanner:       scanner,
-		pending:       make(map[string]chan message, 4),
+		reader:        wire.NewLineReader(stdout, wire.NativeLineMaxBytes),
+		pending:       make(map[string]chan inbound, 4),
 		notifications: make(chan Notification),
 		requests:      make(chan ServerRequest),
 	}
@@ -138,7 +142,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 		return fmt.Errorf("encode %s params: %w", method, err)
 	}
 
-	waiter := make(chan message, 1)
+	waiter := make(chan inbound, 1)
 
 	if err := c.registerPending(string(id), waiter); err != nil {
 		return err
@@ -224,7 +228,7 @@ func (c *Client) write(frame message) error {
 	return err
 }
 
-func (c *Client) registerPending(id string, waiter chan message) error {
+func (c *Client) registerPending(id string, waiter chan inbound) error {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
 
@@ -262,14 +266,18 @@ func (c *Client) closedErrorLocked() error {
 func (c *Client) readLoop(ctx context.Context) {
 	var failure error
 
-	for c.scanner.Scan() {
-		line := c.scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	for {
+		line, err := c.reader.Next()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				failure = err
+			}
+
+			break
 		}
 
-		var frame message
-		if err := json.Unmarshal(line, &frame); err != nil {
+		frame, ok := decodeInbound(line)
+		if !ok {
 			// A line that is not JSON-RPC is app-server chatter on the wrong
 			// stream; it is skipped rather than ending the transport.
 			continue
@@ -282,16 +290,23 @@ func (c *Client) readLoop(ctx context.Context) {
 		}
 	}
 
-	if failure == nil {
-		if err := c.scanner.Err(); err != nil {
-			failure = err
-		}
-	}
-
 	c.finish(failure)
 }
 
-func (c *Client) dispatch(ctx context.Context, frame message) error {
+// decodeInbound decodes one frame. Params that are not an object decode as
+// nil rather than refusing the frame.
+func decodeInbound(line []byte) (inbound, bool) {
+	var frame inbound
+
+	err := json.Unmarshal(line, &frame)
+	if _, typed := errors.AsType[*json.UnmarshalTypeError](err); err != nil && !typed {
+		return inbound{}, false
+	}
+
+	return frame, true
+}
+
+func (c *Client) dispatch(ctx context.Context, frame inbound) error {
 	switch {
 	case len(frame.ID) > 0 && frame.Method == "":
 		c.pendingMu.Lock()
