@@ -45,9 +45,9 @@ type session struct {
 	gate chan struct{}
 
 	mu sync.Mutex
-	// rt is the generation the thread is bound on; nil once that generation
+	// runtime is the generation the thread is bound on; nil once that generation
 	// is gone, until the next explicit operation rebinds it.
-	rt          *runtime
+	runtime     *runtime
 	rolloutPath string
 	// images is the encoded array of admitted images the record carries.
 	images      json.RawMessage
@@ -148,11 +148,11 @@ type dialog struct {
 var errDialogCancelled = errors.New("dialog cancelled by the session")
 
 // bind binds the session's thread on the given generation.
-func (s *session) bind(rt *runtime, thread codex.Thread) {
+func (s *session) bind(runtime *runtime, thread codex.Thread) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.rt = rt
+	s.runtime = runtime
 	s.generationLost = false
 	s.rolloutPath = thread.Path
 	s.responseUsage = thread.ReportsResponses
@@ -165,7 +165,7 @@ func (s *session) bind(rt *runtime, thread codex.Thread) {
 		s.model = s.agent.options.DefaultModel
 	}
 
-	s.contextWindow = catalogContextWindow(rt.models, s.model)
+	s.contextWindow = catalogContextWindow(runtime.models, s.model)
 }
 
 func catalogContextWindow(models []codex.Model, model string) int64 {
@@ -213,41 +213,41 @@ func (s *session) threadResume() codex.ThreadResumeRequest {
 // incarnation.
 func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 	s.mu.Lock()
-	rt := s.rt
+	runtime := s.runtime
 	lost := s.generationLost
 	s.mu.Unlock()
 
-	if rt != nil && rt.alive() {
+	if runtime != nil && runtime.alive() {
 		if lost {
 			// Containment is still joining this session's worker on the live
 			// generation; binding now would feed a stopped queue.
 			return nil, wire.RuntimeUnavailable(vendor)
 		}
 
-		return rt, nil
+		return runtime, nil
 	}
 
-	if rt != nil {
+	if runtime != nil {
 		select {
-		case <-rt.done:
+		case <-runtime.done:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 
-	rt, err := s.agent.ensureRuntime(ctx)
+	runtime, err := s.agent.ensureRuntime(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	thread, err := rt.client.ResumeThread(ctx, s.threadResume(), rt.nativePath)
+	thread, err := runtime.client.ResumeThread(ctx, s.threadResume(), runtime.nativePath)
 	if err != nil {
 		return nil, s.startFailure(ctx, err)
 	}
 
-	s.bind(rt, thread)
+	s.bind(runtime, thread)
 
-	if err := s.openStream(ctx, rt); err != nil {
+	if err := s.openStream(ctx, runtime); err != nil {
 		if errors.Is(err, errSessionClosing) {
 			return nil, s.closingRefusal()
 		}
@@ -255,7 +255,7 @@ func (s *session) ensureBound(ctx context.Context) (*runtime, error) {
 		return nil, err
 	}
 
-	return rt, nil
+	return runtime, nil
 }
 
 // startFailure maps a failed native thread start or resume onto the closed
@@ -278,12 +278,12 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 // queue fence: a settled turn waits for its prompt to finish unless the queue
 // is stopped first, since containment joins this worker from the prompt's own
 // goroutine.
-func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan struct{}, event codex.Event) bool {
+func (s *session) handleEvent(ctx context.Context, runtime *runtime, stopped <-chan struct{}, event codex.Event) bool {
 	s.emitRawEvent(ctx, event)
 
 	s.mu.Lock()
 	t := s.turn
-	bound := s.rt == rt
+	bound := s.runtime == runtime
 	terminalTurn := s.lastTerminalTurn
 	s.mu.Unlock()
 
@@ -327,7 +327,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, stopped <-chan s
 		case <-t.finished:
 		case <-stopped:
 			return false
-		case <-rt.proc.Done():
+		case <-runtime.proc.Done():
 			return false
 		}
 	}
@@ -353,9 +353,9 @@ func bearsWork(event codex.Event) bool {
 // producing events. An in-flight prompt learns its transport ended; an open
 // agent-origin cycle ends failed; the incarnation's stream is fenced once its
 // last terminal event is out.
-func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
+func (s *session) runtimeEnded(ctx context.Context, runtime *runtime) {
 	s.mu.Lock()
-	if s.rt != rt {
+	if s.runtime != runtime {
 		s.mu.Unlock()
 
 		return
@@ -372,8 +372,8 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	defer s.openMu.Unlock()
 
 	s.mu.Lock()
-	if s.rt == rt {
-		s.rt = nil
+	if s.runtime == runtime {
+		s.runtime = nil
 	}
 	s.mu.Unlock()
 
@@ -395,11 +395,11 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 // session keep running; the contained session's in-flight work fails with the
 // given cause, its stream fences, its worker is joined, and its next operation
 // rebinds on the live generation.
-func (s *session) contain(ctx context.Context, rt *runtime, failure error) {
+func (s *session) contain(ctx context.Context, runtime *runtime, failure error) {
 	s.mu.Lock()
-	if s.rt != rt {
+	if s.runtime != runtime {
 		s.mu.Unlock()
-		rt.retireQueue(s)
+		runtime.retireQueue(s)
 
 		return
 	}
@@ -419,14 +419,14 @@ func (s *session) contain(ctx context.Context, rt *runtime, failure error) {
 	// The worker is joined while the binding still stands, so no rebind can
 	// start a second worker beside it. openMu is not held for the join: the
 	// worker may fence the stream on its way out.
-	rt.retireQueue(s)
+	runtime.retireQueue(s)
 
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
 
 	s.mu.Lock()
-	if s.rt == rt {
-		s.rt = nil
+	if s.runtime == runtime {
+		s.runtime = nil
 	}
 	s.mu.Unlock()
 
@@ -443,11 +443,11 @@ func (s *session) contain(ctx context.Context, rt *runtime, failure error) {
 
 // interrupt sends turn/interrupt for the in-flight native turn under a
 // bounded context detached from the caller's cancellation.
-func (s *session) interrupt(ctx context.Context, rt *runtime, nativeTurnID string) {
+func (s *session) interrupt(ctx context.Context, runtime *runtime, nativeTurnID string) {
 	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionAbortTimeout)
 	defer cancel()
 
-	if err := rt.client.InterruptTurn(abortCtx, s.nativeID, nativeTurnID); err != nil {
+	if err := runtime.client.InterruptTurn(abortCtx, s.nativeID, nativeTurnID); err != nil {
 		s.agent.log.DebugContext(abortCtx, "codex turn interrupt failed", slog.String("session_id", string(s.id)))
 	}
 }
@@ -457,7 +457,7 @@ func (s *session) interrupt(ctx context.Context, rt *runtime, nativeTurnID strin
 func (s *session) cancel(ctx context.Context) {
 	s.mu.Lock()
 	t := s.turn
-	rt := s.rt
+	runtime := s.runtime
 	cancelPrompt := s.promptCancel
 
 	if t == nil {
@@ -480,7 +480,7 @@ func (s *session) cancel(ctx context.Context) {
 	c.cancelled = true
 	nativeTurnID := c.nativeTurnID
 
-	interrupt := !c.settling && rt != nil && !s.closing && !s.generationLost
+	interrupt := !c.settling && runtime != nil && !s.closing && !s.generationLost
 	if interrupt {
 		s.callbacks.Add(1)
 	}
@@ -496,7 +496,7 @@ func (s *session) cancel(ctx context.Context) {
 		go func() {
 			defer s.callbacks.Done()
 
-			s.interrupt(ctx, rt, nativeTurnID)
+			s.interrupt(ctx, runtime, nativeTurnID)
 		}()
 	}
 }
@@ -521,7 +521,7 @@ func (s *session) claimCancellation(c *cycle) bool {
 
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
-	if s.closing || s.rt == nil || s.generationLost || (s.turn != nil && (s.turn.cancelled || s.turn.settling)) {
+	if s.closing || s.runtime == nil || s.generationLost || (s.turn != nil && (s.turn.cancelled || s.turn.settling)) {
 		s.mu.Unlock()
 		cancel(errDialogCancelled)
 
@@ -611,7 +611,7 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	t := s.turn
-	rt := s.rt
+	runtime := s.runtime
 	cancelPrompt := s.promptCancel
 
 	if t != nil {
@@ -627,11 +627,11 @@ func (s *session) close(ctx context.Context) error {
 	s.callbacks.Wait()
 
 	if t != nil {
-		if rt != nil && rt.alive() {
+		if runtime != nil && runtime.alive() {
 			s.mu.Lock()
 			nativeTurnID := t.nativeTurnID
 			s.mu.Unlock()
-			s.interrupt(ctx, rt, nativeTurnID)
+			s.interrupt(ctx, runtime, nativeTurnID)
 		}
 
 		select {
@@ -640,10 +640,10 @@ func (s *session) close(ctx context.Context) error {
 		}
 	}
 
-	if rt != nil && rt.alive() {
+	if runtime != nil && runtime.alive() {
 		unsubscribeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionAbortTimeout)
 
-		if err := rt.client.UnsubscribeThread(unsubscribeCtx, s.nativeID); err != nil {
+		if err := runtime.client.UnsubscribeThread(unsubscribeCtx, s.nativeID); err != nil {
 			s.agent.log.DebugContext(unsubscribeCtx, "codex thread unsubscribe failed", slog.String("session_id", string(s.id)))
 		}
 
@@ -672,7 +672,7 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	s.rt = nil
+	s.runtime = nil
 	s.mu.Unlock()
 
 	s.fenceStream()

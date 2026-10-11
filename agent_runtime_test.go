@@ -45,7 +45,7 @@ func TestProcessExitDoesNotPublishQueuedTerminalTail(t *testing.T) {
 	s := a.sessions[created.SessionId]
 	a.mu.Unlock()
 	s.mu.Lock()
-	rt := s.rt
+	runtime := s.runtime
 	s.mu.Unlock()
 	request := wire.TextPromptRequest(created.SessionId, "TAIL")
 	request.Meta = promptMeta(1)
@@ -64,15 +64,15 @@ func TestProcessExitDoesNotPublishQueuedTerminalTail(t *testing.T) {
 		t.Fatal("prompt did not reach its mirror commit")
 	}
 	require.Eventually(t, func() bool {
-		rt.mu.Lock()
-		defer rt.mu.Unlock()
-		queue := rt.events[s]
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		queue := runtime.events[s]
 
 		return queue != nil && len(queue.messages) > 0
 	}, testTimeout, time.Millisecond)
-	require.NoError(t, rt.proc.Kill())
+	require.NoError(t, runtime.proc.Kill())
 	select {
-	case <-rt.done:
+	case <-runtime.done:
 	case <-time.After(testTimeout):
 		t.Fatal("exited generation did not finish while the commit was held")
 	}
@@ -126,9 +126,9 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 	sa, err := a.session(t.Context(), stalled.SessionId)
 	require.NoError(t, err)
 	sa.mu.Lock()
-	rt := sa.rt
+	runtime := sa.runtime
 	sa.mu.Unlock()
-	require.NotNil(t, rt)
+	require.NotNil(t, runtime)
 
 	// A turn must be in flight for the pump to publish anything.
 	done := make(chan error, 1)
@@ -158,24 +158,24 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 	// Flood the stalled session past its 256-slot queue. Its pump blocks on the
 	// first publish to the gated client, so the rest overflow and contain it.
 	for range 400 {
-		a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: sa.nativeID, TurnID: nativeTurnID, ItemID: "delta", Text: "x"}})
+		a.routeMessage(t.Context(), runtime, sa, sessionMessage{event: codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: sa.nativeID, TurnID: nativeTurnID, ItemID: "delta", Text: "x"}})
 	}
 
-	require.True(t, rt.alive(), "one session's overflow must not kill the shared app-server")
+	require.True(t, runtime.alive(), "one session's overflow must not kill the shared app-server")
 
 	// The stopped queue stays registered, so a later frame neither starts a
 	// second worker nor reaches the session.
-	rt.mu.Lock()
-	queue := rt.events[sa]
-	rt.mu.Unlock()
+	runtime.mu.Lock()
+	queue := runtime.events[sa]
+	runtime.mu.Unlock()
 	require.NotNil(t, queue)
 	require.True(t, queue.stopped)
 
-	a.routeMessage(t.Context(), rt, sa, sessionMessage{event: codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: sa.nativeID, TurnID: nativeTurnID, ItemID: "delta", Text: "y"}})
+	a.routeMessage(t.Context(), runtime, sa, sessionMessage{event: codex.Event{Kind: codex.EventAgentMessageDelta, ThreadID: sa.nativeID, TurnID: nativeTurnID, ItemID: "delta", Text: "y"}})
 
-	rt.mu.Lock()
-	require.Same(t, queue, rt.events[sa], "overflow keeps its stopped queue until containment retires it")
-	rt.mu.Unlock()
+	runtime.mu.Lock()
+	require.Same(t, queue, runtime.events[sa], "overflow keeps its stopped queue until containment retires it")
+	runtime.mu.Unlock()
 
 	// The peer still completes a turn on the same app-server.
 	prompt := wire.TextPromptRequest(peer.SessionId, "hi")
@@ -198,12 +198,12 @@ func TestSessionOverflowContainsWithoutKillingPeers(t *testing.T) {
 		sa.mu.Lock()
 		defer sa.mu.Unlock()
 
-		return sa.rt == nil
+		return sa.runtime == nil
 	}, 5*time.Second, 5*time.Millisecond, "the contained session detaches from the live generation")
 
-	rt.mu.Lock()
-	_, registered := rt.events[sa]
-	rt.mu.Unlock()
+	runtime.mu.Lock()
+	_, registered := runtime.events[sa]
+	runtime.mu.Unlock()
 	require.False(t, registered, "containment retires the queue once its worker has exited")
 }
 
@@ -226,9 +226,9 @@ func TestCancelOfAnIgnoredInterruptContainsOnlyThatSession(t *testing.T) {
 	ss, err := a.session(t.Context(), stuck.SessionId)
 	require.NoError(t, err)
 	ss.mu.Lock()
-	rt := ss.rt
+	runtime := ss.runtime
 	ss.mu.Unlock()
-	require.NotNil(t, rt)
+	require.NotNil(t, runtime)
 
 	type result struct {
 		response acp.PromptResponse
@@ -261,10 +261,10 @@ func TestCancelOfAnIgnoredInterruptContainsOnlyThatSession(t *testing.T) {
 		t.Fatal("the cancelled prompt did not settle after the native turn ignored its interrupt")
 	}
 
-	require.True(t, rt.alive(), "an ignored interrupt must not stop the shared app-server")
+	require.True(t, runtime.alive(), "an ignored interrupt must not stop the shared app-server")
 
 	ss.mu.Lock()
-	unbound := ss.rt == nil
+	unbound := ss.runtime == nil
 	ss.mu.Unlock()
 	require.True(t, unbound, "the contained session leaves the live generation")
 

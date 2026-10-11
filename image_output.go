@@ -40,11 +40,11 @@ func (s *session) outputRoots() []string {
 	}
 
 	s.mu.Lock()
-	rt := s.rt
+	runtime := s.runtime
 	s.mu.Unlock()
 
-	if rt != nil && rt.home != "" {
-		roots = append(roots, filepath.Join(rt.home, "generated_images"))
+	if runtime != nil && runtime.home != "" {
+		roots = append(roots, filepath.Join(runtime.home, "generated_images"))
 	}
 
 	return roots

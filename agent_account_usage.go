@@ -56,7 +56,7 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 		return wire.AccountUsageResponse{}, openErr
 	}
 
-	rt, err := a.ensureRuntime(ctx)
+	runtime, err := a.ensureRuntime(ctx)
 	if err != nil {
 		return wire.AccountUsageResponse{}, err
 	}
@@ -69,7 +69,7 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 	// that gateway's report.
 	response := wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated)
 	if request.ProviderID == openaicodex.ProviderID {
-		response, err = readAccountUsage(readCtx, rt.client)
+		response, err = readAccountUsage(readCtx, runtime.client)
 		if err != nil {
 			a.log.ErrorContext(ctx, "codex account usage read failed", slog.String("reason", err.Error()))
 
@@ -87,7 +87,7 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 			return nil, envErr
 		}
 
-		return codex.GatewayRoutes(rt.home, a.options.CodexConfigOverrides, func(key string) (string, bool) { return process.Lookup(env, key) })
+		return codex.GatewayRoutes(runtime.home, a.options.CodexConfigOverrides, func(key string) (string, bool) { return process.Lookup(env, key) })
 	}, request.ProviderID, response)
 	if err != nil {
 		a.log.ErrorContext(ctx, "codex account usage read failed", slog.String("reason", err.Error()))

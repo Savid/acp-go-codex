@@ -529,14 +529,14 @@ func TestLateDialogAfterCancellationIsRefused(t *testing.T) {
 	for _, state := range []string{"cancelled turn", "closed", "disconnected"} {
 		t.Run(state, func(t *testing.T) {
 			t.Parallel()
-			s := &session{rt: &runtime{}, turn: &turn{}}
+			s := &session{runtime: &runtime{}, turn: &turn{}}
 			switch state {
 			case "cancelled turn":
 				s.turn.cancelled = true
 			case "closed":
 				s.closing = true
 			case "disconnected":
-				s.rt = nil
+				s.runtime = nil
 			}
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
@@ -584,7 +584,7 @@ func TestCloseJoinsFirstMirrorAndFencesOpening(t *testing.T) {
 			s, err := a.session(t.Context(), acp.SessionId(key.SessionID))
 			require.NoError(t, err)
 			s.mu.Lock()
-			rt := s.rt
+			runtime := s.runtime
 			s.mu.Unlock()
 			closed := make(chan error, 1)
 			go func() {
@@ -622,7 +622,7 @@ func TestCloseJoinsFirstMirrorAndFencesOpening(t *testing.T) {
 			}
 			require.False(t, s.lc.Active())
 			before := len(rec.snapshot())
-			require.Error(t, s.openStream(t.Context(), rt))
+			require.Error(t, s.openStream(t.Context(), runtime))
 			require.Len(t, rec.snapshot(), before, "closed session published commands or a lifecycle snapshot")
 			require.False(t, s.lc.Active())
 		})
@@ -644,7 +644,7 @@ func TestOpeningRejectsReplacedNativeGeneration(t *testing.T) {
 	s, err := a.session(t.Context(), created.SessionId)
 	require.NoError(t, err)
 	s.mu.Lock()
-	stale := s.rt
+	stale := s.runtime
 	s.mu.Unlock()
 	transport, meta := prepareOpeningResponse(t)
 	a.attach(rec, transport)

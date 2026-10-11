@@ -145,10 +145,10 @@ func TestCompactionSendFailureKeepsRuntime(t *testing.T) {
 	a.attach(rec, nil)
 	s := a.newSession(sessionStart{cwd: t.TempDir()})
 	s.nativeID = "root"
-	rt := &runtime{}
-	s.rt = rt
+	runtime := &runtime{}
+	s.runtime = runtime
 	for _, id := range []string{"failed", "next"} {
-		require.True(t, s.handleEvent(t.Context(), rt, nil, codex.Event{Kind: codex.EventCompactionCompleted, ThreadID: "root", TurnID: "turn", ItemID: id}))
+		require.True(t, s.handleEvent(t.Context(), runtime, nil, codex.Event{Kind: codex.EventCompactionCompleted, ThreadID: "root", TurnID: "turn", ItemID: id}))
 	}
 	require.True(t, rec.failed)
 	require.Len(t, compactionReports(t, rec.snapshot()), 1)

@@ -25,7 +25,7 @@ func (s *session) closingRefusal() error {
 	return wire.UnknownSession()
 }
 
-func (s *session) openStream(ctx context.Context, rt *runtime) error {
+func (s *session) openStream(ctx context.Context, runtime *runtime) error {
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
 
@@ -37,14 +37,14 @@ func (s *session) openStream(ctx context.Context, rt *runtime) error {
 		return errSessionClosing
 	}
 
-	if rt == nil || s.rt != rt || !rt.alive() {
+	if runtime == nil || s.runtime != runtime || !runtime.alive() {
 		s.mu.Unlock()
 
 		return wire.RuntimeUnavailable(vendor)
 	}
 
 	select {
-	case <-rt.proc.Done():
+	case <-runtime.proc.Done():
 		s.mu.Unlock()
 
 		return wire.RuntimeUnavailable(vendor)

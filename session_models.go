@@ -44,7 +44,7 @@ var (
 // personality menus while set.
 func (s *session) configOptions() []acp.SessionConfigOption {
 	s.mu.Lock()
-	rt := s.rt
+	runtime := s.runtime
 	model := s.model
 	mode := s.mode
 	effort := s.effort
@@ -53,8 +53,8 @@ func (s *session) configOptions() []acp.SessionConfigOption {
 	s.mu.Unlock()
 
 	var models []codex.Model
-	if rt != nil {
-		models = rt.models
+	if runtime != nil {
+		models = runtime.models
 	}
 
 	options := make([]acp.SessionConfigOption, 0, 5)
@@ -173,8 +173,8 @@ func (s *session) setConfigOption(ctx context.Context, configID acp.SessionConfi
 		s.model = value
 		s.contextWindow = 0
 
-		if s.rt != nil {
-			s.contextWindow = catalogContextWindow(s.rt.models, value)
+		if s.runtime != nil {
+			s.contextWindow = catalogContextWindow(s.runtime.models, value)
 		}
 	case configMode:
 		if value != modeDefault && value != modePlan {

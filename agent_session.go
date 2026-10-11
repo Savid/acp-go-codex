@@ -154,7 +154,7 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 // Codex has no command surface, so nothing else is published.
 func (a *Agent) scheduleOpen(ctx context.Context, s *session) error {
 	s.mu.Lock()
-	rt := s.rt
+	runtime := s.runtime
 	s.mu.Unlock()
 
 	if t := a.transportRef(); t != nil {
@@ -163,13 +163,13 @@ func (a *Agent) scheduleOpen(ctx context.Context, s *session) error {
 			release := wire.HoldSessionGate(s.gate)
 			defer release()
 
-			err := s.openStream(hookCtx, rt)
+			err := s.openStream(hookCtx, runtime)
 			if err == nil || errors.Is(err, errSessionClosing) {
 				return
 			}
 
 			s.mu.Lock()
-			current := !s.closing && s.rt == rt
+			current := !s.closing && s.runtime == runtime
 			s.mu.Unlock()
 
 			if current {
@@ -185,7 +185,7 @@ func (a *Agent) scheduleOpen(ctx context.Context, s *session) error {
 		})
 	}
 
-	if err := s.openStream(ctx, rt); err != nil {
+	if err := s.openStream(ctx, runtime); err != nil {
 		if errors.Is(err, errSessionClosing) {
 			return s.closingRefusal()
 		}
@@ -229,12 +229,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 	s := a.newSession(start)
 
-	rt, err := a.ensureRuntime(ctx)
+	runtime, err := a.ensureRuntime(ctx)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
 
-	thread, err := rt.client.StartThread(ctx, s.threadStart(), rt.nativePath)
+	thread, err := runtime.client.StartThread(ctx, s.threadStart(), runtime.nativePath)
 	if err != nil {
 		return acp.NewSessionResponse{}, s.startFailure(ctx, err)
 	}
@@ -242,7 +242,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	s.id = acp.SessionId(thread.ID)
 	s.nativeID = thread.ID
 	s.mirror = sessionlog.NewMirror(a.store, string(s.id))
-	s.bind(rt, thread)
+	s.bind(runtime, thread)
 	s.rawEvents = wire.NewRawEvents(vendor, string(s.id), vendor, start.meta.rawEvents)
 
 	release := wire.HoldSessionGate(s.gate)
@@ -431,24 +431,24 @@ func (a *Agent) restore(
 	s.images = stored.record.Images
 	s.mode = cmp.Or(stored.record.Mode, modeDefault)
 
-	rt, err := a.ensureRuntime(ctx)
+	runtime, err := a.ensureRuntime(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	path, rows, err := s.hydrate(ctx, stored, rt.home)
+	path, rows, err := s.hydrate(ctx, stored, runtime.home)
 	if err != nil {
 		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	s.rolloutPath = path
 
-	thread, err := s.resumeStoredThread(ctx, rt, rows)
+	thread, err := s.resumeStoredThread(ctx, runtime, rows)
 	if err != nil {
 		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
-	s.bind(rt, thread)
+	s.bind(runtime, thread)
 	s.restoreUsage(rows)
 
 	release := wire.HoldSessionGate(s.gate)

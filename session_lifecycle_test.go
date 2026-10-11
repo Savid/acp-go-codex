@@ -142,15 +142,15 @@ func TestNativeTailAfterCompletionOpensNoCycle(t *testing.T) {
 func TestNativeTailDoesNotStampTheNextTurn(t *testing.T) {
 	t.Parallel()
 
-	rt := &runtime{}
+	runtime := &runtime{}
 	next := &turn{
 		state:    cycleState{tools: make(map[string]*toolState)},
 		settled:  make(chan struct{}),
 		finished: make(chan struct{}),
 	}
-	s := &session{agent: NewAgent(), rt: rt, turn: next, lastTerminalTurn: "turn-1"}
+	s := &session{agent: NewAgent(), runtime: runtime, turn: next, lastTerminalTurn: "turn-1"}
 
-	s.handleEvent(t.Context(), rt, nil, codex.Event{Kind: codex.EventAgentMessageDelta, TurnID: "turn-1", ItemID: "tail-1", Text: "tail"})
+	s.handleEvent(t.Context(), runtime, nil, codex.Event{Kind: codex.EventAgentMessageDelta, TurnID: "turn-1", ItemID: "tail-1", Text: "tail"})
 
 	s.mu.Lock()
 	adopted := next.nativeTurnID
@@ -201,7 +201,7 @@ func TestCapturedNativeBetweenPromptRecords(t *testing.T) {
 	s, err := a.session(t.Context(), created.SessionId)
 	require.NoError(t, err)
 	s.mu.Lock()
-	rt := s.rt
+	runtime := s.runtime
 	require.Nil(t, s.turn)
 	s.mu.Unlock()
 
@@ -220,7 +220,7 @@ func TestCapturedNativeBetweenPromptRecords(t *testing.T) {
 	for _, frame := range frames {
 		var notification codex.Notification
 		require.NoError(t, json.Unmarshal(frame, &notification))
-		require.True(t, s.handleEvent(t.Context(), rt, nil, codex.DecodeEvent(notification)))
+		require.True(t, s.handleEvent(t.Context(), runtime, nil, codex.DecodeEvent(notification)))
 	}
 
 	rec.mu.Lock()

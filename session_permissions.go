@@ -19,7 +19,7 @@ const optionAccept acp.PermissionOptionId = "accept"
 
 // handleRequest answers one server request the app-server sent for this
 // session's thread. Exactly one response reaches the app-server.
-func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params map[string]any) {
+func (s *session) handleRequest(runtime *runtime, request codex.ServerRequest, params map[string]any) {
 	var c *cycle
 
 	s.mu.Lock()
@@ -38,7 +38,7 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 	if c == nil || closing || ctx.Err() != nil {
 		cancel(nil)
 		unregister()
-		s.agent.respondUnowned(rt, request)
+		s.agent.respondUnowned(runtime, request)
 
 		return
 	}
@@ -98,12 +98,12 @@ func (s *session) handleRequest(rt *runtime, request codex.ServerRequest, params
 				response = s.mcpElicitation(ctx, c, params)
 			}
 		default:
-			s.agent.respondUnowned(rt, request)
+			s.agent.respondUnowned(runtime, request)
 
 			return
 		}
 
-		if err := rt.client.Respond(request, response, nil); err != nil {
+		if err := runtime.client.Respond(request, response, nil); err != nil {
 			s.agent.log.DebugContext(ctx, "respond to codex request failed", slog.String("session_id", string(s.id)))
 		}
 	}()

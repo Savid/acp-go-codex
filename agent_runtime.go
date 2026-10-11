@@ -66,11 +66,11 @@ type sessionQueue struct {
 }
 
 // stopQueue fences a session's delivery on this generation.
-func (rt *runtime) stopQueue(s *session) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
+func (runtime *runtime) stopQueue(s *session) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
 
-	queue := rt.events[s]
+	queue := runtime.events[s]
 	if queue == nil || queue.stopped {
 		return
 	}
@@ -81,10 +81,10 @@ func (rt *runtime) stopQueue(s *session) {
 
 // retireQueue joins a session's worker and forgets its queue, so the
 // session's next binding on this generation starts a fresh one.
-func (rt *runtime) retireQueue(s *session) {
-	rt.mu.Lock()
-	queue := rt.events[s]
-	rt.mu.Unlock()
+func (runtime *runtime) retireQueue(s *session) {
+	runtime.mu.Lock()
+	queue := runtime.events[s]
+	runtime.mu.Unlock()
 
 	if queue == nil {
 		return
@@ -92,11 +92,11 @@ func (rt *runtime) retireQueue(s *session) {
 
 	<-queue.exited
 
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
 
-	if rt.events[s] == queue {
-		delete(rt.events, s)
+	if runtime.events[s] == queue {
+		delete(runtime.events, s)
 	}
 }
 
@@ -106,11 +106,11 @@ type sessionMessage struct {
 	request *codex.ServerRequest
 }
 
-func (rt *runtime) alive() bool {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
+func (runtime *runtime) alive() bool {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
 
-	return !rt.dead
+	return !runtime.dead
 }
 
 // ensureExecutable resolves the codex executable against the base
@@ -145,7 +145,7 @@ func (a *Agent) ensureRuntime(ctx context.Context) (*runtime, error) {
 		return nil, err
 	}
 
-	rt, err := a.startRuntime(ctx)
+	runtime, err := a.startRuntime(ctx)
 	if err != nil {
 		a.log.ErrorContext(ctx, "codex app-server start failed", slog.String("reason", err.Error()))
 
@@ -160,9 +160,9 @@ func (a *Agent) ensureRuntime(ctx context.Context) (*runtime, error) {
 		return nil, wire.InternalFailure(vendor, wire.ClassNativeStart)
 	}
 
-	a.runtime = rt
+	a.runtime = runtime
 
-	return rt, nil
+	return runtime, nil
 }
 
 // startRuntime launches one app-server, performs its handshake, and reads the
@@ -224,7 +224,7 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		return nil, startErr
 	}
 
-	rt := &runtime{
+	runtime := &runtime{
 		homeLock:   homeLock,
 		proc:       proc,
 		client:     nativeClient,
@@ -234,7 +234,7 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		home:       home,
 	}
 
-	go a.pump(context.WithoutCancel(ctx), rt)
+	go a.pump(context.WithoutCancel(ctx), runtime)
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, runtimeStartTimeout)
 	defer cancel()
@@ -242,7 +242,7 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 	if initErr := nativeClient.Initialize(handshakeCtx); initErr != nil {
 		failure := process.LaunchFailure(proc, "codex app-server", initErr)
 
-		a.stopGeneration(context.WithoutCancel(ctx), rt)
+		a.stopGeneration(context.WithoutCancel(ctx), runtime)
 
 		return nil, failure
 	}
@@ -251,7 +251,7 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 	if listErr != nil {
 		failure := process.LaunchFailure(proc, "codex app-server", listErr)
 
-		a.stopGeneration(context.WithoutCancel(ctx), rt)
+		a.stopGeneration(context.WithoutCancel(ctx), runtime)
 
 		return nil, failure
 	}
@@ -260,10 +260,10 @@ func (a *Agent) startRuntime(ctx context.Context) (*runtime, error) {
 		models = brokered
 	}
 
-	rt.models = models
+	runtime.models = models
 	started = true
 
-	return rt, nil
+	return runtime, nil
 }
 
 // gatewayModels is the model list of the gateway the active model provider
@@ -322,20 +322,20 @@ func pathFromEnvironment(env []string) string {
 // pump routes every app-server record of one generation to the session that
 // owns its thread. It is the sole reader of the client's channels for the
 // life of the process.
-func (a *Agent) pump(ctx context.Context, rt *runtime) {
-	defer close(rt.done)
+func (a *Agent) pump(ctx context.Context, runtime *runtime) {
+	defer close(runtime.done)
 	defer func() {
-		rt.mu.Lock()
-		for _, queue := range rt.events {
+		runtime.mu.Lock()
+		for _, queue := range runtime.events {
 			close(queue.messages)
 		}
-		rt.mu.Unlock()
-		rt.eventPumps.Wait()
-		a.generationEnded(ctx, rt)
+		runtime.mu.Unlock()
+		runtime.eventPumps.Wait()
+		a.generationEnded(ctx, runtime)
 	}()
 
-	notifications := rt.client.Notifications()
-	requests := rt.client.Requests()
+	notifications := runtime.client.Notifications()
+	requests := runtime.client.Requests()
 
 	for notifications != nil || requests != nil {
 		select {
@@ -348,7 +348,7 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 
 			event := codex.DecodeEvent(notification)
 			if s := a.sessionByThread(event.ThreadID); s != nil {
-				if !a.routeMessage(ctx, rt, s, sessionMessage{event: event}) {
+				if !a.routeMessage(ctx, runtime, s, sessionMessage{event: event}) {
 					return
 				}
 			}
@@ -359,7 +359,7 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 				continue
 			}
 
-			if !a.routeRequest(ctx, rt, request) {
+			if !a.routeRequest(ctx, runtime, request) {
 				return
 			}
 		}
@@ -368,37 +368,37 @@ func (a *Agent) pump(ctx context.Context, rt *runtime) {
 
 // routeMessage keeps each session's publication, callbacks and settlement off
 // the shared reader while preserving their native stream order.
-func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, message sessionMessage) bool {
-	rt.mu.Lock()
+func (a *Agent) routeMessage(ctx context.Context, runtime *runtime, s *session, message sessionMessage) bool {
+	runtime.mu.Lock()
 
 	select {
 	case <-s.closeDone:
-		rt.mu.Unlock()
+		runtime.mu.Unlock()
 
 		if message.request != nil {
-			a.respondUnowned(rt, *message.request)
+			a.respondUnowned(runtime, *message.request)
 		}
 
 		return true
 	default:
 	}
 
-	queue := rt.events[s]
+	queue := runtime.events[s]
 	if queue == nil {
-		if rt.events == nil {
-			rt.events = make(map[*session]*sessionQueue)
+		if runtime.events == nil {
+			runtime.events = make(map[*session]*sessionQueue)
 		}
 
 		queue = &sessionQueue{messages: make(chan sessionMessage, 256), done: make(chan struct{}), exited: make(chan struct{})}
-		rt.events[s] = queue
-		rt.eventPumps.Go(func() { a.pumpSession(ctx, rt, s, queue) })
+		runtime.events[s] = queue
+		runtime.eventPumps.Go(func() { a.pumpSession(ctx, runtime, s, queue) })
 	}
 
 	if queue.stopped {
-		rt.mu.Unlock()
+		runtime.mu.Unlock()
 
 		if message.request != nil {
-			a.respondUnowned(rt, *message.request)
+			a.respondUnowned(runtime, *message.request)
 		}
 
 		return true
@@ -406,39 +406,39 @@ func (a *Agent) routeMessage(ctx context.Context, rt *runtime, s *session, messa
 
 	select {
 	case queue.messages <- message:
-		rt.mu.Unlock()
+		runtime.mu.Unlock()
 
 		return true
 	default:
 		queue.stopped = true
 		close(queue.done)
-		rt.mu.Unlock()
+		runtime.mu.Unlock()
 
 		a.log.ErrorContext(ctx, "codex session event queue exceeded capacity; containing the session", slog.String("session_id", string(s.id)))
 
 		if message.request != nil {
-			a.respondUnowned(rt, *message.request)
+			a.respondUnowned(runtime, *message.request)
 		}
 
 		// Contain only this session; the shared app-server and its peers keep
 		// running. Run off the shared reader so a stalled session cannot pin it.
 		failure := wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: "the host stopped reading this session's notifications"})
 
-		rt.eventPumps.Go(func() { s.contain(ctx, rt, failure) })
+		runtime.eventPumps.Go(func() { s.contain(ctx, runtime, failure) })
 
 		return true
 	}
 }
 
-func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue *sessionQueue) {
+func (a *Agent) pumpSession(ctx context.Context, runtime *runtime, s *session, queue *sessionQueue) {
 	defer close(queue.exited)
 	defer func() {
-		rt.mu.Lock()
+		runtime.mu.Lock()
 		queue.stopped = true
 
 		select {
 		case <-s.closeDone:
-			delete(rt.events, s)
+			delete(runtime.events, s)
 		default:
 		}
 
@@ -449,10 +449,10 @@ func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue 
 				pending = append(pending, *queued.request)
 			}
 		}
-		rt.mu.Unlock()
+		runtime.mu.Unlock()
 
 		for _, request := range pending {
-			a.respondUnowned(rt, request)
+			a.respondUnowned(runtime, request)
 		}
 	}()
 
@@ -464,8 +464,8 @@ func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue 
 			}
 
 			if queued.request != nil {
-				s.handleRequest(rt, *queued.request, queued.request.Params)
-			} else if !s.handleEvent(ctx, rt, queue.done, queued.event) {
+				s.handleRequest(runtime, *queued.request, queued.request.Params)
+			} else if !s.handleEvent(ctx, runtime, queue.done, queued.event) {
 				return
 			}
 		case <-s.closeDone:
@@ -478,18 +478,18 @@ func (a *Agent) pumpSession(ctx context.Context, rt *runtime, s *session, queue 
 
 // routeRequest queues one server request for the session owning its thread.
 // Requests naming no live session are answered as cancelled.
-func (a *Agent) routeRequest(ctx context.Context, rt *runtime, request codex.ServerRequest) bool {
+func (a *Agent) routeRequest(ctx context.Context, runtime *runtime, request codex.ServerRequest) bool {
 	s := a.sessionByThread(codex.RequestThreadID(request.Params))
 	if s == nil {
-		a.respondUnowned(rt, request)
+		a.respondUnowned(runtime, request)
 
 		return true
 	}
 
-	return a.routeMessage(ctx, rt, s, sessionMessage{request: &request})
+	return a.routeMessage(ctx, runtime, s, sessionMessage{request: &request})
 }
 
-func (a *Agent) respondUnowned(rt *runtime, request codex.ServerRequest) {
+func (a *Agent) respondUnowned(runtime *runtime, request codex.ServerRequest) {
 	var response any
 
 	switch request.Method {
@@ -502,12 +502,12 @@ func (a *Agent) respondUnowned(rt *runtime, request codex.ServerRequest) {
 	case codex.RequestMCPElicitation:
 		response = codex.ElicitationCancelResponse()
 	default:
-		_ = rt.client.Respond(request, nil, &codex.RPCError{Code: -32601, Message: "method not found"})
+		_ = runtime.client.Respond(request, nil, &codex.RPCError{Code: -32601, Message: "method not found"})
 
 		return
 	}
 
-	_ = rt.client.Respond(request, response, nil)
+	_ = runtime.client.Respond(request, response, nil)
 }
 
 // sessionByThread resolves a native thread id to its live session.
@@ -530,78 +530,78 @@ func (a *Agent) sessionByThread(threadID string) *session {
 
 // generationEnded records that an app-server generation stopped producing
 // records: every session bound to it learns its incarnation is over.
-func (a *Agent) generationEnded(ctx context.Context, rt *runtime) {
+func (a *Agent) generationEnded(ctx context.Context, runtime *runtime) {
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeShutdownTimeout)
 	defer cancel()
 
-	if err := rt.proc.Shutdown(shutdownCtx, runtimeShutdownGrace); err != nil {
-		_ = rt.proc.Kill()
+	if err := runtime.proc.Shutdown(shutdownCtx, runtimeShutdownGrace); err != nil {
+		_ = runtime.proc.Kill()
 
 		// The lock is released only once the app-server has been reaped; a
 		// replacement writing the same home beside a live child corrupts it.
 		select {
-		case <-rt.proc.Done():
+		case <-runtime.proc.Done():
 		case <-shutdownCtx.Done():
 		}
 	}
 
-	_ = rt.homeLock.Close()
-	_ = rt.proc.Close()
+	_ = runtime.homeLock.Close()
+	_ = runtime.proc.Close()
 
-	rt.mu.Lock()
-	rt.dead = true
-	rt.mu.Unlock()
+	runtime.mu.Lock()
+	runtime.dead = true
+	runtime.mu.Unlock()
 
 	a.mu.Lock()
 	sessions := slices.Collect(maps.Values(a.sessions))
 	a.mu.Unlock()
 
 	for _, s := range sessions {
-		s.runtimeEnded(ctx, rt)
+		s.runtimeEnded(ctx, runtime)
 	}
 
-	a.observe.RecordProcessExit(ctx, "exited", rt.client.Err())
+	a.observe.RecordProcessExit(ctx, "exited", runtime.client.Err())
 }
 
 // stopGeneration runs the native rungs of the shutdown ladder for one
 // generation: signal the process group, wait for the root, join the pump, and
 // release the pipes.
-func (a *Agent) stopGeneration(ctx context.Context, rt *runtime) {
+func (a *Agent) stopGeneration(ctx context.Context, runtime *runtime) {
 	shutdownCtx, cancel := context.WithTimeout(ctx, runtimeShutdownTimeout)
 	defer cancel()
 
-	if err := rt.proc.Shutdown(shutdownCtx, runtimeShutdownGrace); err != nil {
-		_ = rt.proc.Kill()
+	if err := runtime.proc.Shutdown(shutdownCtx, runtimeShutdownGrace); err != nil {
+		_ = runtime.proc.Kill()
 	}
 
 	select {
-	case <-rt.done:
+	case <-runtime.done:
 	case <-shutdownCtx.Done():
-		rt.cancel()
+		runtime.cancel()
 	}
 
 	// Closing the pipes ends the read loop of a pump that outlived the
 	// shutdown, and the join guarantees nothing still writes the cycle state
 	// the caller settles from.
-	_ = rt.proc.Close()
-	<-rt.done
+	_ = runtime.proc.Close()
+	<-runtime.done
 }
 
 // stopRuntime stops the live generation, if any.
 func (a *Agent) stopRuntime(ctx context.Context) {
 	a.runtimeMu.Lock()
-	rt := a.runtime
+	runtime := a.runtime
 	a.runtime = nil
 	a.runtimeMu.Unlock()
 
-	if rt != nil {
-		a.stopGeneration(ctx, rt)
+	if runtime != nil {
+		a.stopGeneration(ctx, runtime)
 	}
 }
 
 // transportFailure recovers the real cause behind a lost app-server stream:
 // the child's exit status and stderr tail where it died, otherwise the
 // transport error.
-func (a *Agent) transportFailure(ctx context.Context, rt *runtime, err error) *acp.RequestError {
-	return wire.TurnFailed(vendor, wire.TransportFailure(ctx, rt.proc, "codex app-server", err, rt.client.Err))
+func (a *Agent) transportFailure(ctx context.Context, runtime *runtime, err error) *acp.RequestError {
+	return wire.TurnFailed(vendor, wire.TransportFailure(ctx, runtime.proc, "codex app-server", err, runtime.client.Err))
 }

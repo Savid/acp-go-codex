@@ -74,15 +74,15 @@ func (s *session) mapPrompt(ctx context.Context, blocks []acp.ContentBlock) (nat
 // rejectImagesForModel refuses image input pre-turn when the selected model's
 // catalog entry says it accepts no images. An absent model, field, or empty
 // list forwards.
-func (s *session) rejectImagesForModel(rt *runtime, prompt nativePrompt) error {
+func (s *session) rejectImagesForModel(runtime *runtime, prompt nativePrompt) error {
 	if prompt.firstImage == nil {
 		return nil
 	}
 
 	model := s.currentModel()
 
-	for index := range rt.models {
-		candidate := &rt.models[index]
+	for index := range runtime.models {
+		candidate := &runtime.models[index]
 		if candidate.ID != model || len(candidate.InputModalities) == 0 {
 			continue
 		}
@@ -187,7 +187,7 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		return wire.CancelledResponse(params), nil
 	}
 
-	rt, err := s.ensureBound(turnCtx)
+	runtime, err := s.ensureBound(turnCtx)
 	if err != nil {
 		if turnCtx.Err() != nil {
 			return wire.CancelledResponse(params), nil
@@ -196,7 +196,7 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		return acp.PromptResponse{}, err
 	}
 
-	if refusal := s.rejectImagesForModel(rt, mapped); refusal != nil {
+	if refusal := s.rejectImagesForModel(runtime, mapped); refusal != nil {
 		return acp.PromptResponse{}, refusal
 	}
 
@@ -236,14 +236,14 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		}
 	}()
 
-	nativeTurnID, err := rt.client.StartTurn(turnCtx, s.turnStart(mapped.input))
+	nativeTurnID, err := runtime.client.StartTurn(turnCtx, s.turnStart(mapped.input))
 	if err != nil {
 		if !s.turnAccepted(t) {
 			if turnCtx.Err() != nil {
 				return wire.CancelledResponse(params), nil
 			}
 
-			return acp.PromptResponse{}, s.dispatchFailure(context.WithoutCancel(ctx), rt, err)
+			return acp.PromptResponse{}, s.dispatchFailure(context.WithoutCancel(ctx), runtime, err)
 		}
 	}
 
@@ -266,24 +266,24 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 			// The native turn ignored the interrupt: contain this session so
 			// nothing still writes the cycle state the response is judged
 			// from, and leave the shared app-server to its peers.
-			rt.stopQueue(s)
-			s.contain(context.WithoutCancel(ctx), rt, wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: "codex did not end the turn after its interrupt"}))
+			runtime.stopQueue(s)
+			s.contain(context.WithoutCancel(ctx), runtime, wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: "codex did not end the turn after its interrupt"}))
 			t.settle(turnContained)
 		}
 	}
 
-	return s.settleTurn(ctx, rt, t, params)
+	return s.settleTurn(ctx, runtime, t, params)
 }
 
 // dispatchFailure classifies a turn the app-server never accepted: a native
 // rejection carries its message as a provider failure, a dead process is a
 // process exit, and everything else is transport.
-func (s *session) dispatchFailure(ctx context.Context, rt *runtime, err error) error {
+func (s *session) dispatchFailure(ctx context.Context, runtime *runtime, err error) error {
 	if rpcErr, ok := errors.AsType[*codex.RPCError](err); ok {
 		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: rpcErr.Message})
 	}
 
-	return s.agent.transportFailure(ctx, rt, err)
+	return s.agent.transportFailure(ctx, runtime, err)
 }
 
 // cycleVerdict is how one cycle ended, in the terms the lifecycle stream and
@@ -323,7 +323,7 @@ func (s *session) judgeCycle(c *cycle, cancelled bool) cycleVerdict {
 // settleTurn is the one settlement point every accepted prompt reaches: the
 // session info, the durable mirror commit, the terminal idle, and only then
 // the response or error.
-func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (s *session) settleTurn(ctx context.Context, runtime *runtime, t *turn, params acp.PromptRequest) (acp.PromptResponse, error) {
 	s.beginSettlement(&t.cycle)
 
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
@@ -343,7 +343,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	case t.ended == turnContained:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.cycleFailure(&t.cycle)}
 	case t.ended == turnTransportEnded:
-		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.agent.transportFailure(settleCtx, rt, nil)}
+		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.agent.transportFailure(settleCtx, runtime, nil)}
 	default:
 		verdict = s.judgeCycle(&t.cycle, false)
 	}
@@ -354,7 +354,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 
 	if err := s.commitMirror(settleCtx); err != nil {
 		s.mu.Lock()
-		s.rt = nil
+		s.runtime = nil
 		s.mu.Unlock()
 		s.fenceStream()
 
