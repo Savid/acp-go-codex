@@ -436,7 +436,7 @@ func (a *Agent) restore(
 		return nil, nil, err
 	}
 
-	path, rows, err := s.hydrate(ctx, stored, runtime.home)
+	path, rows, err := s.hydrate(ctx, stored, runtime)
 	if err != nil {
 		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}

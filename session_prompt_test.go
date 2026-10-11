@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	stdimage "image"
 	"image/png"
 	"os"
@@ -228,31 +229,70 @@ func TestUnfoundInvalidCallReportsAFailedRepair(t *testing.T) {
 	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
 }
 
-// A store that still holds the cut-off call a repaired rollout no longer
-// holds restores and is republished repaired.
+// A store that still holds a cut-off call restores, whether the rollout
+// was already repaired or holds the same call, and both are left repaired.
 func TestRestoreRepairsAStoredCutOffCall(t *testing.T) {
 	t.Parallel()
 
-	store := acpcore.NewInMemorySessionStore()
-	h := newHarness(t, WithSessionStore(store))
-	h.initialize()
+	for _, nativeCutOff := range []bool{false, true} {
+		t.Run(fmt.Sprintf("native_cut_off=%t", nativeCutOff), func(t *testing.T) {
+			t.Parallel()
 
-	cwd := t.TempDir()
-	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
-	require.NoError(t, err)
+			store := acpcore.NewInMemorySessionStore()
+			h := newHarness(t, WithSessionStore(store))
+			h.initialize()
 
-	_, err = h.prompt(session.SessionId, "RUNAWAY", nil)
-	require.Error(t, err)
+			cwd := t.TempDir()
+			session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+			require.NoError(t, err)
 
-	var record sessionRecord
-	rows, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
-	require.NoError(t, err)
-	require.True(t, found)
+			_, err = h.prompt(session.SessionId, "RUNAWAY", nil)
+			require.Error(t, err)
 
-	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
-	require.NoError(t, err)
+			var record sessionRecord
+			rows, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+			require.NoError(t, err)
+			require.True(t, found)
 
-	// The store keeps the row as codex wrote it, before the repair.
+			_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+			require.NoError(t, err)
+
+			unrepaired := cutOffRows(t, rows)
+
+			require.NoError(t, sessionlog.NewMirror(store, string(session.SessionId)).Commit(t.Context(), sessionlog.Rows(unrepaired),
+				func(sessionlog.Tail) (any, error) { return record, nil }))
+
+			if nativeCutOff {
+				require.NoError(t, writeRollout(record.NativePath, unrepaired))
+			}
+
+			_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+			require.NoError(t, err)
+
+			restored, _, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+			require.NoError(t, err)
+
+			_, cutOff, err := codex.RepairCallArguments(restored)
+			require.NoError(t, err)
+			require.Zero(t, cutOff, "the store still holds the cut-off call")
+			require.Empty(t, invalidCall(record.NativePath), "the rollout still holds the cut-off call")
+
+			native, err := readRollout(record.NativePath)
+			require.NoError(t, err)
+			require.Equal(t, native, restored)
+
+			response, err := h.prompt(session.SessionId, "ECHO after", nil)
+			require.NoError(t, err)
+			require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+		})
+	}
+}
+
+// cutOffRows returns rows with the runaway call's arguments as codex wrote
+// them, before any repair.
+func cutOffRows(t *testing.T, rows [][]byte) [][]byte {
+	t.Helper()
+
 	unrepaired := make([][]byte, len(rows))
 
 	for index, row := range rows {
@@ -265,6 +305,8 @@ func TestRestoreRepairsAStoredCutOffCall(t *testing.T) {
 			continue
 		}
 
+		var err error
+
 		payload["arguments"], err = json.Marshal(`{"command":["ls`)
 		require.NoError(t, err)
 		decoded["payload"], err = json.Marshal(payload)
@@ -273,24 +315,5 @@ func TestRestoreRepairsAStoredCutOffCall(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, sessionlog.NewMirror(store, string(session.SessionId)).Commit(t.Context(), sessionlog.Rows(unrepaired),
-		func(sessionlog.Tail) (any, error) { return record, nil }))
-
-	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
-	require.NoError(t, err)
-
-	restored, _, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
-	require.NoError(t, err)
-
-	_, cutOff, err := codex.RepairCallArguments(restored)
-	require.NoError(t, err)
-	require.Zero(t, cutOff, "the store still holds the cut-off call")
-
-	native, err := readRollout(record.NativePath)
-	require.NoError(t, err)
-	require.Len(t, restored, len(native))
-
-	response, err := h.prompt(session.SessionId, "ECHO after", nil)
-	require.NoError(t, err)
-	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+	return unrepaired
 }

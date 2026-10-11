@@ -213,20 +213,27 @@ func appendImage(encoded json.RawMessage, saved storedImage) (json.RawMessage, e
 // store at the path the app-server resolves the thread id to. A
 // disagreement at a shared position, or a row Codex cannot read, fails the
 // restore. It returns the rollout path and the rows the session now holds.
-func (s *session) hydrate(ctx context.Context, stored storedSession, home string) (string, [][]byte, error) {
-	path, err := hydratePath(stored, home)
+func (s *session) hydrate(ctx context.Context, stored storedSession, runtime *runtime) (string, [][]byte, error) {
+	path, err := hydratePath(stored, runtime.home)
 	if err != nil {
 		return "", nil, err
 	}
 
 	nativeID := stored.record.NativeSessionID
 
-	// A repair whose commit never landed leaves the store with a cut-off call
-	// the rollout no longer holds; the stored copy is repaired the same way so
-	// the two agree, and the next commit republishes it whole.
+	// A stored cut-off call is repaired on both sides: the store's copy, and
+	// the rollout, which holds the same call unless a turn-time repair already
+	// rewrote it. The two then agree, and the next commit republishes the
+	// history whole.
 	storedRows, repaired, err := codex.RepairCallArguments(stored.rows)
 	if err != nil {
 		return "", nil, err
+	}
+
+	if repaired > 0 {
+		if repairErr := s.repairRestoredRollout(ctx, runtime, nativeID, path); repairErr != nil {
+			return "", nil, repairErr
+		}
 	}
 
 	rows, err := s.mirror.Hydrate(ctx, path, storedRows, stored.record, func(rows [][]byte) error {
@@ -251,6 +258,24 @@ func (s *session) hydrate(ctx context.Context, stored storedSession, home string
 	}
 
 	return path, rows, nil
+}
+
+// repairRestoredRollout repairs the cut-off calls in a rollout about to be
+// restored. The thread is unloaded first so no app-server writes the file
+// while it is rewritten.
+func (s *session) repairRestoredRollout(ctx context.Context, runtime *runtime, nativeID, path string) error {
+	ctx, cancel := context.WithTimeout(ctx, threadRepairTimeout)
+	defer cancel()
+
+	if err := runtime.client.UnloadThread(ctx, nativeID); err != nil {
+		return fmt.Errorf("unload thread for repair: %w", err)
+	}
+
+	if _, err := repairRollout(path); err != nil {
+		return fmt.Errorf("repair rollout: %w", err)
+	}
+
+	return nil
 }
 
 // hydratePath is where the stored rollout is resident in home. A committed
