@@ -264,6 +264,7 @@ func TestInvalidOptionsVerdict(t *testing.T) {
 		{"whitespace model", fieldConfiguredModels, WithConfiguredModels([]string{" a"})},
 		{"", "env", WithEnv(map[string]string{"": "x"})},
 		{"", "codexConfigOverrides", WithCodexConfigOverrides(map[string]any{"shell_environment_policy.set.X": "1"})},
+		{"unload delay", "codexConfigOverrides", WithCodexConfigOverrides(map[string]any{"thread_unload_delay_secs": 60})},
 		{"", "imageLimits", WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1})},
 		{"", "concurrencyLimits", WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1})},
 		{"", "inputHandoffRoot", WithInputHandoffRoot("relative")},

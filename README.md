@@ -65,7 +65,8 @@ Options: `WithExecutablePath`, `WithHome`, `WithScratchDir`,
 `WithCodexConfigOverrides` passes `-c key=value` to the app-server; the
 `shell_environment_policy` keyspace is reserved for session environments.
 The app-server runs with `-c thread_unload_delay_secs=0`, so a thread leaves
-memory as soon as its session closes.
+memory as soon as its session closes and the cut-off call repair can reload
+it; an override of that key fails construction.
 
 ### Session options
 

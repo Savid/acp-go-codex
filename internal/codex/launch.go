@@ -14,6 +14,10 @@ const (
 	EnvHome      = "HOME"
 )
 
+// ThreadUnloadDelayKey is the config key the launch sets to unload idle
+// unsubscribed threads at once; overrides may not set it.
+const ThreadUnloadDelayKey = "thread_unload_delay_secs"
+
 // Launch describes one app-server process.
 type Launch struct {
 	// ConfigOverrides are passed as -c key=value, sorted by key.
@@ -26,7 +30,7 @@ type Launch struct {
 // is ready to resume without waiting out the default delay.
 func (l Launch) Args() []string {
 	args := make([]string, 0, 7+2*len(l.ConfigOverrides))
-	args = append(args, "app-server", "--listen", "stdio://", "--disable", "plugins", "-c", "thread_unload_delay_secs=0")
+	args = append(args, "app-server", "--listen", "stdio://", "--disable", "plugins", "-c", ThreadUnloadDelayKey+"=0")
 
 	for _, key := range slices.Sorted(maps.Keys(l.ConfigOverrides)) {
 		args = append(args, "-c", key+"="+tomlValue(l.ConfigOverrides[key]))

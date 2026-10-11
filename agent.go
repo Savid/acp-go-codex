@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
+	"github.com/savid/acp-go-codex/internal/codex"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/image"
 	"github.com/savid/acp-go-core/lifecycle"
@@ -178,6 +179,10 @@ func validateConfigOverrides(overrides map[string]any) error {
 
 		if key == "shell_environment_policy" || strings.HasPrefix(key, "shell_environment_policy.") {
 			return fmt.Errorf("config override %q is owned by the session environment", key)
+		}
+
+		if key == codex.ThreadUnloadDelayKey {
+			return fmt.Errorf("config override %q is owned by the thread repair", key)
 		}
 	}
 
