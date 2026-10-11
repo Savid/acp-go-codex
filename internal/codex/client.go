@@ -202,8 +202,7 @@ func IsMissingThread(err error, threadID string) bool {
 		rpcErr.Message == "no rollout found for thread id "+threadID
 }
 
-// UnsubscribeThread releases the app-server's thread subscription. An
-// app-server without the method is not a failure.
+// UnsubscribeThread releases the app-server's thread subscription.
 func (c *Client) UnsubscribeThread(ctx context.Context, threadID string) error {
 	return c.Call(ctx, methodThreadUnsubscribe, map[string]any{fieldThreadID: threadID}, nil)
 }
