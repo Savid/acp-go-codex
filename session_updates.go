@@ -42,10 +42,11 @@ type cycleState struct {
 	// session with structured output.
 	agentText strings.Builder
 	// streamed holds what each open item already streamed, so its terminal
-	// frame contributes only the suffix. A completed item leaves it; the last
-	// one stays in completed so a repeated terminal frame adds nothing.
-	streamed  map[string]string
-	completed struct{ key, text string }
+	// frame contributes only the suffix. A completed item is released once
+	// the next one completes; the last one stays so a repeated terminal frame
+	// adds nothing.
+	streamed  wire.StreamedText
+	completed string
 	// tools holds each tool call until the app-server completes its item.
 	tools map[string]*toolState
 }
@@ -147,10 +148,6 @@ func (s *session) projectEvent(ctx context.Context, c *cycle, event codex.Event)
 // emitText projects agent or reasoning text as append-only deltas: a
 // completed frame contributes only what its deltas did not carry.
 func (s *session) emitText(ctx context.Context, state *cycleState, event codex.Event, thought bool) error {
-	if state.streamed == nil {
-		state.streamed = make(map[string]string)
-	}
-
 	key := event.ItemID
 	if thought {
 		key = "reasoning:" + key
@@ -158,16 +155,15 @@ func (s *session) emitText(ctx context.Context, state *cycleState, event codex.E
 
 	text := event.Text
 
-	switch {
-	case event.Completed && key == state.completed.key:
-		text = wire.UnstreamedSuffix(state.completed.text, text)
-		state.completed.text += text
-	case event.Completed:
-		text = wire.UnstreamedSuffix(state.streamed[key], text)
-		state.completed.key, state.completed.text = key, state.streamed[key]+text
-		delete(state.streamed, key)
-	default:
-		state.streamed[key] += text
+	if event.Completed {
+		if key != state.completed {
+			state.streamed.Forget(state.completed)
+			state.completed = key
+		}
+
+		text = state.streamed.Suffix(key, text)
+	} else {
+		state.streamed.Add(key, text)
 	}
 
 	if text == "" {
