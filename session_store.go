@@ -15,6 +15,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 
 	"github.com/savid/acp-go-codex/internal/codex"
+	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
@@ -83,9 +84,6 @@ func (s *session) commitMirror(ctx context.Context) error {
 		return nil
 	}
 
-	s.mirrorMu.Lock()
-	defer s.mirrorMu.Unlock()
-
 	s.mu.Lock()
 	path := s.rolloutPath
 	s.mu.Unlock()
@@ -94,8 +92,11 @@ func (s *session) commitMirror(ctx context.Context) error {
 		return errors.New("session has no rollout to mirror")
 	}
 
-	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
-	err := s.mirror.Commit(commitCtx, sessionlog.File(path), s.record())
+	// The record is sampled under the mirror's lock after the read, so it
+	// describes the rows it is committed with; it takes s.mu, which is never
+	// held across a commit.
+	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
+	err := s.mirror.Commit(commitCtx, sessionlog.File(path), func(sessionlog.Tail) (any, error) { return s.record(), nil })
 	finish(err)
 
 	if err != nil {
@@ -118,7 +119,7 @@ type storedSession struct {
 
 // loadStored reads the native rows and required current configuration.
 func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (storedSession, error) {
-	loadCtx, finish := a.observe.StartSessionStore(ctx, "load")
+	loadCtx, finish := a.observe.StartSessionStore(ctx, observer.SessionStoreLoad)
 
 	var record sessionRecord
 
@@ -138,7 +139,7 @@ func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (stored
 
 // loadStoredRecord reads only the configuration of a stored session.
 func (a *Agent) loadStoredRecord(ctx context.Context, sessionID acp.SessionId) (sessionRecord, bool, error) {
-	loadCtx, finish := a.observe.StartSessionStore(ctx, "load")
+	loadCtx, finish := a.observe.StartSessionStore(ctx, observer.SessionStoreLoadRecord)
 
 	var record sessionRecord
 

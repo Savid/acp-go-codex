@@ -89,11 +89,10 @@ type session struct {
 	// persisted marks a session this adapter committed to the store.
 	persisted bool
 	// mirror publishes the session's generations to the store.
-	mirror   *sessionlog.Mirror
-	openMu   sync.Mutex
-	mirrorMu sync.Mutex
-	lcMu     sync.Mutex
-	lc       lifecycle.Publisher
+	mirror *sessionlog.Mirror
+	openMu sync.Mutex
+	lcMu   sync.Mutex
+	lc     lifecycle.Publisher
 }
 
 // cycle is one foreground run: the work of one accepted prompt.
