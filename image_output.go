@@ -297,9 +297,19 @@ func (s *session) publishImageTerminal(ctx context.Context, state *cycleState, e
 		return wire.TurnFailed(vendor, failure.TurnFailure())
 	}
 
+	saved := storedImage{ID: id, Kind: event.Kind, Data: output.Data, MIME: output.MIME}
+
 	s.mu.Lock()
-	s.images = append(s.images, storedImage{ID: id, Kind: event.Kind, Data: output.Data, MIME: output.MIME})
+
+	images, err := appendImage(s.images, saved)
+	if err == nil {
+		s.images = images
+	}
 	s.mu.Unlock()
+
+	if err != nil {
+		return err
+	}
 
 	state.imagesEmitted = true
 

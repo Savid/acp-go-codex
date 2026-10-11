@@ -36,6 +36,20 @@ func (s *commitBarrier) Replace(ctx context.Context, key acpcore.SessionKey, rep
 
 	return s.SessionStore.Replace(ctx, key, replacements)
 }
+
+func (s *commitBarrier) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.block.CompareAndSwap(true, false) {
+		s.entered <- key
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
+}
+
 func TestEstablishmentExcludesPrompt(t *testing.T) {
 	for _, phase := range []string{"new", "cold_load"} {
 		t.Run(phase, func(t *testing.T) {
@@ -61,7 +75,9 @@ func TestEstablishmentExcludesPrompt(t *testing.T) {
 					_, err := h.conn.NewSession(ctx, wire.NewSessionRequest(cwd))
 					done <- err
 				} else {
-					_, err := h.conn.LoadSession(ctx, wire.LoadSessionRequest(id, cwd))
+					// A changed carrier makes the restore commit a new configuration.
+					option := wire.WithSessionMetaValue(map[string]any{"codex": map[string]any{"options": map[string]any{"env": map[string]string{"RESTORE_TEST": "changed"}}}})
+					_, err := h.conn.LoadSession(ctx, wire.LoadSessionRequest(id, cwd, option))
 					done <- err
 				}
 			}()

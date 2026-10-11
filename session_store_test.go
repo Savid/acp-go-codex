@@ -1,11 +1,14 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,7 +40,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 7)
 
-	records, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	records, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: sessionlog.ConfigSubpath})
 	require.NoError(t, err)
 	require.NotEmpty(t, records)
 
@@ -45,7 +48,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 	require.NoError(t, json.Unmarshal(records[len(records)-1], &record))
 	require.Equal(t, cwd, record.Cwd)
 	require.Equal(t, "low", record.Effort)
-	require.NotEmpty(t, record.RolloutPath)
+	require.NotEmpty(t, record.NativePath)
 
 	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
@@ -83,7 +86,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 
 	// Deleting the native rollout leaves the store as the only copy; resume
 	// materializes it back into the home at the path the app-server resolves.
-	require.NoError(t, os.Remove(record.RolloutPath))
+	require.NoError(t, os.Remove(record.NativePath))
 
 	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
 	require.NoError(t, err)
@@ -92,7 +95,7 @@ func TestMirrorListLoadResumeDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, matches, 1)
 
-	materialized, err := codex.ReadRows(matches[0])
+	materialized, err := readRollout(matches[0])
 	require.NoError(t, err)
 	require.Len(t, materialized, 13)
 
@@ -131,17 +134,17 @@ func TestRestoreRefusesDisagreement(t *testing.T) {
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
 
-	records, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	records, err := loadEntries(context.Background(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: sessionlog.ConfigSubpath})
 	require.NoError(t, err)
 
 	var record sessionRecord
 	require.NoError(t, json.Unmarshal(records[len(records)-1], &record))
 
-	rows, err := codex.ReadRows(record.RolloutPath)
+	rows, err := readRollout(record.NativePath)
 	require.NoError(t, err)
 
 	rows[1] = []byte(`{"type":"event_msg","payload":{"type":"user_message","message":"tampered"}}`)
-	require.NoError(t, codex.WriteRows(record.RolloutPath, rows))
+	require.NoError(t, writeRollout(record.NativePath, rows))
 
 	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
 	require.Equal(t, "codex_restore_failed", requestErrorData(t, err)["error"])
@@ -175,7 +178,7 @@ func TestConfigurationCommitsWithoutNewNativeRows(t *testing.T) {
 	require.NoError(t, err)
 	_, err = h.conn.SetSessionConfigOption(h.ctx(), SetModelRequest(session.SessionId, "fake/text"))
 	require.NoError(t, err)
-	records, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	records, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: sessionlog.ConfigSubpath})
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	var record sessionRecord
@@ -201,7 +204,7 @@ func TestMalformedStoreRecordFailsRestore(t *testing.T) {
 	main := acpcore.SessionKey{SessionID: string(session.SessionId)}
 	require.NoError(t, store.Replace(t.Context(), main, []acpcore.SessionStoreReplacement{
 		{Key: main, Entries: rows},
-		{Key: acpcore.SessionKey{SessionID: main.SessionID, Subpath: configSubpath}, Entries: []acpcore.SessionStoreEntry{[]byte(`{"sessionId":"wrong"}`)}},
+		{Key: acpcore.SessionKey{SessionID: main.SessionID, Subpath: sessionlog.ConfigSubpath}, Entries: []acpcore.SessionStoreEntry{[]byte(`{"sessionId":"wrong"}`)}},
 	}))
 	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, t.TempDir()))
 	require.Equal(t, "codex_restore_failed", requestErrorData(t, err)["error"])
@@ -218,6 +221,14 @@ func (s *mirrorFaultStore) Replace(ctx context.Context, key acpcore.SessionKey, 
 	}
 
 	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func (s *mirrorFaultStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("mirror unavailable")
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 func TestMirrorFailureFencesTurnAndAllowsRetry(t *testing.T) {
@@ -358,7 +369,7 @@ func TestLiveResumeAppliesOptionsAndRetainsDirectories(t *testing.T) {
 	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd,
 		WithSessionCodexOptions(NewCodexOptions(WithCodexModel("text-only")))))
 	require.NoError(t, err)
-	rows, err := loadEntries(h.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	rows, err := loadEntries(h.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: sessionlog.ConfigSubpath})
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	var record sessionRecord
@@ -388,15 +399,15 @@ func TestRestoreIntoDifferentNativeHome(t *testing.T) {
 	require.NoError(t, err)
 	_, err = restored.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
-	rows, err := loadEntries(restored.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	rows, err := loadEntries(restored.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: sessionlog.ConfigSubpath})
 	require.NoError(t, err)
 	var record sessionRecord
 	require.Len(t, rows, 1)
 	require.NoError(t, json.Unmarshal(rows[0], &record))
-	relative, err := filepath.Rel(home, record.RolloutPath)
+	relative, err := filepath.Rel(home, record.NativePath)
 	require.NoError(t, err)
 	require.True(t, filepath.IsLocal(relative))
-	require.FileExists(t, record.RolloutPath)
+	require.FileExists(t, record.NativePath)
 }
 
 func TestRestoreAcceptsACommittedEmptyConversation(t *testing.T) {
@@ -420,7 +431,7 @@ func TestRestoreAcceptsACommittedEmptyConversation(t *testing.T) {
 	// A generation whose main record is live but empty is a conversation whose
 	// native history is still empty, not a missing one.
 	main := acpcore.SessionKey{SessionID: string(session.SessionId)}
-	config := acpcore.SessionKey{SessionID: main.SessionID, Subpath: configSubpath}
+	config := acpcore.SessionKey{SessionID: main.SessionID, Subpath: sessionlog.ConfigSubpath}
 
 	records, err := loadEntries(t.Context(), store, config)
 	require.NoError(t, err)
@@ -454,7 +465,7 @@ func TestEmptyConversationCommitsItsConfiguration(t *testing.T) {
 	require.Empty(t, rows)
 
 	var record sessionRecord
-	require.NoError(t, json.Unmarshal(generation[configSubpath][0], &record))
+	require.NoError(t, json.Unmarshal(generation[sessionlog.ConfigSubpath][0], &record))
 	require.Equal(t, "low", record.Effort)
 
 	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
@@ -478,7 +489,7 @@ func TestEmptyConversationCommitsItsConfiguration(t *testing.T) {
 	require.NotEqual(t, session.Meta, resumed.Meta)
 	after, err = store.Load(t.Context(), string(session.SessionId))
 	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(after[configSubpath][0], &record))
+	require.NoError(t, json.Unmarshal(after[sessionlog.ConfigSubpath][0], &record))
 	require.Equal(t, string(session.SessionId), record.SessionID)
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), resumed.Meta)
 	require.Equal(t, "low", record.Effort)
@@ -515,7 +526,7 @@ func TestEmptyConversationRecoversInAnotherNativeHome(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), resumed.Meta)
-	relative, err := filepath.Rel(home, record.RolloutPath)
+	relative, err := filepath.Rel(home, record.NativePath)
 	require.NoError(t, err)
 	require.True(t, filepath.IsLocal(relative), "the new binding names a rollout outside the resuming home")
 
@@ -548,8 +559,8 @@ func TestEmptyConversationRefusesAForeignRolloutPath(t *testing.T) {
 		codex.RolloutPath(h.home, "00000000-0000-4000-8000-00000000abcd", time.Now()),
 		filepath.Join(t.TempDir(), "notes.jsonl"),
 	} {
-		record.RolloutPath = foreign
-		require.NoError(t, sessionlog.Commit(t.Context(), store, string(created.SessionId), rows, record))
+		record.NativePath = foreign
+		require.NoError(t, sessionlog.NewMirror(store, string(created.SessionId)).Commit(t.Context(), sessionlog.Rows(rows), record))
 		_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
 		require.Equal(t, "codex_restore_failed", requestErrorData(t, err)["error"], foreign)
 	}
@@ -573,17 +584,17 @@ func TestRestoreAdoptsRowsAppendedOutsideACP(t *testing.T) {
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
 
-	records, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: configSubpath})
+	records, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: sessionlog.ConfigSubpath})
 	require.NoError(t, err)
 
 	var record sessionRecord
 	require.NoError(t, json.Unmarshal(records[0], &record))
 
-	rows, err := codex.ReadRows(record.RolloutPath)
+	rows, err := readRollout(record.NativePath)
 	require.NoError(t, err)
 
 	native := append(rows, []byte(`{"type":"event_msg","payload":{"type":"agent_message","message":"continued natively"}}`))
-	require.NoError(t, codex.WriteRows(record.RolloutPath, native))
+	require.NoError(t, writeRollout(record.NativePath, native))
 
 	before := len(h.rec.snapshot())
 
@@ -618,7 +629,8 @@ func TestNativeHomeLockRefusesASecondRuntime(t *testing.T) {
 func TestCommitWithNoRolloutIsAFailure(t *testing.T) {
 	t.Parallel()
 
-	s := &session{agent: NewAgent(), id: "sess-1"}
+	agent := NewAgent()
+	s := &session{agent: agent, id: "sess-1", mirror: sessionlog.NewMirror(agent.store, "sess-1")}
 	require.Error(t, s.commitMirror(t.Context()),
 		"a commit the session cannot attempt was reported as a durable generation")
 
@@ -640,7 +652,7 @@ func TestResidualNativeStateIsNeverAdopted(t *testing.T) {
 	orphan := "00000000-0000-4000-8000-00000000abcd"
 	cwd := t.TempDir()
 	path := codex.RolloutPath(h.home, orphan, time.Now())
-	require.NoError(t, codex.WriteRows(path, [][]byte{
+	require.NoError(t, writeRollout(path, [][]byte{
 		[]byte(`{"type":"session_meta","payload":{"id":"` + orphan + `","timestamp":"2026-09-15T00:00:00Z","cwd":"` + cwd + `"}}`),
 	}))
 
@@ -668,6 +680,14 @@ func (s *recoveryFaultStore) Replace(ctx context.Context, main acpcore.SessionKe
 	return s.SessionStore.Replace(ctx, main, replacements)
 }
 
+func (s *recoveryFaultStore) Append(ctx context.Context, main acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("injected store failure")
+	}
+
+	return s.SessionStore.Append(ctx, main, base, entries, replacements)
+}
+
 func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	t.Parallel()
 	store := acpcore.NewInMemorySessionStore()
@@ -688,7 +708,7 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
 	id := acp.SessionId("acp-conversation-independent-of-native-id")
 	record.SessionID = string(id)
-	require.NoError(t, sessionlog.Commit(t.Context(), store, string(id), rows, record))
+	require.NoError(t, sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), record))
 	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
 
 	before := len(h.rec.snapshot())
@@ -745,6 +765,22 @@ func (s *blockedCommitStore) Replace(ctx context.Context, key acpcore.SessionKey
 	}
 
 	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func (s *blockedCommitStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.blockID.Load() == key.SessionID {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 func TestPeerPromptCompletesDuringMirrorCommit(t *testing.T) {
@@ -898,14 +934,20 @@ func TestDeleteWinsAgainstPreparedLoad(t *testing.T) {
 // countingStore counts the writes a session makes to the store.
 type countingStore struct {
 	acpcore.SessionStore
-	replaces atomic.Int32
-	deletes  atomic.Int32
+	writes  atomic.Int32
+	deletes atomic.Int32
 }
 
 func (s *countingStore) Replace(ctx context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
-	s.replaces.Add(1)
+	s.writes.Add(1)
 
 	return s.SessionStore.Replace(ctx, main, replacements)
+}
+
+func (s *countingStore) Append(ctx context.Context, main acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	s.writes.Add(1)
+
+	return s.SessionStore.Append(ctx, main, base, entries, replacements)
 }
 
 func (s *countingStore) Delete(ctx context.Context, key acpcore.SessionKey) error {
@@ -940,7 +982,7 @@ func TestEphemeralSessionNeverReachesTheStore(t *testing.T) {
 	_, err = h.conn.UnstableDeleteSession(h.ctx(), wire.DeleteSessionRequest(session.SessionId))
 	require.NoError(t, err)
 
-	require.Zero(t, store.replaces.Load(), "an ephemeral session is never mirrored")
+	require.Zero(t, store.writes.Load(), "an ephemeral session is never mirrored")
 	require.Zero(t, store.deletes.Load(), "deleting an ephemeral session leaves no tombstone")
 
 	generation, err := store.Load(t.Context(), string(session.SessionId))
@@ -950,7 +992,7 @@ func TestEphemeralSessionNeverReachesTheStore(t *testing.T) {
 	// A session opened without the flag still mirrors.
 	_, err = h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
 	require.NoError(t, err)
-	require.Positive(t, store.replaces.Load())
+	require.Positive(t, store.writes.Load())
 }
 
 func TestSessionMetaIsRefusedOnRestoreAndUnknownFields(t *testing.T) {
@@ -982,4 +1024,144 @@ func TestSessionMetaIsRefusedOnRestoreAndUnknownFields(t *testing.T) {
 	data = requestErrorData(t, err)
 	require.Equal(t, "unsupported", data["error"])
 	require.Equal(t, "_meta."+wire.SessionMetaKey+".persist", data["field"])
+}
+
+// appendRecorder records each append a session makes to the store.
+type appendRecorder struct {
+	acpcore.SessionStore
+	appends  atomic.Int32
+	rows     atomic.Int32
+	configs  atomic.Int32
+	replaces atomic.Int32
+}
+
+func (s *appendRecorder) Replace(ctx context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	s.replaces.Add(1)
+
+	return s.SessionStore.Replace(ctx, main, replacements)
+}
+
+func (s *appendRecorder) Append(ctx context.Context, main acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	s.appends.Add(1)
+	s.rows.Add(int32(len(entries)))
+	s.configs.Add(int32(len(replacements)))
+
+	return s.SessionStore.Append(ctx, main, base, entries, replacements)
+}
+
+func (s *appendRecorder) reset() {
+	s.appends.Store(0)
+	s.rows.Store(0)
+	s.configs.Store(0)
+	s.replaces.Store(0)
+}
+
+// A turn appends only the rollout rows it added; an unchanged configuration
+// is not rewritten, and a configuration change rewrites no rows.
+func TestCommitsAppendOnlyWhatChanged(t *testing.T) {
+	t.Parallel()
+
+	store := &appendRecorder{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "ECHO first", nil)
+	require.NoError(t, err)
+
+	store.reset()
+
+	_, err = h.prompt(session.SessionId, "ECHO second", nil)
+	require.NoError(t, err)
+	require.Zero(t, store.replaces.Load(), "a turn republished the whole generation")
+	require.EqualValues(t, 1, store.appends.Load())
+	require.Positive(t, store.rows.Load())
+	require.Zero(t, store.configs.Load(), "an unchanged configuration was rewritten")
+
+	store.reset()
+
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, configMode, "plan"))
+	require.NoError(t, err)
+	require.Zero(t, store.replaces.Load())
+	require.Zero(t, store.rows.Load(), "a configuration change rewrote native rows")
+	require.EqualValues(t, 1, store.configs.Load())
+
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+
+	var record sessionRecord
+	_, found, err := sessionlog.Load(t.Context(), store, string(session.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	native, err := readRollout(record.NativePath)
+	require.NoError(t, err)
+	require.Len(t, rows, len(native))
+	require.Equal(t, "ECHO first", record.Title)
+	require.Equal(t, "plan", record.Mode)
+}
+
+func TestImagesKeepTheirEncoding(t *testing.T) {
+	t.Parallel()
+
+	first := storedImage{ID: "a", Kind: "imageGeneration", Data: "AAAA", MIME: "image/png"}
+	second := storedImage{ID: "b", Kind: "imageView", Data: "BBBB", MIME: "image/jpeg"}
+
+	one, err := appendImage(nil, first)
+	require.NoError(t, err)
+
+	two, err := appendImage(one, second)
+	require.NoError(t, err)
+
+	decoded, err := decodeImages(one)
+	require.NoError(t, err)
+	require.Equal(t, []storedImage{first}, decoded)
+
+	decoded, err = decodeImages(two)
+	require.NoError(t, err)
+	require.Equal(t, []storedImage{first, second}, decoded)
+
+	_, err = decodeImages(json.RawMessage(`[{"id":"a","extra":1}]`))
+	require.Error(t, err, "an unknown image field was accepted")
+
+	_, err = decodeImages(json.RawMessage(`[] []`))
+	require.Error(t, err, "trailing image data was accepted")
+}
+
+// BenchmarkTurnCommit measures one turn's commit on a long rollout: ten new
+// rows after a 20000-row history.
+func BenchmarkTurnCommit(b *testing.B) {
+	agent := NewAgent()
+	b.Cleanup(func() { _ = agent.Close() })
+
+	threadID := "00000000-0000-4000-8000-000000000001"
+	path := codex.RolloutPath(b.TempDir(), threadID, time.Now())
+	meta := []byte(`{"timestamp":"2026-10-11T00:00:00Z","type":"session_meta","payload":{"id":"` + threadID + `","timestamp":"2026-10-11T00:00:00Z"}}`)
+	row := []byte(`{"timestamp":"2026-10-11T00:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + strings.Repeat("x", 1000) + `"}]}}`)
+
+	rows := make([][]byte, 0, 20001)
+	rows = append(rows, meta)
+
+	for range 20000 {
+		rows = append(rows, row)
+	}
+
+	require.NoError(b, writeRollout(path, rows))
+
+	s := &session{agent: agent, id: acp.SessionId(threadID), nativeID: threadID, cwd: b.TempDir(), rolloutPath: path,
+		mirror: sessionlog.NewMirror(agent.store, threadID)}
+	require.NoError(b, s.commitMirror(b.Context()))
+
+	turn := bytes.Repeat(append(slices.Clone(row), '\n'), 10)
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(b, err)
+		_, err = file.Write(turn)
+		require.NoError(b, err)
+		require.NoError(b, file.Close())
+		require.NoError(b, s.commitMirror(b.Context()))
+	}
 }

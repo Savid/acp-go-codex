@@ -20,6 +20,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -473,6 +474,20 @@ func (w *requestWriter) cancelPrompt() error {
 		return err
 	}
 	_, err = w.Writer.Write(append(data, '\n'))
+
+	return err
+}
+
+// readRollout reads every row of a rollout file.
+func readRollout(path string) ([][]byte, error) {
+	tail, err := sessionlog.ReadJSONL(path, sessionlog.Cursor{})
+
+	return tail.Rows, err
+}
+
+// writeRollout materializes rows as a rollout file.
+func writeRollout(path string, rows [][]byte) error {
+	_, err := sessionlog.WriteJSONL(path, rows)
 
 	return err
 }

@@ -538,7 +538,7 @@ func (f *fakeCodex) resumeThread(id json.RawMessage, params map[string]any) {
 		return
 	}
 
-	rows, err := codex.ReadRows(matches[0])
+	rows, err := readRollout(matches[0])
 	if err != nil || len(rows) == 0 {
 		f.fail(id, -32000, "rollout unreadable")
 

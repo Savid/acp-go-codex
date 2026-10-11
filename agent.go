@@ -38,7 +38,7 @@ const (
 	// SessionStoreFormat identifies the store layout this package writes: raw
 	// Codex rollout rows under the main subpath plus the adapter's session
 	// record under the config subpath.
-	SessionStoreFormat = "codex-rollout-jsonl-v1"
+	SessionStoreFormat = "codex-rollout-jsonl-v2"
 
 	vendor = "codex"
 

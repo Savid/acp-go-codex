@@ -20,6 +20,7 @@ import (
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -240,6 +241,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 	s.id = acp.SessionId(thread.ID)
 	s.nativeID = thread.ID
+	s.mirror = sessionlog.NewMirror(a.store, string(s.id))
 	s.bind(rt, thread)
 	s.rawEvents = wire.NewRawEvents(vendor, string(s.id), vendor, start.meta.rawEvents)
 
@@ -415,12 +417,18 @@ func (a *Agent) restore(
 		start.additionalDirectories = slices.Clone(stored.record.AdditionalDirectories)
 	}
 
+	images, err := decodeImages(stored.record.Images)
+	if err != nil {
+		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
+	}
+
 	s := a.newSession(start)
 	s.id = sessionID
 	s.nativeID = stored.record.NativeSessionID
+	s.mirror = sessionlog.NewMirror(a.store, string(sessionID))
 	s.rawEvents = wire.NewRawEvents(vendor, string(sessionID), vendor, start.meta.rawEvents)
-	s.title = storedTitle(stored.record.NativeSessionID, stored.rows)
-	s.images = slices.Clone(stored.record.Images)
+	s.title = stored.record.Title
+	s.images = stored.record.Images
 	s.mode = cmp.Or(stored.record.Mode, modeDefault)
 
 	rt, err := a.ensureRuntime(ctx)
@@ -428,17 +436,16 @@ func (a *Agent) restore(
 		return nil, nil, err
 	}
 
-	path, rows, err := a.hydrate(ctx, sessionID, stored, rt.home)
+	path, rows, err := s.hydrate(ctx, stored, rt.home)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	s.rolloutPath = path
-	s.mirrored = len(rows)
 
 	thread, err := s.resumeStoredThread(ctx, rt, rows)
 	if err != nil {
-		return nil, nil, a.restoreRefused(ctx, sessionID, err)
+		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	s.bind(rt, thread)
@@ -469,11 +476,11 @@ func (a *Agent) restore(
 		_ = s.close(context.WithoutCancel(ctx))
 		a.detach(ctx, s)
 
-		return nil, nil, a.restoreRefused(ctx, sessionID, err)
+		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	if replay {
-		if err := s.replay(ctx, rows, stored.record.Images); err != nil {
+		if err := s.replay(ctx, rows, images); err != nil {
 			release()
 
 			_ = s.close(context.WithoutCancel(ctx))
@@ -517,7 +524,14 @@ func (a *Agent) restoreActive(ctx context.Context, s *session, replay bool, rele
 		return nil, nil, err
 	}
 
-	if err := s.replay(ctx, stored.rows, stored.record.Images); err != nil {
+	images, err := decodeImages(stored.record.Images)
+	if err != nil {
+		release()
+
+		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, s.id, err)
+	}
+
+	if err := s.replay(ctx, stored.rows, images); err != nil {
 		release()
 
 		return nil, nil, err
@@ -644,25 +658,26 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 			continue
 		}
 
-		stored, loadErr := a.loadStored(ctx, id)
+		record, found, loadErr := a.loadStoredRecord(ctx, id)
 		if loadErr != nil {
+			a.log.ErrorContext(ctx, "codex session listing failed",
+				slog.String("session_id", string(id)), slog.String("reason", loadErr.Error()))
+
 			return acp.ListSessionsResponse{}, wire.InternalFailure(vendor, "")
 		}
 
-		cwd := stored.record.Cwd
-
-		if filter != "" && cwd != filter {
+		if !found || filter != "" && record.Cwd != filter {
 			continue
 		}
 
-		title := storedTitle(stored.record.NativeSessionID, stored.rows)
+		title := cmp.Or(record.Title, string(id))
 		updatedAt := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
 
 		sessions = append(sessions, acp.SessionInfo{
-			Meta:                  wire.NativeSessionMeta(vendor, stored.record.NativeSessionID),
+			Meta:                  wire.NativeSessionMeta(vendor, record.NativeSessionID),
 			SessionId:             id,
-			Cwd:                   cwd,
-			AdditionalDirectories: slices.Clone(stored.record.AdditionalDirectories),
+			Cwd:                   record.Cwd,
+			AdditionalDirectories: record.AdditionalDirectories,
 			Title:                 &title,
 			UpdatedAt:             &updatedAt,
 		})

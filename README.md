@@ -155,10 +155,13 @@ login, or a ChatGPT account with no window, answers
 
 `WithSessionStore` mirrors the thread's rollout rows under the main subpath
 and the adapter's session record under `config`, format
-`codex-rollout-jsonl-v1`. `session/load` and `session/resume` prefer the
-rollout in Codex's home when it is at least as long as the stored copy, adopt
-the rows it holds beyond it, and materialize the stored copy at the path the
-app-server resolves the thread id to otherwise.
+`codex-rollout-jsonl-v2`. The record names the rollout as `nativePath` and
+carries the session's title, so listing reads no rows. Each commit reads only
+the rollout lines written since the previous one and appends them; the record
+is rewritten only when it changed. `session/load` and `session/resume` prefer
+the rollout in Codex's home when it is at least as long as the stored copy,
+adopt the rows it holds beyond it, and materialize the stored copy at the path
+the app-server resolves the thread id to otherwise.
 If Codex never persisted an empty thread, load and resume create a new native
 thread while retaining the ACP session id. The new binding is committed before
 the response. Nonempty history and other native failures never take this path.

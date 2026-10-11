@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -47,8 +49,8 @@ type session struct {
 	// is gone, until the next explicit operation rebinds it.
 	rt          *runtime
 	rolloutPath string
-	images      []storedImage
-	mirrored    int
+	// images is the encoded array of admitted images the record carries.
+	images      json.RawMessage
 	model       string
 	mode        string
 	effort      string
@@ -75,8 +77,6 @@ type session struct {
 	// scope outlives the request context, so a superseded handler context
 	// never ends a turn the session still owns.
 	promptCancel context.CancelFunc
-	// persisted marks a successfully committed mirror.
-	persisted bool
 	// ephemeral marks a session the host deletes without needing it back: it
 	// is never written to the store and never listed.
 	ephemeral bool
@@ -86,6 +86,10 @@ type session struct {
 	turn      *turn
 	dialogs   map[string]*dialog
 
+	// persisted marks a session this adapter committed to the store.
+	persisted bool
+	// mirror publishes the session's generations to the store.
+	mirror   *sessionlog.Mirror
 	openMu   sync.Mutex
 	mirrorMu sync.Mutex
 	lcMu     sync.Mutex

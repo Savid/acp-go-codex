@@ -1,12 +1,9 @@
 package codex
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,7 +28,6 @@ const (
 	rolloutNameSuffix = ".jsonl"
 	rolloutStampForm  = "2006-01-02T15-04-05"
 	rolloutDayForm    = "2006/01/02"
-	maxRolloutLine    = 10 * 1024 * 1024
 )
 
 // RolloutRow is one decoded rollout row.
@@ -131,93 +127,6 @@ func RelocateRollout(home string, recorded string, threadID string) (string, boo
 	}
 
 	return filepath.Join(home, sessionsDirName, filepath.FromSlash(start.Format(rolloutDayForm)), name), true
-}
-
-// ReadRows reads a rollout file's non-empty lines. A missing file reads as
-// empty.
-func ReadRows(path string) ([][]byte, error) {
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, initialLineBytes), maxRolloutLine)
-
-	rows := make([][]byte, 0)
-
-	for scanner.Scan() {
-		if line := bytes.TrimSpace(scanner.Bytes()); len(line) > 0 {
-			rows = append(rows, bytes.Clone(line))
-		}
-	}
-
-	return rows, scanner.Err()
-}
-
-// WriteRows materializes rows as a rollout file, creating its day directory.
-// The file is staged beside its final name and renamed into place.
-func WriteRows(path string, rows [][]byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create rollout directory: %w", err)
-	}
-
-	var content bytes.Buffer
-
-	for _, row := range rows {
-		content.Write(bytes.TrimSpace(row))
-		content.WriteByte('\n')
-	}
-
-	staging, err := os.CreateTemp(filepath.Dir(path), ".acp-go-codex-*.jsonl")
-	if err != nil {
-		return fmt.Errorf("stage rollout file: %w", err)
-	}
-
-	_, writeErr := staging.Write(content.Bytes())
-	if writeErr == nil {
-		writeErr = staging.Sync()
-	}
-
-	if closeErr := staging.Close(); writeErr == nil {
-		writeErr = closeErr
-	}
-
-	if writeErr != nil {
-		_ = os.Remove(staging.Name())
-
-		return fmt.Errorf("write rollout file: %w", writeErr)
-	}
-
-	if err := os.Rename(staging.Name(), path); err != nil {
-		_ = os.Remove(staging.Name())
-
-		return fmt.Errorf("publish rollout file: %w", err)
-	}
-
-	return nil
-}
-
-// FirstUserMessage returns the first user message text a rollout carries.
-func FirstUserMessage(rows [][]byte) string {
-	for _, row := range rows {
-		decoded, err := DecodeRow(row)
-		if err != nil || decoded.Type != RowTypeEventMsg || stringValue(decoded.Payload, fieldType) != "user_message" {
-			continue
-		}
-
-		if text := strings.TrimSpace(stringValue(decoded.Payload, fieldMessage)); text != "" {
-			return text
-		}
-	}
-
-	return ""
 }
 
 // LastTokenUsage is the thread usage a rollout last recorded, which codex

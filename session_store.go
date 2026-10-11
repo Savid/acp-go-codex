@@ -1,15 +1,16 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 
@@ -17,9 +18,6 @@ import (
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
-
-// configSubpath holds the current session configuration.
-const configSubpath = sessionlog.ConfigSubpath
 
 type storedImage struct {
 	ID   string `json:"id"`
@@ -32,12 +30,15 @@ type storedImage struct {
 // Codex keeps the rollout and the configuration the session was established
 // with.
 type sessionRecord struct {
-	Images                []storedImage     `json:"images,omitempty"`
+	// Images is the encoded array of admitted images. The session keeps it
+	// encoded, so a commit never re-encodes image bytes that did not change.
+	Images                json.RawMessage   `json:"images,omitempty"`
 	SessionID             string            `json:"sessionId"`
 	NativeSessionID       string            `json:"nativeSessionId"`
+	Title                 string            `json:"title,omitempty"`
 	Cwd                   string            `json:"cwd"`
 	AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
-	RolloutPath           string            `json:"rolloutPath"`
+	NativePath            string            `json:"nativePath"`
 	Env                   map[string]string `json:"env,omitempty"`
 	ExtraPathDirs         []string          `json:"extraPathDirs,omitempty"`
 	Model                 string            `json:"model,omitempty"`
@@ -48,7 +49,6 @@ type sessionRecord struct {
 	ApprovalPolicy        any               `json:"approvalPolicy,omitempty"`
 	SandboxPolicy         any               `json:"sandboxPolicy,omitempty"`
 	OutputSchema          map[string]any    `json:"outputSchema,omitempty"`
-	UpdatedAtUnixMilli    int64             `json:"updatedAtUnixMilli"`
 }
 
 func (s *session) record() sessionRecord {
@@ -56,12 +56,13 @@ func (s *session) record() sessionRecord {
 	defer s.mu.Unlock()
 
 	return sessionRecord{
-		Images:                slices.Clone(s.images),
+		Images:                s.images,
 		SessionID:             string(s.id),
 		NativeSessionID:       s.nativeID,
+		Title:                 s.title,
 		Cwd:                   s.cwd,
 		AdditionalDirectories: slices.Clone(s.additionalDirectories),
-		RolloutPath:           s.rolloutPath,
+		NativePath:            s.rolloutPath,
 		Env:                   maps.Clone(s.options.Env),
 		ExtraPathDirs:         slices.Clone(s.options.ExtraPathDirs),
 		Model:                 s.model,
@@ -72,12 +73,11 @@ func (s *session) record() sessionRecord {
 		ApprovalPolicy:        wire.CloneValue(s.options.ApprovalPolicy),
 		SandboxPolicy:         wire.CloneValue(s.options.SandboxPolicy),
 		OutputSchema:          wire.CloneMap(s.options.OutputSchema),
-		UpdatedAtUnixMilli:    time.Now().UnixMilli(),
 	}
 }
 
-// commitMirror publishes the native rows and current session configuration
-// as one durable generation.
+// commitMirror publishes the rollout rows written since the last commit and
+// the current session configuration as one durable generation.
 func (s *session) commitMirror(ctx context.Context) error {
 	if s.ephemeral {
 		return nil
@@ -88,38 +88,22 @@ func (s *session) commitMirror(ctx context.Context) error {
 
 	s.mu.Lock()
 	path := s.rolloutPath
-	mirrored := s.mirrored
 	s.mu.Unlock()
 
 	if path == "" {
 		return errors.New("session has no rollout to mirror")
 	}
 
-	rows, err := codex.ReadRows(path)
-	if err != nil {
-		return fmt.Errorf("read native session: %w", err)
-	}
-
-	if len(rows) < mirrored {
-		return fmt.Errorf("native log shrank from %d to %d rows", mirrored, len(rows))
-	}
-
 	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
-	err = sessionlog.Commit(commitCtx, s.agent.store, string(s.id), rows, s.record())
+	err := s.mirror.Commit(commitCtx, sessionlog.File(path), s.record())
 	finish(err)
-
-	if err == nil {
-		s.mu.Lock()
-		s.persisted = true
-		s.mu.Unlock()
-	}
 
 	if err != nil {
 		return fmt.Errorf("commit session mirror: %w", err)
 	}
 
 	s.mu.Lock()
-	s.mirrored = len(rows)
+	s.persisted = true
 	s.mu.Unlock()
 
 	return nil
@@ -146,20 +130,36 @@ func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (stored
 	finish(err)
 
 	if err != nil {
-		return storedSession{}, a.restoreRefused(ctx, sessionID, err)
+		return storedSession{}, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	return storedSession{rows: rows, record: record, found: found}, nil
 }
 
+// loadStoredRecord reads only the configuration of a stored session.
+func (a *Agent) loadStoredRecord(ctx context.Context, sessionID acp.SessionId) (sessionRecord, bool, error) {
+	loadCtx, finish := a.observe.StartSessionStore(ctx, "load")
+
+	var record sessionRecord
+
+	found, err := sessionlog.LoadRecord(loadCtx, a.store, string(sessionID), &record)
+	if err == nil && found {
+		err = record.validate(string(sessionID))
+	}
+
+	finish(err)
+
+	return record, found, err
+}
+
 func (r sessionRecord) validate(sessionID string) error {
-	if !codex.ValidThreadID(r.NativeSessionID) || r.SessionID != sessionID || !filepath.IsAbs(r.Cwd) || !filepath.IsAbs(r.RolloutPath) || r.UpdatedAtUnixMilli <= 0 {
-		return fmt.Errorf("invalid session record identity or location")
+	if !codex.ValidThreadID(r.NativeSessionID) || r.SessionID != sessionID || !filepath.IsAbs(r.Cwd) || !filepath.IsAbs(r.NativePath) {
+		return errors.New("invalid session record identity or location")
 	}
 
 	for _, directory := range r.AdditionalDirectories {
 		if !filepath.IsAbs(directory) {
-			return fmt.Errorf("invalid additional directory")
+			return errors.New("invalid additional directory")
 		}
 	}
 
@@ -170,101 +170,136 @@ func (r sessionRecord) validate(sessionID string) error {
 	return nil
 }
 
+// decodeImages reads a record's admitted images, refusing unknown fields.
+func decodeImages(encoded json.RawMessage) ([]storedImage, error) {
+	if len(encoded) == 0 {
+		return nil, nil
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+
+	var images []storedImage
+	if err := decoder.Decode(&images); err != nil {
+		return nil, fmt.Errorf("decode stored images: %w", err)
+	}
+
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing stored image data")
+	}
+
+	return images, nil
+}
+
+// appendImage returns a new encoding of the images with saved added; the
+// previous encoding is left untouched for any record still holding it.
+func appendImage(encoded json.RawMessage, saved storedImage) (json.RawMessage, error) {
+	item, err := json.Marshal(saved)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(encoded) < 2 || bytes.Equal(encoded, []byte("[]")) {
+		return slices.Concat([]byte("["), item, []byte("]")), nil
+	}
+
+	return slices.Concat(encoded[:len(encoded)-1], []byte(","), item, []byte("]")), nil
+}
+
 // hydrate reconciles the store with Codex's own rollout before a load or
 // resume. An existing rollout at least as long as the store wins and its
 // newer rows are adopted; a missing or shorter one is materialized from the
-// store at the path the app-server resolves the thread id to. A disagreement
-// at a shared position, or a row Codex cannot read, fails the restore.
-// It returns the rollout path and the rows the session now holds.
-func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored storedSession, home string) (string, [][]byte, error) {
-	path := stored.record.RolloutPath
-
-	// A committed conversation whose native history is still empty carries
-	// only its recorded location: no header to read, nothing to reconcile.
-	// Codex writes no rollout before a thread's first turn, so the recorded
-	// home may hold nothing for it; the location is re-rooted by its file name
-	// in the home the thread resumes from, never followed outside it.
-	if len(stored.rows) == 0 {
-		local, ok := codex.RelocateRollout(home, path, stored.record.NativeSessionID)
-		if !ok {
-			return "", nil, a.restoreRefused(ctx, sessionID, errors.New("stored rollout path names no rollout for the native session"))
-		}
-
-		return local, nil, nil
-	}
-
-	meta, ok := codex.ParseSessionMeta(stored.rows[0])
-	if !ok || meta.ID != stored.record.NativeSessionID {
-		return "", nil, a.restoreRefused(ctx, sessionID, fmt.Errorf("stored rollout does not open with session_meta for %s", sessionID))
-	}
-
-	relative, pathErr := filepath.Rel(home, path)
-	if pathErr != nil || !filepath.IsLocal(relative) || !fileExists(path) {
-		stamp := meta.Timestamp
-		if stamp.IsZero() {
-			return "", nil, a.restoreRefused(ctx, sessionID, errors.New("native session timestamp missing"))
-		}
-
-		path = codex.RolloutPath(home, stored.record.NativeSessionID, stamp)
-	}
-
-	native, err := codex.ReadRows(path)
+// store at the path the app-server resolves the thread id to. A
+// disagreement at a shared position, or a row Codex cannot read, fails the
+// restore. It returns the rollout path and the rows the session now holds.
+func (s *session) hydrate(ctx context.Context, stored storedSession, home string) (string, [][]byte, error) {
+	path, err := hydratePath(stored, home)
 	if err != nil {
-		return "", nil, a.restoreRefused(ctx, sessionID, err)
+		return "", nil, err
 	}
 
-	rows, nativeWins, err := sessionlog.Reconcile(native, stored.rows)
-	if err != nil {
-		return "", nil, a.restoreRefused(ctx, sessionID, err)
-	}
+	nativeID := stored.record.NativeSessionID
 
-	// Validate both histories before adopting native rows or materializing stored rows.
-	for index, row := range rows {
-		if _, err := codex.DecodeRow(row); err != nil {
-			return "", nil, a.restoreRefused(ctx, sessionID, fmt.Errorf("native row %d: %w", index, err))
+	rows, err := s.mirror.Hydrate(ctx, path, stored.rows, stored.record, func(rows [][]byte) error {
+		if meta, ok := codex.ParseSessionMeta(rows[0]); !ok || meta.ID != nativeID {
+			return fmt.Errorf("rollout does not open with session_meta for %s", nativeID)
 		}
-	}
 
-	if nativeWins {
-		if len(rows) > len(stored.rows) {
-			if err := sessionlog.Commit(ctx, a.store, string(sessionID), rows, stored.record); err != nil {
-				return "", nil, a.restoreRefused(ctx, sessionID, err)
+		for index, row := range rows {
+			if _, decodeErr := codex.DecodeRow(row); decodeErr != nil {
+				return fmt.Errorf("native row %d: %w", index, decodeErr)
 			}
 		}
 
-		return path, rows, nil
-	}
-
-	if err := codex.WriteRows(path, rows); err != nil {
-		return "", nil, a.restoreRefused(ctx, sessionID, err)
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
 	}
 
 	return path, rows, nil
 }
 
+// hydratePath is where the stored rollout is resident in home. A committed
+// conversation whose native history is still empty carries only its
+// recorded location: Codex writes no rollout before a thread's first turn,
+// so the location is re-rooted by its file name in the home the thread
+// resumes from, never followed outside it. A nonempty history is placed at
+// its recorded path when that is inside home, else at the path its
+// session_meta names.
+func hydratePath(stored storedSession, home string) (string, error) {
+	path := stored.record.NativePath
+	nativeID := stored.record.NativeSessionID
+
+	if len(stored.rows) == 0 {
+		local, ok := codex.RelocateRollout(home, path, nativeID)
+		if !ok {
+			return "", errors.New("stored rollout path names no rollout for the native session")
+		}
+
+		return local, nil
+	}
+
+	meta, ok := codex.ParseSessionMeta(stored.rows[0])
+	if !ok || meta.ID != nativeID {
+		return "", fmt.Errorf("stored rollout does not open with session_meta for %s", nativeID)
+	}
+
+	if relative, err := filepath.Rel(home, path); err == nil && filepath.IsLocal(relative) && fileExists(path) {
+		return path, nil
+	}
+
+	if meta.Timestamp.IsZero() {
+		return "", errors.New("native session timestamp missing")
+	}
+
+	return codex.RolloutPath(home, nativeID, meta.Timestamp), nil
+}
+
 // resumeStoredThread replaces an unpersisted empty thread while retaining the
 // ACP identity. The caller commits the new native binding before publication.
-func (s *session) resumeStoredThread(ctx context.Context, rt *runtime, rows [][]byte) (codex.Thread, error) {
-	thread, err := rt.client.ResumeThread(ctx, s.threadResume(), rt.nativePath)
+func (s *session) resumeStoredThread(ctx context.Context, runtime *runtime, rows [][]byte) (codex.Thread, error) {
+	thread, err := runtime.client.ResumeThread(ctx, s.threadResume(), runtime.nativePath)
 	if err == nil || len(rows) != 0 || !codex.IsMissingThread(err, s.nativeID) {
 		return thread, err
 	}
 
-	native, readErr := codex.ReadRows(s.rolloutPath)
+	native, readErr := sessionlog.ReadJSONL(s.rolloutPath, sessionlog.Cursor{})
 	if readErr != nil {
 		return codex.Thread{}, readErr
 	}
 
-	if len(native) != 0 {
+	if len(native.Rows) != 0 {
 		return codex.Thread{}, err
 	}
 
-	thread, err = rt.client.StartThread(ctx, s.threadStart(), rt.nativePath)
+	thread, err = runtime.client.StartThread(ctx, s.threadStart(), runtime.nativePath)
 	if err != nil {
 		return codex.Thread{}, err
 	}
 
 	s.nativeID = thread.ID
+	s.mirror.Reset()
 
 	return thread, nil
 }
@@ -273,21 +308,4 @@ func fileExists(path string) bool {
 	info, err := os.Stat(path)
 
 	return err == nil && !info.IsDir()
-}
-
-func (a *Agent) restoreRefused(ctx context.Context, sessionID acp.SessionId, err error) error {
-	a.log.ErrorContext(ctx, "codex session restore failed",
-		slog.String("session_id", string(sessionID)), slog.String("reason", err.Error()))
-
-	return wire.RestoreFailed(vendor)
-}
-
-// storedTitle derives a listing title: the first user message text, else the
-// session id.
-func storedTitle(sessionID string, rows [][]byte) string {
-	if text := codex.FirstUserMessage(rows); text != "" {
-		return wire.NormalizeTitle(text)
-	}
-
-	return sessionID
 }

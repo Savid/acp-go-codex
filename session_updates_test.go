@@ -410,7 +410,7 @@ func recordedResponseIDs(t *testing.T, h *harness, session acp.SessionId) []stri
 	require.NoError(t, err)
 	require.Len(t, matches, 1)
 
-	rows, err := codex.ReadRows(matches[0])
+	rows, err := readRollout(matches[0])
 	require.NoError(t, err)
 
 	ids := make([]string, 0, len(rows))

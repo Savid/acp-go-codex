@@ -11,6 +11,7 @@ import (
 
 	"github.com/savid/acp-go-codex/internal/codex"
 	"github.com/savid/acp-go-core/image"
+	"github.com/savid/acp-go-core/wire"
 )
 
 // Rollout payload types the replay projects.
@@ -42,7 +43,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 	for _, row := range rows {
 		parsed, err := codex.DecodeRow(row)
 		if err != nil {
-			return s.agent.restoreRefused(ctx, s.id, err)
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 		}
 
 		decoded = append(decoded, parsed)
@@ -55,15 +56,15 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 	captured := make(map[string]storedImage, len(images))
 	for _, saved := range images {
 		if saved.ID == "" {
-			return s.agent.restoreRefused(ctx, s.id, fmt.Errorf("stored image has no identity"))
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, fmt.Errorf("stored image has no identity"))
 		}
 
 		if _, exists := captured[saved.ID]; exists {
-			return s.agent.restoreRefused(ctx, s.id, fmt.Errorf("duplicate stored image identity"))
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, fmt.Errorf("duplicate stored image identity"))
 		}
 
 		if _, failure := image.DecodeOutput(saved.Data, saved.MIME, limits.EffectiveOutputPerImage()); failure != nil {
-			return s.agent.restoreRefused(ctx, s.id, failure)
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, failure)
 		}
 
 		captured[saved.ID] = saved
@@ -82,7 +83,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte, images []storedImag
 
 		updates, failure := replayRow(row, hasEvents, limits)
 		if failure != nil {
-			return s.agent.restoreRefused(ctx, s.id, failure)
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, failure)
 		}
 
 		if err := s.emit(ctx, updates...); err != nil {
