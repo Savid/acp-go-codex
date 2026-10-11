@@ -175,6 +175,14 @@ so image replay survives deletion of the original files. Invalid stored images
 fail load; an image the adapter refused at turn time replays as the failed
 tool call it was.
 
+### Tool output
+
+A tool call's streamed output travels as one text block. ACP replaces a tool
+call's whole content array on every update, so the output so far is resent
+each time; it is sent on the first delta and then whenever it has doubled
+since the last send, keeping the bytes sent linear in the output. The
+terminal update carries the complete output.
+
 ### Cut-off function calls
 
 A model cut off mid-call leaves a function call whose arguments are not JSON

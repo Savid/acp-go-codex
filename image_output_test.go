@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -53,4 +54,41 @@ func TestSavedImageReplaysAfterOriginalFileIsDeleted(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{data}, images)
+}
+
+// Streamed tool output is delivered once it doubles, so the bytes sent stay
+// linear in the output, and the terminal update carries all of it.
+func TestToolOutputDeliveryIsLinear(t *testing.T) {
+	t.Parallel()
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+
+	s := a.newSession(sessionStart{cwd: t.TempDir()})
+	state := &cycleState{}
+	delta := strings.Repeat("x", 100)
+
+	for range 1000 {
+		require.NoError(t, s.publishToolDelta(t.Context(), state, "call-1", delta))
+	}
+
+	require.NoError(t, s.publishToolTerminal(t.Context(), state, codex.ToolEvent{ID: "call-1", Kind: "commandExecution", Status: "completed"}))
+
+	sent, deliveries, last := 0, 0, ""
+
+	for _, notification := range rec.snapshot() {
+		update := notification.Update.ToolCallUpdate
+		if update == nil || len(update.Content) == 0 {
+			continue
+		}
+
+		deliveries++
+		last = update.Content[0].Content.Content.Text.Text
+		sent += len(last)
+	}
+
+	require.Equal(t, strings.Repeat(delta, 1000), last)
+	require.LessOrEqual(t, deliveries, 12)
+	require.LessOrEqual(t, sent, 3*len(last))
 }

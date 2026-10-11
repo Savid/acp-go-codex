@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 
@@ -53,10 +54,13 @@ func (s *session) outputRoots() []string {
 // toolState is the exact-id lifecycle published for one native tool call.
 type toolState struct {
 	published bool
-	// content is the last emitted complete content array; each later
-	// content-bearing update extends it so no delivered item disappears
-	// under ACP's whole-array replacement.
-	content []acp.ToolCallContent
+	// output is the text the tool streamed. ACP replaces a tool call's whole
+	// content array on every update, so each delivery resends all of it;
+	// emitted is its length at the last delivery, and a delta is delivered
+	// only once the output has doubled since, keeping the bytes sent linear
+	// in the output. The terminal update carries the complete output.
+	output  strings.Builder
+	emitted int
 }
 
 func (state *cycleState) tool(id string) *toolState {
@@ -127,8 +131,8 @@ func (s *session) publishToolStart(ctx context.Context, state *cycleState, event
 	return nil
 }
 
-// publishToolDelta appends one output delta and emits the complete content
-// array.
+// publishToolDelta records one output delta and delivers the output so far
+// once it has doubled since the last delivery.
 func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id string, text string) error {
 	state.toolsMu.Lock()
 	defer state.toolsMu.Unlock()
@@ -137,11 +141,18 @@ func (s *session) publishToolDelta(ctx context.Context, state *cycleState, id st
 		return nil
 	}
 
-	tool := state.tool(cmp.Or(id, "codex-tool"))
+	id = cmp.Or(id, "codex-tool")
+	tool := state.tool(id)
 
-	tool.content = append(tool.content, acp.ToolContent(acp.TextBlock(text)))
+	tool.output.WriteString(text)
 
-	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(cmp.Or(id, "codex-tool")), acp.WithUpdateContent(append([]acp.ToolCallContent(nil), tool.content...))))
+	if tool.output.Len() < 2*tool.emitted {
+		return nil
+	}
+
+	tool.emitted = tool.output.Len()
+
+	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(tool.output.String()))})))
 }
 
 // publishToolTerminal emits the terminal status and the complete final
@@ -167,14 +178,20 @@ func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, ev
 		opts = append(opts, acp.WithUpdateTitle(event.Title))
 	}
 
-	if len(tool.content) == 0 && event.Content != "" {
-		tool.content = append(tool.content, acp.ToolContent(acp.TextBlock(event.Content)))
+	output := tool.output.String()
+	if output == "" {
+		output = event.Content
 	}
 
-	tool.content = append(tool.content, diffContent(event.Raw)...)
+	var content []acp.ToolCallContent
+	if output != "" {
+		content = append(content, acp.ToolContent(acp.TextBlock(output)))
+	}
 
-	if len(tool.content) > 0 {
-		opts = append(opts, acp.WithUpdateContent(append([]acp.ToolCallContent(nil), tool.content...)))
+	content = append(content, diffContent(event.Raw)...)
+
+	if len(content) > 0 {
+		opts = append(opts, acp.WithUpdateContent(content))
 	}
 
 	if !tool.published {
